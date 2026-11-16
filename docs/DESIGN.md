@@ -1702,6 +1702,58 @@ column is the same equality.
 `count of distinct keys` BI shapes and the type matrix's `keyed`, `pairs` and `vkeys`; `tests/cli-sources.test.ts`
 (an invalid index).
 
+#### mode() of a text under a libc order (2026-11-15, issue 464)
+
+**The measurement.** The shop of `tests/duck-plans.test.ts` (a million orders) on a local Postgres 16 whose database is
+glibc's `en_US.utf8`. `SELECT o.tenant_id, mode() WITHIN GROUP (ORDER BY o.status) FROM orders o GROUP BY 1` took
+2.2 s against Postgres's 0.36 s. The same over the 50,000 values of `notes` took 3.0 s against 1.9 s, and a status by
+each of 20,000 customers 2.4 s against 0.5 s. Under C the three took 0.03 to 0.12 s. The engine's mode() with an ORDER BY
+counts each (group, value) pair and keeps the least sort key of each, so it computed the ORDER BY's libc key for every
+row: a JavaScript call a row, through the turn.
+
+**The decision.** The key is a function of the value alone, so it is written as a scalar subquery of the value,
+`(SELECT __mason_libc_key_or_null(x, collate))`. The engine plans a correlated subquery as a join of the distinct
+values it reads: the key is computed once a distinct value and hashed back to the rows. The order still decides only a
+tie among the most frequent values, and the value's bytes stay the second key, so the answer is the one the key a row
+gave. After it, the three took 0.07, 0.38 and 0.23 s. The join has a cost of its own where the values are many: over
+20 M rows of 500,000 values in the engine alone, with `md5` standing in for the key, the subquery took 4.9 s where a
+native key a row took 2.9 s (a file, an 8 GiB limit; in memory under 2 GiB, 14.7 s against 9.2 s). The libc key is no
+native key, though: a JavaScript call of about 2 µs a row is 40 s over those rows.
+
+**The key refuses only where it decides (the review of PR 1089).** The first form keyed with `__mason_libc_key`, which
+refuses a value holding a character the order does not cover (`libc-uncovered`, under a locale other than English).
+The join keys every distinct value of the aggregate's whole input, read from a materialised CTE before the engine
+applies a HAVING or an outer query's WHERE on the group. The key a row came after the engine had pushed that filter
+down. So a value in a group the query drops refused the statement where main answered. Three ways were weighed:
+- key only the groups that reach the output: the engine places the CTE, and does not push a filter into it;
+- keep the key a row wherever the output is filtered on its group: the filters an outer query can push (a WHERE, a
+  join, an IN, a LIMIT's top N, a view) are many, and each wrapper a BI tool adds would be slow again;
+- key lazily: chosen. Such a value's key is NULL in the join (`__mason_libc_key_or_null`), and it sorts FIRST among
+  values of equal count. So where it ties for the most frequent, mode() picks it. The value picked is keyed again, once
+  a group, by `__mason_libc_checked`, which raises the same refusal, or answers the value. A group it never ties in
+  answers, since its key decided nothing there. This refuses less than the key a row, which raised for any such value
+  of a group it kept: over five groups of which three hold `€`, `HAVING g IN ('1', '4')` answers where main refused,
+  since `€` is not among group 4's most frequent. A join to the grouped query, an IN and a top N over it are refused at
+  main and at the head alike, where `€` leads a group the engine still aggregates.
+A FILTER takes the same path: the join keys every value lazily, and a row the filter drops is never counted, so its
+value is never picked.
+
+**The CTE's memory.** The engine materialises the aggregate's input (its groups and the value) once for the join, and
+holds it while the query runs. Measured over 20 M rows in a file, an 8 GiB limit, nothing spilled, with `md5` as the
+key: the process's peak was 788 MiB for six statuses by three tenants, against 152 MiB with a key a row, and 2,685 MiB
+for 500,000 notes, against 2,007 MiB. So about 32 bytes a row of the input, beside the aggregate's own hash table. Over
+a limit the engine spills it to disk.
+
+**What was tried first.** The engine's `histogram(x)` per group, with the key computed only for each group's tied
+leaders: 0.02 s for six values, but 5.6 s for 50,000 values in a group, since the histogram's map grows with the values.
+
+**What stays the key a row.** A type other than text and varchar (a char(n) orders without its padding, a citext by
+its lower case, a name), an order by an operator (USING), a value calling a volatile function (read twice, it would be
+two values), and a value that reads a subquery or a column of an outer query (the subquery would nest in another's
+correlation).
+**Where.** `src/duck/rewrite.ts` (`modeKeyedOnce`); `tests/duck-wire.test.ts` "issue 464: mode()",
+`tests/duck-plans.test.ts` (`text under libc: mode()`), the oracle's `collation: mode()` and `issue 464: mode()`.
+
 ### A query cannot take the run down
 
 **Decision.** Results stream (the next chunk read once the socket drained), an Execute's row limit pages, a cancel aborts

@@ -875,7 +875,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     duck: { copies: () => sync.state(), file: duckFile, poll: (sources) => sync.pollNow(sources), refused: (sources) => sync.pollRefusal(sources), stream: (o) => sync.streamStatus(o), measured: (table) => sync.measured(table), disk: () => sync.diskStatus(),
       // what queries may spill into now, and whether MASON_SPILL_LIMIT sets it: the room an add keeps beside a table
       spill: () => ({ limitBytes: store.spillLimitBytes, set: spillLimit !== undefined }), requests, events, usage,
-      restarts: () => readRestarts(home), jsonPaths: () => sync.kept.status(), generated: () => sync.generated.status() },
+      restarts: () => readRestarts(home), jsonPaths: () => sync.kept.status(), generated: () => sync.generated.status(), storage: () => sync.storedFacts() },
   };
   const server = createRunServer(runCtx);
   o.serve?.page?.(server);

@@ -295,6 +295,10 @@ export const BI_SHAPES: Array<{ name: string; sql: string }> = [
   // grouped by the engine's integer, and a DISTINCT ON returning every group's latest row, its ties broken by the key
   { name: "issue 464: to_char of a month grouped", sql: "SELECT to_char(o.created_at, 'YYYY-MM') AS m, count(*) FROM orders o GROUP BY 1 ORDER BY 1" },
   { name: "issue 464: to_char of a day and a month's name grouped, ordered by the count", sql: "SELECT to_char(o.created_at, 'YYYY-MM-DD') AS d, to_char(o.created_at, 'FMMonth YYYY') AS m, count(*) AS n FROM orders o GROUP BY 1, 2 ORDER BY 3 DESC, 1 LIMIT 10" },
+  // issue 464: mode() of a text under the database's libc order, each distinct value keyed once: a status by customer
+  // (many small groups, many ties the order decides), the notes by tenant descending, beside another aggregate
+  { name: "issue 464: mode() of a status by customer, its ties decided by the order", sql: "SELECT o.customer_id, mode() WITHIN GROUP (ORDER BY o.status) AS top_status, count(*) AS n FROM orders o GROUP BY 1 ORDER BY 1 NULLS FIRST" },
+  { name: "issue 464: mode() of the notes by tenant, descending, beside percentile_disc", sql: "SELECT o.tenant_id, mode() WITHIN GROUP (ORDER BY o.notes DESC) AS m, percentile_disc(0.5) WITHIN GROUP (ORDER BY o.amount) AS p FROM orders o GROUP BY 1 ORDER BY 1" },
   { name: "issue 464: DISTINCT ON each customer's latest order, every row, ties by the key", sql: "SELECT DISTINCT ON (o.customer_id) o.customer_id, o.id, o.created_at, o.amount FROM orders o ORDER BY o.customer_id NULLS FIRST, o.created_at DESC, o.id" },
   { name: "issue 464: DISTINCT ON a tied key, every row", sql: "SELECT DISTINCT ON (o.status, o.tenant_id) o.status, o.tenant_id, o.created_at, o.id FROM orders o ORDER BY o.status NULLS FIRST, o.tenant_id, o.amount, o.id DESC" },
   { name: "issue 665: Metabase's numeric auto-bin", sql: "SELECT (floor(((o.amount - 0.0) / 12.5)) * 12.5 + 0.0) AS amount, count(*) AS count FROM orders o GROUP BY (floor(((o.amount - 0.0) / 12.5)) * 12.5 + 0.0) ORDER BY (floor(((o.amount - 0.0) / 12.5)) * 12.5 + 0.0) ASC" },
