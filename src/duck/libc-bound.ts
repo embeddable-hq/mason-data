@@ -69,9 +69,9 @@
  * A GROUPED MIN OR MAX KEYS EACH GROUP'S CANDIDATES (the third round, `Values.pickGrouped`: keyed a row, the min and max
  * of names by region took 28 s against Postgres's 0.4 s over 4.5 M rows): the bounds are a group's as they are a
  * statement's, so a pass over the SELECT's rows gives each group its thresholds, a second its distinct candidates, and
- * each group's least and greatest candidate by the key is a WITH query's row, which each pick reads by its group. Both
- * passes hold a row a group and the candidates, never every distinct value (`groupedQueries`). Its keys must be
- * computed again over the same rows (`groupKeys`).
+ * each group's least and greatest candidate by the key is a WITH query's row, joined to the SELECT's rows, which narrows
+ * the pick's rows to those holding it (`groupedQueries`). Only where the groups are few beside the rows (`probe`): else
+ * the key a row, as written. Its keys must be computed again over the same rows (`groupKeys`).
  *
  * A SELECT DISTINCT SORTED BY A LIBC KEY SORTS ITS DISTINCT ROWS (`distinctSorted`), and under a LIMIT is a top N above.
  *
@@ -87,6 +87,9 @@ import { OWN_PREFIX } from "./own-names.ts";
 type Body = Record<string, unknown>;
 type AstNode = Record<string, unknown>;
 
+/** a grouped min / max keys each group's candidates where its groups are at most a sixteenth of its rows, and each row
+ *  otherwise (`Values.pickGrouped`): measured, docs/DESIGN.md "Grouped and listed" */
+const GROUPS_FEW = 16;
 /** the run's length in characters: the longest shared prefix a column's values can have and still be told apart by
  *  their bounds (a URL's `https://example.com/item/` is 25), measured (docs/DESIGN.md "The libc key for the candidates
  *  alone"); a longer one costs each row's bounds more and saves little */
@@ -394,7 +397,7 @@ interface Pick { f: Body; case: Body; call: AstNode; x: AstNode; collate: string
 
 /** a grouped min or max's WITH query of its groups (`Values.pickGrouped`): its name, its group keys' columns, the
  *  columns of each group's least and greatest value, and of whether each is a value the order could not key */
-interface GroupedValues { name: string; keys: string[]; min: string; max: string; minUnkeyed: string; maxUnkeyed: string }
+interface GroupedValues { name: string; alias: string; probe: string; few: string; keys: string[]; min: string; max: string; minUnkeyed: string; maxUnkeyed: string }
 
 const col = (...names: string[]): AstNode => ({ ColumnRef: { fields: names.map(S) } });
 /** a node without its offsets: two spellings of one expression at two places */
@@ -554,11 +557,17 @@ class Values {
   }
 
   /**
-   * A GROUPED MIN OR MAX: each pick is its group's row of a WITH query of the groups' least and greatest values
-   * (`groupedQueries`), made once per SELECT, x and order, read by a lookup of the row's group, `ifnull(CASE WHEN
-   * any_value((SELECT <unkeyed> FROM <groups> WHERE <its keys> IS NOT DISTINCT FROM <the row's>)) THEN error(<the
-   * order's refusal>) END, any_value((SELECT <min> …)))`. The refusal is the engine's, where the value picked is one the
-   * order could not key: never a function's call a group (two million groups of one row each were 4 M calls)
+   * A GROUPED MIN OR MAX, ITS GROUPS FEW BESIDE ITS ROWS: each group's least and greatest value is a row of a WITH query
+   * (`groupedQueries`), made once per SELECT, x and order, LEFT JOINed to the SELECT's rows by the group's keys (once a
+   * WITH query), and the pick stays the engine's `arg_min` / `arg_max` as written, its rows narrowed to those holding
+   * that value: `arg_min(x, CASE WHEN x IS NOT NULL THEN CASE WHEN <few> THEN CASE WHEN x = <the group's min> THEN
+   * ROW(CASE WHEN <unkeyed> THEN error(<the order's refusal>) ELSE '' END, x) END ELSE ROW(<key>, x) END END)`. The
+   * refusal is the engine's, where the value picked is one the order could not key, on a row the statement reads (as
+   * the key a row raised it), and no function is called a group or a row.
+   * WHERE THE GROUPS ARE MANY (`probe`: more than a sixteenth of the rows) the WITH queries read no row and the pick is
+   * the key a row, as written: the aggregate holds what it held, nothing beside it (the second review of PR 1104: a row a
+   * group of thresholds, candidates and picks beside the aggregate held more than the key a row did, and spilled past
+   * the ceiling where it answered, 3.9 M groups of names over 4.5 M rows).
    */
   pickGrouped(s: Body, item: AstNode, groups: AstNode[], p: Pick): void {
     // (by x and the order: the review of PR 1104, `min(n), min(n COLLATE zh)` answered the first's for both; a min and
@@ -570,21 +579,39 @@ class Values {
       const of = this.groupedMade.get(s) ?? new Map<string, GroupedValues>();
       of.set(shape, made);
       this.groupedMade.set(s, of);
+      // its row of each group, joined to the SELECT's rows (at most one: a row a group)
+      const from = s.fromClause as AstNode[];
+      const on = and(made.keys.map((k, i) => ({ A_Expr: { kind: "AEXPR_NOT_DISTINCT", name: [S("=")], lexpr: col(made!.alias, k), rexpr: structuredClone(groups[i]!) } })));
+      s.fromClause = [{ JoinExpr: { jointype: "JOIN_LEFT", larg: from[0], rarg: { RangeVar: { relname: made.name, inh: true, relpersistence: "p", alias: { aliasname: made.alias } } }, quals: on } }];
     }
-    const { name, keys } = made;
     const [value, unkeyed] = p.min ? [made.min, made.minUnkeyed] : [made.max, made.maxUnkeyed];
-    const lookup = (column: string): AstNode => {
-      const alias = this.fresh("group");
-      const same = and(keys.map((k, i) => ({ A_Expr: { kind: "AEXPR_NOT_DISTINCT", name: [S("=")], lexpr: col(alias, k), rexpr: structuredClone(groups[i]!) } })));
-      return call("any_value", [Values.scalar({ SelectStmt: { targetList: [{ ResTarget: { val: col(alias, column) } }],
-        fromClause: [{ RangeVar: { relname: name, inh: true, relpersistence: "p", alias: { aliasname: alias } } }], whereClause: same, limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE" } })]);
-    };
-    // the order's refusal, raised by the engine where the group's pick is a value it could not key: a group the statement
-    // reads, once it is formed (a check inside the lookup is computed for every group the rows hold, before a HAVING or
-    // an outer query's WHERE drops one)
-    const refused: AstNode = { CaseExpr: { args: [{ CaseWhen: { expr: lookup(unkeyed), result: call("error", [str(`mason[0A000]: ${p.refusal}`)]) } }] } };
-    for (const k of Object.keys(p.f)) delete p.f[k];
-    Object.assign(p.f, bodyOf(call("ifnull", [refused, lookup(value)])));
+    const refusedOr = { CaseExpr: { args: [{ CaseWhen: { expr: col(made.alias, unkeyed), result: call("error", [str(`mason[0A000]: ${p.refusal}`)]) } }], defresult: str("") } };
+    const picked = { CaseExpr: { args: [{ CaseWhen: { expr: op("=", structuredClone(p.x), col(made.alias, value)), result: row([refusedOr, structuredClone(p.x)]) } }] } };
+    p.case.result = { CaseExpr: { args: [{ CaseWhen: { expr: Values.scalar(Values.over(made.probe, [col(made.few)])), result: picked } }], defresult: p.case.result as AstNode } };
+  }
+
+  /** a SELECT's probe of its groups (`probe`), made once a SELECT: its WITH query's name and its one column */
+  private readonly probes = new Map<Body, { probe: string; few: string }>();
+  /**
+   * WHETHER A SELECT'S GROUPS ARE FEW BESIDE ITS ROWS: `approx_count_distinct` of its keys' hash (a HyperLogLog, a few
+   * kilobytes whatever the groups) at most a sixteenth of its rows, a WITH query of one row over its FROM item and WHERE.
+   * Measured over 4.5 M rows: 20 and 100,000 groups are few, 3.9 M groups of names are not (docs/DESIGN.md "Grouped and
+   * listed")
+   */
+  private probe(s: Body, item: AstNode, groups: AstNode[]): { probe: string; few: string } {
+    const known = this.probes.get(s);
+    if (known !== undefined) return known;
+    const probe = this.fresh("probe"), few = this.fresh("few");
+    const groupsSeen = call("approx_count_distinct", [call("hash", groups.map((g) => structuredClone(g)))]);
+    const rowsSeen = { FuncCall: { funcname: [S("count")], agg_star: true, funcformat: "COERCE_EXPLICIT_CALL" } };
+    const query: Body = { targetList: [{ ResTarget: { name: few, val: op("<=", op("*", groupsSeen, int(GROUPS_FEW)), rowsSeen) } }],
+      fromClause: [this.counted(structuredClone(item))], ...(s.whereClause !== undefined ? { whereClause: structuredClone(s.whereClause as AstNode) } : {}),
+      limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE" };
+    const w = (s.withClause as Body | undefined) ?? {};
+    s.withClause = { ...w, ctes: [...(w.ctes as unknown[] | undefined ?? []), { CommonTableExpr: { ctename: probe, ctematerialized: "CTEMaterializeAlways", ctequery: { SelectStmt: query } } }] };
+    const made = { probe, few };
+    this.probes.set(s, made);
+    return made;
   }
 
   /**
@@ -602,7 +629,8 @@ class Values {
    * The weights are computed a row in each pass (the pairs weighed a distinct value once, but held every pair).
    */
   private groupedQueries(s: Body, item: AstNode, groups: AstNode[], p: Pick): GroupedValues {
-    const name = this.fresh("groups"), bounds = this.fresh("thresholds");
+    const { probe, few } = this.probe(s, item, groups);
+    const name = this.fresh("groups"), bounds = this.fresh("thresholds"), alias = this.fresh("group");
     const keys = groups.map(() => this.fresh("g"));
     const [min, max, minUnkeyed, maxUnkeyed] = [this.fresh("min"), this.fresh("max"), this.fresh("min_unkeyed"), this.fresh("max_unkeyed")];
     const [tmin, tmax, bmin, bmax, low, high] = [this.fresh("tmin"), this.fresh("tmax"), this.fresh("bmin"), this.fresh("bmax"), this.fresh("low"), this.fresh("high")];
@@ -615,7 +643,9 @@ class Values {
     // the SELECT's own rows of a value: each group's keys, the value and its run's weights, a row at a time
     const weighed = (): Body => select({ targetList: [...groups.map((g, i) => named(structuredClone(g), keys[i])), named(structuredClone(p.x), this.v), named(weightsOf(p.bound, structuredClone(p.x)), this.w)],
       fromClause: [this.counted(structuredClone(item))],
-      whereClause: and([...(s.whereClause !== undefined ? [structuredClone(s.whereClause as AstNode)] : []), nullTest(structuredClone(p.x), "IS_NOT_NULL")]) });
+      // (no row where the groups are many: the key a row answers there)
+      whereClause: and([...(s.whereClause !== undefined ? [structuredClone(s.whereClause as AstNode)] : []), nullTest(structuredClone(p.x), "IS_NOT_NULL"),
+        Values.scalar(Values.over(probe, [col(few)]))]) });
     // a row a group: its least hi, its greatest lo, and its least and greatest value by their bytes
     const thresholds = select({ targetList: [...keys.map((k) => named(col(k), k)), named(call("min", [this.mark(false)]), tmin), named(call("max", [this.mark(true)]), tmax),
       named(call("min", [col(this.v)]), bmin), named(call("max", [col(this.v)]), bmax)],
@@ -645,7 +675,7 @@ class Values {
     const w = (s.withClause as Body | undefined) ?? {};
     const cte = (ctename: string, q: Body): AstNode => ({ CommonTableExpr: { ctename, ctematerialized: "CTEMaterializeAlways", ctequery: { SelectStmt: q } } });
     s.withClause = { ...w, ctes: [...(w.ctes as unknown[] | undefined ?? []), cte(bounds, thresholds), cte(name, groupsQuery)] };
-    return { name, keys, min, max, minUnkeyed, maxUnkeyed };
+    return { name, alias, probe, few, keys, min, max, minUnkeyed, maxUnkeyed };
   }
 
   /** the top N: its FROM item LEFT JOINed to the keys of the values the bounds keep, sorted by the joined key */
@@ -801,7 +831,8 @@ export async function libcBounded(tree: AstNode, analysis: TreeValue, context: B
     }
     // A MIN OR A MAX: arg_min / arg_max over the libc key's CASE (src/duck/rewrite.ts textMinMax), no FILTER; ungrouped,
     // or grouped by keys the WITH query of its pairs can compute again (`groupKeys`)
-    const groups = present(s.groupClause) ? groupKeys(s) : null;
+    // (a `*` beside a GROUP BY would list the groups' joined columns: as written)
+    const groups = present(s.groupClause) && !holds(s.targetList, new Set(["A_Star"])) ? groupKeys(s) : null;
     if (present(s.groupClause) ? groups === null
       : present(s.distinctClause) || present(s.sortClause) || s.limitCount !== undefined || s.limitOffset !== undefined) continue;
     const each: Pick[] = [];

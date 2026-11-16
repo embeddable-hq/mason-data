@@ -1391,6 +1391,8 @@ function* matrix(): Generator<Matrixed> {
     ["grouped, filtered outside", "SELECT * FROM (SELECT n, min(s) AS lo, max(s) AS hi FROM coll_rep GROUP BY n) q WHERE q.n = 3"],
     ["grouped, a LIMIT", "SELECT n, max(s) FROM coll_top GROUP BY n ORDER BY max(s), n LIMIT 5"],
     ["grouped, no row", "SELECT n, min(s) FROM coll_rep WHERE n > 7 GROUP BY n"],
+    // (one value under several orders in one grouped statement, each its own: the first review of PR 1104)
+    ["grouped, one value under several collations", `SELECT n, min(s), min(s COLLATE "C"), max(s COLLATE "en_US"), max(s), min(v COLLATE "en_US") FROM coll_rep GROUP BY n ORDER BY n`],
     ["DISTINCT sorted", "SELECT DISTINCT s FROM coll_rep ORDER BY s"],
     ["DISTINCT sorted, descending, NULLs last", "SELECT DISTINCT s FROM coll_rep ORDER BY s DESC NULLS LAST"],
     ["DISTINCT of two columns", "SELECT DISTINCT n, s FROM coll_rep ORDER BY s, n"],

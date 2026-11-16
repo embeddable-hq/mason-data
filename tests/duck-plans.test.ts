@@ -1001,12 +1001,13 @@ test("issue 666: a grouped min / max and a SELECT DISTINCT sorted under a libc o
   // each min and max handed it every row (491,520 for a min and a max)
   for (const [sql, most] of [
     // a group's candidates are the values whose bounds reach its least (greatest) one, each keyed once, beside the ORDER
-    // BY's key of each group: a few a group (measured: 7, 7, 9, 70,004 and 16 rows)
+    // BY's key of each group: a few a group (measured: 7, 7, 9 and 16 rows; by customer 389,120, every row's value)
     ["SELECT o.tenant_id, min(o.status), max(o.status) FROM orders o GROUP BY 1 ORDER BY 1", 3 + 3 * 6],
     [`SELECT o.tenant_id, min(${SKEWED}), max(${SKEWED}) FROM orders o GROUP BY 1 ORDER BY 1`, 3 + 3 * 7],
     ["SELECT o.tenant_id, min(o.notes), max(o.notes) FROM orders o GROUP BY 1 ORDER BY 1", 3 + 3 * 8],
-    // (each customer's dozen orders hold two or three statuses and five notes, most of them a candidate)
-    ["SELECT o.customer_id, min(o.status), max(o.notes), count(*) FROM orders o GROUP BY 1 ORDER BY 1 LIMIT 5", 5 + 20_001 * (6 + 8)],
+    // (20,001 customers over 245,760 orders: groups more than a sixteenth of the rows, so the key a row, as written —
+    // a row a group beside the aggregate held more than it, the second review of PR 1104)
+    ["SELECT o.customer_id, min(o.status), max(o.notes), count(*) FROM orders o GROUP BY 1 ORDER BY 1 LIMIT 5", 2 * SMALL_ORDERS],
     [`SELECT o.customer_id % 7 AS g, max(${SKEWED}) FROM orders o GROUP BY 1 HAVING count(*) > 1 ORDER BY 1`, 7 * 7],
     // a SELECT DISTINCT keys each distinct value; under a LIMIT its candidates alone (measured: 6, 4, 100 and 12 rows)
     ["SELECT DISTINCT o.status FROM orders o ORDER BY 1", 6],

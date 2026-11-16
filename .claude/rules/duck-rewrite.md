@@ -610,19 +610,22 @@ paths:
   É by `strip_accents`; where it does not decompose, a `replace`, which on glibc's en_US writes Ø, ł, ð, Đ, Ħ, ŀ, ſ, ª
   and ¹ ² ³; a mark of no first-level weight dropped), each read from the order and `strip_accents` held to `stripped`
   over every character of `FOLD_BLOCKS`; a head of ASCII alone is read unfolded, since folding every value doubled a
-  unique wide column's time. **A grouped min / max keys each group's candidates alone** (`pickGrouped`, the third round
-  of issue 666: keyed a row, 5 to 28 s against Postgres's 0.1 to 0.5 s): a pass over the SELECT's rows gives each group
-  its thresholds and its least and greatest value by their bytes (one value: its answer, unkeyed), a second its DISTINCT
-  candidates, each keyed once, and each group's least and greatest candidate by the key is a WITH query's row, which
-  each pick reads through a lookup inside `any_value`. **What it holds is a row a group and the candidates, never every
-  distinct value or (group, value) pair**: the pairs, materialised, made 64 such statements at once spill past the
-  spill ceiling (53400) where the key a row answered every one (the review of PR 1104). Every WITH query is keyed by
-  the value AND its order: one value under two collations is two (the same review: `min(n), min(n COLLATE zh)`
-  answered the first's for both). Only where every key of the GROUP BY can be computed again over the same rows: no grouping set,
-  and no key that reads a subquery, calls a function of Mason's or a window, or is a bare name an output gives another
-  meaning. A value the order cannot key is picked first and marked, and the engine's `error()` raises its refusal above
-  the aggregate, where the statement reads that group: computed inside the lookup, it refused for a group an outer
-  query's WHERE dropped. **A SELECT DISTINCT sorted by a libc key sorts its distinct rows** (`distinctSorted`: 13 to 18 s
+  unique wide column's time. **A grouped min / max keys each group's candidates alone, where its groups are few**
+  (`pickGrouped`, the third round of issue 666: keyed a row, 5 to 28 s against Postgres's 0.1 to 0.5 s): a pass over
+  the SELECT's rows gives each group its thresholds and its least and greatest value by their bytes (one value: its
+  answer, unkeyed), a second its DISTINCT candidates, each keyed once, and each group's least and greatest candidate by
+  the key is a WITH query's row, LEFT JOINed to the SELECT's rows; the engine's `arg_min` / `arg_max` stays as written,
+  its rows narrowed to those holding that value. **Few is a probe's, never a guess**: `approx_count_distinct` of the
+  keys at most a sixteenth of the rows (`GROUPS_FEW`, a HyperLogLog of a few kilobytes); otherwise the WITH queries read
+  no row and the key a row answers, as written, the aggregate holding what it held. A row a group of thresholds,
+  candidates and picks beside the aggregate held more than the key a row did, and spilled past the ceiling (53400)
+  where it answered: 3.9 M groups over 4.5 M rows, two at once under a 3 GB ceiling (the second review of PR 1104);
+  the DISTINCT (group, value) pairs, materialised, had done so at 16 and 64 at once (the first). Only where every key
+  of the GROUP BY can be computed again over the same rows: no grouping set, no `*` in the list, and no key that reads
+  a subquery, calls a function of Mason's or a window, or is a bare name an output gives another meaning. A value the
+  order cannot key is picked first and marked, and the engine's `error()` raises its refusal on a row of its group the
+  statement reads, as the key a row did. Every WITH query is keyed by the value AND its order: one value under two
+  collations is two (the first review: `min(n), min(n COLLATE zh)` answered the first's for both). **A SELECT DISTINCT sorted by a libc key sorts its distinct rows** (`distinctSorted`: 13 to 18 s
   keyed a row): it is a SELECT of its outputs over the DISTINCT as a derived table, each key written over those columns,
   and a LIMIT over it is then a top N as above; a DISTINCT ON, a `*`, an output of no name and a key reading anything but
   the outputs stay as written. Anything else is sent as written (a grouped top N, WITH TIES, a set operation, a

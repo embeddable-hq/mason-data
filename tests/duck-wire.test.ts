@@ -9050,12 +9050,19 @@ test("libc grouped: a grouped min / max and a SELECT DISTINCT sorted are keyed o
       [`SELECT i, min(d) FROM colls WHERE ${w} AND id < 0 GROUP BY i`, []],
     ];
     for (const [sql, want] of grouped) {
-      assert.match(await sent(sql), /__mason_groups\d* AS MATERIALIZED .*ifnull\(CASE WHEN any_value\(\(SELECT __mason_group\d*\.__mason_m(in|ax)_unkeyed\d* .* THEN error\('mason\[0A000\]: /, sql);
+      assert.match(await sent(sql), /__mason_groups\d* AS MATERIALIZED .*arg_m(in|ax)\(.*CASE WHEN \(SELECT (\()?__mason_few\)? FROM __mason_probe\) THEN CASE WHEN .* = __mason_group\d*\.__mason_m(in|ax) THEN ROW\(CASE WHEN __mason_group\d*\.__mason_m(in|ax)_unkeyed THEN error\('mason\[0A000\]: /, sql);
       const before = await keyRows();
       assert.deepEqual((await answer(c, sql)).rows, want, sql);
       // (each group's candidates: a few of the thirteen values a group, never its hundreds of rows)
       const keyed = await keyRows() - before;
       assert.ok(keyed <= 2 * 6 * pool.length, `${sql}: the libc key was handed ${keyed} rows of ${rows.length}: per row, not per candidate`);
+    }
+    // GROUPS MANY BESIDE THE ROWS (the second review of PR 1104: 3.9 M groups over 4.5 M rows spilled past the ceiling
+    // where the key a row answered): a group a row, keyed a row as written, the groups' WITH queries reading no row
+    const byId = rows.filter((r) => r[0] < 7008).map((r) => [String(r[0]), r[1], r[1]]);
+    for (const sql of [`SELECT id, min(d), max(d) FROM colls WHERE ${w} AND id < 7008 GROUP BY id ORDER BY id`]) {
+      assert.match(await sent(sql), /__mason_probe\d* AS MATERIALIZED .*approx_count_distinct\(.*arg_min\(d, CASE WHEN NOT \(d IS NULL\) THEN CASE WHEN \(SELECT (\()?__mason_few\)? FROM __mason_probe\) THEN .* ELSE ROW\(__mason_libc_key\(/, sql);
+      assert.deepEqual((await answer(c, sql)).rows, byId, sql);
     }
     const sorted: Array<[string, unknown[][]]> = [
       [`SELECT DISTINCT d FROM colls WHERE ${w} ORDER BY d`, distinct(false, false).map((x) => [x])],
@@ -9093,7 +9100,8 @@ test("libc grouped: a value the order cannot key refuses a grouped min / max onl
   const { api: a, c } = await collsApi(await store.listener({ provider: "c", collate: "en_US.utf8", locale: null }, undefined, letters, () => copies, undefined, { collations: PG_COLLATIONS }));
   const rows: Array<[number, string, string]> = [];
   for (const [g, xs] of [["0", ["B", "b", "a", "c"]], ["1", ["é", "f", "e", "E"]], ["3", ["€", "z", "y"]], ["4", ["x€", "w"]], ["5", ["a", "b", "x€"]]] as Array<[string, string[]]>) {
-    for (const x of xs) for (let n = 0; n < 3; n++) rows.push([9000 + rows.length, x, g]);
+    // (twenty rows a value: the groups few beside the rows, so the groups' WITH queries answer)
+    for (const x of xs) for (let n = 0; n < 20; n++) rows.push([9000 + rows.length, x, g]);
   }
   await store.writer.run(`INSERT INTO public.colls SELECT id, x, x, g FROM (VALUES ${rows.map(([i, x, g]) => `(${i}, '${x}', '${g}')`).join(", ")}) AS s(id, x, g)`);
   try {
@@ -9251,10 +9259,10 @@ test("libc grouped: a value under two libc orders in one statement, each min and
   const xx = { schema: "public", name: "mason_xx", provider: "c", collate: "xx_XX.utf8", locale: null, deterministic: true };
   const { api: a, c } = await collsApi(await store.listener({ provider: "c", collate: "en_US.utf8", locale: null }, undefined, database, () => copies, undefined,
     { collations: [...PG_COLLATIONS, xx], readLibc: async () => after }), [xx]);
-  // three groups (the ICU column's digit), each value three times: é is the first of group 1 under the database's order
+  // three groups (the ICU column's digit), each value twenty times: é is the first of group 1 under the database's order
   // and the last under the second's
   const groups: Array<[string, string[]]> = [["1", ["é", "f", "g"]], ["2", ["b", "c"]], ["3", ["y", "é", "q"]]];
-  const rows = groups.flatMap(([g, xs]) => xs.flatMap((x) => [0, 1, 2].map(() => [g, x] as const))).map(([g, x], i) => [9500 + i, g, x] as const);
+  const rows = groups.flatMap(([g, xs]) => xs.flatMap((x) => Array.from({ length: 20 }, () => [g, x] as const))).map(([g, x], i) => [9500 + i, g, x] as const);
   await store.writer.run(`INSERT INTO public.colls SELECT id, x, x, g FROM (VALUES ${rows.map(([i, g, x]) => `(${i}, '${x}', '${g}')`).join(", ")}) AS s(id, x, g)`);
   const least = (o: typeof database, xs: string[], desc = false): string => [...xs].sort((x, y) => (libcKey(o, x) < libcKey(o, y) ? -1 : 1) * (desc ? -1 : 1))[0]!;
   try {
