@@ -51,11 +51,12 @@ paths:
   of the statement met twice outside its own rule's answer (`nodesPlacedTwice`, src/duck/rewrite.ts), and
   `tests/duck-wire.test.ts`, `tests/duck-corpus.test.ts` and the oracle hold it to none. ("A `->>` is DuckDB's own read")
 - **What a bare name in a FROM reads is decided once, by Postgres's scoping, in `src/duck/cte-names.ts`** (issue 981):
-  the listener's route asks `cteReads`, and the rewrite first renames apart a WITH query whose name the statement gives
-  to anything else (`cteNamesApart`: its reads keep the old name as their alias). So every later reader, DuckDB included,
-  meets one meaning per name. Why: each reader resolved names by rules of its own, and each read a WITH query's own body
-  `FROM t` as the WITH query, where Postgres reads the table (a count of 0, and XX000 from a pass-through followed into
-  itself).
+  the listener's route and the hidden columns' view (`exposes`, `hideKept`, src/duck/kept-route.ts) ask `cteReads`.
+  The rewrite first renames apart a WITH query whose name the statement gives to anything else (`cteNamesApart`: its
+  reads keep the old name as their alias), so every later reader, DuckDB included, meets one meaning per name. Why:
+  each reader resolved names by rules of its own. Each read a WITH query's own body `FROM t` as the WITH query, where
+  Postgres reads the table (a count of 0, and XX000 from a pass-through followed into itself), and `hideKept` read a
+  name a set operation's arm's own WITH binds as the table of that name.
 - **A rewrite the deparser cannot spell is a refusal, never a different statement**: the rewritten tree is deparsed,
   parsed again and compared node for node (`treeDifference`). ("How a statement is answered")
 - **No DuckDB macro**: with the `postgres` extension loaded, a macro with a lambda or calling a macro

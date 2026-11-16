@@ -16,6 +16,7 @@ import { createHash } from "node:crypto";
 import { pathIndex } from "./functions.ts";
 import type { LibcOrder } from "./libc-order.ts";
 import type { DuckCollation } from "./rewrite.ts";
+import { cteReads } from "./cte-names.ts";
 
 /** A JSON read of a copied table's column, as the rewrite meets it: what `__mason_json_get` is called with. */
 export interface JsonRead {
@@ -256,34 +257,25 @@ export function exposes(tree: unknown): boolean {
   };
   collect(tree);
   const star = (n: unknown): boolean => kindOf(n) === "ColumnRef" && Array.isArray(bodyOf(n).fields) && (bodyOf(n).fields as unknown[]).length === 1 && kindOf((bodyOf(n).fields as unknown[])[0]) === "A_Star";
-  // the tables of a FROM, a WITH query's name in scope left out
-  const tables = (from: unknown, ctes: ReadonlySet<string>): Body[] =>
-    directTables(from).filter((rv) => (typeof rv.schemaname === "string" && rv.schemaname !== "") || !ctes.has(String(rv.relname ?? "")));
-  const found = (v: unknown, ctes: ReadonlySet<string> = new Set()): boolean => {
-    if (Array.isArray(v)) return v.some((x) => found(x, ctes));
+  // the tables of a FROM: a name Postgres binds to a WITH query left out (src/duck/cte-names.ts, the one reader of its scoping)
+  const bound = cteReads(tree);
+  const tables = (from: unknown): Body[] => directTables(from).filter((rv) => !bound.has(rv));
+  const found = (v: unknown): boolean => {
+    if (Array.isArray(v)) return v.some(found);
     if (!isObject(v)) return false;
     const k = kindOf(v);
     const b = k === null ? v : bodyOf(v);
-    // a WITH query sees the ones before it (all of them, RECURSIVE); the rest of the statement sees all
-    if ((k === "SelectStmt" || k === null) && isObject(b.withClause) && Array.isArray(b.withClause.ctes)) {
-      const w = b.withClause;
-      const list = (w.ctes as unknown[]).filter((c) => kindOf(c) === "CommonTableExpr").map(bodyOf);
-      const all = new Set([...ctes, ...list.map((c) => String(c.ctename ?? ""))]);
-      if (list.some((c, i) => found(c.ctequery, w.recursive === true ? all : new Set([...ctes, ...list.slice(0, i).map((x) => String(x.ctename ?? ""))])))) return true;
-      const { withClause: _w, ...rest } = b;
-      return found(k === null ? rest : { SelectStmt: rest }, all);
-    }
     // (an arm of a set operation is a SelectStmt with no wrapper of its own: k is null)
-    if ((k === "SelectStmt" || k === null) && Array.isArray(b.targetList) && tables(b.fromClause, ctes).length > 0
+    if ((k === "SelectStmt" || k === null) && Array.isArray(b.targetList) && tables(b.fromClause).length > 0
       && b.targetList.some((t) => kindOf(t) === "ResTarget" && star(bodyOf(t).val))) return true;
-    if (k === "JoinExpr" && b.isNatural === true && tables([b.larg, b.rarg], ctes).length > 0) return true;
+    if (k === "JoinExpr" && b.isNatural === true && tables([b.larg, b.rarg]).length > 0) return true;
     if (k === "ColumnRef" && Array.isArray(b.fields)) {
       const fields = b.fields as unknown[];
       const last = fields[fields.length - 1];
       if (fields.length >= 2 && kindOf(last) === "A_Star" && aliases.has(sval(fields[fields.length - 2]) ?? "")) return true;
       if (fields.length === 1 && aliases.has(sval(fields[0]) ?? "\u0000")) return true;
     }
-    return Object.values(b).some((x) => found(x, ctes));
+    return Object.values(b).some(found);
   };
   return found(tree);
 }
@@ -302,32 +294,24 @@ export function exposes(tree: unknown): boolean {
  */
 export function hideKept(tree: unknown, ctx: { visible: ReadonlySet<string>; searchPath: readonly string[] }): boolean {
   if (!exposes(tree)) return false;
-  // every copy it names, read through its view; a WITH query's name in scope is the WITH query's
-  const redirect = (v: unknown, ctes: ReadonlySet<string>): void => {
-    if (Array.isArray(v)) { for (const x of v) redirect(x, ctes); return; }
+  // every copy it names, read through its view; a name Postgres binds to a WITH query is the WITH query's
+  // (src/duck/cte-names.ts, the one reader of its scoping: a set operation's arm's own WITH included)
+  const bound = cteReads(tree);
+  const redirect = (v: unknown): void => {
+    if (Array.isArray(v)) { v.forEach(redirect); return; }
     if (!isObject(v)) return;
     const k = kindOf(v);
     if (k === "RangeVar") {
       const b = bodyOf(v);
       if (typeof b.catalogname === "string" && b.catalogname !== "") return;
+      if (bound.has(b)) return;
       const name = String(b.relname ?? "");
-      const schema = typeof b.schemaname === "string" && b.schemaname !== "" ? b.schemaname
-        : ctes.has(name) ? null : ctx.searchPath.find((s) => ctx.visible.has(`${s}.${name}`)) ?? null;
+      const schema = typeof b.schemaname === "string" && b.schemaname !== "" ? b.schemaname : ctx.searchPath.find((s) => ctx.visible.has(`${s}.${name}`)) ?? null;
       if (schema !== null && ctx.visible.has(`${schema}.${name}`)) { b.catalogname = VISIBLE_CATALOG; b.schemaname = schema; }
       return;
     }
-    if (k === "SelectStmt") {
-      const b = bodyOf(v);
-      const w = isObject(b.withClause) ? b.withClause : null;
-      const list = w !== null && Array.isArray(w.ctes) ? w.ctes.filter((c) => kindOf(c) === "CommonTableExpr").map(bodyOf) : [];
-      const all = new Set([...ctes, ...list.map((c) => String(c.ctename ?? ""))]);
-      // a WITH query sees the ones before it (all of them, RECURSIVE); the rest of the statement sees all
-      list.forEach((c, i) => redirect(c.ctequery, w?.recursive === true ? all : new Set([...ctes, ...list.slice(0, i).map((x) => String(x.ctename ?? ""))])));
-      for (const [key, x] of Object.entries(b)) if (key !== "withClause") redirect(x, all);
-      return;
-    }
-    for (const x of Object.values(k === null ? v : bodyOf(v))) redirect(x, ctes);
+    for (const x of Object.values(k === null ? v : bodyOf(v))) redirect(x);
   };
-  redirect(tree, new Set());
+  redirect(tree);
   return true;
 }

@@ -5,10 +5,13 @@
  * So `WITH big AS (SELECT * FROM big WHERE tenant = 0) SELECT … FROM big` reads the TABLE big inside the WITH query, and
  * the WITH query outside it.
  *
- * This module is the one place that reads those rules. Two readers ask it:
+ * This module is the one place that reads those rules. Its readers:
  * - the listener, which sends a statement that reads a table to the synced data, and one that reads none to the
  *   catalog (src/api/postgres/translate.ts `duckTranslate`). It took the body's `big` for the WITH query, so the
  *   statement read "no table" and the empty catalog answered: a count of 0.
+ * - the hidden columns' view (src/duck/kept-route.ts `exposes`, `hideKept`), which reads a copy listed by a `*`
+ *   through its view. It missed a set operation's arm's own WITH, and read a name that WITH binds as the copy of that
+ *   name.
  * - the rewrite (src/duck/rewrite.ts `rewrite`), before anything else reads the statement. Its resolvers, and those of
  *   src/duck/late.ts, src/duck/libc-bound.ts, src/duck/kept-route.ts and the generated tables' swap, each read a name
  *   by rules of their own. Each took the body's `big` for the WITH query, and a pass-through followed it into itself
