@@ -9019,6 +9019,7 @@ test("issue 464: mode() under a libc order refuses a value it cannot order only 
   await store.writer.run(`INSERT INTO public.colls SELECT id, x, x, g FROM (VALUES ${rows.map(([i, x, g]) => `(${i}, '${x}', '${g}')`).join(", ")}) AS s(id, x, g)`);
   try {
     const sent = async (sql: string): Promise<string> => String((await answer(c, `EXPLAIN ${sql}`)).rows.map((r) => String(r[0])).find((l) => l.includes("Sent to the engine")) ?? "");
+    const wrong: string[] = [], keyedPerRow: string[] = [];
     for (const [sql, want] of [
       // a HAVING on the group, and an outer query's WHERE: the groups holding `€` are dropped
       ["SELECT i, mode() WITHIN GROUP (ORDER BY d) FROM colls WHERE id >= 6000 GROUP BY 1 HAVING i = '1'", [["1", "é"]]],
@@ -9031,9 +9032,13 @@ test("issue 464: mode() under a libc order refuses a value it cannot order only 
       // a FILTER that drops it
       ["SELECT mode() WITHIN GROUP (ORDER BY d) FILTER (WHERE i = '1') FROM colls WHERE id >= 6000", [["é"]]],
     ] as Array<[string, unknown[][]]>) {
-      assert.deepEqual((await answer(c, sql)).rows, want, sql);
-      assert.match(await sent(sql), /\(SELECT __mason_libc_key_or_null\(/, sql);
+      // (each statement's own verdict, so a failure names every form that refused or differed)
+      const got = await answer(c, sql).then((r) => JSON.stringify(r.rows), (e: Error) => `refused: ${e.message}`);
+      if (got !== JSON.stringify(want)) wrong.push(`${sql}\n  ${got}`);
+      if (!/\(SELECT __mason_libc_key_or_null\(/.test(await sent(sql))) keyedPerRow.push(sql);
     }
+    assert.deepEqual(wrong, [], wrong.join("\n"));
+    assert.deepEqual(keyedPerRow, [], "keyed a row, not once a value");
     // where `€` is among the most frequent, alone or tied, the order would decide: refused by name, as the key a row did
     for (const sql of ["SELECT mode() WITHIN GROUP (ORDER BY d) FROM colls WHERE id >= 6000 AND i = '3'",
       "SELECT i, mode() WITHIN GROUP (ORDER BY d DESC) FROM colls WHERE id >= 6000 GROUP BY 1 HAVING i = '5'", "SELECT i, mode() WITHIN GROUP (ORDER BY d) FROM colls WHERE id >= 6000 GROUP BY 1 ORDER BY 1"]) {
