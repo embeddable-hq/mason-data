@@ -26,6 +26,7 @@ import { exposes, hideKept, readKey, searchSchemas, type KeptLookup, type KeptRo
 import { distinctCountTables, distinctKeyCounts, groupedLimitTables, primaryKeysOf, uniqueColumnsOf, uniqueColumnsSql } from "./distinct-key.ts";
 import type { PrimaryKeys } from "./distinct-key.ts";
 import { enforceGrants, type RoleGrants } from "./grants.ts";
+import { ownPrefix } from "./own-names.ts";
 import { attributeRefused, expandRowFilters, wallStatistics, wallSwitch, type Walls } from "./row-filter.ts";
 import type { PgAnalysis } from "./analyze.ts";
 import type { ScaleLookup } from "./rewrite.ts";
@@ -601,8 +602,11 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   let collations: StatementCollations;
   try { collations = await resolver.prepare((sql) => catalogRows(catalog, sql), collationOids(analysis.tree)); }
   catch (e) { throw e instanceof Unrewritable ? unrewritableError(e, text) : e; }
+  // THE NAMES MASON INVENTS FOR THE STATEMENT (src/duck/own-names.ts): each begins with a prefix none of its names holds,
+  // its columns read by a `*` included, whichever module writes it (the rewrite, the late select list, the libc bounds)
+  const own = ownPrefix([stmt, analysis.tree], walls?.written ?? []);
   const analysed = performance.now();
-  const rewritten = (l = lookup, sc = scales): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, typeNames, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts, boundPaths, scales: sc });
+  const rewritten = (l = lookup, sc = scales): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, typeNames, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts, boundPaths, scales: sc, own });
   try {
     ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams, wholeNumericArrays } = rewritten());
     // the oracle's (`eager`): every read stored before the plan is made, and the plan made again over them
@@ -631,11 +635,11 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   // (a role's walled read it fetches through itself is one more wall: counted, so `wallStatistics` still walls every one)
   const lateWall = walls !== null ? { alias: walls.alias, added: 0 } : null;
   tree = await selectListAfterLimit(tree as Record<string, unknown>, analysis.tree, () => joinKeys(catalog, analysis.tree),
-    { volatile: (functions) => volatileFunctions(catalog, functions), wall: lateWall, rows: copiedRows(copies(), searchSchemas(searchPath)) }) ?? tree;
+    { volatile: (functions) => volatileFunctions(catalog, functions), wall: lateWall, rows: copiedRows(copies(), searchSchemas(searchPath)), own }) ?? tree;
   // a top N and a min or max under a libc order keyed for their candidates alone (src/duck/libc-bound.ts): after the
   // late select list, whose inner query holds the sort and the limit; a walled read it reads again is one more wall
   tree = await libcBounded(tree as Record<string, unknown>, analysis.tree, { order: (collate) => resolver.libcOrder(collate),
-    volatile: (functions) => volatileFunctions(catalog, functions), wall: lateWall }) ?? tree;
+    volatile: (functions) => volatileFunctions(catalog, functions), wall: lateWall, own }) ?? tree;
   // ONLY WHAT THE ORACLE VERIFIED: after the rewrite, so a construct the rewrite refuses by name (with its own way out)
   // says so first
   const keys = [...resolved].sort();
@@ -664,7 +668,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   }
   const planned = { text: sql, functions: masonCalls(tree), ...(unboundedLateral ? { unboundedLateral: true } : {}),
     ...(pathParams.length > 0 ? { pathParams } : {}), ...(wholeNumericArrays.length > 0 ? { wholeNumericArrays } : {}) } as unknown as PlannedSql;
-  return { sql: planned, params: analysis.params, fields: fields?.map((f) => ({ ...f, size: pgTyplen(f.oid) })) ?? null, withTies, ...(exact.length > 0 ? { exact } : {}), resolved: keys, argumentTypes: argumentTypes(analysis.tree), ...(outputs ? { outputs: outputExpressions(analysis.tree) ?? [] } : {}),
+  return { sql: planned, params: analysis.params, fields: fields?.map((f) => ({ ...f, size: pgTyplen(f.oid) })) ?? null, withTies, ...(exact.length > 0 ? { exact, own } : {}), resolved: keys, argumentTypes: argumentTypes(analysis.tree), ...(outputs ? { outputs: outputExpressions(analysis.tree) ?? [] } : {}),
     ...(Object.keys(clock).length > 0 ? { clock } : {}), ...(jsonReads.length > 0 ? { jsonReads: jsonReads.map(readKey) } : {}), ...(reads !== undefined ? { reads } : {}),
     timing: { analysisMs: analysed - started, rewriteMs: performance.now() - analysed } };
 }

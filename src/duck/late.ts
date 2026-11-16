@@ -200,6 +200,7 @@ import { FIRST_USER_OID, type TreeNode, type TreeValue } from "./pgtree.ts";
 import { distinctGrouping, keyGrouped, projectionOnly } from "./distinct-key.ts";
 import type { PrimaryKeys } from "./distinct-key.ts";
 import { constantExpression, evaluated } from "./constant-key.ts";
+import { OWN_PREFIX } from "./own-names.ts";
 
 type Body = Record<string, unknown>;
 type AstNode = Record<string, unknown>;
@@ -209,7 +210,25 @@ const kindOf = (n: unknown): string | null => isObject(n) ? Object.keys(n)[0] ??
 const bodyOf = (n: unknown): Body => (n as Record<string, Body>)[kindOf(n)!]!;
 const S = (sval: string): AstNode => ({ String: { sval } });
 const ref = (...names: string[]): AstNode => ({ ColumnRef: { fields: names.map(S) } });
-const LATE = "__mason_late";
+/**
+ * THE NAMES THIS MODULE WRITES (issue 1024): the kept rows' derived table or WITH query, a row number exposed beside a
+ * FROM item's columns, and the columns of the kept rows, each the statement's own prefix and a word
+ * (src/duck/own-names.ts). A table's column `__mason_rid` was listed by `SELECT *, t.rowid AS __mason_rid` before the
+ * row number, which the join then read as the row's: NULLs where Postgres answers the rows.
+ */
+interface Names {
+  /** the kept rows (`__mason_late`) */
+  late: string;
+  /** a derived or limited item's row number (`__mason_rid`) */
+  rid: string;
+  /** the kept rows' columns: a carried one (`__mason_c<i>`), a sort key (`__mason_o<i>`), a row number (`__mason_r<i>`) */
+  c: (i: number) => string; o: (i: number) => string; r: (i: number) => string;
+  /** whether a name is one of the statement's invented names (a lambda's parameter the rewrite wrote), no column of any
+   *  item: no name the statement can reach begins with the prefix */
+  own: (name: string) => boolean;
+}
+const namesOf = (prefix: string): Names => ({ late: `${prefix}late`, rid: `${prefix}rid`, c: (i) => `${prefix}c${i}`, o: (i) => `${prefix}o${i}`, r: (i) => `${prefix}r${i}`,
+  own: (name) => name.toLowerCase().startsWith(prefix) });
 
 /** what may stand in a select list that is computed after the limit: one value per row, reading its row alone */
 const ROW_WISE = new Set(["ColumnRef", "A_Const", "ParamRef", "FuncCall", "TypeCast", "A_Expr", "BoolExpr", "CaseExpr", "CaseWhen",
@@ -338,19 +357,19 @@ function rowWise(n: unknown, subLinks = false): { ok: boolean; computes: boolean
 }
 
 /** the same tree with every ColumnRef replaced by `__mason_late.<the column it is read as>` */
-function overLate(n: unknown, columns: Map<string, string>): unknown {
-  if (Array.isArray(n)) return n.map((x) => overLate(x, columns));
+function overLate(n: unknown, columns: Map<string, string>, mine: Names): unknown {
+  if (Array.isArray(n)) return n.map((x) => overLate(x, columns, mine));
   if (!isObject(n)) return n;
   if (kindOf(n) === "ColumnRef" && isObject(n.ColumnRef)) {
     // a lambda's parameter (the rewrite's own name) is no column of the table
     const names = fieldNames(n.ColumnRef);
-    if (names.length === 1 && typeof names[0] === "string" && ownName(names[0])) return n;
+    if (names.length === 1 && typeof names[0] === "string" && mine.own(names[0])) return n;
     const key = JSON.stringify(n.ColumnRef.fields);
     let name = columns.get(key);
-    if (name === undefined) { name = `__mason_c${columns.size + 1}`; columns.set(key, name); }
-    return ref(LATE, name);
+    if (name === undefined) { name = mine.c(columns.size + 1); columns.set(key, name); }
+    return ref(mine.late, name);
   }
-  return Object.fromEntries(Object.entries(n).map(([k, v]) => [k, overLate(v, columns)]));
+  return Object.fromEntries(Object.entries(n).map(([k, v]) => [k, overLate(v, columns, mine)]));
 }
 
 /** what the plan knows beside the statement: which of a statement's functions are volatile (the catalog's pg_proc), and
@@ -358,7 +377,10 @@ function overLate(n: unknown, columns: Map<string, string>): unknown {
 export interface LateContext { volatile: (functions: number[]) => Promise<ReadonlySet<number>>; wall: { alias: string; added: number } | null;
   /** a copied table's rows as the sync counted them (`CopyState.rows`), by its schema as written (null where none is)
    *  and its name; null where unknown. Absent: every table's rows unknown */
-  rows?: (schema: string | null, name: string) => number | null }
+  rows?: (schema: string | null, name: string) => number | null;
+  /** the prefix of every name the statement's rewrite invents (src/duck/own-names.ts), which this module's names begin
+   *  with too. Absent: `__mason_` */
+  own?: string }
 /** with no catalog to ask, every function is volatile: nothing is read twice */
 const UNKNOWN: LateContext = { volatile: async (functions) => new Set(functions), wall: null };
 
@@ -375,14 +397,15 @@ export async function selectListAfterLimit(tree: AstNode, analysis: TreeValue, k
   if (!around && !grouped) return null;
   const volatile = await context.volatile(derivedFunctions(analysis));
   const wall = context.wall;
+  const mine = namesOf(context.own ?? OWN_PREFIX);
   const relations = relationsOf(analysis, grouped ? await keys() : new Map(), volatile, wall?.alias ?? null);
   let changed = false;
   const written = (select: AstNode): AstNode | null => {
-    const grouped = keyFirst(select, relations);
+    const grouped = keyFirst(select, relations, mine);
     if (grouped !== null || !around) return grouped;
-    const rows = joinRows(select, relations, wall?.alias ?? null, context.rows ?? null);
+    const rows = joinRows(select, relations, wall?.alias ?? null, context.rows ?? null, mine);
     if (rows !== null) { if (wall !== null) wall.added += rows.walls; return rows.select; }
-    return strict ? afterLimit(select) : null;
+    return strict ? afterLimit(select, mine) : null;
   };
   // bottom up: a SELECT's derived tables and WITH queries first, then the SELECT (never what it was written as)
   const visit = (n: unknown): unknown => {
@@ -512,7 +535,7 @@ const anyValue = (arg: AstNode): AstNode => ({ FuncCall: { funcname: [S("any_val
  * jsonb output's equality (`keyedDistinct`: its DISTINCT ON of the outputs' keys), the grouping is those keys, and an
  * output so keyed must be one the fetch reads, so no raw jsonb is shown from a group it does not decide.
  */
-function keyFirst(select: AstNode, relations: Query[]): AstNode | null {
+function keyFirst(select: AstNode, relations: Query[], mine: Names): AstNode | null {
   const s = bodyOf(select);
   if (s.op !== undefined && s.op !== "SETOP_NONE") return null;
   for (const f of ["lockingClause", "intoClause", "valuesLists"]) {
@@ -599,14 +622,14 @@ function keyFirst(select: AstNode, relations: Query[]): AstNode | null {
   const carried: AstNode[] = [];
   const list = targets.map((t, i) => {
     const b = bodyOf(t), at = shown.get(i);
-    if (at !== undefined) return { ResTarget: { ...b, val: ref(LATE, `__mason_o${at + 1}`) } };
+    if (at !== undefined) return { ResTarget: { ...b, val: ref(mine.late, mine.o(at + 1)) } };
     const f = fetchOf(b.val);
     if (f !== null) { if (!fetched.includes(f.alias)) fetched.push(f.alias); return { ResTarget: { ...b, val: f.outer } }; }
     // an output a DISTINCT groups by the rewrite's key of it, not by itself, is not computed inside
     if (distinct !== null && JSON.stringify(groups[i]) !== JSON.stringify(b.val)) return null;
-    const name = `__mason_c${carried.length + 1}`;
+    const name = mine.c(carried.length + 1);
     carried.push({ ResTarget: { name, val: b.val } });
-    return { ResTarget: { ...b, val: ref(LATE, name) } };
+    return { ResTarget: { ...b, val: ref(mine.late, name) } };
   });
   if (fetched.length === 0 || list.some((t) => t === null)) return null;
   // a grouped column of a keyed table, not its key, read nowhere inside but where it is grouped: decided by the key
@@ -650,20 +673,20 @@ function keyFirst(select: AstNode, relations: Query[]): AstNode | null {
   const fromInner = mapFrom(s.fromClause as unknown[], (n, i) => keyed.has(aliases[i]!) ? ownTable(bodyOf(n)) : n);
   const { sortClause: _sorts, ...unsorted } = s;
   const inner: Body = { ...unsorted, fromClause: fromInner, groupClause: kept, distinctClause: undefined, targetList: [
-    ...fetched.map((alias, i) => ({ ResTarget: { name: `__mason_r${i + 1}`, val: anyValue(rowNumber(alias)) } })),
+    ...fetched.map((alias, i) => ({ ResTarget: { name: mine.r(i + 1), val: anyValue(rowNumber(alias)) } })),
     ...carried,
-    ...keys.map((k, i) => ({ ResTarget: { name: `__mason_o${i + 1}`, val: k } })),
+    ...keys.map((k, i) => ({ ResTarget: { name: mine.o(i + 1), val: k } })),
   ] };
   if (sorts.length > 0) inner.sortClause = sorts.map((sort, i) => ({ SortBy: { ...bodyOf(sort), node: structuredClone(keys[i]!) } }));
-  let joined: AstNode = { RangeSubselect: { subquery: { SelectStmt: inner }, alias: { aliasname: LATE } } };
+  let joined: AstNode = { RangeSubselect: { subquery: { SelectStmt: inner }, alias: { aliasname: mine.late } } };
   fetched.forEach((alias, i) => {
     joined = { JoinExpr: { jointype: "JOIN_LEFT", larg: joined, rarg: ownTable(bodyOf(items[keyed.get(alias)!.at]!)), quals: { A_Expr: {
-      kind: "AEXPR_OP", name: [S("=")], lexpr: rowNumber(alias), rexpr: ref(LATE, `__mason_r${i + 1}`) } } } };
+      kind: "AEXPR_OP", name: [S("=")], lexpr: rowNumber(alias), rexpr: ref(mine.late, mine.r(i + 1)) } } } };
   });
   return { SelectStmt: {
     targetList: list,
     fromClause: [joined],
-    ...(sorts.length > 0 ? { sortClause: sorts.map((sort, i) => ({ SortBy: { ...bodyOf(sort), node: ref(LATE, `__mason_o${i + 1}`) } })) } : {}),
+    ...(sorts.length > 0 ? { sortClause: sorts.map((sort, i) => ({ SortBy: { ...bodyOf(sort), node: ref(mine.late, mine.o(i + 1)) } })) } : {}),
     limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE",
   } };
 }
@@ -720,7 +743,7 @@ function sortKeys(targets: AstNode[], written: AstNode[], shown: Map<number, num
 
 
 /** one SELECT written so, or null where it is not so shaped */
-function afterLimit(select: AstNode): AstNode | null {
+function afterLimit(select: AstNode, mine: Names): AstNode | null {
   const s = bodyOf(select);
   const shape = sortedLimited(s);
   if (shape === null) return null;
@@ -737,15 +760,15 @@ function afterLimit(select: AstNode): AstNode | null {
   if (sorted === null || sorted.sorts.length === 0) return null;
   const { keys, sorts } = sorted;
   const columns = new Map<string, string>();
-  const list = targets.map((t) => ({ ResTarget: { ...bodyOf(t), val: overLate(bodyOf(t).val, columns) } }));
+  const list = targets.map((t) => ({ ResTarget: { ...bodyOf(t), val: overLate(bodyOf(t).val, columns, mine) } }));
   const inner: Body = { ...s, targetList: [
     ...[...columns].map(([fields, name]) => ({ ResTarget: { name, val: { ColumnRef: { fields: JSON.parse(fields) } } } })),
-    ...keys.map((k, i) => ({ ResTarget: { name: `__mason_o${i + 1}`, val: k } })),
+    ...keys.map((k, i) => ({ ResTarget: { name: mine.o(i + 1), val: k } })),
   ], sortClause: sorts.map((sort, i) => ({ SortBy: { ...bodyOf(sort), node: keys[i] } })) };
   return { SelectStmt: {
     targetList: list,
-    fromClause: [{ RangeSubselect: { subquery: { SelectStmt: inner }, alias: { aliasname: LATE } } }],
-    sortClause: sorts.map((sort, i) => ({ SortBy: { ...bodyOf(sort), node: ref(LATE, `__mason_o${i + 1}`) } })),
+    fromClause: [{ RangeSubselect: { subquery: { SelectStmt: inner }, alias: { aliasname: mine.late } } }],
+    sortClause: sorts.map((sort, i) => ({ SortBy: { ...bodyOf(sort), node: ref(mine.late, mine.o(i + 1)) } })),
     limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE",
   } };
 }
@@ -1030,7 +1053,6 @@ const aliasOfItem = (n: AstNode): string | null => {
   return kindOf(n) === "RangeVar" ? aliasOfTable(b) : isObject(b.alias) ? String(b.alias.aliasname) : null;
 };
 const rowNumber = (alias: string): AstNode => ref(alias, "rowid");
-const ROW_ID = "__mason_rid";
 
 const hasStarTarget = (t: AstNode): boolean => {
   const val = kindOf(t) === "ResTarget" ? bodyOf(t).val : null;
@@ -1040,8 +1062,6 @@ const hasStarTarget = (t: AstNode): boolean => {
 /** a column's name in a ColumnRef's fields, each field a name; null for a star */
 const fieldNames = (b: Body): Array<string | null> => (b.fields as unknown[]).map((f) => kindOf(f) === "String" ? bodyOf(f).sval as string : null);
 
-/** a name no column of a statement has: what a rewrite binds inside an expression (a lambda's parameter) */
-const ownName = (name: string): boolean => name.startsWith("__mason_");
 
 /** an item as a select list reads it */
 interface Listed { alias: string; columns: string[] }
@@ -1049,7 +1069,7 @@ interface Listed { alias: string; columns: string[] }
 /** the select list with every `*` written out; the tables it reads by name; null where it reads a whole row, or holds what the list after the limit may not.
  *  With `subLinks` (the items its subqueries read, from Postgres's analysis: `listSubLinkReads`), a subquery may stand in
  *  it, its own select not read here */
-function writtenOut(targets: AstNode[], tables: readonly Listed[], tablesAlone = true, subLinks: readonly string[] | null = null): { list: AstNode[]; read: Set<string> } | null {
+function writtenOut(mine: Names, targets: AstNode[], tables: readonly Listed[], tablesAlone = true, subLinks: readonly string[] | null = null): { list: AstNode[]; read: Set<string> } | null {
   const aliases = new Set(tables.map((t) => t.alias));
   const read = new Set<string>();
   const list: AstNode[] = [];
@@ -1062,14 +1082,14 @@ function writtenOut(targets: AstNode[], tables: readonly Listed[], tablesAlone =
         // a bare name: of a table it does not say, unless it is a table's own name, a whole row
         const name = names[0];
         // (a lambda's parameter, the rewrite's own name, reads no table)
-        if (typeof name === "string" && ownName(name)) return true;
+        if (typeof name === "string" && mine.own(name)) return true;
         if (name === null || name === undefined || aliases.has(name)) return false;
         const owners = tablesAlone ? [] : tables.filter((t) => t.columns.includes(name));
         for (const t of owners.length > 0 ? owners : tables) read.add(t.alias);
         return true;
       }
       const owner = names.at(-2);
-      if (owner === LATE) return true;
+      if (owner === mine.late) return true;
       if (typeof owner !== "string" || !aliases.has(owner)) return false;
       read.add(owner);
       return true;
@@ -1156,12 +1176,12 @@ function both(a: unknown, b: unknown): unknown {
 
 /** one SELECT of one FROM item, a projection and a WHERE over FROM items, folded into it (see above): each column of the
  *  wrapper read as the expression it is; null where it cannot be */
-function fold(s: Body, sub: Body, item: Derived): Body | null {
+function fold(s: Body, sub: Body, item: Derived, mine: Names): Body | null {
   const inner = item.read;
   if (inner === null || !projection(sub)) return null;
   const items = inner.items.filter((r): r is Table | Derived | Walled => r !== null);
   if (items.length !== inner.items.length) return null;
-  const expanded = writtenOut(sub.targetList as AstNode[], items);
+  const expanded = writtenOut(mine, sub.targetList as AstNode[], items);
   if (expanded === null || expanded.list.length !== item.columns.length) return null;
   const values = expanded.list.map((t) => bodyOf(t).val);
   const byName = new Map<string, unknown>();
@@ -1179,14 +1199,14 @@ function fold(s: Body, sub: Body, item: Derived): Body | null {
   const readsConstant = (n: unknown): boolean => {
     if (!isObject(n) || kindOf(n) !== "ColumnRef" || !isObject(n.ColumnRef)) return false;
     const column = columnOf(n);
-    return column !== null && !ownName(column) && constant.has(column);
+    return column !== null && !mine.own(column) && constant.has(column);
   };
   const over = (n: unknown): unknown => {
     if (Array.isArray(n)) return n.map(over);
     if (!isObject(n)) return n;
     if (kindOf(n) === "ColumnRef" && isObject(n.ColumnRef)) {
       const column = columnOf(n);
-      if (column !== null && ownName(column)) return n;
+      if (column !== null && mine.own(column)) return n;
       const value = typeof column === "string" ? byName.get(column) : undefined;
       if (value === undefined || value === null) { whole = false; return n; }
       return structuredClone(value);
@@ -1244,7 +1264,7 @@ function fold(s: Body, sub: Body, item: Derived): Body | null {
 
 /** a SELECT's FROM read as its query's items: its WITH queries in place of their one read and, while its one item is a
  *  derived read, folded into it; null where the tree and the analysis do not agree or a wrapper does not fold */
-function unwrapped(s: Body, query: Query, withs: Withs): { s: Body; query: Query } | null {
+function unwrapped(s: Body, query: Query, withs: Withs, mine: Names): { s: Body; query: Query } | null {
   for (let body = s, q = query; ;) {
     const items = fromItems(body.fromClause);
     if (items === null || items.length !== q.items.length || items.some((n, i) => aliasOfItem(n) !== q.items[i]?.alias)) return null;
@@ -1252,7 +1272,7 @@ function unwrapped(s: Body, query: Query, withs: Withs): { s: Body; query: Query
     const one = items.length === 1 ? q.items[0]! : null;
     const item = fromItems(placed.fromClause)![0]!;
     if (one?.kind !== "derived" || one.read === null || kindOf(item) !== "RangeSubselect") return { s: placed, query: q };
-    const folded = fold(placed, bodyOf(bodyOf(item).subquery), one);
+    const folded = fold(placed, bodyOf(bodyOf(item).subquery), one, mine);
     if (folded === null) return null;
     body = folded; q = one.read;
   }
@@ -1278,34 +1298,34 @@ function barrierOf(item: AstNode, wall: string | null): { barrier: Body; table: 
 }
 
 /** a walled read exposing its row number as `__mason_rid`: chosen behind its barrier, passed on by its wall's `*` */
-function walledExposed(item: AstNode, wall: string): AstNode {
+function walledExposed(item: AstNode, wall: string, mine: Names): AstNode {
   const copy = structuredClone(item);
   const { barrier, table } = barrierOf(copy, wall)!;
-  barrier.targetList = [...barrier.targetList as AstNode[], { ResTarget: { name: ROW_ID, val: rowNumber(aliasOfTable(table)) } }];
+  barrier.targetList = [...barrier.targetList as AstNode[], { ResTarget: { name: mine.rid, val: rowNumber(aliasOfTable(table)) } }];
   barrier.fromClause = [ownTable(table)];
   return copy;
 }
 
 /** a derived item that is a plain read of one table or one walled read in the tree too (the rewrite may have written it
  *  otherwise), or null */
-function plainSide(item: AstNode, relation: Derived, withs: Withs, wall: string | null): PlainSide | null {
+function plainSide(item: AstNode, relation: Derived, withs: Withs, wall: string | null, mine: Names): PlainSide | null {
   if (relation.read === null || kindOf(item) !== "RangeSubselect") return null;
   const sub = bodyOf(item).subquery;
   if (kindOf(sub) !== "SelectStmt" || bodyOf(item).lateral === true) return null;
   // a WITH query taken only if this read is: one that stays carried reads what it always read
   const trial: Withs = { byName: withs.byName, used: new Set() };
-  const opened = unwrapped(bodyOf(sub), relation.read, trial);
+  const opened = unwrapped(bodyOf(sub), relation.read, trial, mine);
   if (opened === null || !projection(opened.s)) return null;
   const [table] = opened.query.items, from = opened.s.fromClause as unknown[];
   if (opened.query.items.length !== 1 || from.length !== 1 || table === null || table === undefined) return null;
   const walled = table.kind === "walled" && barrierOf(from[0] as AstNode, wall) !== null && aliasOfItem(from[0] as AstNode) === table.alias;
   if (!walled && (table.kind !== "table" || kindOf(from[0]) !== "RangeVar")) return null;
   if (table.columns.some((c) => c === "" || c.toLowerCase() === "rowid")) return null;
-  const written = writtenOut(opened.s.targetList as AstNode[], [table]);
+  const written = writtenOut(mine, opened.s.targetList as AstNode[], [table]);
   // a whole row in the WHERE lists what a read of the table itself shows and its view of visible columns does not
-  if (written === null || !writtenOut([{ ResTarget: { val: opened.s.whereClause ?? { A_Const: { isnull: true } } } }], [table])) return null;
+  if (written === null || !writtenOut(mine, [{ ResTarget: { val: opened.s.whereClause ?? { A_Const: { isnull: true } } } }], [table])) return null;
   for (const name of trial.used) withs.used.add(name);
-  return { body: opened.s, source: from[0] as AstNode, id: walled ? ref(table.alias, ROW_ID) : rowNumber(aliasOfTable(bodyOf(from[0]))), walled, list: written.list };
+  return { body: opened.s, source: from[0] as AstNode, id: walled ? ref(table.alias, mine.rid) : rowNumber(aliasOfTable(bodyOf(from[0]))), walled, list: written.list };
 }
 
 /** a table read itself: a row number is no column of a copy's view, and nothing here lists a column that is not named */
@@ -1313,11 +1333,11 @@ function ownTable(t: Body): AstNode { const { catalogname: _c, ...rest } = t; re
 
 /** a plain side as a FROM item: the query it was, each row exposing its row number; a walled read it reads keeps its
  *  filter, its barrier and its wall, whether or not the side keeps its own WHERE */
-function exposed(side: PlainSide, alias: Body, where: boolean, wall: string | null, chosen: AstNode | null = null): AstNode {
+function exposed(mine: Names, side: PlainSide, alias: Body, where: boolean, wall: string | null, chosen: AstNode | null = null): AstNode {
   const { whereClause, ...rest } = side.body;
   return { RangeSubselect: { alias: structuredClone(alias), subquery: { SelectStmt: { ...structuredClone({ ...rest,
-    targetList: [...side.list, { ResTarget: { name: ROW_ID, val: side.id } }],
-    fromClause: [side.walled ? walledExposed(side.source, wall!) : ownTable(bodyOf(side.source))],
+    targetList: [...side.list, { ResTarget: { name: mine.rid, val: side.id } }],
+    fromClause: [side.walled ? walledExposed(side.source, wall!, mine) : ownTable(bodyOf(side.source))],
     ...(where && whereClause !== undefined ? { whereClause } : {}) }), ...(chosen !== null ? { whereClause: chosen } : {}) } } } };
 }
 
@@ -1346,27 +1366,27 @@ function readsComputed(side: PlainSide, alias: string, list: unknown): boolean {
 }
 
 /** `id IN (SELECT __mason_late.<column> FROM __mason_late)`: the fetched rows of a side, those the chosen rows name */
-const inChosen = (id: AstNode, column: string): AstNode => ({ SubLink: { subLinkType: "ANY_SUBLINK", testexpr: structuredClone(id), subselect: { SelectStmt: {
-  targetList: [{ ResTarget: { val: ref(LATE, column) } }], fromClause: [{ RangeVar: { relname: LATE, inh: true, relpersistence: "p" } }],
+const inChosen = (id: AstNode, column: string, mine: Names): AstNode => ({ SubLink: { subLinkType: "ANY_SUBLINK", testexpr: structuredClone(id), subselect: { SelectStmt: {
+  targetList: [{ ResTarget: { val: ref(mine.late, column) } }], fromClause: [{ RangeVar: { relname: mine.late, inh: true, relpersistence: "p" } }],
   limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE" } } } });
 
 /** the same tree with every column of a carried item replaced by `__mason_late.__mason_c<i>`, which `columns` names */
-function overCarried(n: unknown, carried: readonly Listed[], columns: Map<string, { name: string; val: AstNode }>): unknown {
-  if (Array.isArray(n)) return n.map((x) => overCarried(x, carried, columns));
+function overCarried(n: unknown, carried: readonly Listed[], columns: Map<string, { name: string; val: AstNode }>, mine: Names): unknown {
+  if (Array.isArray(n)) return n.map((x) => overCarried(x, carried, columns, mine));
   if (!isObject(n)) return n;
   if (kindOf(n) === "ColumnRef" && isObject(n.ColumnRef)) {
     const names = fieldNames(n.ColumnRef);
     const column = names.at(-1);
     // a lambda's parameter (the rewrite's own name) is no column of any item
-    if (names.length === 1 && typeof column === "string" && ownName(column)) return n;
+    if (names.length === 1 && typeof column === "string" && mine.own(column)) return n;
     const owner = names.length === 1 ? carried.find((c) => c.columns.includes(String(column))) : carried.find((c) => c.alias === names.at(-2));
     if (owner === undefined || typeof column !== "string") return n;
     const key = `${owner.alias}.${column}`;
     let at = columns.get(key);
-    if (at === undefined) { at = { name: `__mason_c${columns.size + 1}`, val: ref(owner.alias, column) }; columns.set(key, at); }
-    return ref(LATE, at.name);
+    if (at === undefined) { at = { name: mine.c(columns.size + 1), val: ref(owner.alias, column) }; columns.set(key, at); }
+    return ref(mine.late, at.name);
   }
-  return Object.fromEntries(Object.entries(n).map(([k, v]) => [k, k === "subselect" ? v : overCarried(v, carried, columns)]));
+  return Object.fromEntries(Object.entries(n).map(([k, v]) => [k, k === "subselect" ? v : overCarried(v, carried, columns, mine)]));
 }
 
 /** a LIMIT's or an OFFSET's count where it is a constant: a non-negative integer, `none` where none is written; else null */
@@ -1398,8 +1418,8 @@ function preservedLeaf(from: unknown): AstNode | null {
  *  the engine binds it there too: qualified by that name, or a bare name no other item holds (`others`, in any case,
  *  since the engine binds a name in any case) nor a join's merged column. A star, a subquery or a bare name of no
  *  column of the item is unsure: false */
-function readsOnly(n: unknown, alias: string, own: readonly string[], others: ReadonlySet<string>, merged: ReadonlySet<string>): boolean {
-  if (Array.isArray(n)) return n.every((x) => readsOnly(x, alias, own, others, merged));
+function readsOnly(n: unknown, alias: string, own: readonly string[], others: ReadonlySet<string>, merged: ReadonlySet<string>, mine: Names): boolean {
+  if (Array.isArray(n)) return n.every((x) => readsOnly(x, alias, own, others, merged, mine));
   if (!isObject(n)) return true;
   if (kindOf(n) === "SubLink") return false;
   if (kindOf(n) === "ColumnRef" && isObject(n.ColumnRef)) {
@@ -1408,10 +1428,10 @@ function readsOnly(n: unknown, alias: string, own: readonly string[], others: Re
     const column = names.at(-1)!;
     if (names.length >= 2) return names.at(-2) === alias;
     // a lambda's parameter (the rewrite's own name) is no column of any item
-    if (ownName(column)) return true;
+    if (mine.own(column)) return true;
     return own.includes(column) && !others.has(column.toLowerCase()) && !merged.has(column);
   }
-  return Object.values(n).every((x) => readsOnly(x, alias, own, others, merged));
+  return Object.values(n).every((x) => readsOnly(x, alias, own, others, merged, mine));
 }
 
 /** each column reference of a tree qualified by a schema (or a catalog) and the item named `alias`, read by that name
@@ -1463,7 +1483,7 @@ function shortened(n: unknown, alias: string): unknown {
  * wraps the item as the join reads it, so a walled read keeps its filter, barrier and wall inside, and the keys and
  * the WHERE run above them, where they ran before.
  */
-function preservedFirst(s: Body, items: readonly AstNode[], listed: ReadonlyArray<Table | Derived | Walled>, query: Query, keys: readonly AstNode[]): { at: number; count: AstNode } | null {
+function preservedFirst(s: Body, items: readonly AstNode[], listed: ReadonlyArray<Table | Derived | Walled>, query: Query, keys: readonly AstNode[], mine: Names): { at: number; count: AstNode } | null {
   const limit = noLimit(s.limitCount) ? null : constantCount(s.limitCount, null), offset = constantCount(s.limitOffset, 0);
   if (limit === null || offset === null || !Number.isSafeInteger(limit + offset) || limit + offset > 2 ** 31 - 1) return null;
   const leaf = preservedLeaf(s.fromClause);
@@ -1477,8 +1497,8 @@ function preservedFirst(s: Body, items: readonly AstNode[], listed: ReadonlyArra
   const others = new Set(listed.flatMap((r, i) => i === at ? [] : r.columns.map((c) => c.toLowerCase())));
   const merged = new Set(query.merged.map(([name]) => name));
   const own = listed[at]!.columns;
-  if (!keys.every((k) => readsOnly(k, alias, own, others, merged))) return null;
-  if (s.whereClause !== undefined && (holdsSubLink(s.whereClause) > 0 || !readsOnly(s.whereClause, alias, own, others, merged))) return null;
+  if (!keys.every((k) => readsOnly(k, alias, own, others, merged, mine))) return null;
+  if (s.whereClause !== undefined && (holdsSubLink(s.whereClause) > 0 || !readsOnly(s.whereClause, alias, own, others, merged, mine))) return null;
   // (the parser writes 0 as an integer with no value: a tree that reads back as itself)
   return { at, count: { A_Const: { ival: limit + offset === 0 ? {} : { ival: limit + offset } } } };
 }
@@ -1517,7 +1537,7 @@ function biggestPreserved(lead: { at: number; count: AstNode } | null, items: re
 }
 
 /** one SELECT over joined FROM items written with its rows chosen by row number (see above), or null where it is not so shaped */
-function joinRows(select: AstNode, relations: Query[], wall: string | null, rows: LateContext["rows"] | null = null): { select: AstNode; walls: number } | null {
+function joinRows(select: AstNode, relations: Query[], wall: string | null, rows: LateContext["rows"] | null, mine: Names): { select: AstNode; walls: number } | null {
   const written0 = bodyOf(select);
   // a DISTINCT ON keeps one whole row of its FROM per group: that row's numbers fetch it, whatever the ON expressions
   const on0 = distinctOnOf(written0);
@@ -1536,7 +1556,7 @@ function joinRows(select: AstNode, relations: Query[], wall: string | null, rows
   // the analysis's DISTINCT ON is the tree's, and none of its expressions is volatile: computed inside, once per row
   if (named.some((q) => q.distinctOn !== (on0 !== null) || q.volatileOn)) return null;
   const withs = withsOf(written0);
-  const opened = unwrapped(written0, first, withs);
+  const opened = unwrapped(written0, first, withs, mine);
   if (opened === null) return null;
   const { s, query } = opened;
   const on = distinctOnOf(s);
@@ -1560,14 +1580,14 @@ function joinRows(select: AstNode, relations: Query[], wall: string | null, rows
   if (listed.some((t) => t.kind !== "derived" && t.columns.some((c) => c === "" || c.toLowerCase() === "rowid"))) return null;
   // a walled read is the walled form in the tree too, or nothing is written
   if (listed.some((t, i) => t.kind === "walled" && barrierOf(items[i]!, wall) === null)) return null;
-  const sides = items.map((n, i) => { const r = listed[i]!; return r.kind === "derived" ? plainSide(n, r, withs, wall) : null; });
+  const sides = items.map((n, i) => { const r = listed[i]!; return r.kind === "derived" ? plainSide(n, r, withs, wall, mine) : null; });
   // what a list reads of a derived item is read by name: two of one name (in any case) cannot be told apart
   const carried = listed.filter((r, i) => r.kind === "derived" && sides[i] === null);
   if (listed.some((r) => r.kind === "derived" && new Set(r.columns.map((c) => c.toLowerCase())).size !== r.columns.length)) return null;
   const tablesAlone = listed.every((r) => r.kind === "table");
   // a subquery reads a carried item's columns by the names inside it, which the fetch has not
   if (subLinks.some((a) => { const i = aliases.indexOf(a); return i < 0 || (listed[i]!.kind === "derived" && sides[i] === null); })) return null;
-  const outputs = writtenOut(s.targetList as AstNode[], listed, tablesAlone, subqueried ? subLinks : null);
+  const outputs = writtenOut(mine, s.targetList as AstNode[], listed, tablesAlone, subqueried ? subLinks : null);
   if (outputs === null) return null;
   const writtenSorts = (s.sortClause as AstNode[] | undefined) ?? [];
   // the keys are read from the outputs as the join reads them: a bare merged column is the join's, inside
@@ -1585,29 +1605,29 @@ function joinRows(select: AstNode, relations: Query[], wall: string | null, rows
   const carriedMerge = (name: string): AstNode => {
     const key = `.${name}`;
     let at = columns.get(key);
-    if (at === undefined) { at = { name: `__mason_c${columns.size + 1}`, val: ref(name) }; columns.set(key, at); }
-    return ref(LATE, at.name);
+    if (at === undefined) { at = { name: mine.c(columns.size + 1), val: ref(name) }; columns.set(key, at); }
+    return ref(mine.late, at.name);
   };
   const merged = new Map(query.merged);
-  const written = writtenOut(outputs.list.map((t, i) => {
+  const written = writtenOut(mine, outputs.list.map((t, i) => {
     const at = shown?.get(i);
-    return { ResTarget: { ...bodyOf(t), val: at !== undefined ? ref(LATE, `__mason_o${at + 1}`) : mergedOver(bodyOf(t).val, merged, carriedMerge) } };
+    return { ResTarget: { ...bodyOf(t), val: at !== undefined ? ref(mine.late, mine.o(at + 1)) : mergedOver(bodyOf(t).val, merged, carriedMerge) } };
   }), listed, tablesAlone, subqueried ? subLinks : null);
   if (written === null) return null;
   const isFetched = (i: number): boolean => written.read.has(aliases[i]!) && (listed[i]!.kind !== "derived" || sides[i] !== null);
   // THE PRESERVED SIDE FIRST (issue 824, part 2): its rows limited before the join, where that is the same answer
-  const lead = on === null && !volatileKeys && sorts.length > 0 && !named.some((q) => q.volatileWhere) ? preservedFirst(s, items, listed, query, keys)
+  const lead = on === null && !volatileKeys && sorts.length > 0 && !named.some((q) => q.volatileWhere) ? preservedFirst(s, items, listed, query, keys, mine)
     // WITH NO SORT, only where the preserved table is the biggest FROM item (issue 463, see `biggestPreserved`)
-    : on === null && sorts.length === 0 && s.whereClause === undefined ? biggestPreserved(preservedFirst(s, items, listed, query, []), items, listed, sides, rows) : null;
+    : on === null && sorts.length === 0 && s.whereClause === undefined ? biggestPreserved(preservedFirst(s, items, listed, query, [], mine), items, listed, sides, rows) : null;
   // (a table limited first is a derived table: its row number is the column it exposes, inside; the fetch reads the table)
-  const innerId = (i: number): AstNode => listed[i]!.kind === "table" && lead?.at !== i ? rowNumber(aliases[i]!) : ref(aliases[i]!, ROW_ID);
-  const fetched = items.flatMap((n, i) => isFetched(i) ? [{ node: n, at: i, alias: aliases[i]!, id: listed[i]!.kind === "table" ? rowNumber(aliases[i]!) : ref(aliases[i]!, ROW_ID), inner: innerId(i) }] : []);
+  const innerId = (i: number): AstNode => listed[i]!.kind === "table" && lead?.at !== i ? rowNumber(aliases[i]!) : ref(aliases[i]!, mine.rid);
+  const fetched = items.flatMap((n, i) => isFetched(i) ? [{ node: n, at: i, alias: aliases[i]!, id: listed[i]!.kind === "table" ? rowNumber(aliases[i]!) : ref(aliases[i]!, mine.rid), inner: innerId(i) }] : []);
   if (fetched.length === 0) return null;
-  const list = written.list.map((t) => ({ ResTarget: { ...bodyOf(t), val: overCarried(bodyOf(t).val, carried, columns) } }));
+  const list = written.list.map((t) => ({ ResTarget: { ...bodyOf(t), val: overCarried(bodyOf(t).val, carried, columns, mine) } }));
   const placed = (n: AstNode, i: number): AstNode => {
     const side = sides[i];
-    if (side !== null && side !== undefined) return isFetched(i) ? exposed(side, bodyOf(n).alias as Body, true, wall) : { RangeSubselect: { ...bodyOf(n), subquery: { SelectStmt: side.body } } };
-    if (listed[i]!.kind === "walled") return isFetched(i) ? walledExposed(n, wall!) : n;
+    if (side !== null && side !== undefined) return isFetched(i) ? exposed(mine, side, bodyOf(n).alias as Body, true, wall) : { RangeSubselect: { ...bodyOf(n), subquery: { SelectStmt: side.body } } };
+    if (listed[i]!.kind === "walled") return isFetched(i) ? walledExposed(n, wall!, mine) : n;
     return kindOf(n) === "RangeVar" && listed[i]!.kind === "table" ? ownTable(bodyOf(n)) : n;
   };
   const from = mapFrom(s.fromClause as unknown[], (n, i) => {
@@ -1615,7 +1635,7 @@ function joinRows(select: AstNode, relations: Query[], wall: string | null, rows
     // its WHERE (which reads it alone) and its sort, the statement's own, and its first OFFSET + LIMIT rows
     return { RangeSubselect: { alias: { aliasname: aliases[i]! }, subquery: { SelectStmt: {
       targetList: [{ ResTarget: { val: { ColumnRef: { fields: [{ A_Star: {} }] } } } },
-        ...(listed[i]!.kind === "table" && isFetched(i) ? [{ ResTarget: { name: ROW_ID, val: rowNumber(aliases[i]!) } }] : [])],
+        ...(listed[i]!.kind === "table" && isFetched(i) ? [{ ResTarget: { name: mine.rid, val: rowNumber(aliases[i]!) } }] : [])],
       fromClause: [placed(n, i)],
       ...(s.whereClause !== undefined ? { whereClause: structuredClone(s.whereClause) } : {}),
       ...(sorts.length > 0 ? { sortClause: sorts.map((sort, k) => ({ SortBy: { ...bodyOf(sort), node: structuredClone(keys[k]!) } })) } : {}),
@@ -1628,12 +1648,12 @@ function joinRows(select: AstNode, relations: Query[], wall: string | null, rows
   const { withClause: _with, sortClause: _sorts, ...body } = s;
   const left = isObject(s.withClause) ? (s.withClause.ctes as AstNode[]).filter((c) => !withs.used.has(String(bodyOf(c).ctename))) : [];
   const inner0: Body = { ...body, ...(distinct !== null ? { distinctClause: distinct } : {}), ...(left.length > 0 ? { withClause: { ...s.withClause as Body, ctes: left } } : {}), targetList: [
-    ...fetched.map((t, i) => ({ ResTarget: { name: `__mason_r${i + 1}`, val: t.inner } })),
+    ...fetched.map((t, i) => ({ ResTarget: { name: mine.r(i + 1), val: t.inner } })),
     ...[...columns.values()].map((c) => ({ ResTarget: { name: c.name, val: c.val } })),
-    ...keys.map((k, i) => ({ ResTarget: { name: `__mason_o${i + 1}`, val: k } })),
+    ...keys.map((k, i) => ({ ResTarget: { name: mine.o(i + 1), val: k } })),
   ],
   // (a volatile key is sorted by the output that holds it: said twice, it would be two values)
-  ...(sorts.length > 0 ? { sortClause: sorts.map((sort, i) => ({ SortBy: { ...bodyOf(sort), node: volatileKeys ? ref(`__mason_o${i + 1}`) : keys[i] } })) } : {}) };
+  ...(sorts.length > 0 ? { sortClause: sorts.map((sort, i) => ({ SortBy: { ...bodyOf(sort), node: volatileKeys ? ref(mine.o(i + 1)) : keys[i] } })) } : {}) };
   // the preserved item is a derived table now, which a schema's name cannot qualify: its columns are read by its name alone
   const inner: Body = { ...(lead === null ? inner0 : shortened(inner0, aliases[lead.at]!) as Body), fromClause: from };
   // THE DERIVED LIST OVER THE CHOSEN ROWS GATHERED (issue 463): a plain side's fetch scans its whole table, and hands its
@@ -1643,23 +1663,23 @@ function joinRows(select: AstNode, relations: Query[], wall: string | null, rows
   // rows (see above)
   const narrowed = sorts.length === 0 && on === null
     ? new Set(fetched.flatMap((t, i) => { const side = sides[t.at]; return side !== null && side !== undefined && readsComputed(side, t.alias, list) ? [i] : []; })) : new Set<number>();
-  let joined: AstNode = narrowed.size > 0 ? { RangeVar: { relname: LATE, inh: true, relpersistence: "p" } } : { RangeSubselect: { subquery: { SelectStmt: inner }, alias: { aliasname: LATE } } };
+  let joined: AstNode = narrowed.size > 0 ? { RangeVar: { relname: mine.late, inh: true, relpersistence: "p" } } : { RangeSubselect: { subquery: { SelectStmt: inner }, alias: { aliasname: mine.late } } };
   // the fetch reads a walled read through itself again, filter, barrier and wall: one more wall each
   let walls = 0;
   fetched.forEach((t, i) => {
     const side = sides[t.at];
     const walled = listed[t.at]!.kind === "walled";
     if (walled || side?.walled === true) walls++;
-    const rarg = side !== null && side !== undefined ? exposed(side, bodyOf(t.node).alias as Body, false, wall, narrowed.has(i) ? inChosen(side.id, `__mason_r${i + 1}`) : null)
-      : walled ? walledExposed(t.node, wall!) : ownTable(bodyOf(t.node));
+    const rarg = side !== null && side !== undefined ? exposed(mine, side, bodyOf(t.node).alias as Body, false, wall, narrowed.has(i) ? inChosen(side.id, mine.r(i + 1), mine) : null)
+      : walled ? walledExposed(t.node, wall!, mine) : ownTable(bodyOf(t.node));
     joined = { JoinExpr: { jointype: "JOIN_LEFT", larg: joined, rarg, quals: { A_Expr: {
-      kind: "AEXPR_OP", name: [S("=")], lexpr: structuredClone(t.id), rexpr: ref(LATE, `__mason_r${i + 1}`) } } } };
+      kind: "AEXPR_OP", name: [S("=")], lexpr: structuredClone(t.id), rexpr: ref(mine.late, mine.r(i + 1)) } } } };
   });
   return { walls, select: { SelectStmt: {
-    ...(narrowed.size > 0 ? { withClause: { ctes: [{ CommonTableExpr: { ctename: LATE, ctematerialized: "CTEMaterializeAlways", ctequery: { SelectStmt: inner } } }] } } : {}),
+    ...(narrowed.size > 0 ? { withClause: { ctes: [{ CommonTableExpr: { ctename: mine.late, ctematerialized: "CTEMaterializeAlways", ctequery: { SelectStmt: inner } } }] } } : {}),
     targetList: list,
     fromClause: [joined],
-    ...(sorts.length > 0 ? { sortClause: sorts.map((sort, i) => ({ SortBy: { ...bodyOf(sort), node: ref(LATE, `__mason_o${i + 1}`) } })) } : {}),
+    ...(sorts.length > 0 ? { sortClause: sorts.map((sort, i) => ({ SortBy: { ...bodyOf(sort), node: ref(mine.late, mine.o(i + 1)) } })) } : {}),
     limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE",
   } } };
 }

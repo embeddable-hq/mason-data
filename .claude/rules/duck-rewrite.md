@@ -11,6 +11,7 @@ paths:
   - "src/duck/late.ts"
   - "src/duck/libc-bound.ts"
   - "src/duck/libc-order.ts"
+  - "src/duck/own-names.ts"
   - "src/duck/pg-eval-worker.ts"
   - "src/duck/pg-eval.ts"
   - "src/duck/pgtree.ts"
@@ -59,6 +60,17 @@ paths:
   each reader resolved names by rules of its own. Each read a WITH query's own body `FROM t` as the WITH query, where
   Postgres reads the table (a count of 0, and XX000 from a pass-through followed into itself), and `hideKept` read a
   name a set operation's arm's own WITH binds as the table of that name.
+- **Every name Mason invents for a statement begins with ONE prefix, chosen for that statement** (`ownPrefix`,
+  src/duck/own-names.ts, issue 1024): `__mason_`, else `__mason<n>_` for the first n that no string of the statement's
+  parse tree or of Postgres's analysis holds, in any case. The analysis names every column of every table read, so a
+  column only a `*` or a whole row reaches counts too. src/duck/plan.ts chooses it and hands it to the rewrite (the
+  cells, FETCH … WITH TIES, a lambda's parameter, a list function's step, an alias, `cteNamesApart`), to src/duck/late.ts
+  and to src/duck/libc-bound.ts; src/duck/pgtree.ts renames case twins apart by the analysed tree's own
+  (`analysedPrefix`), and a generated table reads the plan's cells by its plan's (`DuckPlan.own`). A role's filtered
+  reads' own names are left out of the test (`Walls.written`). A function keeps its `__mason_` name. A new invented
+  name takes the prefix, never a literal `__mason_`. Why: a table's column `__mason_rid` answered NULLs under a top N
+  over a LEFT JOIN, a jsonb column `__mason_v` was read as a lambda's parameter, and a table `__mason_late` as the kept
+  rows. `tests/duck-own-names.test.ts`, the oracle's `issue 1024:` statements. ("The names Mason invents")
 - **A rewrite the deparser cannot spell is a refusal, never a different statement**: the rewritten tree is deparsed,
   parsed again and compared node for node (`treeDifference`). ("How a statement is answered")
 - **No DuckDB macro**: with the `postgres` extension loaded, a macro with a lambda or calling a macro
@@ -455,7 +467,7 @@ paths:
   sum, avg or window sum adds the program's text (`summed`); a cast to text, varchar, float8 or an integer reads the
   program's text (`typeCast`); a `*` beside a program is written out (`starsWrittenForExact`) so its cells ride. Each
   asks `duckExact` first, so a DECIMAL column, an integer or a sum of one keeps its native plan with no `__mason_*`
-  call. The hidden cells are named by `cellPrefix`, which no name the statement writes begins with.
+  call. The hidden cells are named by `cellPrefix`, the statement's own prefix and `cell_` (src/duck/own-names.ts).
   `tests/duck-wire.test.ts` "exact path: …". Round 2 (issue 358) adds: a set operation's ORDER BY, LIMIT and WITH TIES
   key each output by its record (`recordOrderKey`, `setOperationExactKeys`); a VALUES or nested arm is typed by
   Postgres's analysis and wrapped to the one cell count (`exactArms`, `armWrapped`); a numeric column whose arms write
