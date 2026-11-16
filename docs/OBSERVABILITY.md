@@ -86,7 +86,7 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
   counts every failed event: failed syncs, restarts and the web page's own errors); ONE table of facts, Mason, in the
   page's words (`factRows`, `factNotes`): the Source (the database, its host, its Postgres version, main or read
   replica), the warnings, Mason's version and up for, restarts (`engine`), the free disk and what the synced data uses
-  (`disk`), the tools connected (`sessions`), then quiet lines for a database on another machine and how text sorts; in replication mode a Changes table — the stream (`stream`: running
+  (`disk`), then quiet lines for a database on another machine and how text sorts; in replication mode a Changes table — the stream (`stream`: running
   or why not, position, lag, last batch, as `streamLines` says it) and the slot's hold on the WAL (`stream.slotWal`:
   held, status, room left; `lost`, `unreserved` or no cap are warnings); and the first syncs not finished, a bar each,
   only while there are any. A fact the run could not read (`{ error }`) is said as unknown with its reason, never as 0;
