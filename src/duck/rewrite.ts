@@ -35,6 +35,7 @@ import { pathIndex, PG_SESSION_SEPARATOR, SESSION_VARIABLE, SETTINGS_VARIABLE, T
 import { cellsOf, evaluateText, mapCells, numericLiteral, programJson, type NumericProgram } from "../lib/pg-numeric.ts";
 import { analysedQueries, caseTwins, FIRST_USER_OID, implicitTimetzCasts, joinsUsing, setOperationOutputs, type Grouping, type Keys, type QueryOutputs, type TreeValue, type Typed } from "./pgtree.ts";
 import { evaluated, keysBound, type Unbound } from "./constant-key.ts";
+import { cteNamesApart } from "./cte-names.ts";
 import { canonicalRead, EQUAL_STEPS, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, MARKED_FUNCTIONS, markedError, ORDER_STEPS, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
 import { JSONB_KEY_FUNCTIONS } from "./jsonb-order.ts";
 import { strftimeTemplate } from "./to-char.ts";
@@ -8445,6 +8446,8 @@ export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(
     throw new Unrewritable("a JOIN … USING or a NATURAL JOIN on a jsonb column is not supported by Mason (Postgres equates jsonb by its own rules)", "JOIN … ON a.j = b.j", "jsonb-compare");
   }
   const own = JSON.parse(JSON.stringify(stmt)) as AstNode;
+  // (before anything reads a name: a WITH query named as anything else the statement reads is renamed apart, issue 981)
+  cteNamesApart(own);
   // (the hidden cells' name: one the statement's own text never begins a name with, `cellPrefix`)
   const written = JSON.stringify(stmt).toLowerCase();
   for (let n = 0; written.includes(r.cellPrefix); n++) r.cellPrefix = `__mason_cell${n}_`;

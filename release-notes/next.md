@@ -6,6 +6,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **A WITH query named like the table it reads now gives Postgres's answer.** In
+  `WITH orders AS (SELECT * FROM orders WHERE status = 'paid') SELECT count(*) FROM orders`, the WITH query's own
+  `FROM orders` reads the table, as on Postgres. Before, Mason counted 0 rows. With a join, the query failed with
+  XX000 "Maximum call stack size exceeded". This also holds when the WITH query is inside a subquery or one arm of a
+  UNION, and when a later WITH query reads an earlier one named like a table.
 - **A column your sources file leaves out is no longer served under another name.** This covers a column that
   `exclude:` names, one a `columns:` entry does not list, and a secret-looking column `mason add` left out. Before, Mason
   matched columns by name alone. If two columns swapped names in one transaction, the left-out column was served under
