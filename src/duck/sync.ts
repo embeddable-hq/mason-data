@@ -69,8 +69,9 @@ import type { PgApiType, PgCollation, PgColumn, PgJoin, PgSchema, PgTable, PgVie
 import { wireColumn } from "./types.ts";
 import { fileFactsSql, nextPollDelayMs, rowsHeldSql, SNAPSHOT_SQL, snapshotXmin, xmin8Sql, xminBeforeHolds, xminBeforeSql } from "../cdc/poll.ts";
 import { pgIdent } from "../cdc/pg-wire.ts";
-import { regclassName, shapeColumns, shapeSql, shapeTuples } from "../cdc/shape.ts";
+import { identitySql, regclassName, shapeColumns, shapeOid, shapeSql, shapeTuples } from "../cdc/shape.ts";
 import { keyHeldProblem, keyHeldSql } from "../cdc/key-held.ts";
+import { identityVerdict, recordOf, unionOut, type CarriedRecord, type ColumnRecord, type EntryWords, type FormerRecord, type RecordedColumn } from "./column-identity.ts";
 import type { RelationColumn } from "../cdc/pgoutput.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -107,11 +108,14 @@ export function syncModeOf(env: NodeJS.ProcessEnv): SyncMode {
  *  is how the sources file keeps it current after its first copy (its entry's, else the file's, else `off`); a table
  *  with none — a test's — is polled at the sync's own interval (`Sync.syncOf`). Its key is written by only while the
  *  database still enforces it (src/cdc/key-held.ts, issue 1027). */
-export type AddedTable = Pick<SourceTable, "source" | "schema" | "table" | "key" | "columns" | "foreignKeys" | "bytes" | "rows"> & Partial<Pick<SourceTable, "rowTypeOid" | "uniqueKeys" | "shape">> &
+export type AddedTable = Pick<SourceTable, "source" | "schema" | "table" | "key" | "columns" | "foreignKeys" | "bytes" | "rows"> & Partial<Pick<SourceTable, "rowTypeOid" | "uniqueKeys" | "shape" | "oid">> &
   { primaryKey?: string[]; sync?: TableSync; replicaIdentity?: SourceTable["replicaIdentity"];
     /** where the sources file names it (`mason/sources/app.yml: tables.logs`), for a refusal that names the file and the
      *  key (`keyNotHeld`); none for a test's table */
-    entryAt?: string };
+    entryAt?: string;
+    /** its entry in the sources file, for the line a hold for its columns says (src/duck/column-identity.ts); absent from
+     *  a test's table */
+    entry?: EntryWords };
 
 export type CopyPhase = "waiting" | "copying" | "copied" | "failed";
 
@@ -1026,12 +1030,18 @@ export function sourceSecretSql(s: Pick<Source, "host" | "port" | "database" | "
     `DATABASE ${literal(s.database)}, USER ${literal(s.user)}${s.password ? `, PASSWORD ${literal(s.password)}` : ""})`;
 }
 
-/** a table's columns as a copy is made with them: their names and source types, in order */
+/** a table's columns as a copy is made with them: their names and source types, in order, and each one's number on the
+ *  source (`attnum`, its identity: issue 1073) where it is known — two columns whose names were swapped are other
+ *  columns, so a copy holding the old ones is read again whole */
 const columnsKey = (columns: readonly SourceColumnInfo[]): string => JSON.stringify(columns.map((c) => {
   // what the copy holds is part of the shape: a copy made before a column's type was held as its text is read again
   const hold = holdOf(c.type, c.typeKind);
-  return hold === "same" && c.domain !== true ? [c.name, c.type] : [c.name, c.type, hold, ...(c.domain === true ? ["domain"] : [])];
+  const named = hold === "same" && c.domain !== true ? [c.name, c.type] : [c.name, c.type, hold, ...(c.domain === true ? ["domain"] : [])];
+  return c.attnum === undefined ? named : [...named, `#${c.attnum}`];
 }));
+
+/** the columns without their numbers: how a copy recorded by a Mason before them is held to the columns now */
+const unnumbered = (columns: readonly SourceColumnInfo[]): SourceColumnInfo[] => columns.map(({ attnum: _attnum, ...c }) => c);
 
 /** `postgres_query` over the attached source: a read of Postgres's own SQL in the DuckDB transaction's snapshot */
 const pq = (sql: string): string => `postgres_query(${literal(SRC)}, ${literal(sql)})`;
@@ -1243,6 +1253,21 @@ export class Sync {
   private lastStay = 0;
   /** a NAMED publication's gaps: each added table it does not carry, with the refusal (neither copied nor streamed) */
   private readonly unpublished = new Map<string, string>();
+  /** a NAMED publication's column list, of each table it lists the columns of (`verifyPublication`): what the stream's
+   *  relation carries of it (`relationOf`) */
+  private readonly publishedColumns = new Map<string, readonly string[]>();
+  /** the shape each table's stream relation was last refused under for columns that moved (`refuseStreamed`): refused
+   *  again under it, it backs off, so a relation that never lines up is not caught up again and again */
+  private readonly movedUnder = new Map<string, string | undefined>();
+  /** WHAT THE RUN TOOK OF EACH TABLE'S COLUMNS, BY IDENTITY (`_mason.column_identity`, src/duck/column-identity.ts; issue
+   *  1073): its oid, and each column's number, the name it was taken under and whether it is synced */
+  private readonly columnRecords = new Map<string, ColumnRecord>();
+  /** THE RECORDS NO ENTRY HOLDS AS ITS OWN, BY RELATION (`_mason.column_identity_former`, issue 1080): a relation a table
+   *  named before, and one that holds a table not by its own record */
+  private readonly formerRecords = new Map<number, FormerRecord>();
+  /** THE TABLES HELD BY THEIR COLUMNS' IDENTITY (issue 1073), and why: a column the sources file left out would be synced
+   *  under another name. Not copied, polled, caught up or streamed; their synced data served as it was */
+  private readonly unplaced = new Map<string, string>();
   /** the error each table a named publication did not carry was given (`settlePrepared`): cleared by the pass that finds
    *  it carried again, and by nothing else that pass */
   private readonly gapErrors = new Map<string, string>();
@@ -1571,6 +1596,22 @@ export class Sync {
     await this.store.writer.run(`CREATE TABLE IF NOT EXISTS ${MASON_SCHEMA}.copy_chunks (source VARCHAR, first_page BIGINT, end_page BIGINT, "rows" BIGINT, filenode BIGINT, ` +
       `committed_at TIMESTAMPTZ, PRIMARY KEY (source, first_page))`);
     await this.oneReaderProgress();
+    // WHAT THE RUN TOOK OF EACH TABLE'S COLUMNS, BY IDENTITY (issue 1073): a store made before has none, and its tables are
+    // taken by name at this start, as they always were
+    await this.store.writer.run(`CREATE TABLE IF NOT EXISTS ${MASON_SCHEMA}.column_identity (source VARCHAR PRIMARY KEY, oid BIGINT, columns JSON)`);
+    for (const [source, oid, columns] of (await this.store.writer.runAndReadAll(`SELECT source, oid, columns::VARCHAR FROM ${MASON_SCHEMA}.column_identity`)).getRowsJS() as Array<[string, bigint, string]>) {
+      const r = recordOf(oid, columns);
+      if (r === null) this.log(`${source}: its record of which column is which could not be read (Mason bug: report it), so its columns are taken by name at this start`);
+      else this.columnRecords.set(source, r);
+    }
+    // AND WHAT NO ENTRY HOLDS AS ITS OWN (issue 1080): a relation two tables' or schemas' names moved between entries
+    await this.store.writer.run(`CREATE TABLE IF NOT EXISTS ${MASON_SCHEMA}.column_identity_former (oid BIGINT PRIMARY KEY, columns JSON, came_from VARCHAR, held_by VARCHAR)`);
+    for (const [oid, columns, from, heldBy] of (await this.store.writer.runAndReadAll(`SELECT oid, columns::VARCHAR, came_from, held_by FROM ${MASON_SCHEMA}.column_identity_former`)).getRowsJS() as Array<[bigint, string, string, string | null]>) {
+      const r = recordOf(oid, columns);
+      // fail closed: a record that cannot be read holds nothing back, so it is said, and every table it named is placed by its own record
+      if (r === null) this.log(`a record of which column is which, of a table renamed on the database (oid ${String(oid)}), could not be read (Mason bug: report it)`);
+      else this.formerRecords.set(r.oid, { columns: r.columns, from, heldBy });
+    }
     for (const [source, why] of (await this.store.writer.runAndReadAll(`SELECT source, why FROM ${MASON_SCHEMA}.catch_up`)).getRowsJS() as [string, string][]) this.behind.set(source, { why });
     if (this.replication !== null) {
       const r = (await this.store.writer.runAndReadAll(`SELECT lsn FROM ${MASON_SCHEMA}.stream_state WHERE slot = $1`, [this.replication.slot])).getRowsJS();
@@ -1955,13 +1996,17 @@ export class Sync {
   }
 
   /** the tables the project adds now (its sources file): a new one is copied at the next pass unless its copy is already
-   *  here and current (said as its records say it, `addedText`), a removed one dropped.
+   *  here and current (said as its records say it, `addedText`), a removed one dropped. `confirmed`: the tables whose
+   *  entry the person just wrote against the database's columns as they are now (`mason add` through the run), taken
+   *  afresh by name (src/duck/column-identity.ts). `readOnly`: the project's files are deployed read-only, so the
+   *  sources file is the owner's committed word, which confirms a column left out that did not move.
    *  What it returns is the catalog rebuilt over them (never rejected: a failure is said in the log) */
-  setTables(tables: readonly AddedTable[]): Promise<void> {
+  setTables(tables: readonly AddedTable[], o: { confirmed?: ReadonlyArray<{ table: string; shape: string | undefined }>; readOnly?: boolean } = {}): Promise<void> {
     // (called at mason start and at mason add / remove only: the catalog's keys and constraints are the source's as of
     // then — docs/DESIGN.md "A count of distinct keys")
     const before = this.tables;
     this.tables = new Map(tables.map((t) => [t.source, t]));
+    this.placeColumns(tables, new Map((o.confirmed ?? []).map((c) => [c.table, c.shape])), o.readOnly === true);
     // said as it happens: what is added, each table as its records say it is (`addedText`), and what is no longer
     // (dropped at the next pass)
     const added = tables.filter((t) => !before.has(t.source));
@@ -2132,7 +2177,7 @@ export class Sync {
 
   /** a table a pass would poll now if it were due: copied, not queued or rebuilt, and not owed its catch-up */
   private pollable(t: AddedTable): boolean {
-    return !this.needsCopy(t) && !this.behind.has(t.source) && !this.queuedRebuild(t.source) && this.rebuildingNow?.source !== t.source;
+    return !this.needsCopy(t) && !this.behind.has(t.source) && !this.queuedRebuild(t.source) && this.rebuildingNow?.source !== t.source && !this.unplaced.has(t.source);
   }
 
   /** the source's views (src/cli/preflight.ts VIEWS_SQL), served over the copied tables: in the catalog from the next
@@ -2187,7 +2232,10 @@ export class Sync {
       // its space and its last compaction, once read or done (`Compaction`)
       .map((s) => { const c = this.compactions.get(s.source); return c === undefined || s.phase !== "copied" ? s : { ...s, compaction: { ...c } }; })
       // the columns its synced data holds now: what is served while new columns wait for its whole read (issue 977)
-      .map((s) => { const c = this.copiedColumns.get(s.source); return c === undefined || s.phase !== "copied" ? s : { ...s, syncedColumns: c.map((x) => x.name) }; });
+      .map((s) => { const c = this.copiedColumns.get(s.source); return c === undefined || s.phase !== "copied" ? s : { ...s, syncedColumns: c.map((x) => x.name) }; })
+      // HELD FOR ITS COLUMNS (issue 1073): why, and the line to write, as its error for as long as it is held — in memory,
+      // never the ledger's: a start that places its columns has nothing to clear
+      .map((s) => { const why = this.unplaced.get(s.source); return why === undefined ? s : { ...s, error: why }; });
   }
 
   /**
@@ -2358,7 +2406,8 @@ export class Sync {
     // a table a named publication does not carry waits for its owner, never for the interval (prepareReplication)
     // a table waiting out a failure's back-off is `wakeAt`'s, never a pass every interval (each one reads the source)
     const backingOff = (s: string): boolean => (this.retries.get(s)?.at ?? 0) > Date.now();
-    return [...this.tables.values()].some((t) => !busy(t.source) && !backingOff(t.source) && !this.unpublished.has(t.source) && (this.needsCopy(t) || this.behind.has(t.source)));
+    // a table held for its columns waits for its file, never for the interval (`placeColumns`)
+    return [...this.tables.values()].some((t) => !busy(t.source) && !backingOff(t.source) && !this.unpublished.has(t.source) && !this.unplaced.has(t.source) && (this.needsCopy(t) || this.behind.has(t.source)));
   }
 
   /**
@@ -2396,7 +2445,7 @@ export class Sync {
    */
   private followUp(source: string): void {
     const t = this.tables.get(source);
-    if (t === undefined || this.stopped || this.unpublished.has(source)) return;
+    if (t === undefined || this.stopped || this.unpublished.has(source) || this.unplaced.has(source)) return;
     // copied and caught up: polled from now on, so the next pass is timed again (`rearm`)
     if (!this.needsCopy(t) && !this.behind.has(source)) { this.rearm(); return; }
     const at = this.retries.get(source)?.at ?? 0;
@@ -2617,6 +2666,9 @@ export class Sync {
    */
   private syncRefusal(t: AddedTable): PollRefused | null {
     if (this.mode === "recopy") return this.recopyRefusal();
+    // HELD FOR ITS COLUMNS (issue 1073): never read, whatever its sync
+    const unplaced = this.unplaced.get(t.source);
+    if (unplaced !== undefined) return new PollRefused("refused", unplaced);
     if (this.replicated(t)) return null;
     // A SYNC OF IT RUNNING OR WAITING TO START IS `busy` (issue 1007: a second is never queued for another read of the
     // table): its first sync, a whole read again, its catch-up, its poll in the pass running now; a failed first sync is not
@@ -2703,12 +2755,12 @@ export class Sync {
       // the same, or gone from the database (its poll fails, said as it always was)
       if (shape === undefined || shape === null || shape === t.shape) { out.push(t); continue; }
       const read = this.columnsChanged(t, shape);
-      const has = new Set(shapeColumns(shape));
-      const held = this.asCopied(t).columns.filter((c) => !has.has(c.name)).map((c) => c.name);
+      // each column its copy holds, by identity: a name now another column's (a swap, issue 1073) is not that column
+      const held = this.movedFrom(this.asCopied(t), shape);
       if (!strict && held.length === 0) { out.push(t); continue; }
       if (read) continue;
       // read again for this shape already, and the run's tables still do not have it: the sources file cannot take it
-      throw new Error(`${t.source}'s columns changed on the database (${shapeColumns(shape).join(", ")}), and its synced data holds ${held.length ? `${held.join(", ")}, which it no longer has` : "others"}: ` +
+      throw new Error(`${t.source}'s columns changed on the database (${shapeColumns(shape).join(", ")}), and its synced data holds ${held.length ? `${held.join(", ")}, which it no longer has as they were` : "others"}: ` +
         "the sources file cannot be read against them as it is (mason status says why), so the synced data serves as it was");
     }
     return out;
@@ -2727,7 +2779,14 @@ export class Sync {
     // against the columns the catalog read last: a column the entry leaves out is no change of the copy's
     const was = t.shape !== undefined ? shapeColumns(t.shape) : this.asCopied(t).columns.map((c) => c.name), now = shapeColumns(shape);
     const gone = was.filter((c) => !now.includes(c)), added = now.filter((c) => !was.includes(c));
-    const what = [added.length ? `${added.join(", ")} added` : "", gone.length ? `${gone.join(", ")} gone` : "", !added.length && !gone.length ? "a column's type changed" : ""].filter(Boolean).join("; ");
+    // the same names on other columns (a swap, issue 1073), or a column dropped and added again under its name
+    const placed = (s: string): string => JSON.stringify(shapeTuples(s).map((c) => [c.name, c.attnum]));
+    const moved = t.shape !== undefined && placed(t.shape) !== placed(shape);
+    // another table at its name (dropped and made again, or renamed into its place): another oid
+    const other = t.shape !== undefined && shapeOid(t.shape) !== null && shapeOid(t.shape) !== shapeOid(shape);
+    const what = other ? `it is another table of that name now (dropped and made again, or renamed into its place)${added.length || gone.length ? `, ${[added.length ? `${added.join(", ")} added` : "", gone.length ? `${gone.join(", ")} gone` : ""].filter(Boolean).join("; ")}` : ""}`
+      : [added.length ? `${added.join(", ")} added` : "", gone.length ? `${gone.join(", ")} gone` : "",
+        !added.length && !gone.length ? (moved ? "its names are on other columns now" : "a column's type changed") : ""].filter(Boolean).join("; ");
     const m = `its columns changed on the database (${what}): they are read again, and its synced data serves as it was until it is synced again whole with them`;
     this.log(`${t.source}: ${m}`);
     this.event({ kind: "columns_changed", table: t.source, message: m });
@@ -2779,6 +2838,186 @@ export class Sync {
     this.relationCheckedAt.set(source, Date.now());
     this.shapeChecks.add(source);
     this.kick();
+  }
+
+  /**
+   * WHICH COLUMN IS WHICH, BY IDENTITY (issue 1073; src/duck/column-identity.ts), as the run's tables are set: each table's
+   * columns held to what the run took of them before (`columnRecords`). A table whose entry would sync a column it left
+   * out, under another name, is HELD (`unplaced`): said in the log, as an event and as its error while it is held (`state`:
+   * `mason status`, the web page), with the line to write; not copied, polled, caught up or streamed, its synced data
+   * served as it was. A replicated one is marked behind, so it is caught up by one poll once it is let go (the stream
+   * skips its changes meanwhile). Every other table's record is written as taken. A copy recorded by a Mason before columns had numbers
+   * takes them from its table now, where its names and types are the same: never read again for it.
+   */
+  private placeColumns(tables: readonly AddedTable[], confirmed: ReadonlyMap<string, string | undefined>, readOnly: boolean): void {
+    const wasHeld = new Map(this.unplaced);
+    this.unplaced.clear();
+    // EVERY RECORD READ BEFORE ANY IS WRITTEN (issue 1080): two tables, or two schemas, that swap names bring each its
+    // relation to the other's entry, so a table is placed against every record of its relation, its own entry's, the
+    // other entries' and the ones no entry holds as its own any more (`formerRecords`)
+    const owns = new Map(this.columnRecords);
+    const formers = new Map(this.formerRecords);
+    const carriedOf = (source: string, oid: number | undefined): CarriedRecord[] => {
+      if (oid === undefined) return [];
+      const out: CarriedRecord[] = [...owns].filter(([s, r]) => s !== source && r.oid === oid).map(([s, r]) => ({ ...r, from: s }));
+      const f = formers.get(oid);
+      if (f !== undefined) out.push({ oid, columns: f.columns, from: f.from });
+      return out;
+    };
+    const writes: Array<[string, ColumnRecord]> = [];
+    const adopted: Array<[string, SourceColumnInfo[]]> = [];
+    // ANOTHER TABLE AT ITS NAME (the re-check of PR 1078: a table dropped and made again, or another renamed into its
+    // place, failed every poll for ever): its synced data is another table's, so it is read again whole — its watermark
+    // forgotten here and in the ledger, so a restart before that read ends reads it again too
+    const replaced: string[] = [];
+    // the relations a table is taken as now (their records are its own: no former record of them is kept), the records
+    // of another relation a table leaves behind, and the records a table is held by that are not its own
+    const takenOids = new Set<number>();
+    const left: Array<[string, ColumnRecord]> = [];
+    const heldBy: Array<[string, ColumnRecord, string]> = [];
+    const unconfirmed: string[] = [];
+    for (const t of tables) {
+      // A CONFIRMATION IS OF THE TABLE THE ADD SAW (the re-check of PR 1078): its oid, and each column's number, name and
+      // type (its shape). Any of it changed since, and it is no confirmation: the table is placed as the run took it
+      const asked = confirmed.has(t.source);
+      const isConfirmed = asked && confirmed.get(t.source) === t.shape;
+      if (asked && !isConfirmed) unconfirmed.push(t.source);
+      const own = owns.get(t.source);
+      const v = identityVerdict({ source: t.source, oid: t.oid, shape: t.shape, synced: t.columns.map((c) => c.name), entry: t.entry }, own, isConfirmed, readOnly, carriedOf(t.source, t.oid));
+      if (v.kind === "held") {
+        this.unplaced.set(t.source, v.why);
+        // held by a record that is not its own (another entry's, or a name the table it replaced left out): what holds it
+        // is kept by its relation, so a restart holds it the same; its own record stays as it is until it is taken
+        if (own === undefined || own.oid !== v.record.oid) heldBy.push([t.source, v.record, v.conflicts.find((c) => c.from !== undefined)?.from ?? t.source]);
+        continue;
+      }
+      if (v.kind === "taken") {
+        takenOids.add(v.record.oid);
+        if (JSON.stringify(v.record) !== JSON.stringify(own ?? null)) writes.push([t.source, v.record]);
+        // its record of the relation it named before, which may be on the database under another name now: kept by its oid
+        if (own !== undefined && own.oid !== v.record.oid && own.columns.some((c) => !c.synced)) left.push([t.source, own]);
+      }
+      if (v.kind === "taken" && v.replaced === true) {
+        replaced.push(t.source);
+        this.snapshots.delete(t.source);
+        continue;
+      }
+      const copied = this.copiedColumns.get(t.source);
+      if (copied !== undefined && copied.some((c) => c.attnum === undefined) && t.columns.every((c) => c.attnum !== undefined) && columnsKey(unnumbered(t.columns)) === columnsKey(unnumbered(copied))) {
+        const numbered = copied.map((c) => ({ ...c, attnum: t.columns.find((x) => x.name === c.name)!.attnum! }));
+        this.copiedColumns.set(t.source, numbered);
+        this.copiedAs.set(t.source, columnsKey(numbered));
+        adopted.push([t.source, numbered]);
+      }
+    }
+    for (const [source, r] of writes) this.columnRecords.set(source, r);
+    // THE FORMER RECORDS (issue 1080): what a table left behind and what holds a table, by relation, every column any of
+    // them left out kept out; a relation a table is taken as now has its record as that table's own
+    const next = new Map(formers);
+    const keep = (oid: number, columns: readonly RecordedColumn[], from: string, holder: string | null): void => {
+      const before = next.get(oid);
+      next.set(oid, before === undefined ? { columns: [...columns], from, heldBy: holder } : { columns: unionOut(before.columns, columns), from: before.from, heldBy: holder ?? before.heldBy });
+    };
+    for (const [source, r] of left) keep(r.oid, r.columns, source, null);
+    for (const [source, r, from] of heldBy) keep(r.oid, r.columns, from, source);
+    for (const oid of takenOids) next.delete(oid);
+    const formerWrites: Array<[number, FormerRecord | null]> = [];
+    for (const [oid, f] of next) if (JSON.stringify(f) !== JSON.stringify(formers.get(oid) ?? null)) formerWrites.push([oid, f]);
+    for (const oid of formers.keys()) if (!next.has(oid)) formerWrites.push([oid, null]);
+    for (const [oid, f] of formerWrites) { if (f === null) this.formerRecords.delete(oid); else this.formerRecords.set(oid, f); }
+    const held = [...this.unplaced].filter(([s, why]) => wasHeld.get(s) !== why);
+    const letGo = [...wasHeld].filter(([s]) => this.tables.has(s) && !this.unplaced.has(s));
+    for (const source of unconfirmed) this.log(`${source}: the entry mason add wrote is not taken as confirmed: the table changed on the database after the add read it, so its columns are placed as the run took them before`);
+    if (writes.length === 0 && adopted.length === 0 && held.length === 0 && letGo.length === 0 && formerWrites.length === 0) return;
+    for (const source of replaced) this.log(`${source}: it is another table of that name on the database now (dropped and made again, or renamed into its place): it is read again whole, and its synced data serves as it was meanwhile`);
+    for (const [source, why] of held) { this.log(`${source}: ${why}`); this.event({ kind: "columns_changed", table: source, message: why }); }
+    for (const [source] of letGo) { this.log(`${source}: its columns are placed again, so it is synced again`); this.retries.delete(source); }
+    void this.onWriter(async () => {
+      // the held replicated tables marked behind: the stream skips a held table's changes, caught up by one poll once it
+      // is let go
+      const marks: string[] = [];
+      for (const [source, why] of held) {
+        const t = this.tables.get(source), st = this.states.get(source);
+        if (t === undefined || st === undefined || this.unplaced.get(source) !== why) continue;
+        if (this.replicated(t) && st.phase === "copied" && !this.behind.has(source)) marks.push(source);
+      }
+      const mark = "after it was held for its columns";
+      // ONE TRANSACTION (the re-check of PR 1078): a stop between a record and the watermark it goes with read the two apart
+      const w = this.store.writer;
+      await w.run("BEGIN TRANSACTION");
+      try {
+        for (const [source, r] of writes) await w.run(`INSERT OR REPLACE INTO ${MASON_SCHEMA}.column_identity VALUES (${literal(source)}, ${r.oid}, ${literal(JSON.stringify(r.columns))}::JSON)`);
+        for (const [oid, f] of formerWrites) {
+          if (f === null) await w.run(`DELETE FROM ${MASON_SCHEMA}.column_identity_former WHERE oid = ${oid}`);
+          else await w.run(`INSERT OR REPLACE INTO ${MASON_SCHEMA}.column_identity_former VALUES (${oid}, ${literal(JSON.stringify(f.columns))}::JSON, ${literal(f.from)}, ${f.heldBy === null ? "NULL" : literal(f.heldBy)})`);
+        }
+        for (const [source, c] of adopted) await w.run(`UPDATE ${MASON_SCHEMA}.copy_state SET columns = ${literal(JSON.stringify(c))}::JSON WHERE source = ${literal(source)}`);
+        for (const source of replaced) await w.run(`DELETE FROM ${MASON_SCHEMA}.poll_state WHERE source = ${literal(source)}`);
+        for (const source of marks) await w.run(`INSERT OR REPLACE INTO ${MASON_SCHEMA}.catch_up VALUES (${literal(source)}, ${literal(mark)}, now())`);
+        await w.run("COMMIT");
+      } catch (e) {
+        await w.run("ROLLBACK");
+        throw e;
+      }
+      for (const source of marks) { this.behind.set(source, { why: mark }); this.held.delete(source); }
+      this.refreshStreamed();
+    }).catch((e: unknown) => {
+      // a record not written is read as it was at the next start: a held table is held again then, a column taken stays as it was
+      this.log(`which column is which could not be recorded (said again at the next change): ${this.errorText(e)}`);
+    }).finally(() => { if (letGo.length && !this.stopped) this.kick(); });
+  }
+
+  /** THE COLUMNS A READ OF `t` NAMES, BY IDENTITY: its table's oid and each column's number — a copy recorded by a Mason
+   *  before numbers takes them from its table as the run took it, by name (`placeColumns` holds the two to the same
+   *  names). Null when they are not known (a test's table) */
+  private identityOf(t: AddedTable): { oid: number; columns: Array<{ attnum: number; name: string }> } | null {
+    const now = this.tables.get(t.source);
+    const oid = t.oid ?? now?.oid;
+    if (oid === undefined) return null;
+    const columns: Array<{ attnum: number; name: string }> = [];
+    for (const c of t.columns) {
+      const attnum = c.attnum ?? now?.columns.find((x) => x.name === c.name)?.attnum;
+      if (attnum === undefined) return null;
+      columns.push({ attnum, name: c.name });
+    }
+    return { oid, columns };
+  }
+
+  /** the columns of `t` a shape no longer has as they were: by number and name, or by name where the numbers are not known */
+  private movedFrom(t: AddedTable, shape: string): string[] {
+    const now = shapeTuples(shape), id = this.identityOf(t);
+    if (id === null) return t.columns.filter((c) => !now.some((x) => x.name === c.name)).map((c) => c.name);
+    // another table at its name: none of its columns is one the copy holds
+    const oid = shapeOid(shape);
+    if (oid !== null && oid !== id.oid) return id.columns.map((c) => c.name);
+    return id.columns.filter((c) => !now.some((x) => x.attnum === c.attnum && x.name === c.name)).map((c) => c.name);
+  }
+
+  /**
+   * AFTER A READ OF `t`, IN ITS TRANSACTION (issue 1073): each column it named is still the column meant (`identitySql`,
+   * src/cdc/shape.ts), asked under the lock the read holds, so no rename can come between. A column renamed since the
+   * tables were set may be another column's values under its name (a swap served a salary as `a`): the read fails,
+   * nothing of it written, and the table's columns are read again at the next pass, which places them (`placeColumns`).
+   */
+  private async readStillPlaced(c: DuckConnection, t: AddedTable, what: string): Promise<void> {
+    const id = this.identityOf(t);
+    if (id === null) return;
+    const same = (await c.runAndReadAll(`SELECT * FROM ${pq(identitySql(t.schema, t.table, id.oid, id.columns))}`)).getRowsJS()[0]?.[0];
+    if (same === true) return;
+    this.shapeChecks.add(t.source);
+    this.kick();
+    throw new Error(`${t.source}'s columns were renamed on the database while ${what} read it, so a column it names may hold another column's values: ` +
+      "nothing of this read is written, and its columns are read again");
+  }
+
+  /** WHAT THE STREAM HOLDS A TABLE'S RELATION TO (`relationMoved`, src/duck/stream.ts): its oid and its every column, by
+   *  number, as the run took them — a generated one, or one a named publication's column list leaves out, may be absent
+   *  from a relation. Nothing for a table built without its oid or shape (a test's) */
+  private relationOf(t: AddedTable): Pick<StreamedTable, "relation"> {
+    const cols = t.shape === undefined ? [] : shapeTuples(t.shape);
+    if (t.oid === undefined || cols.length === 0 || cols.some((c) => !Number.isInteger(c.attnum))) return {};
+    const listed = this.publishedColumns.get(t.source);
+    return { relation: { oid: t.oid, columns: cols.map((c) => ({ name: c.name, skippable: c.generated || (listed !== undefined && !listed.includes(c.name)) })) } };
   }
 
   /** an added table with no copy to keep current (never copied, or to be copied again: its columns changed, a numeric
@@ -2931,8 +3170,12 @@ export class Sync {
    */
   private async verifyPublication(pg: PgConnection, tables: readonly AddedTable[]): Promise<void> {
     const name = this.replication!.publication;
-    const v = namedPublicationVerdict(await readNamedPublication(pg, name, tables), tables);
+    const described = await readNamedPublication(pg, name, tables);
+    const v = namedPublicationVerdict(described, tables);
     if (v.refused !== null) throw new Error(v.refused);
+    // what its column lists carry: the stream holds each listed table's relation to them (`relationOf`)
+    this.publishedColumns.clear();
+    for (const [source, d] of described.tables) if (d.columnList === true && d.published !== null) this.publishedColumns.set(source, d.published);
     this.unpublished.clear();
     for (const [source, m] of v.tables) this.unpublished.set(source, m);
     if (v.noTruncate && !this.truncateSaid) {
@@ -3071,7 +3314,7 @@ export class Sync {
     const s = new ReplicationStream({
       connect: () => PgConnection.connect({ ...this.pgOptions(), replication: true }), slot: r.slot, publication: r.publication, log: (l) => this.log(l), errorText: (e) => this.errorText(e),
       target: { tables: () => this.streamed, apply: (batch, lsn, committedAt) => this.applyStreamed(batch, lsn, committedAt), applied: () => this.appliedLsn,
-        refuse: (source, missing) => this.refuseStreamed(source, missing), keyHeld: (source, gone) => this.streamKeyHeld(source, gone),
+        refuse: (source, why) => this.refuseStreamed(source, why), verify: (source) => this.verifyStreamed(source), keyHeld: (source, gone) => this.streamKeyHeld(source, gone),
         current: () => { if (this.stream === s) this.streamCurrent(); },
         relation: (source, columns) => this.relationSeen(source, columns) },
     });
@@ -3124,6 +3367,30 @@ export class Sync {
   }
 
   /**
+   * A STREAMED TABLE'S RELATION MESSAGE, ITS NAMES IN PLACE OR NARROWER (src/duck/stream.ts `relationMoved`, issue 1073):
+   * names alone cannot tell a column dropped from one dropped with another renamed into its name, nor a drop and renames
+   * that shift every name back into place. A drop is for good, so each column its copy holds still being that column NOW,
+   * by number and name (`identitySql`, on a connection of its own), says the relation's names are those columns. Asked
+   * once a relation message: Postgres sends one before a table's first change in a stream and after its definition
+   * changes. Null when they are; else why not, a check that fails included (fail closed: the table is refused and caught
+   * up by one poll, which checks its columns again under its own lock).
+   */
+  private async verifyStreamed(source: string): Promise<string | null> {
+    const t = this.tables.get(source);
+    const id = t === undefined ? null : this.identityOf(this.asCopied(t));
+    if (t === undefined || id === null) return null;
+    let pg: PgConnection | null = null;
+    try {
+      pg = await PgConnection.connect(this.pgOptions());
+      const same = (await pg.query(identitySql(t.schema, t.table, id.oid, id.columns))).rows[0]?.[0];
+      if (same === "t") return null;
+      return "its columns changed on the database: a column its synced data holds is not that column now (dropped, or renamed)";
+    } catch (e) {
+      return `its columns changed on the database, and whether the columns its synced data holds are still those columns could not be checked: ${this.errorText(e)}`;
+    } finally { pg?.close(); }
+  }
+
+  /**
    * A STREAMED TABLE WHOSE RELATION NO LONGER CARRIES A COLUMN ITS COPY HOLDS (a DDL on the database, or a publication's
    * column list narrowed while Mason streams; at the start `checkPublication` refuses the same): refused by name with the
    * way out, the other tables streaming on. It leaves the stream and is marked behind (`_mason.catch_up`, on the writer's
@@ -3132,29 +3399,36 @@ export class Sync {
    * without it, the table is copied again at once. The stream waits for it: one that cannot be recorded ends the stream with its
    * error, before anything past it is acknowledged.
    */
-  private refuseStreamed(source: string, missing: readonly string[]): Promise<void> {
+  private refuseStreamed(source: string, refusal: { missing: readonly string[] } | { moved: string }): Promise<void> {
     return this.onWriter(async () => {
       const t = this.tables.get(source);
       if (t === undefined || !this.streamed.has(source)) return;
+      const missing = "missing" in refusal ? refusal.missing : [];
       const cols = missing.join(", ");
-      const why = `after the stream stopped carrying ${cols}`;
+      const why = "moved" in refusal ? "after its columns changed on the database" : `after the stream stopped carrying ${cols}`;
       await this.store.writer.run(`INSERT OR REPLACE INTO ${MASON_SCHEMA}.catch_up VALUES (${literal(source)}, ${literal(why)}, now())`);
       this.behind.set(source, { why });
       this.held.delete(source);
-      const when = this.backOff(source, 0);
-      const pub = this.replication!.publication;
       // ITS COLUMNS ARE CHECKED NOW (issue 977): a column renamed or dropped on the database is read again, and the table
       // synced again whole with its columns now — never a way out that narrows an every-column entry
       const checked = t.shape !== undefined && this.onColumnsChanged !== undefined;
       if (checked) { this.shapeChecks.add(source); this.relationCheckedAt.set(source, Date.now()); }
+      // A RELATION WHOSE COLUMNS MOVED (issue 1073: a column the copy does not hold renamed, too) is caught up by one poll
+      // as soon as its columns are read again, never after a back-off; refused again under the same columns, it backs off
+      const moved = "moved" in refusal;
+      const again = moved && this.movedUnder.get(source) === t.shape;
+      if (moved) this.movedUnder.set(source, t.shape);
+      const when = moved && !again && checked ? null : this.backOff(source, 0);
+      const pub = this.replication!.publication;
       const them = missing.length === 1 ? "it" : "them";
       const owned = this.replication!.owned;
-      const m = `replication: the stream no longer carries ${source}'s ${cols}, which its synced table holds (a column dropped or renamed on the database` +
-        `${owned ? "" : `, or ${pub}'s column list narrowed`}), so its changes are not applied. ` +
-        `${checked ? "Its columns are read again from the database now, and it is synced again whole with them"
+      const m = ("moved" in refusal ? `replication: ${source}: ${refusal.moved}, so the stream may name another column's values as one it syncs, and its changes are not applied. `
+        : `replication: the stream no longer carries ${source}'s ${cols}, which its synced table holds (a column dropped or renamed on the database` +
+        `${owned ? "" : `, or ${pub}'s column list narrowed`}), so its changes are not applied. `) +
+        `${checked ? `Its columns are read again from the database now, and it is synced again whole with them${moved ? " where the columns it syncs changed" : ""}`
           : "It is synced again whole once its columns are read again: at the next start, or at a mason add of it"}. ` +
-        `${owned ? "" : `If ${pub} lists its columns, publish ${them} again (ALTER PUBLICATION ${pub} …). `}` +
-        `Until then it is caught up by one poll again after ${when}`;
+        `${owned || moved ? "" : `If ${pub} lists its columns, publish ${them} again (ALTER PUBLICATION ${pub} …). `}` +
+        (when === null ? "Until then it is caught up by one poll once they are read" : `Until then it is caught up by one poll again after ${when}`);
       this.log(`${source}: ${m}`);
       this.event({ kind: "stream_failed", table: source, message: m });
       await this.record({ ...this.states.get(source)!, error: m });
@@ -3304,11 +3578,13 @@ export class Sync {
     for (const t of this.tables.values()) {
       // a table a named publication does not carry is never streamed (`unpublished`): its changes are not in the slot;
       // nor one whose sync is not replication (it is polled, or off)
-      const joined = this.replicated(t) && !this.behind.has(t.source) && !this.needsCopy(t) && !this.unpublished.has(t.source);
+      // nor one held for its columns (`placeColumns`): its changes are skipped, and it is caught up once let go
+      const joined = this.replicated(t) && !this.behind.has(t.source) && !this.needsCopy(t) && !this.unpublished.has(t.source) && !this.unplaced.has(t.source);
       // in the COPY's columns: a held table's columns may have changed since its copy began (`asCopied`)
       const c = this.asCopied(t).columns;
-      if (joined || this.held.has(t.source)) {
-        this.streamed.set(t.source, { stay: before.get(t.source)?.stay ?? ++this.lastStay, columns: c.map((x) => x.name), key: t.key, generated: c.filter((x) => x.generated).map((x) => x.name), big: t.rows !== null && t.rows > BIG_TABLE_ROWS });
+      if (joined || (this.held.has(t.source) && !this.unplaced.has(t.source))) {
+        this.streamed.set(t.source, { stay: before.get(t.source)?.stay ?? ++this.lastStay, columns: c.map((x) => x.name), key: t.key, generated: c.filter((x) => x.generated).map((x) => x.name), big: t.rows !== null && t.rows > BIG_TABLE_ROWS,
+          ...this.relationOf(t) });
       }
       if (joined) now.add(t.source);
     }
@@ -3536,6 +3812,9 @@ export class Sync {
     // (`rowsChanged`) — never a count(*), which a write by key's deletes make a scan (12 ms on 20 M rows, measured) —
     // written to the ledger IN the batch's transaction, so a run that dies keeps a count equal to its rows
     const rowsAfter = new Map<string, number>();
+    // THE TABLES WHOSE ROWS READ AGAIN FROM THE DATABASE MET OTHER COLUMNS (issue 1081, `sourceRows`), and why: those rows
+    // are not written, the table marked behind in this transaction, and refused once it commits (`refetchMoved`)
+    const movedOnRead = new Map<string, string>();
     // a batch with a position: its time in the ledger and in this run, ONE value (`Synced`)
     const position = lsn === null ? null : { lsn, at: new Date().toISOString() };
     await w.run("BEGIN TRANSACTION");
@@ -3574,7 +3853,14 @@ export class Sync {
         for (const [carried, rows] of partial) fetch.push(...await this.updateCarried(t, target, carried.split("\0"), rows, value, types, scaled));
         if (fetch.length) {
           source ??= await PgConnection.connect(this.pgOptions());
-          whole.push(...await this.sourceRows(source, t, fetch));
+          const read = await this.sourceRows(source, t, fetch);
+          if ("moved" in read) {
+            // the rest of its changes are the stream's own, decoded under the relation they came with: written. The rows
+            // read again are not: its catch-up poll reads them, under a check of its own (`readStillPlaced`)
+            movedOnRead.set(name, read.moved);
+            const why = "after its columns changed on the database while its changes were applied";
+            await w.run(`INSERT OR REPLACE INTO ${MASON_SCHEMA}.catch_up VALUES (${literal(name)}, ${literal(why)}, now())`);
+          } else whole.push(...read);
         }
         delta += await this.writeByKey(t, target, gone, whole, value, scaled);
         // a copy whose rows the ledger does not know (none should be: its copy counts them) is counted, once
@@ -3593,6 +3879,7 @@ export class Sync {
       await w.run("ROLLBACK");
       throw e;
     } finally { source?.close(); }
+    for (const [name, why] of movedOnRead) await this.refetchMoved(name, why);
     if (lsn !== null) this.appliedLsn = lsn;
     if (from !== "held") this.streamFailures = 0;
     // THE STREAM'S FAILURE IS OVER when it applies a batch WITH A POSITION: every table it keeps current is current as of
@@ -3728,20 +4015,60 @@ export class Sync {
     return m;
   }
 
-  /** rows read from the source by key, each column as its text (as the stream sends it); a key it no longer has is
-   *  left out (its delete is in the stream) */
-  private async sourceRows(pg: PgConnection, t: AddedTable, keys: ReadonlyArray<Array<string | null>>): Promise<Array<Array<string | null>>> {
+  /**
+   * ROWS READ FROM THE SOURCE BY KEY, each column as its text (as the stream sends it); a key it no longer has is left out
+   * (its delete is in the stream). A generated column before Postgres 18, or a large value an update left unchanged that
+   * DuckDB has no row to keep, is read so. The read names columns, and the stream's relation message came before
+   * whatever renamed them since (issue 1081: columns swapped after the update was sent served the left-out values), so
+   * each chunk of keys is read in a short transaction of its own, and each column is checked to be the column meant after
+   * its rows, under the lock its read holds (`identitySql`, as the poll's `readStillPlaced`) — never one lock over every
+   * chunk, which an application's DDL would queue behind. `{ moved }` when one is not: nothing of the read is taken (fail
+   * closed).
+   */
+  private async sourceRows(pg: PgConnection, t: AddedTable, keys: ReadonlyArray<Array<string | null>>): Promise<Array<Array<string | null>> | { moved: string }> {
     const out: Array<Array<string | null>> = [];
+    const id = this.identityOf(t);
+    // the key's values as untyped literals: Postgres reads each as its column's type, so the primary key's index is used
+    const tuple = (k: Array<string | null>): string => `(${k.map((v) => v === null ? "NULL" : pgLiteral(v)).join(", ")})`;
     for (let i = 0; i < keys.length; i += 500) {
       const chunk = keys.slice(i, i + 500);
-      // the key's values as untyped literals: Postgres reads each as its column's type, so the primary key's index is used
-      const tuple = (k: Array<string | null>): string => `(${k.map((v) => v === null ? "NULL" : pgLiteral(v)).join(", ")})`;
       const where = t.key.length === 1 ? `${pgIdent(t.key[0]!)} IN (${chunk.map((k) => k[0] === null ? "NULL" : pgLiteral(k[0]!)).join(", ")})`
         : `(${t.key.map(pgIdent).join(", ")}) IN (${chunk.map(tuple).join(", ")})`;
-      const r = await pg.query(`SELECT ${t.columns.map((c) => `${pgIdent(c.name)}::text`).join(", ")} FROM ${pgIdent(t.schema)}.${pgIdent(t.table)} WHERE ${where}`);
-      out.push(...r.rows);
+      await pg.query("BEGIN READ ONLY");
+      let ended = false;
+      try {
+        const r = await pg.query(`SELECT ${t.columns.map((c) => `${pgIdent(c.name)}::text`).join(", ")} FROM ${pgIdent(t.schema)}.${pgIdent(t.table)} WHERE ${where}`);
+        const same = id === null ? "t" : (await pg.query(identitySql(t.schema, t.table, id.oid, id.columns))).rows[0]?.[0];
+        await pg.query("COMMIT");
+        ended = true;
+        if (same !== "t") return { moved: "its columns were renamed on the database while its changes were applied, so a row read again from the database by a column's name may hold another column's values" };
+        out.push(...r.rows);
+      } finally {
+        // a read that failed: its transaction ended before the connection is used again (its failure is the caller's)
+        if (!ended) await pg.query("ROLLBACK").catch((e: unknown) => this.log(`${t.source}: the read of its rows again could not be ended (its connection is closed with the batch): ${this.errorText(e)}`));
+      }
     }
     return out;
+  }
+
+  /**
+   * A TABLE WHOSE ROWS READ AGAIN MET OTHER COLUMNS (issue 1081, `sourceRows`), once the batch that skipped them and marked
+   * it behind committed, on the writer's turn (the caller's): out of the stream, its columns read again, and caught up by
+   * one poll once they are — said as a refused stream table is (`refuseStreamed`), with no back-off.
+   */
+  private async refetchMoved(source: string, moved: string): Promise<void> {
+    const why = "after its columns changed on the database while its changes were applied";
+    this.behind.set(source, { why });
+    this.held.delete(source);
+    const t = this.tables.get(source);
+    if (t?.shape !== undefined && this.onColumnsChanged !== undefined) { this.shapeChecks.add(source); this.relationCheckedAt.set(source, Date.now()); }
+    const m = `replication: ${source}: ${moved}. Those rows are not written. Its columns are read again from the database now, and it is caught up by one poll once they are`;
+    this.log(`${source}: ${m}`);
+    this.event({ kind: "stream_failed", table: source, message: m });
+    const st = this.states.get(source);
+    if (st !== undefined) await this.record({ ...st, error: m });
+    this.refreshStreamed();
+    this.kick();
   }
 
   /** for a test or a wait: resolves once every change the source had committed when it was called is in DuckDB, in every
@@ -3899,6 +4226,15 @@ export class Sync {
     await w.run(`DROP TABLE IF EXISTS ${ident(schema)}.${ident(table)}`);
     // and what a copy of it left beside it (a crash, a stop, a failure, a removal while it was read: `copy`)
     await w.run(`DROP TABLE IF EXISTS ${ident(schema)}.${ident(`${table}${SIDE_SUFFIX}`)}`);
+    // ITS RECORD OF WHICH COLUMN IS WHICH (issue 1073) goes with its entry: added again, its entry is taken afresh, by
+    // name. Only a removal forgets it: a table synced again whole for any other reason keeps what it leaves out
+    await w.run(`DELETE FROM ${MASON_SCHEMA}.column_identity WHERE source = ${literal(source)}`);
+    this.columnRecords.delete(source);
+    // and a record of another relation that holds it (issue 1080): its entry gone, nothing of that relation is synced by it
+    await w.run(`DELETE FROM ${MASON_SCHEMA}.column_identity_former WHERE held_by = ${literal(source)}`);
+    for (const [oid, f] of this.formerRecords) if (f.heldBy === source) this.formerRecords.delete(oid);
+    this.unplaced.delete(source);
+    this.movedUnder.delete(source);
     await this.forgetSynced(source);
     // its stored JSON paths and its view
     await this.kept.removed(source);
@@ -4059,6 +4395,8 @@ export class Sync {
       if ((this.retries.get(t.source)?.at ?? 0) > Date.now()) continue;
       // a table the named publication does not carry: copied, nothing would keep it current (prepareReplication)
       if (this.unpublished.has(t.source)) continue;
+      // held for its columns (`placeColumns`): never read until its file places them
+      if (this.unplaced.has(t.source)) continue;
       if (this.replicated(t) && !replicationReady) continue;
       if (this.mode !== "recopy" && !this.needsCopy(t)) continue;
       if (this.queuedRebuild(t.source) || this.rebuildingNow?.source === t.source) continue;
@@ -4072,7 +4410,7 @@ export class Sync {
     for (const source of this.behind.keys()) {
       const t = this.tables.get(source);
       // a failed catch-up waits its turn as a failed copy does (`backOff`); the error it recorded says when
-      if (t !== undefined && !this.needsCopy(t) && !this.reshaping.has(source) && (this.retries.get(source)?.at ?? 0) <= Date.now() && (!this.replicated(t) || replicationReady)) this.enqueue(source, { kind: "catch-up" });
+      if (t !== undefined && !this.needsCopy(t) && !this.reshaping.has(source) && !this.unplaced.has(source) && (this.retries.get(source)?.at ?? 0) <= Date.now() && (!this.replicated(t) || replicationReady)) this.enqueue(source, { kind: "catch-up" });
     }
     // POLL MODE: the tables due (`dueAt`: a polled one past its interval, one whose sync changed), and not a table whose
     // new columns could not be copied (its copy failed above): it is not polled with them
@@ -4154,6 +4492,8 @@ export class Sync {
           continue;
         }
         const t = this.tables.get(next[0]);
+        // held for its columns since it was queued (`placeColumns`): not read; queued again once it is let go
+        if (t !== undefined && kind !== "compact" && this.unplaced.has(t.source)) continue;
         // a compaction says its own failure, and changes nothing a copy or a catch-up waits on
         // (its columns changed meanwhile, or its held changes could not be applied: its follow-up below)
         if (kind === "compact") { if (t !== undefined) await this.compact(t); this.followUp(next[0]); }
@@ -4211,7 +4551,7 @@ export class Sync {
       // a table its copy left behind (`swap`), or one marked so before: one poll, unless a copy of it comes first — the
       // table as it is added NOW, which may have changed while it was copied (then copied again at once: `followUp`)
       const now = this.tables.get(t.source);
-      if (now !== undefined && this.behind.has(t.source) && !this.needsCopy(now) && !this.stopped) return await this.catchUp(now);
+      if (now !== undefined && this.behind.has(t.source) && !this.needsCopy(now) && !this.unplaced.has(t.source) && !this.stopped) return await this.catchUp(now);
       // not caught up: nothing is held for it (its next copy's swap holds anew)
       if (this.held.has(t.source)) await this.onWriter(async () => { this.held.delete(t.source); this.refreshStreamed(); });
       return null;
@@ -4523,6 +4863,8 @@ export class Sync {
           if (file.seen === null || file.seen !== file.now) {
             throw new Error(`${rewrittenText(t.source, "while this poll read it")}, so the poll's snapshot sees none of its rows: nothing of this read was written, and its next poll reads it again`);
           }
+          // RENAMED SINCE THE TABLES WERE SET (issue 1073): a column it named may be another column now; nothing is written
+          await this.readStillPlaced(w, t, "this poll");
           if (staged > POLL_PIECE_ROWS) {
             const c1 = Date.now();
             doing = `${t.source}: counting the keys its ${staged} changed row(s) add to the synced table (the stage anti-joined with its keys)`;
@@ -4961,6 +5303,8 @@ export class Sync {
               if (node !== filenode) {
                 throw new StartOver(`the source rewrote ${t.source} since its sync began (its file changed: a VACUUM FULL, CLUSTER, TRUNCATE or column type change), so its rows moved between pages`);
               }
+              // and its columns, under the same lock: a column renamed since the tables were set is never read as another (issue 1073)
+              await this.readStillPlaced(c, t, "its sync");
               const n = Number(r.rowsChanged);
               await this.onChunk?.({ ...told, rows: n, phase: "read" });
               if (!recopy) await this.recordChunk(c, t, range, n, node);
@@ -5236,7 +5580,8 @@ export class Sync {
     const r = (await w.runAndReadAll(`SELECT snapshot, columns, exact, pages FROM ${MASON_SCHEMA}.copy_progress WHERE source = ${literal(t.source)}`)).getRowsJS();
     const there = (await w.runAndReadAll(`SELECT count(*) FROM duckdb_tables() WHERE database_name = current_database() AND schema_name = ${literal(t.schema)} AND table_name = ${literal(`${t.table}${SIDE_SUFFIX}`)}`)).getRowsJS()[0]![0] === 1n;
     const row = r[0] as [string | null, string, string, bigint] | undefined;
-    if (row === undefined || row[0] === null || row[1] !== columnsKey(t.columns) || !there) {
+    // a copy begun by a Mason before columns had numbers continues where its names and types are the same
+    if (row === undefined || row[0] === null || (row[1] !== columnsKey(t.columns) && (row[1].includes('"#') || row[1] !== columnsKey(unnumbered(t.columns)))) || !there) {
       if (row !== undefined) this.log(`starting the sync of ${t.source} over, from its first page: ${!there ? "the table it was filling is gone" : row[0] === null ? "it was begun as a recopy" : "its columns are not the ones its sync was begun with"}`);
       return this.forgetCopy(t, side);
     }

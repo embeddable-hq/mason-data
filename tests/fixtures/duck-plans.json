@@ -1377,6 +1377,30 @@
       "full_sort": false
     },
     {
+      "name": "Metabase's JSON sample: the first and last 250 rows by the key, joined back",
+      "sql": "SELECT CASE WHEN 50000 < LENGTH(CAST(\"public\".\"orders\".\"meta\" AS TEXT)) THEN NULL ELSE \"public\".\"orders\".\"meta\" END AS \"meta\" FROM \"public\".\"orders\" INNER JOIN ((SELECT \"public\".\"orders\".\"id\" FROM \"public\".\"orders\" ORDER BY \"public\".\"orders\".\"id\" ASC LIMIT $1) UNION ALL (SELECT \"public\".\"orders\".\"id\" FROM \"public\".\"orders\" ORDER BY \"public\".\"orders\".\"id\" DESC LIMIT $2)) AS \"result\" ON \"result\".\"id\" = \"public\".\"orders\".\"id\"",
+      "values": [
+        "250",
+        "250"
+      ],
+      "plan": [
+        "PROJECTION",
+        "  HASH_JOIN",
+        "    TABLE_SCAN public.orders",
+        "    UNION",
+        "      TOP_N (1 key)",
+        "        TABLE_SCAN public.orders [top-N filter: id]",
+        "      TOP_N (1 key)",
+        "        TABLE_SCAN public.orders [top-N filter: id]"
+      ],
+      "calls": [
+        "__mason_jsonb_text"
+      ],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
       "name": "a numeric column = a bound parameter: the scan's filter",
       "sql": "SELECT o.id FROM orders o WHERE o.amount = $1",
       "values": [
