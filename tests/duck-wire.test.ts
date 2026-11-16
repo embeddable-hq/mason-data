@@ -8908,7 +8908,8 @@ test("libc top N: a top N and an ungrouped min / max are bounded natively, the d
       ["WITH __mason_values1 AS (SELECT id, d FROM colls), __mason_keys1 AS (SELECT 1 AS one) SELECT id FROM __mason_values1 ORDER BY d, id LIMIT 3", "SELECT id FROM colls ORDER BY d, id LIMIT 3"],
     ] as const) {
       assert.deepEqual((await answer(c, own)).rows, (await answer(c, plain)).rows, own);
-      assert.match(await sent(own), /__mason_values\d* AS MATERIALIZED \(SELECT __mason_v\d*, /, own);
+      // (a statement that holds a `__mason_` name has its own prefix, issue 1024: src/duck/own-names.ts)
+      assert.match(await sent(own), /__mason\d*_values\d* AS MATERIALIZED \(SELECT __mason\d*_v\d*, /, own);
     }
     // a parameter in the WHERE the threshold reads too: bound once, read in both, and again after the session moved
     const bound = "SELECT id FROM colls WHERE id > $1 ORDER BY d, id LIMIT 3";

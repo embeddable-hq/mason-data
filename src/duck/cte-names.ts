@@ -27,10 +27,13 @@
  * Names are compared WITHOUT CASE here, as DuckDB binds them (the review of PR 1093). Postgres tells `"Small"` from
  * `small`, and DuckDB does not: `WITH small AS (…) SELECT … FROM "Small"` read the WITH query there. So a WITH query
  * whose name equals another's or a table's in any case is renamed, and the new name is one the statement holds in no
- * case (a table `"__MASON_WITH0"` was read as the renamed WITH query).
+ * case (a table `"__MASON_WITH0"` was read as the renamed WITH query): it begins with the statement's own prefix
+ * (src/duck/own-names.ts), which no name the statement can reach holds.
  *
  * A statement whose names are already apart is left exactly as it was.
  */
+
+import { OWN_PREFIX } from "./own-names.ts";
 
 type Body = Record<string, unknown>;
 
@@ -89,17 +92,17 @@ export function cteReads(tree: unknown): Set<object> {
 }
 
 /** Renames, in place, each WITH query of `tree` whose name the statement gives to anything else, and its reads (see
- *  the module's comment). */
-export function cteNamesApart(tree: unknown): void {
+ *  the module's comment). `own` is the statement's own prefix (src/duck/own-names.ts), which every new name begins with. */
+export function cteNamesApart(tree: unknown, own: string = OWN_PREFIX): void {
   const { reads, ctes } = bindings(tree);
   if (ctes.length === 0) return;
   // (without case, as DuckDB binds a name: see above)
   const same = (a: unknown, b: unknown): boolean => String(a).toLowerCase() === String(b).toLowerCase();
   const clashes = ctes.filter((c) => ctes.some((o) => o !== c && same(o.ctename, c.ctename)) || reads.some((r) => same(r.range.relname, c.ctename) && r.to !== c));
   if (clashes.length === 0) return;
-  const written = JSON.stringify(tree).toLowerCase();
+  // (a name of the statement's own prefix, which no name it can reach holds in any case: src/duck/own-names.ts)
   let n = 0;
-  const fresh = (): string => { let name: string; do name = `__mason_with${n++}`; while (written.includes(name)); return name; };
+  const fresh = (): string => `${own}with${n++}`;
   for (const c of clashes) {
     const was = String(c.ctename), now = fresh();
     for (const r of reads) {

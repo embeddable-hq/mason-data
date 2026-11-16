@@ -265,6 +265,9 @@ export const TYPED = `${MAPPED_TABLE} CREATE EXTENSION IF NOT EXISTS citext; CRE
   `CREATE TABLE public.castable (id int PRIMARY KEY, s text); INSERT INTO public.castable VALUES ${CASTABLE.map(([id, v]) => `(${id}, '${v.replace(/'/g, "''")}')`).join(", ")}; ` +
   // a column named as typed's `t` in another case: DuckDB binds names case-insensitively (the corpus rerun)
   `CREATE TABLE public.cased (id int PRIMARY KEY, "T" text, "Tz" text); INSERT INTO public.cased VALUES (1, 'one', 'Europe/London'), (2, 'a', 'utc'), (4, 'B', 'UT'), (9, NULL, 'asia/kolkata');` +
+  // columns named like names Mason invents (issue 1024): the row number a top N over a join reads rows by, and a native
+  // json read's lambda parameter in another case
+  ` CREATE TABLE public.own_named (id int PRIMARY KEY, "__mason_rid" int, "__MASON_V" jsonb, v text); INSERT INTO public.own_named VALUES (1, 30, '{"a": 1.50}', 'a'), (2, 10, '{"a": [1]}', 'b'), (4, NULL, NULL, 'd'), (5, 40, '{"a": "s"}', 'e');` +
   // JSON COLUMNS NAMED AS typed's j and jb in another case (the review of the native read): a read's column
   // is placed in every arm of its CASE, and each place must be qualified as Postgres resolved the bare name; its
   // documents hold `#>` elements an index reads otherwise than a key (`+1`, ` 1`, `1 `)
@@ -1374,6 +1377,11 @@ function* matrix(): Generator<Matrixed> {
   yield q("a name in another case, joined", `SELECT id, "T", t, "Tz" FROM typed JOIN cased USING (id) ORDER BY id`);
   yield q("a name in another case, correlated", `SELECT id, t FROM typed x WHERE EXISTS (SELECT 1 FROM cased c WHERE c.id = x.id AND "T" = t) ORDER BY id`);
   yield q("GROUP BY an output name in another case", `SELECT upper(t) AS "T", count(*) FROM typed GROUP BY "T" ORDER BY 1`);
+  // ---- issue 1024: a column named like a name Mason invents is the table's (src/duck/own-names.ts) -------------------
+  yield q("issue 1024: a column named like the row number, a top N over a LEFT JOIN", `SELECT o.id, o."__mason_rid", o.v, c."T" FROM own_named o LEFT JOIN cased c ON c.id = o.id ORDER BY o."__mason_rid" DESC NULLS LAST, o.id LIMIT 3`);
+  yield q("issue 1024: a column named like the row number, through a *", "SELECT * FROM own_named o LEFT JOIN cased c ON c.id = o.id ORDER BY o.v DESC LIMIT 3");
+  yield q("issue 1024: a column named like the row number, in a whole row", `SELECT row_to_json(o) AS r, c."T" FROM own_named o LEFT JOIN cased c ON c.id = o.id ORDER BY o.id LIMIT 3`);
+  yield q("issue 1024: a jsonb named like a lambda's parameter in another case", `SELECT id, "__MASON_V" -> 'a' AS a FROM own_named ORDER BY id`);
   // a DISTINCT aggregate's ORDER BY over a division (its zero test was a volatile error() DuckDB refuses there)
   yield q("DISTINCT aggregate ordered by a division", "SELECT array_agg(DISTINCT (t || ': ' || (i4::float8 / 2)::text) ORDER BY (t || ': ' || (i4::float8 / 2)::text)), array_agg(DISTINCT i4::float8 / nullif(i2, 0) ORDER BY i4::float8 / nullif(i2, 0)) FROM typed WHERE id < 100");
   yield q("division by zero, a float", "SELECT id, i4::float8 / i2 FROM typed WHERE id = 1");

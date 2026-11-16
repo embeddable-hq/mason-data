@@ -242,7 +242,7 @@ export function failureWords(err: unknown): string {
   // the mapping's own DETAIL is Postgres's; one that carries the engine's text is the engine's, and stays out
   const theirs = detail === undefined || detail.startsWith("the engine") ? "" : ` ${detail}`;
   const way = WAY_OUT[code];
-  return `${withoutValues(message)} (SQLSTATE ${code}).${theirs}${way === undefined ? "" : ` ${way}`}`.replace(/__mason_\w+/g, "a value it computes");
+  return `${withoutValues(message)} (SQLSTATE ${code}).${theirs}${way === undefined ? "" : ` ${way}`}`.replace(/__mason\d*_\w+/g, "a value it computes");
 }
 /** what to do about a run's failure, by its SQLSTATE: the data's, so the run is tried again on the back-off meanwhile */
 const WAY_OUT: Readonly<Record<string, string>> = {

@@ -64,6 +64,20 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
     that make PascalCase tables, such as Prisma, write such names.
   - A whole row of a WITH query with a column list, such as `WITH q(a, b) AS (…) SELECT q FROM q`, now answers.
     Before, it failed with 42703.
+- **A column, table or alias whose name starts with `__mason_` now gives Postgres's answer.** Mason writes names of
+  its own into the queries it runs on the synced data, and they all started with `__mason_`. A name of yours that
+  matched one, in any case, was taken for Mason's:
+  - a table with a column named `__mason_rid` answered NULLs for its columns in the first rows of a join, such as
+    `SELECT t.*, o.v FROM t LEFT JOIN other o ON o.id = t.id ORDER BY t.id LIMIT 10`;
+  - a jsonb column named `__mason_v`, `__mason_x` or `__mason_k` answered NULLs or failed when read with `->`, `@>` or
+    `jsonb_object_keys`;
+  - a table named `__mason_late` or `__mason_ties_bound`, or a FROM alias named `__mason_late`, answered another
+    table's rows or failed;
+  - a subquery with two columns whose names differ only in case, beside a third such as `t__mason_2`, answered one
+    column's values in another.
+
+  Now the names Mason writes are chosen so that no name your query can reach holds them, columns read by a `*`
+  included.
 - **Two generated tables that read each other through a WITH query named like one of them are now refused.** Take a
   table `a` defined as `WITH b AS (SELECT * FROM b) SELECT * FROM b`, and a table `b` that reads `a`. The WITH query's
   own `FROM b` reads the table `b`, as on Postgres. So the two read each other, and each is refused with the cycle,
