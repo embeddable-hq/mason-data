@@ -32,6 +32,7 @@ import { choosePgPort, freePort } from "./ports.ts";
 import { failed, type Problem } from "./command.ts";
 import { checkSource, connectSource, maskedUrl, PRIMARY_NOTE, readSourceFacts, readTables, type SourceFacts, type SourceTable } from "./preflight.ts";
 import { actRead, sourceCatalog, STATE_WAIT_MS, watchedRead } from "./source-catalog.ts";
+import { forgetConfirmed, readConfirmed } from "./confirmed.ts";
 import { uiReadOnlyAllowSetting, uiReadOnlySetting, type PageArea } from "./ui-read-only.ts";
 import { backLinkOf, uiBackLinkSetting } from "./ui-back-link.ts";
 import { accountOf, uiAccountSetting } from "./ui-account.ts";
@@ -600,7 +601,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
       runWarnings.push(m);
     }
   };
-  const added = (edit: { edited?: readonly string[] } = {}): Promise<void> => {
+  const added = (edit: { edited?: readonly string[]; confirmed?: ReadonlyArray<{ table: string; shape: string | undefined }> } = {}): Promise<void> => {
     // the catalog as last read: an edit asked for a fresh one first (src/cli/run-server.ts /api/pick, /api/remove)
     const now = catalog.facts();
     let read = readSources();
@@ -623,7 +624,12 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     sources = { file: r.file, tables: r.tables, problem: r.problem };
     sync.setViews(now.views ?? []);
     sync.setCollations(now.collations ?? []);
-    return sync.setTables(sources.tables);
+    // the tables an edit just wrote (mason add, now or while Mason was stopped: src/cli/confirmed.ts): their entry written
+    // against the columns as they are now, so each is taken afresh by name, whatever the run took of its columns before;
+    // and in a project deployed read-only, the committed file is the owner's word (src/duck/column-identity.ts)
+    // — each as the table the add read: one changed since is no confirmation (src/duck/sync.ts `placeColumns`)
+    return sync.setTables(sources.tables, { confirmed: r.problem === null ? edit.confirmed ?? [] : [],
+      readOnly: projectWriteRefusal(project.root, process.env) !== null });
   };
 
   if (pg.said) say(`  ${pg.said}`);
@@ -821,7 +827,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     roles: () => api.roles(),
     ...(shares !== undefined ? { shares, pageShares: new PageShares({ shares, home, log: logLine }) } : {}),
     // the sources file is the list of what is added: a change to it is read by the sync at once
-    sources: () => sources, sourcesChanged: (edited) => { void added({ edited }); }, readSource: readSources, runUrl: src.resolved,
+    sources: () => sources, sourcesChanged: (edited, confirmed) => { void added({ edited, ...(confirmed !== undefined ? { confirmed } : {}) }); }, readSource: readSources, runUrl: src.resolved,
     // a table set to sync: replication while the run is up, in a run that never checked the database for it: the
     // start's own checks, now, and the edit refused when they fail (src/cli/run-server.ts /api/pick)
     checkReplication: async (file) => {
@@ -870,7 +876,14 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // a sample is /api/state's facts at its moment (src/cli/run-server.ts usageFacts): one computation of each
   usage.start(() => usageFacts(runCtx));
   await listenOnLoopback(server, setupPort);
-  const tablesSet = added();
+  // THE ENTRIES mason add WROTE WHILE MASON WAS STOPPED (src/cli/confirmed.ts): taken afresh at this start, then forgotten
+  const offline = readConfirmed(home);
+  if ("problem" in offline) logLine(`[sync] ${offline.problem} (Mason bug: report it): the entries mason add wrote while Mason was stopped are taken as the run took them before`);
+  const confirmedOffline = "tables" in offline ? offline.tables : [];
+  const tablesSet = added({ confirmed: confirmedOffline }).then(() => {
+    // only once the file was taken: else the next start takes them
+    if (sources.problem === null && (confirmedOffline.length > 0 || "problem" in offline)) forgetConfirmed(home);
+  });
   // the run's own start beside its pid (src/cli/runs.ts masonProcess): how a command tells this run, alive and silent,
   // from another process given the number later, whatever started it (mason start, mason serve, a supervisor, npx)
   const started = processStart(process.pid);
