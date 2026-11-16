@@ -1,19 +1,19 @@
 {
-  "statements": 7525,
+  "statements": 7604,
   "mason": {
-    "exact": 7009,
+    "exact": 7089,
     "decided": 46,
-    "refused": 470,
+    "refused": 469,
     "differs": 0
   },
   "duckdb": {
-    "exact": 1963,
-    "name": 1404,
-    "refused": 1694,
-    "value": 1095,
-    "rows": 627,
-    "text": 83,
-    "other": 659
+    "exact": 1967,
+    "name": 1408,
+    "refused": 1712,
+    "value": 1101,
+    "rows": 626,
+    "text": 85,
+    "other": 705
   },
   "gaps": {
     "copyPhase": {
@@ -26,7 +26,6 @@
         "div-numeric": { "planted": 1, "natural": 0 },
         "enum-forms": { "planted": 1, "natural": 0 },
         "explain-option": { "planted": 1, "natural": 0 },
-        "extract-julian": { "planted": 1, "natural": 0 },
         "format-specifiers": { "planted": 1, "natural": 0 },
         "held-type-compare": { "planted": 1, "natural": 297 },
         "hypothetical-set": { "planted": 1, "natural": 0 },
@@ -94,7 +93,7 @@
       }
     },
     "everyAsk": {
-      "asked": 105282,
+      "asked": 105989,
       "refused": {
         "array-lower-bound": { "planted": 0, "natural": 2 },
         "array-remove-type": { "planted": 3, "natural": 0 },
@@ -105,7 +104,6 @@
         "div-numeric": { "planted": 3, "natural": 0 },
         "enum-forms": { "planted": 3, "natural": 0 },
         "explain-option": { "planted": 3, "natural": 0 },
-        "extract-julian": { "planted": 3, "natural": 0 },
         "format-specifiers": { "planted": 3, "natural": 0 },
         "held-type-compare": { "planted": 3, "natural": 1017 },
         "hypothetical-set": { "planted": 3, "natural": 0 },
@@ -118,7 +116,7 @@
         "json-of-type": { "planted": 3, "natural": 3 },
         "json-path-type": { "planted": 0, "natural": 48 },
         "json-rows-in-select": { "planted": 3, "natural": 0 },
-        "jsonb-compare": { "planted": 3, "natural": 225 },
+        "jsonb-compare": { "planted": 3, "natural": 227 },
         "jsonb-set": { "planted": 0, "natural": 3 },
         "latest-order": { "planted": 6, "natural": 0 },
         "latest-quotient": { "planted": 3, "natural": 0 },
