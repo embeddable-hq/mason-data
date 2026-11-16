@@ -1,19 +1,19 @@
 {
-  "statements": 7471,
+  "statements": 7500,
   "mason": {
-    "exact": 6956,
+    "exact": 6984,
     "decided": 46,
-    "refused": 469,
+    "refused": 470,
     "differs": 0
   },
   "duckdb": {
     "exact": 1959,
-    "name": 1401,
-    "refused": 1664,
+    "name": 1402,
+    "refused": 1684,
     "value": 1087,
     "rows": 626,
     "text": 83,
-    "other": 651
+    "other": 659
   },
   "gaps": {
     "copyPhase": {
@@ -62,6 +62,7 @@
         "similar-to-forms": { "planted": 1, "natural": 0 },
         "star-join-twin": { "planted": 1, "natural": 0 },
         "sum-real": { "planted": 0, "natural": 3 },
+        "tablesample": { "planted": 1, "natural": 0 },
         "text-array-order": { "planted": 0, "natural": 9 },
         "time-date-trunc": { "planted": 0, "natural": 12 },
         "time-timetz-coerced": { "planted": 3, "natural": 0 },
@@ -93,7 +94,7 @@
       }
     },
     "everyAsk": {
-      "asked": 104501,
+      "asked": 104880,
       "refused": {
         "array-lower-bound": { "planted": 0, "natural": 2 },
         "array-remove-type": { "planted": 3, "natural": 0 },
@@ -141,6 +142,7 @@
         "similar-to-forms": { "planted": 3, "natural": 0 },
         "star-join-twin": { "planted": 3, "natural": 0 },
         "sum-real": { "planted": 0, "natural": 9 },
+        "tablesample": { "planted": 3, "natural": 0 },
         "text-array-order": { "planted": 0, "natural": 50 },
         "time-date-trunc": { "planted": 0, "natural": 36 },
         "time-timetz-coerced": { "planted": 9, "natural": 0 },
