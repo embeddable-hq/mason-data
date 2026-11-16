@@ -564,7 +564,7 @@ const STATUS_USAGE = `usage: mason status [--json]
     sessions: { open (the Postgres API's sessions logged in), byClient: [{ user ('' a token's), client (its
     application_name), open, running }] }, users: { active (the users mason user made, removed ones not counted) } or
     { error }, share: (null, or what mason share has open) { port, fingerprint, sessions,
-    refusedLogins, droppedConnections, shares: [{ user, from (command: mason share; page: the web page), role, reads, openedAt, via, host, port, endsAt, state }] }, shareEnded: (null, or the last share that ended) { user, from, why, at }, queries: { keptDays, day, week } (the last day's and the last 7
+    refusedLogins, droppedConnections, shares: [{ user, from (command: mason share; page: the web page), role, reads, openedAt, via, host, port, database, sslmode (require), endsAt, state }] }, shareEnded: (null, or the last share that ended) { user, from, why, at }, queries: { keptDays, day, week } (the last day's and the last 7
     days' statements, each { days, covered (the days of it the request log keeps), statements, completed, refused,
     failed, cancelled, rows, bytesSent, durationMs: { avg, p50, p95 } (the completed ones') or null }; { error }
     when it could not be read), slowQueries, refusedQueries, refusedTotal (how many in all), unsupported: [{ gap

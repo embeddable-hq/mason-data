@@ -182,7 +182,7 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   under Only these columns); **Name its key…** does the same for a
   table with no primary key.
 - **Users** (`#users`), in this order: the list of users, right under the title (and its read-only line), then the add
-  box (the add form; and, where it may be opened, a Temporary cloud login) with the card of what it made beside it,
+  box (the add form; and, where it may be opened, a Temporary cloud tunnel) with the card of what it made beside it,
   then **Connect a Postgres client or BI tool** and **Connect an MCP client**, so a card that appears moves nothing
   above it. A person arriving on the page — its address opened, a
   link of the sidebar or another followed — starts with the cursor in the form's **Name**, once the form is written;
@@ -224,7 +224,7 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   memory while the dialog is open, dropped at **I have copied it**. The package is pinned to the run's version as the
   user was added, so a later read never rewrites the dialog. A section's long line scrolls inside its own block, and
   the section never widens the dialog. A field the JSON does not carry (no URL) leaves the section out. A temporary
-  cloud login's dialog has no such section: it is for a tool in the cloud, which runs no command on a computer of its
+  cloud tunnel's dialog has no such section: it is for a tool in the cloud, which runs no command on a computer of its
   own. Under the rows, a status line: "Waiting for its first query…" until Mason
   has seen the user — a session of it open (`/api/state` `sessions`), or a statement of it since it was added
   (`/api/users?lastUsed=1` `lastUsedAt`) — then "Connected", held once seen. While it waits, the state is read every
@@ -245,35 +245,44 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   `main-<sha>` leaves it unpinned. It is shown wherever the box above is (a served run and a read-only page too), with
   the same note on a server's page, and not where the run says no URL. A long line scrolls inside its own block, never
   the page (`copyBlock`).
-- **Users**, the add box's **Temporary cloud login** (under `mason start` only: never under `mason serve`, whose run
+- **Users**, the add box's **Temporary cloud tunnel** (under `mason start` only: never under `mason serve`, whose run
   refuses it, and never on a read-only page, `pageReadOnly`, whatever `MASON_UI_READ_ONLY_ALLOW` still allows; there
   the box is the plain add form, with no segments): `mason share` from the page, for a tool in the cloud that cannot
   reach this machine. It is the same flow as adding a user with another job, so it is the box's second kind: two
-  segments on top of the box, **New user** (the form above) and **Temporary cloud login**, a segmented control as the
+  segments on top of the box, **New user** (the form above) and **Temporary cloud tunnel**, a segmented control as the
   time range's, the choice the page's own (not the hash: a form's, not a view's). The two panes sit in one grid cell,
   the one not chosen unseen in its place, so the box keeps the height of the taller and a choice moves nothing on the
   page; each pane is a part of its own (`add-user-box`, `add-share-box`), so a choice rewrites neither, and a name being
-  typed stays. The pane: "For a tool in the cloud that can't reach this machine. Opens a public address with a login
-  of its own, until you stop it.", a **Role** choice where `mason/roles.yml` offers more than one role a share may
+  typed stays. The pane: "For a tool in the cloud that can't reach this machine. Opens an address reachable online,
+  protected by a login and password of its own, until you stop it. It usually opens in a few seconds." (Mason's own
+  part takes well under a second, measured over a stub tunnel; the rest is the tunnel's service. The run gives up
+  after 30 s and says so.) Then a **Role** choice where `mason/roles.yml` offers more than one role a share may
   read as (`GET /api/share/choices`, read beside the state while it is offered, as `mason share --role`; each option
-  says what it reads), and **Open a cloud login**, held disabled while one opens or is open (one at a time). The click
+  says what it reads), and **Open a cloud tunnel**, held disabled while one opens or is open (one at a time). The click
   is the person's yes, the pane's sentence what they have read before it, and no question follows: `POST /api/share` `{ from: "page", confirmed: true, role? }` opens the same share the command
   opens (src/cli/page-share.ts): the run makes the password and starts the tunnel's client. What it opened is shown
-  once in the same modal dialog as New user added, titled **Temporary cloud login**: URL, **Login** (its own, never a
+  once in the same modal dialog as New user added, titled **Temporary cloud tunnel**: URL, **Login** (its own, never a
   `mason user`, and never listed or counted among the users) and **Password**, the URL and the Password each with
-  **Copy**, "Shown once" beside the password's Copy; how long it has been public and what it reads; that the password
+  **Copy**, "Shown once" beside the password's Copy; that it is online and until when, and what it reads (the card's line,
+  below, counting down as the card's does); that the password
   is only shown once and is not saved; and **I have copied it**, its only way out, as a new user's. The password is in
   that one answer alone, kept in the page's memory until the dialog closes (or the share is seen ended, when the
-  dialog goes with it). Under the add box a card, titled **Temporary cloud login** on its top edge, shows it live: the
-  host, port and login, that the password was shown once, how long it has been public and what it reads, "Live until
-  you stop it", when a free one ends sooner (within about an hour) and that it ends when the page closes, and **Stop**
+  dialog goes with it). Under the add box a card, titled **Temporary cloud tunnel** on its top edge, shows it live: what a
+  BI tool's form asks for, in the order of Connect a Postgres client or BI tool, **Host**, **Port**, **Database** and
+  **SSL mode** (always `require`: the share's socket takes TLS alone), each with **Copy**, then the **Login**
+  (`/api/state` `share.shares[]`, which carries the database and the SSL mode); that the password was shown once; that
+  it is online and until when, and what it reads: with an end (a free tunnel's hour) "Online · ends in 59 min, at
+  18:55", the time left counting down at each write of the page as an age counts up (`<time data-tick>`: its text set
+  in place, so nothing moves), and "ending now" once the end has passed and the state has not yet seen the tunnel go;
+  with no end "Online until you stop it", with no timer; that it also ends within two minutes of closing the page;
+  and **Stop**
   (`DELETE /api/share/<user>`), which takes the focus when the dialog closes. After a reload the card is the same.
   While it opens, the card says so. The page holds it by a beat (`POST
   /api/share/<user>/beat`, every 15 s, hidden or not): two minutes without one (the tab closed, crashed or asleep) and
   it, its sessions and the tunnel's client end. How it ended (Stop, the tunnel dropped, from `/api/state`
   `shareEnded`) is said in the card's place, and a refusal there is the run's Failure; the pane is the form again.
-  Connect a Postgres client or BI tool says, where it is offered, that a tool in the cloud that can't reach this machine uses Temporary public
-  login in the box above.
+  Connect a Postgres client or BI tool says, where it is offered, that a tool in the cloud that can't reach this machine uses Temporary cloud
+  tunnel in the box above.
 - **Users**, the list: two tabs over the table, a segmented control as the time range's, each with its count —
   **Active** (the default, `#users`: the users not removed, a disabled one among them with its Disabled status) and
   **Removed** (`#users?show=removed`: the removed ones, muted, with Queries alone). The tab is the hash's

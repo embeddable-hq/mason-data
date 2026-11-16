@@ -326,7 +326,7 @@ export const staleText = (at, failure) => `As of ${utcMinute(at.toISOString()).s
 
 /** The longest one request to the run may take, its answer whole, in ms: past it the request is aborted and said as its
  *  failure, so a button never stays busy for ever (issue 1033). A catalog read the run is still making answers well
- *  within it (src/cli/source-catalog.ts ACT_WAIT_MS: 20 s), and a cloud login opens within 30 s. */
+ *  within it (src/cli/source-catalog.ts ACT_WAIT_MS: 20 s), and a cloud tunnel opens within 30 s. */
 export const ASK_MS = 60_000;
 
 /**

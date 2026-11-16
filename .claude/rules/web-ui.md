@@ -129,7 +129,7 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   and a failed poll keeps the last state
   and says, as a Failure, what to do (the run stopped: `mason start`, then `mason ui`; a cookie of an earlier run:
   `mason ui`).
-- **A password is shown once and kept nowhere**: an added user's password, and a temporary cloud login's, lives in the
+- **A password is shown once and kept nowhere**: an added user's password, and a temporary cloud tunnel's, lives in the
   page's memory only while its one-time dialog is open (index.html's `<dialog id="once">`), dropped at its "I have copied
   it", the one thing that closes it; never in storage, a URL or a log line (the server logs `user <name> added`, never the password).
   So are the dialog's MCP lines, which carry it (issue 1114: its closed "Connect an MCP client", under the URL, each

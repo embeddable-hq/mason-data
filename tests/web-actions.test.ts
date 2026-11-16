@@ -10,7 +10,7 @@
  * checks that the page says so in a popover at that control (beside it, or beside the row or question it is in), with a
  * Dismiss that takes it away, and that nothing is left busy. A new button is covered by this test without a new test.
  *
- * Then focused tests: a refused Stop of a cloud login is said, and says the login is still open (issue 1033's gap 1); a
+ * Then focused tests: a refused Stop of a cloud tunnel is said, and says the login is still open (issue 1033's gap 1); a
  * double press of a Remove's or a Cancel's question sends one request and says what it did (gap 2); a request that
  * hangs is given up at its deadline, and a body cut off is said (gap 6); a new filter or page keeps the last list
  * greyed while it is read (gap 5).
@@ -63,8 +63,8 @@ const STATE = ((): Record<string, unknown> => {
   } as unknown as RunContext;
   return JSON.parse(JSON.stringify(runState(ctx, COPIES, null, NOW))) as Record<string, unknown>;
 })();
-/** A temporary cloud login the page opened, as `/api/state` lists it. */
-const LISTED = { user: "share_a1b2c3", from: "page", role: null, reads: "every synced table", openedAt: at, via: "pinggy", host: "relay.example", port: 41234, endsAt: null, state: "up" };
+/** A temporary cloud tunnel the page opened, as `/api/state` lists it. */
+const LISTED = { user: "share_a1b2c3", from: "page", role: null, reads: "every synced table", openedAt: at, via: "pinggy", host: "relay.example", port: 41234, database: "shop", sslmode: "require", endsAt: null, state: "up" };
 const sharing = (shares: unknown[]) => ({ ...STATE, share: shares.length ? { port: 40001, fingerprint: "AA", sessions: 0, refusedLogins: 0, droppedConnections: 0, shares } : null, shareEnded: null });
 const USERS = { users: [{ name: "metabase", id: "0123456789abcdef", addedAt: at, live: true, from: null },
   { name: "looker", id: "fedcba9876543210", addedAt: at, disabledAt: at, live: true, from: ["192.0.2.0/24"] }], lastUsedNote: null, requestLogDays: 7 };
@@ -212,7 +212,7 @@ const settle = async () => { for (let i = 0; i < 5; i++) await tick(); };
 const REFUSAL = { code: "refused", message: "refused by the test", next: [] };
 
 /** A page shown over a fake run: every read answered at once, every change (any method but GET) held until released.
- *  `sent`: the changes asked, in order (a cloud login's beats, which no person sends, left out). */
+ *  `sent`: the changes asked, in order (a cloud tunnel's beats, which no person sends, left out). */
 async function pageOver(id: string, hash: string, state: unknown) {
   const held: Array<{ path: string; answer: (r: Response) => void; fail: (e: Error) => void }> = [];
   const sent: string[] = [];
@@ -248,7 +248,7 @@ async function pageOver(id: string, hash: string, state: unknown) {
 const SCENES: Array<{ name: string; id: string; hash: string; state: unknown }> = [
   { name: "Tables", id: "tables", hash: "#tables", state: STATE },
   { name: "Users", id: "users", hash: "#users", state: sharing([]) },
-  { name: "Users with a cloud login open", id: "users", hash: "#users", state: sharing([LISTED]) },
+  { name: "Users with a cloud tunnel open", id: "users", hash: "#users", state: sharing([LISTED]) },
   { name: "Usage", id: "usage", hash: "#observability/usage", state: STATE },
   { name: "Queries", id: "queries", hash: "#observability/queries", state: STATE },
   { name: "Sync events", id: "syncs", hash: "#observability/syncs", state: STATE },
@@ -362,7 +362,7 @@ for (const scene of SCENES) {
 
 // ------------------------------------------------------------------ the focused tests
 
-test("a refused Stop of a cloud login is said beside Stop, saying the login is still open, and stays said across polls until dismissed (issue 1033, gap 1)", async () => {
+test("a refused Stop of a cloud tunnel is said beside Stop, saying the login is still open, and stays said across polls until dismissed (issue 1033, gap 1)", async () => {
   const p = await pageOver("users", "#users", sharing([LISTED]));
   const stop = p.parts().byId("share-stop");
   assert.ok(stop, "the open login's card has Stop");
@@ -378,9 +378,9 @@ test("a refused Stop of a cloud login is said beside Stop, saying the login is s
     const f = p.parts();
     const pop = f.pops.find((e) => e.attrs["data-anchor"] === "share-stop");
     assert.ok(pop, `${when}: the refusal is said beside Stop`);
-    assert.match(textOf(pop), /^Stop failed\. The temporary cloud login is still open, and its address and password still work\. ✗ refused by the test Dismiss$/, when);
+    assert.match(textOf(pop), /^Stop failed\. The temporary cloud tunnel is still open, and its address and password still work\. ✗ refused by the test Dismiss$/, when);
     assert.ok(f.byId("share-stop") !== null && !busy(f.byId("share-stop")), `${when}: the card still shows the open login, with Stop to try again`);
-    assert.match(textOf(f.byId("added")!), /Public for/, `${when}: and that it is public`);
+    assert.match(textOf(f.byId("added")!), /Online until you stop it/, `${when}: and that it is online`);
   };
   check("refused");
   // the next read of the state still lists it: still said, never turned back into an open login saying nothing

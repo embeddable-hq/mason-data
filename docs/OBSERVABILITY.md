@@ -104,10 +104,10 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
   (`/api/tables/<table>/columns`).
 - **Users** (`#users`): the users first, under Active / Removed tabs — each user's status (Active / Disabled /
   Removed), when it was added, its last use and its Queries, Disable (asks first) / Enable and Remove; then the box that
-  adds one, with two segments, New user and Temporary cloud login (what `mason share` opens), what it adds shown once in
+  adds one, with two segments, New user and Temporary cloud tunnel (what `mason share` opens), what it adds shown once in
   a dialog that closes only at "I have copied it"; then ONE Connect panel for the run (host, port, database, SSL mode
   and the URL with `<user>:<password>`, each with **Copy**), never a URL per user. Reads `/api/users?lastUsed=1` and
-  `/api/state` (on opening, then 30 s), and `/api/share/choices` where a cloud login is offered.
+  `/api/state` (on opening, then 30 s), and `/api/share/choices` where a cloud tunnel is offered.
 - **Observability › Queries** (`#observability/queries`): the request log as a table, newest first — the first 8
   characters of the id, started, duration, status, user, client, rows, the statement (two lines at most), its error's
   first line — with a per-row details (the whole id, ended, bytes sent, the statement and error, the first 16 KiB of
