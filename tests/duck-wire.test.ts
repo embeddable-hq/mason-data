@@ -36,7 +36,7 @@ import * as wire from "./postgres-api/wire.ts";
 import { withinDuckDBRounding } from "./memory-text.ts";
 import { handLibcOrder, lettersOf } from "./libc-order-fixture.ts";
 import { libcKey } from "../src/duck/libc-order.ts";
-import { catalogDdl } from "../src/api/postgres/catalog.ts";
+import { catalogDdl, catalogViews } from "../src/api/postgres/catalog.ts";
 import { planDuck } from "../src/duck/plan.ts";
 import { parseSql } from "../src/api/postgres/parser.ts";
 import { mayOrderText } from "../src/api/postgres/translate.ts";
@@ -8960,4 +8960,89 @@ test("collation resolver: two libc collations in one session, each by its own or
     assert.deepEqual((await answer(c, "SELECT 'a' < 'B', 'B' < 'a'")).rows, [["t", "f"]]);
     assert.equal(reads, 1, "the second collation's order is read once, then held");
   } finally { await c.end(); await a.close(); }
+});
+
+// ISSUE 982: TABLESAMPLE was refused only because the allowlist lacked its node, so wherever the allowlist was off (the
+// oracle, scripts/duck-repro.ts) or would come to list it, it reached the engine, which reads `SYSTEM (100)` as 100 rows:
+// 100 of 400 where Postgres answers 400. The class: a construct refused by nothing but its absence from the allowlist,
+// which answers every form once one is verified. The decision: one reader, Postgres's analysis (its TABLESAMPLECLAUSE),
+// refuses every sample by name before the rewrite, wherever the table is read, and a percent or seed Postgres rejects
+// when the sample runs is Postgres's own error.
+test("issue 982: every TABLESAMPLE is refused by name, wherever the table is read, and a percent Postgres rejects is Postgres's error", async () => {
+  const catalogDb = new PGlite();
+  try {
+    await catalogDb.waitReady;
+    const sampled: PgSchema = { database: "app", tables: [{ name: "sampled", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "v", type: "text" }] }],
+      views: [{ schema: "public", name: "sampled_half", definition: " SELECT id, v FROM public.sampled TABLESAMPLE BERNOULLI (50);" },
+        { schema: "public", name: "sampled_all", definition: " SELECT id, v FROM public.sampled;" }] };
+    for (const s of [...catalogDdl(sampled), ...catalogViews(sampled)]) await catalogDb.exec(s);
+    const catalog = (b: Uint8Array): Promise<Uint8Array> => catalogDb.execProtocolRaw(b);
+    // the allowlist off, as the oracle and scripts/duck-repro.ts plan: nothing but the refusal stands between the
+    // statement and the engine
+    const plan = async (sql: string) => planDuck({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Parameters<typeof planDuck>[0]["stmt"],
+      base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collations: CollationResolver.of({ kind: "bytes" }), verified: null });
+    const outcome = async (sql: string): Promise<string> => {
+      try { await plan(sql); return "answered"; }
+      catch (e) { return e instanceof StatementError ? `${e.fields.code} ${e.gap ?? ""} ${e.fields.message}` : `thrown ${String(e)}`; }
+    };
+    const refused = (sql: string, got: string): void => assert.match(got, /^0A000 tablesample Mason cannot answer TABLESAMPLE/, sql);
+    const forms: string[] = [];
+    for (const method of ["SYSTEM", "BERNOULLI"]) for (const percent of ["0", "50", "100"]) for (const seed of ["", " REPEATABLE (7)"]) {
+      forms.push(`SELECT count(*) FROM sampled TABLESAMPLE ${method} (${percent})${seed}`);
+    }
+    forms.push(
+      "select count(*) from public.sampled as s tablesample system(100)",
+      "SELECT count(*) FROM sampled TABLESAMPLE pg_catalog.bernoulli (100)",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM ($1)",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (100) REPEATABLE ($1)",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (50 + 50)",
+      "SELECT count(*) FROM sampled TABLESAMPLE BERNOULLI ('100')",
+      "SELECT count(*) FROM sampled TABLESAMPLE BERNOULLI (100::float8) REPEATABLE (length('abc'))",
+      "SELECT count(*) FROM (SELECT * FROM sampled TABLESAMPLE SYSTEM (100)) s",
+      "WITH s AS (SELECT * FROM sampled TABLESAMPLE BERNOULLI (100)) SELECT count(*) FROM s",
+      "SELECT count(*) FROM sampled a JOIN sampled b TABLESAMPLE SYSTEM (100) ON a.id = b.id",
+      "SELECT count(*) FROM sampled a LEFT JOIN LATERAL (SELECT * FROM sampled b TABLESAMPLE SYSTEM (100) WHERE b.id = a.id) l ON true",
+      "SELECT id, (SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (100)) FROM sampled",
+      "SELECT id FROM sampled WHERE EXISTS (SELECT 1 FROM sampled TABLESAMPLE BERNOULLI (100))",
+      "SELECT id FROM sampled UNION ALL SELECT id FROM sampled TABLESAMPLE SYSTEM (100)",
+      "SELECT count(*) FROM sampled_half",
+      "SELECT count(*) FROM sampled_all a JOIN sampled_half h USING (id)",
+      // arguments that read the query around them or a table: never run over the catalog's tables of no rows, whose
+      // NULL or missing name is not Postgres's answer
+      "SELECT count(*) FROM sampled a, LATERAL (SELECT * FROM sampled TABLESAMPLE SYSTEM (a.id * 50)) s",
+      "SELECT (SELECT count(*) FROM sampled TABLESAMPLE BERNOULLI (100) REPEATABLE (a.id)) FROM sampled a",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM ((SELECT max(id) * 50 FROM sampled))",
+    );
+    for (const sql of forms) refused(sql, await outcome(sql));
+    // what Postgres itself rejects is its error, word for word: at its analysis (an unknown method, two arguments, a view
+    // sampled) and as the sample starts (a percent past 100 or NULL, a NULL seed, a division by zero), the same here
+    // as the catalog Postgres's own run of the statement over its table of no rows
+    for (const sql of [
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (200)",
+      "SELECT count(*) FROM sampled TABLESAMPLE BERNOULLI (-1)",
+      "SELECT count(*) FROM sampled TABLESAMPLE BERNOULLI ('NaN')",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (NULL)",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (50) REPEATABLE (NULL)",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (1 / 0)",
+      "SELECT count(*) FROM (SELECT * FROM sampled TABLESAMPLE SYSTEM (100 + 1)) s",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM ('abc')",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (50, 50)",
+      "SELECT count(*) FROM sampled TABLESAMPLE system_rows (10)",
+      "SELECT count(*) FROM sampled_all TABLESAMPLE SYSTEM (100)",
+    ]) {
+      const postgres = await catalogDb.query(sql).then(() => "answered", (e: Error & { code?: string }) => `${e.code} ${e.message}`);
+      assert.notEqual(postgres, "answered", sql);
+      assert.equal((await outcome(sql)).replace(/^(\w+) {2}/, "$1 "), postgres, sql);
+    }
+  } finally { await catalogDb.close(); }
+  // on the wire, with the allowlist on: the refusal names its entry before the allowlist names the node, in the simple
+  // and the extended protocol, and the session goes on
+  const c = await client();
+  try {
+    for (const [sql, values] of [["SELECT count(*) FROM big TABLESAMPLE SYSTEM (100)", undefined], ["SELECT count(*) FROM big TABLESAMPLE BERNOULLI ($1) REPEATABLE ($2)", [100, 7]]] as const) {
+      await assert.rejects(c.query(sql, values === undefined ? undefined : [...values]), (e: pg.DatabaseError) => e.code === "0A000" && /^Mason gap tablesample\b/.test(e.detail ?? "") && /WHERE id % 10 = 0/.test(e.hint ?? ""), sql);
+    }
+    await assert.rejects(c.query("SELECT count(*) FROM big TABLESAMPLE SYSTEM (200)"), (e: pg.DatabaseError) => e.code === "2202H" && e.message === "sample percentage must be between 0 and 100");
+    assert.deepEqual((await answer(c, "SELECT count(*) FROM big")).rows, [["150000"]]);
+  } finally { await c.end(); }
 });

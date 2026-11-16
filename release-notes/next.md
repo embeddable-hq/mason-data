@@ -6,6 +6,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **A query with `TABLESAMPLE` is now refused by name.** A sample is of your database's pages or rows, which the
+  synced table does not hold. Before, Mason refused it only as something it had not verified yet. Without that check,
+  `TABLESAMPLE SYSTEM (100)` was answered with 100 rows, not every row. Now every form is refused with
+  `Mason gap tablesample`, wherever the table is read: a subquery, a CTE, a join or a view. A percent past 100, a NULL
+  percent or a NULL seed gets Postgres's own error. To read a part of a table, filter it, such as `WHERE id % 10 = 0`.
 - **A column your sources file leaves out is no longer served under another name.** This covers a column that
   `exclude:` names, one a `columns:` entry does not list, and a secret-looking column `mason add` left out. Before, Mason
   matched columns by name alone. If two columns swapped names in one transaction, the left-out column was served under

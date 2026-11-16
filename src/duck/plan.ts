@@ -19,6 +19,7 @@ import { expandViews, MAX_VIEW_DEPTH, viewRefused } from "./views.ts";
 import { selectListAfterLimit } from "./late.ts";
 import { libcBounded } from "./libc-bound.ts";
 import { pgTyplen } from "./types.ts";
+import { cstr, decodeBackend, frame } from "../api/postgres/protocol.ts";
 import type { CopyState } from "./sync.ts";
 import { giveTurns, datumText, masonCalls, rewrite, treeDifference, Unrewritable, type EnumTypes, type RowColumn } from "./rewrite.ts";
 import type { CollationResolver, StatementCollations } from "./collation.ts";
@@ -459,6 +460,46 @@ async function heldRefusal(catalog: Parameters<typeof catalogRows>[0], tree: Tre
     "read the value, or its text (x::text); = and GROUP BY are answered where equal values have one text", text);
 }
 
+/**
+ * A TABLESAMPLE ANYWHERE IN THE STATEMENT IS REFUSED BY NAME (issue 982): a sample is of the source's pages or rows, which
+ * the synced table does not hold, and DuckDB's own TABLESAMPLE reads `SYSTEM (100)` as 100 rows. Postgres's analysis is
+ * the one reader (its TABLESAMPLECLAUSE, wherever the statement reads a table: a subquery, a CTE, a join, a view's
+ * expansion), never a list of places, so no spelling passes it. A percent or seed Postgres would reject when the sample
+ * runs (past 100, NaN, NULL, 1/0) is Postgres's own error: each sample's arguments are run by the catalog Postgres, over
+ * a table of its own, as the statement wrote them. Arguments that read anything are refused unrun: a parameter's value
+ * comes later, and a column of the query around them or a subquery reads rows the catalog does not hold.
+ */
+async function sampleRefusal(catalog: Parameters<typeof catalogRows>[0], tree: TreeValue, stmt: Node, text: string): Promise<StatementError | null> {
+  const sampled = (v: TreeValue | undefined): boolean => Array.isArray(v) ? v.some(sampled)
+    : v !== null && typeof v === "object" && (v._node === "TABLESAMPLECLAUSE" || Object.entries(v).some(([k, x]) => k !== "_node" && sampled(x)));
+  if (!sampled(tree)) return null;
+  const samples: Array<Record<string, unknown>> = [];
+  const reads = (v: unknown): boolean => Array.isArray(v) ? v.some(reads)
+    : typeof v === "object" && v !== null && ("ParamRef" in v || "ColumnRef" in v || "SubLink" in v || Object.values(v).some(reads));
+  const collect = (v: unknown): void => {
+    if (Array.isArray(v)) { v.forEach(collect); return; }
+    if (typeof v !== "object" || v === null) return;
+    const s = (v as { RangeTableSample?: Record<string, unknown> }).RangeTableSample;
+    if (s !== undefined) samples.push(s);
+    Object.values(v).forEach(collect);
+  };
+  collect(stmt);
+  for (const s of samples) {
+    if (reads([s.args, s.repeatable])) continue;
+    // over pg_am, which the catalog always holds: the arguments are checked as the sample starts, on any table
+    const probe = { SelectStmt: { targetList: [], limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE",
+      fromClause: [{ RangeTableSample: { ...s, relation: { RangeVar: { schemaname: "pg_catalog", relname: "pg_am", inh: true, relpersistence: "p" } } } }] } };
+    const sql = `SELECT count(*) FROM (${deparseSync(probe as unknown as Node, { pretty: false })}) AS s`;
+    const refused = decodeBackend(Buffer.from(await catalog(frame("Q", cstr(sql))))).find((m) => m.type === "ErrorResponse");
+    if (refused?.type === "ErrorResponse") {
+      const f = refused.fields;
+      return new StatementError({ code: f.C ?? "XX000", message: f.M ?? "Postgres refused the sample's arguments", ...(f.D ? { detail: f.D } : {}), ...(f.H ? { hint: f.H } : {}) }, text);
+    }
+  }
+  return gapRefusal("tablesample", "Mason cannot answer TABLESAMPLE: the synced table has none of the source's pages, so its sample would not be Postgres's",
+    "read the whole table, or a part of it by a filter (WHERE id % 10 = 0)", text);
+}
+
 /** A statement's plan. `wireBound`: its rows are bounded by a row count an Execute sets on the wire, which its SQL
  *  does not say (src/duck/rewrite.ts markBounds; the listener asks for it where PlannedSql.unboundedLateral says so).
  *  `grants`: the session's role (src/duck/grants.ts), held after the analysis; null for a session with no role where
@@ -534,6 +575,9 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
       return { ...inner, ...(reads !== undefined ? { reads } : {}), rowFilters };
     }
   }
+  // a TABLESAMPLE: after the role's refusals (a filtered table's is the role's), before the rewrite and the allowlist
+  const sample = await sampleRefusal(catalog, analysis.tree, stmt, text);
+  if (sample !== null) throw sample;
   // the catalog's own OIDs for the types a database made (citext, an enum): the rewrite knows a few by name. The wire
   // sends the analysis's OID as it is, the catalog's, never the source's (issue 861): a client that looks it up in pg_type
   // or sends it back as a parameter's type reads the type itself
