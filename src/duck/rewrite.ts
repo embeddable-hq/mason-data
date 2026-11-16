@@ -38,7 +38,7 @@ import { evaluated, keysBound, type Unbound } from "./constant-key.ts";
 import { cteNamesApart } from "./cte-names.ts";
 import { canonicalRead, EQUAL_STEPS, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, MARKED_FUNCTIONS, markedError, ORDER_STEPS, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
 import { JSONB_KEY_FUNCTIONS } from "./jsonb-order.ts";
-import { strftimeTemplate } from "./to-char.ts";
+import { nativeTemplate, type NativeInt, type NativePiece } from "./to-char.ts";
 import { jsonbText, parseJson, storedPairs, type Json } from "./jsonb.ts";
 import { atTimeZoneOf, isUtc, UTC_NAMES } from "../lib/timezone.ts";
 import type { CaseMapping, DuckCollation, StatementCollations } from "./collation.ts";
@@ -8356,6 +8356,95 @@ function translateTemplate(fmt: string, forParse: boolean): string {
   return out;
 }
 
+/** an integer of a time the engine reads in the session's zone (src/duck/to-char.ts `NativeInt`), for a year 1 to 9999 AD */
+function nativeInt(of: NativeInt, x: () => AstNode): AstNode {
+  const part = (p: string): AstNode => fn("date_part", [strConst(p), x()]);
+  const mod = (a: AstNode, n: number): AstNode => op("%", a, intConst(n));
+  // `//` is DuckDB's division of integers (its `/` is a double's)
+  const div = (a: AstNode, n: number): AstNode => op("//", a, intConst(n));
+  const plus = (a: AstNode, n: number): AstNode => op("+", a, intConst(n));
+  switch (of) {
+    case "year": return part("year");
+    case "year3": return mod(part("year"), 1000);
+    case "year2": return mod(part("year"), 100);
+    case "year1": return mod(part("year"), 10);
+    case "isoyear": return part("isoyear");
+    case "isoyear3": return mod(part("isoyear"), 1000);
+    case "isoyear2": return mod(part("isoyear"), 100);
+    case "isoyear1": return mod(part("isoyear"), 10);
+    case "month": return part("month");
+    case "day": return part("day");
+    case "doy": return part("doy");
+    case "isoyday": return op("+", op("*", plus(part("week"), -1), intConst(7)), part("isodow"));
+    case "dow": return plus(part("dow"), 1);
+    case "isodow": return part("isodow");
+    case "monthweek": return plus(div(plus(part("day"), -1), 7), 1);
+    case "yearweek": return plus(div(plus(part("doy"), -1), 7), 1);
+    case "isoweek": return part("week");
+    case "century": return div(plus(part("year"), 99), 100);
+    // the day's number from 4714 BC's 24 November: its date in the session's zone, from 1970's first
+    case "julian": return plus(fn("date_diff", [strConst("day"), cast(strConst("1970-01-01"), ["date"]), cast(x(), ["date"])]), 2440588);
+    case "quarter": return part("quarter");
+    case "hour": return part("hour");
+    case "hour12": return plus(mod(plus(part("hour"), 11), 12), 1);
+    case "minute": return part("minute");
+    case "second": return part("second");
+    case "daysecond": return op("+", op("+", op("*", part("hour"), intConst(3600)), op("*", part("minute"), intConst(60))), part("second"));
+    default: return of satisfies never;
+  }
+}
+
+/** the text of a template's pieces (src/duck/to-char.ts `nativeTemplate`), each read from `x()`: a run of strftime's
+ *  specifiers and literal text is one strftime call (a literal's `%` doubled), every other piece its own expression,
+ *  joined by `||` */
+export function nativeText(pieces: readonly NativePiece[], x: () => AstNode): AstNode {
+  const parts: AstNode[] = [];
+  let run = "", specs = false, text = "";
+  const flush = (): void => {
+    if (run !== "") parts.push(specs ? fn("strftime", [x(), strConst(run)]) : strConst(text));
+    run = ""; specs = false; text = "";
+  };
+  const padded = (s: AstNode, pad: number): AstNode => pad === 0 ? s : fn("rpad", [s, intConst(pad), strConst(" ")]);
+  for (const p of pieces) {
+    switch (p.kind) {
+      case "text": run += p.text.replace(/%/g, "%%"); text += p.text; continue;
+      case "spec": run += p.spec; specs = true; continue;
+      default: break;
+    }
+    flush();
+    switch (p.kind) {
+      case "number": {
+        const v = nativeInt(p.of, x);
+        parts.push(p.width < 2 ? cast(v, ["varchar"]) : fn("printf", [strConst(`%0${p.width}d`), v]));
+        break;
+      }
+      case "ordinal": {
+        const last = (n: number): AstNode => op("%", nativeInt(p.of, x), intConst(n));
+        const suffix = (s: string): AstNode => strConst(p.upper ? s.toUpperCase() : s);
+        parts.push(caseWhen([[and([op(">=", last(100), intConst(11)), op("<=", last(100), intConst(13))]), suffix("th")],
+          [op("=", last(10), intConst(1)), suffix("st")], [op("=", last(10), intConst(2)), suffix("nd")], [op("=", last(10), intConst(3)), suffix("rd")]], suffix("th")));
+        break;
+      }
+      case "name": {
+        const name = fn("strftime", [x(), strConst(p.spec)]);
+        parts.push(padded(p.letters === "as" ? name : fn(p.letters, [name]), p.pad));
+        break;
+      }
+      case "meridiem": parts.push(caseWhen([[op("<", nativeInt("hour", x), intConst(12)), strConst(p.am)]], strConst(p.pm))); break;
+      case "roman": {
+        const r = fn("split_part", [strConst("I,II,III,IV,V,VI,VII,VIII,IX,X,XI,XII"), strConst(","), nativeInt("month", x)]);
+        parts.push(padded(p.lower ? fn("lower", [r]) : r, p.pad));
+        break;
+      }
+      case "fraction": parts.push(fn("substr", [fn("strftime", [x(), strConst("%f")]), intConst(1), intConst(p.digits)])); break;
+      case "thousands": parts.push(fn("printf", [strConst("%d,%03d"), op("//", nativeInt("year", x), intConst(1000)), op("%", nativeInt("year", x), intConst(1000))])); break;
+      default: return p satisfies never;
+    }
+  }
+  flush();
+  return parts.length === 1 ? parts[0]! : concat(...parts);
+}
+
 /** to_char of a time or a number, by Postgres's template rules (src/duck/to-char.ts): the value's text, the format's */
 function toChar(args: AstNode[], type: number | null, clone: (n: AstNode) => AstNode): AstNode {
   if (args.length !== 2) throw new Unrewritable("to_char() takes a value and a format", "write to_char(value, 'format')", { postgres: "42883" });
@@ -8363,18 +8452,19 @@ function toChar(args: AstNode[], type: number | null, clone: (n: AstNode) => Ast
     const fmt = constString(args[1]);
     // (the value is read by the guard and by strftime: a volatile one, `ts + random() * interval '1 day'`, would be two
     // values where Postgres reads one, so it is the function's, read once)
-    const spec = fmt === null || callsVolatile(args[0]) ? null : strftimeTemplate(fmt, type === DATE);
+    const pieces = fmt === null || callsVolatile(args[0]) ? null : nativeTemplate(fmt, type === DATE);
     const called = (x: AstNode, f: AstNode): AstNode => fn("__mason_to_char_time", [cast(x, ["varchar"]), cast(f, ["varchar"])]);
-    if (spec === null) return called(args[0]!, args[1]!);
-    // A FORMAT STRFTIME WRITES AS POSTGRES DOES (issue 464: the function a row, a grouped month was x8-18 of Postgres):
-    // DuckDB's own strftime of the value, in the session's zone as the function's text of it is, wherever the year is
-    // 1 to 9999 AD in any zone (two days inside either end); infinity, BC and a year past 9999 stay the function's
+    if (pieces === null) return called(args[0]!, args[1]!);
+    // A TEMPLATE THE ENGINE WRITES AS POSTGRES DOES (issue 464: the function a row, a grouped month was x8-18 of
+    // Postgres, a quarter or a padded month's name x8): DuckDB's own strftime and date_part of the value, in the
+    // session's zone as the function's text of it is, wherever the year is 1 to 9999 AD in any zone (two days inside
+    // either end); infinity, BC and a year past 9999 stay the function's
     const duckType = type === DATE ? "date" : type === TIMESTAMP ? "timestamp" : "timestamptz";
     const bound = (day: string): AstNode => cast(strConst(type === DATE ? day : type === TIMESTAMP ? `${day} 00:00:00` : `${day} 00:00:00+00`), [duckType]);
     const x = args[0]!;
     return caseWhen([
       [isNull(clone(x)), nullConst()],
-      [and([op(">=", clone(x), bound("0001-01-03")), op("<", clone(x), bound("9999-12-29"))]), fn("strftime", [clone(x), strConst(spec)])],
+      [and([op(">=", clone(x), bound("0001-01-03")), op("<", clone(x), bound("9999-12-29"))]), nativeText(pieces, () => clone(x))],
     ], called(x, args[1]!));
   }
   if (type !== null && (INTEGERS.has(type) || FLOATS.has(type) || type === NUMERIC)) return fn("__mason_to_char_number", [cast(args[0]!, ["varchar"]), cast(args[1]!, ["varchar"])]);

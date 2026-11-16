@@ -122,16 +122,22 @@ paths:
     UNION, an IN, a CASE or a comparison it was cast to a type that rounds the other's decimals, and a product of it
     passed 38 places where Postgres answers. `tests/duck-wire.test.ts` "issues 464, 465", the plan fixture's BINS, the
     oracle's `bin:` statements over `bins`;
-  - **a to_char of a time in a format DuckDB's strftime writes as Postgres does is `strftime`** (`strftimeTemplate`,
-    src/duck/to-char.ts; `toChar`, issue 464: the function a row, a grouped month was ×8–18 of Postgres over 4.5 M
-    rows): the template read as the function reads it, and taken only when every pattern is one strftime writes alike
-    (YYYY MM DD DDD IYYY IW Mon Dy FMMonth FMDay HH24 MI SS MS US, a date's without the time of day) and the format is
-    a constant; anything else (Q, a padded name, FM on a number, TH, TM, another case, a parameter, a template that
-    writes nothing, which DuckDB refuses as it binds, and a volatile value, which the guard would read twice) is the function's.
-    The value is read in the session's zone by DuckDB's calendar, as the function's text of it was, and only for a
-    year 1 to 9999 AD in any zone (a CASE: NULL is NULL, ±infinity, BC and a year past 9999 the function's).
-    `tests/duck-functions.test.ts` holds each taken template to the function, `tests/duck-wire.test.ts` "issue 464"
-    the wire in three zones, the plan fixture's `issue 464` and the oracle's `issue 464: to_char` statements;
+  - **a to_char of a time in a template the engine writes as Postgres does is the engine's own text**
+    (`nativeTemplate`, src/duck/to-char.ts; `toChar`, `nativeText`, src/duck/rewrite.ts; issue 464: the function a
+    row, a grouped month was ×8–18 of Postgres over 4.5 M rows, a quarter or a padded month's name ×8–9 over a million):
+    the template read as the function reads it, each pattern a piece (strftime's specifiers and literal text as one
+    strftime call, a number Postgres pads that strftime does not from `date_part` through `printf`, a name in another
+    case or padded to nine through `upper`, `lower` and `rpad`, TH as the number's ordinal, a meridiem by the hour, an
+    era as AD, a Roman month by `split_part`), joined by `||`, and taken only when every pattern is one the pieces write
+    and the format is a constant. What stays the function's: TM, FX, a zone's TZ, TZH, TZM and OF, SP, TH on anything
+    but a whole number or Y,YYY, FM before a literal, a backslash, a date's pattern of the time of day (a date is a
+    zone's midnight, which a day of daylight saving may not have), a parameter, a template that writes nothing (DuckDB
+    refuses an empty format as it binds), and a volatile value, which the guard would read twice. The value is read in
+    the session's zone by DuckDB's calendar, as the function's text of it was, and only for a year 1 to 9999 AD in any
+    zone (a CASE: NULL is NULL, ±infinity, BC and a year past 9999 the function's). `tests/duck-functions.test.ts` holds
+    each taken template's SQL to the function over times at their edges, `tests/duck-wire.test.ts` "issue 464" the
+    wire to Postgres in three zones, `tests/duck-plans.test.ts` "issue 464: to_char of …" the rows the function is
+    handed over the shop (none), and the oracle's `issue 464: to_char` statements;
   - **a mode() of a text or varchar under a libc order keys each distinct value once** (`modeKeyedOnce`, issue 464: the
     libc key's function a row, a status by tenant was ×6 of Postgres over a million rows): its ORDER BY is
     `(SELECT __mason_libc_key_or_null(x, collate)) NULLS FIRST, x`, a scalar subquery of the value, which the engine

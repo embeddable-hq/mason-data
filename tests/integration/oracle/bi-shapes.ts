@@ -301,6 +301,10 @@ export const BI_SHAPES: Array<{ name: string; sql: string }> = [
   // grouped by the engine's integer, and a DISTINCT ON returning every group's latest row, its ties broken by the key
   { name: "issue 464: to_char of a month grouped", sql: "SELECT to_char(o.created_at, 'YYYY-MM') AS m, count(*) FROM orders o GROUP BY 1 ORDER BY 1" },
   { name: "issue 464: to_char of a day and a month's name grouped, ordered by the count", sql: "SELECT to_char(o.created_at, 'YYYY-MM-DD') AS d, to_char(o.created_at, 'FMMonth YYYY') AS m, count(*) AS n FROM orders o GROUP BY 1, 2 ORDER BY 3 DESC, 1 LIMIT 10" },
+  // issue 464: a quarter and a month's name padded to nine grouped by their to_char text (DuckDB's strftime, date_part
+  // and rpad, never the function a row: x8-9 of Postgres over a million orders)
+  { name: "issue 464: to_char of a quarter grouped", sql: "SELECT to_char(o.created_at, 'YYYY \"Q\"Q') AS q, count(*) FROM orders o GROUP BY 1 ORDER BY 1" },
+  { name: "issue 464: to_char of a padded month's name grouped", sql: "SELECT to_char(o.created_at, 'Month YYYY') AS m, count(*) FROM orders o GROUP BY 1 ORDER BY 1" },
   // issue 464: mode() of a text under the database's libc order, each distinct value keyed once: a status by customer
   // (many small groups, many ties the order decides), the notes by tenant descending, beside another aggregate
   { name: "issue 464: mode() of a status by customer, its ties decided by the order", sql: "SELECT o.customer_id, mode() WITHIN GROUP (ORDER BY o.status) AS top_status, count(*) AS n FROM orders o GROUP BY 1 ORDER BY 1 NULLS FIRST" },
