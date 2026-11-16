@@ -41,6 +41,7 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   now takes 0.1 to 0.15 s, where Postgres takes about 0.4 s. This now holds for every pattern in every case, padded or
   with `FM`, with `TH` after a number. These are still slow: `TM`, `FX`, a time zone's `TZ`, `TZH`, `TZM` and `OF`,
   `SP`, a format passed as a parameter, a year before 1 or after 9999, and a date formatted with a time of day.
+- **The web page's Overview no longer has a Connected tools row.** The Usage page shows who is connected now.
 
 ## What was wrong and is now right
 

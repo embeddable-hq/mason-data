@@ -254,10 +254,10 @@ test("each added table's line is mason status's: the table, its percent and what
   }
 });
 
-test("the Overview's facts card: Source, Mason, Disk and Connected tools in the page's words — no Sources file, Changes or Web page row (issue 877; the owner kept it, 2026-11-13; Source, issue 935)", () => {
+test("the Overview's facts card: Source, Mason and Disk in the page's words — no Sources file, Changes, Web page or Connected tools row (issue 877; the owner kept it, 2026-11-13; Source, issue 935; issue 1111)", () => {
   const factRows = fn<[unknown, number], Array<[string, string, boolean]>>("factRows");
   const rows = factRows(RUNNING, NOW);
-  assert.deepEqual(rows.map(([k]) => k), ["Source", "Mason", "Disk", "Connected tools"]);
+  assert.deepEqual(rows.map(([k]) => k), ["Source", "Mason", "Disk"]);
   // the database's name and host, the version's number alone (no build in brackets), and what kind of server it is
   const standby = (version: string, on: boolean) => factRows({ ...RUNNING, source: { ...RUNNING.source, version, standby: on } }, NOW)[0];
   assert.deepEqual(standby("16.15 (Ubuntu 16.15-1.pgdg20.04+1)", true), ["Source", "shop on db.example.com · Postgres 16.15 · a read replica", false]);
@@ -277,11 +277,11 @@ test("the Overview's facts card: Source, Mason, Disk and Connected tools in the 
     ["Disk", "1.0 GiB free · the synced data uses 1.0 MiB · the first syncs running need about 2.0 GiB more. That is more than is free: the sync stops before the disk fills", true]);
   assert.deepEqual(disk({ path: "/x", freeBytes: null, copyBytes: null, projectedBytes: null, error: "the free space where the synced data is could not be read: EACCES" }),
     ["Disk", "the free space where the synced data is could not be read: EACCES", true]);
-  // the sessions, as the tools connected
-  const tools = (sessions: unknown) => factRows({ ...RUNNING, sessions }, NOW).find(([k]) => k === "Connected tools");
-  assert.deepEqual(tools({ open: 0, byClient: [] }), ["Connected tools", "none", false]);
-  assert.deepEqual(tools({ open: 5, byClient: [{ user: "metabase", client: "Metabase", open: 3, running: 1 }, { user: "", client: "psql", open: 2, running: 0 }] }), ["Connected tools", "2 connected", false]);
-  assert.deepEqual(tools({ error: "the listener did not answer" }), ["Connected tools", "unknown: the listener did not answer", false]);
+  // who is connected is the Usage page's, never a row here, whatever the sessions say (issue 1111)
+  for (const sessions of [{ open: 0, byClient: [] }, { open: 5, byClient: [{ user: "metabase", client: "Metabase", open: 3, running: 1 }, { user: "", client: "psql", open: 2, running: 0 }] }, { error: "the listener did not answer" }]) {
+    assert.deepEqual(factRows({ ...RUNNING, sessions }, NOW).map(([k]) => k), ["Source", "Mason", "Disk"], JSON.stringify(sessions));
+    assert.doesNotMatch(textOf(fn<[unknown, number], string>("renderFacts")({ ...RUNNING, sessions }, NOW)), /Connected|connected|listener/, JSON.stringify(sessions));
+  }
   // restarts only when there were some, without a command
   const restarted = factRows({ ...RUNNING, engine: { ...RUNNING.engine, restarts: { count: 2, last: { at: new Date(NOW - 300_000).toISOString(), why: "it ran out of memory", upSeconds: 120 } } } }, NOW);
   assert.deepEqual(restarted.find(([k]) => k === "Restarts"), ["Restarts", "2, the last 5 min ago: it ran out of memory, after 120 s up", true]);
@@ -595,7 +595,8 @@ test("no table added: the commands' sentence, and what adds one", () => {
   assert.match(textOf(fn<[unknown, unknown?], string>("renderStatus")(NONE)), /^Getting started 2 of 3 done ✓ Mason is running \(done\) ○ Sync a table \(to do\) Add a table ✓ Create a user \(done\)$/);
   // where Getting started cannot tell (the users unreadable): the commands' sentence, and the facts card
   const html = fn<[unknown, unknown?], string>("renderStatus")({ ...NONE, users: { error: "users.json cannot be read" } });
-  assert.match(textOf(html), /^No table added yet\. Your database has 4\. Add one on the Tables page\. Mason Source .* Connected tools none Your database is on another machine\. Mason will sync the tables you choose to this machine\.$/, "no box: the facts card says the Source, then where it is, as information");
+  assert.match(textOf(html), /^No table added yet\. Your database has 4\. Add one on the Tables page\. Mason Source .* Your database is on another machine\. Mason will sync the tables you choose to this machine\.$/, "no box: the facts card says the Source, then where it is, as information");
+  assert.doesNotMatch(textOf(html), /Connected tools/, "who is connected is the Usage page's (issue 1111)");
   assert.match(html, /Add one on the <a href="#tables">Tables<\/a> page\./, "the way to add one is the page's own");
 });
 
@@ -3104,7 +3105,8 @@ test("the Overview: the word and its line, the cards (tables synced N of M, rows
     assert.match(html, /<a class="card warn link" href="#observability\/queries\?status=refused-or-failed&amp;range=24h"><p class="card-label">Query errors, last day<\/p><p class="card-value">3<\/p><p class="card-sub">30 refused<\/p>/);
     // the Source in the box, under its line (mason status's row, issue 935); the facts in main's card, "Mason"
     assert.match(html, /<dl class="health-facts"><div><dt>Source<\/dt><dd>postgres:.*?<\/dd><\/div><\/dl><\/div>/);
-    assert.match(text, / Mason Source shop on db\.example\.com · Postgres 16\.4 · your main database Mason \S+ · up .* Disk .* Connected tools none Your database is on another machine\. Mason will sync the tables you choose to this machine\.$/, "main's facts card, then where the database is, as information");
+    assert.match(text, / Mason Source shop on db\.example\.com · Postgres 16\.4 · your main database Mason \S+ · up .* Disk .* Your database is on another machine\. Mason will sync the tables you choose to this machine\.$/, "main's facts card, then where the database is, as information");
+    assert.doesNotMatch(text, /Connected tools/, "who is connected is the Usage page's (issue 1111)");
     assert.doesNotMatch(html, /\/app\//, "never an absolute path");
     assert.match(html, /<caption>Mason<\/caption><tbody><tr><th scope="row">Source<\/th>/, "ONE table of the other facts, each a row headed by its name");
     const facts = html.slice(html.indexOf("<caption>Mason</caption>"));
@@ -5605,7 +5607,7 @@ test("the Overview: the last day's unsupported SQL is one line at its foot, with
   const app = fn<[unknown], App>("createApp")(run.fetch);
   await app.poll();
   assert.ok(run.asked.includes("GET api/unsupported?limit=100"), "the Overview reads the last day's, the endpoint's default");
-  assert.match(textOf(app.view().status!), /Connected tools .* Unsupported SQL, last day: a window frame in GROUPS mode: 12 statements as ana, metabase from Metabase \(and 1 other\) See all$/);
+  assert.match(textOf(app.view().status!), / Disk .* Unsupported SQL, last day: a window frame in GROUPS mode: 12 statements as ana, metabase from Metabase \(and 1 other\) See all$/);
 });
 
 // ------------------------------------------------------------------ a table just added shows its copy at once
