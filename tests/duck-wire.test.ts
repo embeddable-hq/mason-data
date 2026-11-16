@@ -498,6 +498,40 @@ test("a statement over a copied table is answered by DuckDB with Postgres's colu
   } finally { await c.end(); }
 });
 
+test("issue 981: a WITH query named like the table it reads reads the table inside its own body, by Postgres's rules, in every place a name is read", async () => {
+  // A WITH query is seen by the query that declares it, the queries inside that one and the WITH queries after it,
+  // never by its own body, unless the WITH is RECURSIVE. Before the fix the first statement counted 0 (the listener
+  // took it for a statement of no table, which the empty catalog answered) and the join failed XX000 "Maximum call
+  // stack size exceeded" (the rewrite followed the WITH query into itself).
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      // a count, and a join
+      ["WITH orders AS (SELECT * FROM orders WHERE status = 'paid') SELECT count(*) FROM orders", "ordered"],
+      ["WITH orders AS (SELECT * FROM orders WHERE status = 'paid') SELECT count(*), count(i.total) FROM orders LEFT JOIN sales.invoices i ON i.id = orders.id", "ordered"],
+      ["WITH orders AS (SELECT * FROM orders WHERE status = 'paid') SELECT o.id, i.total FROM orders o LEFT JOIN sales.invoices i ON i.id = o.id ORDER BY o.id DESC LIMIT 1", "ordered"],
+      // a column qualified by the name, TABLE, and a WITH query of a column list
+      ["WITH orders AS (SELECT id, status FROM orders WHERE status = 'paid') SELECT orders.id, orders.status FROM orders ORDER BY 1", "ordered"],
+      ["WITH orders AS (SELECT id, status FROM orders WHERE status = 'paid') TABLE orders ORDER BY id", "ordered"],
+      ["WITH orders(n, s) AS (SELECT id, status FROM orders WHERE status = 'paid') SELECT count(*), sum(n), max(s) FROM orders", "ordered"],
+      // a later WITH query reads an earlier one of a table's name; an earlier one reads the table a later one is named as
+      ["WITH orders AS (SELECT * FROM orders WHERE status = 'paid'), accounts AS (SELECT * FROM orders WHERE id > 1) SELECT (SELECT count(*) FROM accounts) AS a, (SELECT count(*) FROM orders) AS o", "ordered"],
+      ["WITH a AS (SELECT * FROM orders), orders AS (SELECT * FROM a WHERE status = 'paid') SELECT (SELECT count(*) FROM a) AS a, (SELECT count(*) FROM orders) AS o", "ordered"],
+      // WITH RECURSIVE: the WITH query sees itself, and the table is read by its schema
+      ["WITH RECURSIVE orders AS (SELECT 1 AS id UNION ALL SELECT id + 1 FROM orders WHERE id < 5) SELECT count(*), sum(id) FROM orders", "ordered"],
+      ["WITH RECURSIVE orders AS (SELECT 1 AS id UNION ALL SELECT id + 1 FROM orders WHERE id < 5) SELECT (SELECT count(*) FROM public.orders) AS whole, count(*) AS part FROM orders", "ordered"],
+      ["WITH RECURSIVE r AS (SELECT min(id) AS id FROM orders UNION ALL SELECT r.id + 1 FROM r JOIN orders o ON o.id = r.id + 1) SELECT count(*), sum(id) FROM r", "ordered"],
+      // inside a subquery, beside the table read outside it; in a set operation's arm, beside the table in the other
+      ["SELECT (SELECT count(*) FROM orders) AS whole, (WITH orders AS (SELECT * FROM orders WHERE status = 'paid') SELECT count(*) FROM orders) AS paid", "ordered"],
+      ["SELECT count(*) FROM orders WHERE id IN (WITH orders AS (SELECT * FROM orders WHERE status = 'pending') SELECT id FROM orders)", "ordered"],
+      ["(WITH orders AS (SELECT * FROM orders WHERE status = 'paid') SELECT count(*) FROM orders) UNION ALL SELECT count(*) FROM orders", "ordered"],
+      // the body reads the table by its schema, and the statement reads both
+      ["WITH orders AS (SELECT * FROM public.orders WHERE status = 'paid') SELECT count(*) FROM orders", "ordered"],
+      ["WITH orders AS (SELECT * FROM orders WHERE status = 'paid') SELECT count(*) FROM orders, public.orders p WHERE p.id = orders.id", "ordered"],
+    ]), []);
+  } finally { await c.end(); }
+});
+
 test("a result column is Postgres's type: a sum of an integer is DuckDB's HUGEINT, sent as Postgres's bigint", async () => {
   const c = await client();
   try {

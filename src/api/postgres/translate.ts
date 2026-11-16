@@ -12,7 +12,8 @@
  *     out, never passed through on a guess. The switch has no default branch that accepts.
  */
 import { gapMark, type GapId } from "../../duck/gaps.ts";
-import type { A_Const, ColumnRef, CommonTableExpr, Node, RangeVar, SelectStmt, TypeCast, VariableSetStmt } from "libpg-query";
+import { cteReads } from "../../duck/cte-names.ts";
+import type { A_Const, ColumnRef, Node, RangeVar, SelectStmt, TypeCast, VariableSetStmt } from "libpg-query";
 
 /** A statement, or a part of one, this listener does not answer: named, placed, with a SQLSTATE and the way out. */
 export class Unsupported extends Error {
@@ -157,9 +158,10 @@ export function duckTranslate(stmt: Node, text: string): Translation | { kind: "
   }
   if (kind !== "SelectStmt") return sessionStatement(stmt);
   const s = bodyOf<SelectStmt>(stmt);
-  const ctes = (s.withClause?.ctes ?? []).map((n) => bodyOf<CommonTableExpr>(n));
-  const names = new Set(ctes.map((c) => String(c.ctename ?? "")));
-  const relations = collect(s, "RangeVar").map((n) => bodyOf<RangeVar>(n)).filter((r) => r.schemaname !== undefined || !names.has(String(r.relname ?? "")));
+  // (a name a WITH query's own body reads is the table's, never the WITH query's: Postgres's rules, read in one place,
+  // issue 981)
+  const ctes = cteReads(stmt);
+  const relations = collect(s, "RangeVar").map((n) => bodyOf<RangeVar>(n)).filter((r) => !ctes.has(r));
   if (relations.length === 0) return mayOrderText(s) ? { kind: "catalog", fromless: { names: pgColumnNames(s) } } : { kind: "catalog" };
   if (relations.every(isCatalogRelation)) return { kind: "catalog" };
   return { kind: "duckdb", sql: text, names: pgColumnNames(s) };

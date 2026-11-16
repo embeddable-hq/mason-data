@@ -46,6 +46,18 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
     it served 0 rows: a `TRUNCATE`, then another transaction left open, then the reload.
   - Now each whole sync is caught up before it is served. Until then, a table synced before keeps serving its previous
     data, and a new table is not served yet.
+- **A WITH query named like the table it reads now gives Postgres's answer.** In
+  `WITH orders AS (SELECT * FROM orders WHERE status = 'paid') SELECT count(*) FROM orders`, the WITH query's own
+  `FROM orders` reads the table, as on Postgres. Before, Mason counted 0 rows. With a join, the query failed with
+  XX000 "Maximum call stack size exceeded". This also holds when the WITH query is inside a subquery or one arm of a
+  UNION, and when a later WITH query reads an earlier one named like a table. A WITH query in one arm of a UNION,
+  named like a synced table, could also read that table instead of itself when the query held a `*`. It now reads
+  itself.
+  - A WITH query whose name differs from a table's only in case is now told apart from it, as on Postgres. Before,
+    `WITH small AS (…) SELECT count(*) FROM "Small"` counted the WITH query's rows, not the table `"Small"`'s. Tools
+    that make PascalCase tables, such as Prisma, write such names.
+  - A whole row of a WITH query with a column list, such as `WITH q(a, b) AS (…) SELECT q FROM q`, now answers.
+    Before, it failed with 42703.
 - **A column your sources file leaves out is no longer served under another name.** This covers a column that
   `exclude:` names, one a `columns:` entry does not list, and a secret-looking column `mason add` left out. Before, Mason
   matched columns by name alone. If two columns swapped names in one transaction, the left-out column was served under
