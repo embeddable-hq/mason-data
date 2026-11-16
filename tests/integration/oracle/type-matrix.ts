@@ -1308,7 +1308,7 @@ function* matrix(): Generator<Matrixed> {
     ["every value, descending", "SELECT id, s FROM coll ORDER BY s DESC, id LIMIT 30"],
     ["every value, a page", "SELECT id, s FROM coll ORDER BY s, id LIMIT 30 OFFSET 60"],
     ["grouped (as written)", "SELECT s FROM coll_top GROUP BY s ORDER BY s ASC LIMIT 12"],
-    ["DISTINCT (as written)", "SELECT DISTINCT s FROM coll_top ORDER BY 1 LIMIT 12"],
+    ["DISTINCT", "SELECT DISTINCT s FROM coll_top ORDER BY 1 LIMIT 12"],
     ["DISTINCT ON (as written)", "SELECT DISTINCT ON (s) s, id FROM coll_top ORDER BY s, id LIMIT 5"],
     ["a set operation (as written)", "SELECT s FROM coll_top UNION ALL SELECT s FROM coll ORDER BY 1 LIMIT 5"],
     ["a join (as written)", "SELECT a.id, a.s FROM coll_top a JOIN coll_top b ON b.id = a.id ORDER BY a.s LIMIT 5"],
@@ -1338,7 +1338,7 @@ function* matrix(): Generator<Matrixed> {
     ["every value", "SELECT min(s), max(s) FROM coll"],
     ["of an expression", "SELECT min(lower(s)), max(s || 'x') FROM coll_top"],
     ["a derived table", "SELECT min(s), max(s) FROM (SELECT s FROM coll_top WHERE n > 10) q"],
-    ["grouped (as written)", "SELECT n % 5, min(s), max(s) FROM coll_top GROUP BY 1 ORDER BY 1"],
+    ["grouped", "SELECT n % 5, min(s), max(s) FROM coll_top GROUP BY 1 ORDER BY 1"],
     ["FILTER (as written)", "SELECT min(s) FILTER (WHERE n > 5), max(s) FROM coll_top"],
     ["a window (as written)", "SELECT id, max(s) OVER (PARTITION BY n % 3) FROM coll_top ORDER BY id LIMIT 5"],
     ["a control character inside a value", "SELECT min(s), max(s) FROM coll_top WHERE s IN ('abc', 'ab' || chr(2) || 'cd')"],
@@ -1372,6 +1372,38 @@ function* matrix(): Generator<Matrixed> {
     ["bytes (as written)", `SELECT id, s FROM coll_rep ORDER BY s COLLATE "C", id LIMIT 10`],
     ["min and max in bytes (as written)", `SELECT min(s COLLATE "C"), max(s COLLATE "C") FROM coll_rep`],
   ] as Array<[string, string]>) yield q(`text keyed once a value: ${name}`, sql);
+  // the third round: a grouped min / max keys each group's candidates once (src/duck/libc-bound.ts `pickGrouped`), and a
+  // SELECT DISTINCT sorted sorts its distinct rows (`distinctSorted`), over the value most rows hold, every value, and
+  // values each their own
+  for (const [name, sql] of [
+    ["grouped", "SELECT n, min(s), max(s) FROM coll_rep GROUP BY n ORDER BY n"],
+    ["grouped by an expression, a varchar beside a count", "SELECT n % 3, min(v), max(v), count(*) FROM coll_rep GROUP BY 1 ORDER BY 1"],
+    ["grouped, HAVING and ORDER BY the min", "SELECT n, min(s) FROM coll_rep GROUP BY n HAVING max(s) > 'b' ORDER BY min(s) DESC, n"],
+    ["grouped by two keys, a NULL group", "SELECT n % 2, CASE WHEN n = 3 THEN NULL ELSE n % 3 END AS g, min(s), max(s) FROM coll_rep GROUP BY 1, 2 ORDER BY 1, 2 NULLS FIRST"],
+    ["grouped, a group of NULLs alone", "SELECT s IS NULL, min(s), max(s) FROM coll_rep GROUP BY 1 ORDER BY 1"],
+    ["grouped by the text itself", "SELECT s, min(s), max(v), count(*) FROM coll_rep GROUP BY s ORDER BY 1 NULLS FIRST"],
+    ["grouped, values glibc weighs alike", "SELECT n, min(s), max(s) FROM coll_rep WHERE s IN ('k', 'K', chr(8490), 'é', 'e' || chr(769), 'E', 'e') GROUP BY n ORDER BY n"],
+    ["grouped, letters of Latin", "SELECT n % 2, min(s), max(s) FROM coll_rep WHERE left(s, 1) IN ('Ø', 'o', 'Ł', 'l', 'Ö', 'ŀ', 'ª', 'a', '²', '2', 'É', 'e') GROUP BY 1 ORDER BY 1"],
+    ["grouped, control characters", "SELECT n % 2, min(s), max(s) FROM coll_top WHERE s LIKE '%' || chr(2) || '%' OR s LIKE 'ab%' OR s LIKE 'z%' GROUP BY 1 ORDER BY 1"],
+    ["grouped, every value", "SELECT id % 4, min(s), max(s) FROM coll GROUP BY 1 ORDER BY 1"],
+    ["grouped, values each their own", "SELECT n, min(s), max(s) FROM coll_top GROUP BY n ORDER BY n"],
+    ["grouped, a group a row", "SELECT id, min(s), max(s) FROM coll_top WHERE id < 40 GROUP BY id ORDER BY id"],
+    ["grouped, filtered outside", "SELECT * FROM (SELECT n, min(s) AS lo, max(s) AS hi FROM coll_rep GROUP BY n) q WHERE q.n = 3"],
+    ["grouped, a LIMIT", "SELECT n, max(s) FROM coll_top GROUP BY n ORDER BY max(s), n LIMIT 5"],
+    ["grouped, no row", "SELECT n, min(s) FROM coll_rep WHERE n > 7 GROUP BY n"],
+    // (one value under several orders in one grouped statement, each its own: the first review of PR 1104)
+    ["grouped, one value under several collations", `SELECT n, min(s), min(s COLLATE "C"), max(s COLLATE "en_US"), max(s), min(v COLLATE "en_US") FROM coll_rep GROUP BY n ORDER BY n`],
+    ["DISTINCT sorted", "SELECT DISTINCT s FROM coll_rep ORDER BY s"],
+    ["DISTINCT sorted, descending, NULLs last", "SELECT DISTINCT s FROM coll_rep ORDER BY s DESC NULLS LAST"],
+    ["DISTINCT of two columns", "SELECT DISTINCT n, s FROM coll_rep ORDER BY s, n"],
+    ["DISTINCT by an output's name", "SELECT DISTINCT lower(s) AS l FROM coll_rep ORDER BY l NULLS FIRST"],
+    ["DISTINCT, every value", "SELECT DISTINCT s FROM coll ORDER BY 1"],
+    ["DISTINCT, a page", "SELECT DISTINCT s FROM coll_top ORDER BY s LIMIT 20 OFFSET 40"],
+    ["DISTINCT, a varchar descending", "SELECT DISTINCT v FROM coll_top ORDER BY v DESC LIMIT 15"],
+    ["DISTINCT in bytes (as written)", `SELECT DISTINCT s COLLATE "C" FROM coll_rep ORDER BY 1`],
+    ["grouped, FILTER (as written)", "SELECT n, min(s) FILTER (WHERE id > 100) FROM coll_rep GROUP BY n ORDER BY n"],
+    ["grouped, ROLLUP (as written)", "SELECT n, min(s), max(s) FROM coll_rep GROUP BY ROLLUP (n) ORDER BY n NULLS LAST"],
+  ] as Array<[string, string]>) yield q(`text keyed once a group: ${name}`, sql);
   // ---- the corpus rerun of fbbf8f08: what reached DuckDB and failed, and the pieces still unverified -------------------
   // a name another table has in another case: qualified with the table Postgres resolved it to
   yield q("a name in another case, joined", `SELECT id, "T", t, "Tz" FROM typed JOIN cased USING (id) ORDER BY id`);

@@ -369,6 +369,11 @@ const JSONB_SHAPES: Shape[] = [
   { name: "text under libc: a table's page, ORDER BY a text LIMIT 50, the key for the candidates alone", sql: "SELECT o.id, o.status, o.amount FROM orders o ORDER BY o.status LIMIT 50", on: "libc" },
   { name: "text under libc: SELECT * ORDER BY a text DESC LIMIT 50, the key for the candidates alone", sql: "SELECT * FROM orders ORDER BY status DESC LIMIT 50", on: "libc" },
   { name: "text under libc: min and max of a text, the key for the candidates alone", sql: "SELECT min(status), max(status) FROM orders", on: "libc" },
+  // issue 666, the third round: a grouped min / max under a libc order keys each group's candidates alone (the bounds of
+  // each distinct (group, value) pair, a WITH query of its groups each pick reads), and a SELECT DISTINCT sorted by the
+  // order sorts its distinct rows; neither hands the key's function a row of the scan
+  { name: "text under libc: a grouped min and max of a text, the key for each group's candidates alone", sql: "SELECT o.tenant_id, min(o.status), max(o.status) FROM orders o GROUP BY 1 ORDER BY 1", on: "libc" },
+  { name: "text under libc: SELECT DISTINCT a text ORDER BY it, the key once a distinct value", sql: "SELECT DISTINCT o.status FROM orders o ORDER BY 1", on: "libc" },
   // issue 464: mode() of a text under a libc order keys each distinct value once: a scalar subquery of the value, which
   // the engine computes over the distinct values and joins back (a delimiter join), never the key's function a row
   { name: "text under libc: mode() of a text by group, the key once a value", sql: "SELECT o.tenant_id, mode() WITHIN GROUP (ORDER BY o.status) AS top_status FROM orders o GROUP BY 1 ORDER BY 1", on: "libc" },
@@ -980,6 +985,39 @@ test("a text's top N and min / max under a libc order hand the libc key each dis
     ["SELECT * FROM orders ORDER BY status DESC LIMIT 50", 6]] as const) {
     const keyed = (await rowsOf(sql, "libc")).get("__mason_libc_key") ?? 0;
     t.diagnostic(`${sql}: __mason_libc_key handed ${keyed} rows of ${ORDERS}`);
+    assert.ok(keyed > 0, `${sql}: the libc key was handed no row — the function counter or the statement changed`);
+    assert.ok(keyed <= most, `${sql}: the libc key was handed ${keyed} rows, more than ${most}: keyed per row, not for its candidates`);
+  }
+});
+
+// issue 666, the third round: a grouped min / max and a SELECT DISTINCT sorted under a libc order hand the libc key each
+// group's DISTINCT candidate values (src/duck/libc-bound.ts `pickGrouped`), and each distinct value (`distinctSorted`),
+// never a row: keyed a row, the min and max of names by region took 28 s against Postgres's 0.4 s over 4.5 M rows. Over
+// a uniform column (the six statuses, the 50,000 notes) and a skewed one (99 % of the orders one kind), by the three
+// tenants and by the 20,000 customers. The rows each is handed are recorded here, as issue 666 asks
+const SKEWED = "CASE WHEN o.id % 100 = 0 THEN o.status ELSE 'standard' END";
+test("issue 666: a grouped min / max and a SELECT DISTINCT sorted under a libc order hand the libc key each distinct candidate once, never every row", async (t) => {
+  // [the statement, the most rows the key may be handed]; measured on the libc shop's 245,760 orders, where keyed a row
+  // each min and max handed it every row (491,520 for a min and a max)
+  for (const [sql, most] of [
+    // a group's candidates are the values whose bounds reach its least (greatest) one, each keyed once, beside the ORDER
+    // BY's key of each group: a few a group (measured: 7, 7, 9 and 16 rows; by customer 389,120, every row's value)
+    ["SELECT o.tenant_id, min(o.status), max(o.status) FROM orders o GROUP BY 1 ORDER BY 1", 3 + 3 * 6],
+    [`SELECT o.tenant_id, min(${SKEWED}), max(${SKEWED}) FROM orders o GROUP BY 1 ORDER BY 1`, 3 + 3 * 7],
+    ["SELECT o.tenant_id, min(o.notes), max(o.notes) FROM orders o GROUP BY 1 ORDER BY 1", 3 + 3 * 8],
+    // (20,001 customers over 245,760 orders: groups more than a sixteenth of the rows, so the key a row, as written —
+    // a row a group beside the aggregate held more than it, the second review of PR 1104)
+    ["SELECT o.customer_id, min(o.status), max(o.notes), count(*) FROM orders o GROUP BY 1 ORDER BY 1 LIMIT 5", 2 * SMALL_ORDERS],
+    [`SELECT o.customer_id % 7 AS g, max(${SKEWED}) FROM orders o GROUP BY 1 HAVING count(*) > 1 ORDER BY 1`, 7 * 7],
+    // a SELECT DISTINCT keys each distinct value; under a LIMIT its candidates alone (measured: 6, 4, 100 and 12 rows)
+    ["SELECT DISTINCT o.status FROM orders o ORDER BY 1", 6],
+    [`SELECT DISTINCT ${SKEWED} AS k FROM orders o ORDER BY 1 DESC`, 7],
+    ["SELECT DISTINCT o.notes FROM orders o ORDER BY 1 LIMIT 100", 100],
+    ["SELECT DISTINCT o.tenant_id, o.status FROM orders o ORDER BY 2, 1", 3 * 6],
+  ] as const) {
+    const rows = await rowsOf(sql, "libc");
+    const keyed = ["__mason_libc_key", "__mason_libc_key_or_null"].reduce((n, k) => n + (rows.get(k) ?? 0), 0);
+    t.diagnostic(`${sql}: the libc key handed ${keyed} rows`);
     assert.ok(keyed > 0, `${sql}: the libc key was handed no row — the function counter or the statement changed`);
     assert.ok(keyed <= most, `${sql}: the libc key was handed ${keyed} rows, more than ${most}: keyed per row, not for its candidates`);
   }

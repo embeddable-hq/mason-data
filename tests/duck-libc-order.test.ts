@@ -433,7 +433,8 @@ test("libc bound: a top N and a min / max key their candidates alone, so a value
       for (const sql of ["SELECT id, s FROM t ORDER BY s DESC LIMIT 2", "SELECT max(s) FROM t", "SELECT id FROM t ORDER BY s LIMIT 7", "SELECT id FROM t ORDER BY s"]) {
         await assert.rejects(c.query(sql), uncovered, sql);
       }
-      // a grouped min keys every group's rows, as written
+      // a grouped min over groups as many as a sixteenth of its rows keys every row, as written (src/duck/libc-bound.ts
+      // `pickGrouped`; the few groups' path is tests/duck-wire.test.ts "libc grouped")
       await assert.rejects(c.query("SELECT id % 2, min(s) FROM t GROUP BY 1"), uncovered);
     } finally { await c.end(); }
   } finally { await api?.close(); await store.close(); }

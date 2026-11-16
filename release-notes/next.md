@@ -64,6 +64,16 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
     gives up after 30 s, and says so.
 - **`mason status --json` now gives each open share's `database` and `sslmode`**, beside its host and port.
 
+- **A grouped `min()` or `max()` of a `text` or `varchar`, and a `SELECT DISTINCT` sorted by one, are faster under a
+  libc collation**, such as a database whose collation is `en_US.utf8`. Over 4.5 M rows, the min and max of names by
+  region took 29 s and now take about 3 s, against Postgres's 0.4 s. The distinct values of a code column, sorted, took
+  13 s and now take 0.2 s, about Postgres's time. The answers are Postgres's, as before. Sixteen such queries at once
+  under a 1 GB engine limit now finish in a tenth of the time, and Mason's peak memory was about 8 % higher. Where a
+  query has many groups (more than a sixteenth of its rows, such as a min and max per name), it runs as before. These
+  are still slow: a grouped min or max over many groups, `FETCH FIRST … WITH TIES` sorted by a text, a min or max with
+  `FILTER` or under `ROLLUP`, and a `SELECT DISTINCT` with no `LIMIT` over a column whose values are nearly all
+  different.
+
 ## What was wrong and is now right
 
 - **A query with `TABLESAMPLE` is now refused by name.** A sample is of your database's pages or rows, which the

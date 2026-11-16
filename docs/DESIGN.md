@@ -3593,7 +3593,102 @@ aggregate and the bounds over 30 M distinct values). A first letter of no decomp
 (Hangul, Cyrillic) still has no run. A list of distinct values, a grouped min / max and `FETCH FIRST … WITH TIES` still
 key every row (over the 4.5 M sales, `SELECT DISTINCT code … ORDER BY code` 15.4 s at main and 14.0 s here, Postgres
 0.37–0.85 s; a grouped min / max 16.3 and 12.9 s, 0.42–1.13 s; `FETCH FIRST 5 ROWS WITH TIES` 47 and 30 s, 3.7–6.4 s):
-they are written elsewhere in the rewrite, and are issue 666's next step.
+they are written elsewhere in the rewrite, and are issue 666's next step (the next section answers the first two).
+
+### Grouped and listed: each group's candidates (2026-11-16, issue 666)
+
+After the second round, a grouped min / max and a list of distinct values still keyed every row: over the synthetic
+data below, 5 to 32 s against Postgres's 0.1 to 0.5 s. A grouped min / max wrote the key a row inside `arg_min`, and
+`SELECT DISTINCT x … ORDER BY x` computed the ORDER BY's key for every row before the DISTINCT.
+
+**A grouped min / max keys each group's candidates, where its groups are few** (`pickGrouped`, src/duck/libc-bound.ts).
+The bounds work for a group as they work for a statement. A first pass over the SELECT's rows gives each group its
+thresholds (its least hi and greatest lo) and its least and greatest value by their bytes, which are one where the
+group holds one value: that value is its answer, with no key. A second pass gives each group of more than one value its
+DISTINCT candidates, each keyed once. Each group's least and greatest candidate by the key is a row of a WITH query,
+LEFT JOINed to the SELECT's rows, and the engine's `arg_min` / `arg_max` stays as written, its rows narrowed to those
+holding that value. Few is a probe's: `approx_count_distinct` of the GROUP BY's keys at most a sixteenth of the rows
+(a HyperLogLog of a few kilobytes, one more scan). Otherwise the WITH queries read no row, and the key a row answers as
+written. These forms came first:
+- **The key once a distinct value, joined back** (#1089's form for `mode()`): the codes by region went from 12 s to
+  0.7 s, but 0.9 M names in 20 groups went from 5.4 s to 11.5 s. Every distinct name is keyed (0.84 M of them), and each
+  of min and max planned its own join.
+- **The DISTINCT (group, value) pairs, materialised, each weighed once a distinct value** (the PR's first form): the
+  names by region in 2.1 s, the codes in 0.5 s. Over the first data below, the pairs' DISTINCT read 3,886,072 (region,
+  name) pairs of 832,632 distinct names (its EXPLAIN ANALYZE, and `count(DISTINCT name)`). The review of PR 1104 ran
+  the names by region 16 and 64 at once: some refused with 53400, past the spill ceiling, where the key a row answered
+  every one.
+- **Two passes, each pick a lookup of its group** (the second form): a row a group, and 64 at once answered. But with
+  as many groups as rows the thresholds, the candidates, the picks and four lookups beside the aggregate held more than
+  the key a row did. The second review grouped 4.5 M rows by 3.9 M names: 1.5 times main's spill alone, and 2 or 3 at
+  once refused with 53400 (and once a raw XX000 of the same ceiling) where main answered. Hence the probe, and the
+  pick narrowed in place of the lookups: no aggregate is added beside the one written.
+- **The check of a value the order cannot key.** Inside a lookup, it was computed for every group the rows hold,
+  before a HAVING or an outer query's WHERE dropped one. So it refused a statement main answered (the test's
+  `WHERE q.g = '1'` over a grouped derived table). Now the engine's own `error()` raises the order's refusal on a row
+  holding its group's pick where that pick is marked unkeyed: a row the statement reads, as the key a row raised it.
+**One value under two orders is two WITH queries.** The first review also found them cached by the value alone, so
+`SELECT g, min(n), min(n COLLATE zh) … GROUP BY g` answered the database's least for both (`中` sorts first under
+zh_CN, `a` under en_US). Every WITH query this module writes is keyed by the value and its order. The keys of the
+GROUP BY must be computed again over the same rows (`groupKeys`): a grouping set, a `*` in the list, a key that calls a
+function of Mason's (a jsonb's or a numeric's key) or reads a subquery, and a bare name an output gives another meaning
+stay as written.
+
+**A SELECT DISTINCT sorted by a libc key sorts its distinct rows** (`distinctSorted`). It becomes a SELECT of its
+outputs over the DISTINCT as a derived table, each key written over those columns. Under a LIMIT, that is a top N of
+one FROM item, which the second round keys for its candidates alone.
+
+**Measured** over the wire on a shared 4-core machine (load 1 to 6), main and the change in turn, three rounds each, a
+4 GiB engine limit, with the source Postgres 16 (`en_US.utf8`) beside them. A time is the best of three. The data: 4.5 M
+sales with a status 97 % one value, 16,900 codes, 3.9 M distinct names (4.47 M distinct (region, name) pairs) and 20
+regions.
+
+| statement | main | this change | Postgres |
+|---|---|---|---|
+| `region, min(code), max(code) … GROUP BY region` | 13.0 s | 1.24 s | 0.33 s |
+| `region, min(name), max(name) … GROUP BY region` | 31.0 s | 3.17 s | 0.36 s |
+| `status, min(name), max(name) … GROUP BY status` | 30.9 s | 3.27 s | 0.38 s |
+| the same by `id % 100000` (100,000 groups), `LIMIT 5` | 35.7 s | 5.56 s | 0.72 s |
+| `name, min(status), max(code), count(*)` by name (3.9 M groups: many), `LIMIT 5` | 57.1 s | 58.3 s | 4.77 s |
+| `SELECT DISTINCT code … ORDER BY code` | 12.1 s | 0.14 s | 0.35 s |
+| `SELECT DISTINCT name … ORDER BY name LIMIT 100` | 34.1 s | 1.99 s | 4.90 s |
+| `SELECT DISTINCT status … ORDER BY status` | 17.2 s | 0.05 s | 0.18 s |
+| `* ORDER BY code FETCH FIRST 10 ROWS WITH TIES` | 14.7 s | 15.6 s | 2.01 s |
+
+The ungrouped min / max and the top N were unchanged. Grouped by the names themselves, the groups are many, and most
+of the time is the ORDER BY's key of each of the 3.9 M groups, which this change does not touch.
+
+**Many at once**, each statement started at once, the server's peak resident memory and the peak size of its spill
+directory across the run, main and the change in turn under the same load (a 1 GiB engine limit beside a 3 GB spill
+ceiling, or 4 GiB beside the default, half the free disk, 4.5 GB here). The names by region (few groups):
+
+| at once | limit | main | this change |
+|---|---|---|---|
+| 16 | 1 GiB, 3 GB | 16 answered in 585 s, peak 721 MiB, no spill | 16 answered in 61 s, peak 779 MiB, no spill |
+| 64 | 4 GiB, default | 64 answered in 2,232 s, peak 1,388 MiB, no spill | 64 answered in 226 s, peak 958 MiB, no spill |
+
+The names by name (`name, min(status), max(code), count(*) … GROUP BY name ORDER BY name LIMIT 5`: many groups, so the
+key a row). The spill varies from run to run by up to a factor of two at 8 at once, so every run is listed:
+
+| at once | limit | main: peak spill (each run) | this change: peak spill (each run) | answered |
+|---|---|---|---|---|
+| 1 | 1 GiB, 3 GB | 625, 553 MiB | 621, 685, 603 MiB | all, both |
+| 2 | 1 GiB, 3 GB | 1,597, 1,490, 1,704, 1,655 MiB | 1,702, 1,568, 1,660, 1,421 MiB | all, both |
+| 3 | 1 GiB, 3 GB | 2,318, 2,529 MiB | 2,362, 2,443 MiB | all, both |
+| 8 | 4 GiB, default | 715, 1,725 MiB | 881, 730 MiB | all, both |
+
+Peak resident memory ranged alike: 1.6–2.1 GiB for both from 1 to 3 at once, 4.4 GiB for both at 8. The times were
+within 10 % of each other. The PR's earlier rounds measured "many at once" under the server's default engine limit:
+the harness never handed the engine the limit it named, so those numbers are not repeated here.
+
+**What is left.** A grouped min / max over many groups keys every row, as before. `FETCH FIRST … WITH TIES` still keys
+every row (15 s against 2.0 s); its first n rows plus their ties
+are the rows a top N's threshold keeps, so the second round's filter would serve it. A grouped top N, a window's ORDER
+BY, a FILTER'd or grouping-set min / max, and a SELECT DISTINCT with no LIMIT over values each their own (every value
+keyed once) are as before or close to it.
+**Where.** `src/duck/libc-bound.ts` (`pickGrouped`, `groupedQueries`, `groupKeys`, `distinctSorted`);
+`tests/duck-wire.test.ts` "libc grouped", `tests/duck-plans.test.ts` (the `text under libc:` entries and the rows
+test), the oracle's `text keyed once a group:`, `collation: a grouped min and max …` and `issue 666:` statements.
 
 ## Measurements
 

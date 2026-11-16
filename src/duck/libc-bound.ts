@@ -64,13 +64,22 @@
  * inside what is cloned but a role's barrier (src/duck/row-filter.ts `BARRIER`), which every row passes. Anything else
  * stays as written: a join (but a top N over joined tables src/duck/late.ts writes as a SELECT of one FROM item, the
  * preserved side limited first or the row numbers chosen, is bounded there), a set operation, a window's ORDER BY,
- * WITH TIES, GROUP BY and DISTINCT, a FILTER'd or grouped min, a LIMIT that is not a constant.
+ * WITH TIES, a grouped top N, a FILTER'd min, a grouping set, a LIMIT that is not a constant.
+ *
+ * A GROUPED MIN OR MAX KEYS EACH GROUP'S CANDIDATES (the third round, `Values.pickGrouped`: keyed a row, the min and max
+ * of names by region took 28 s against Postgres's 0.4 s over 4.5 M rows): the bounds are a group's as they are a
+ * statement's, so a pass over the SELECT's rows gives each group its thresholds, a second its distinct candidates, and
+ * each group's least and greatest candidate by the key is a WITH query's row, joined to the SELECT's rows, which narrows
+ * the pick's rows to those holding it (`groupedQueries`). Only where the groups are few beside the rows (`probe`): else
+ * the key a row, as written. Its keys must be computed again over the same rows (`groupKeys`).
+ *
+ * A SELECT DISTINCT SORTED BY A LIBC KEY SORTS ITS DISTINCT ROWS (`distinctSorted`), and under a LIMIT is a top N above.
  *
  * WHAT CHANGES BESIDE THE TIME: a value the bounds rule out is never keyed, so under a locale whose order leaves a
  * character uncovered (`libc-uncovered`), a value holding it that is outside the top N no longer refuses the statement;
  * a candidate holding one still does.
  */
-import type { LibcOrder } from "./libc-order.ts";
+import { uncoveredRefusal, type LibcOrder } from "./libc-order.ts";
 import { functionsCalled, type TreeNode, type TreeValue } from "./pgtree.ts";
 import { BARRIER } from "./row-filter.ts";
 import { OWN_PREFIX } from "./own-names.ts";
@@ -78,6 +87,9 @@ import { OWN_PREFIX } from "./own-names.ts";
 type Body = Record<string, unknown>;
 type AstNode = Record<string, unknown>;
 
+/** a grouped min / max keys each group's candidates where its groups are at most a sixteenth of its rows, and each row
+ *  otherwise (`Values.pickGrouped`): measured, docs/DESIGN.md "Grouped and listed" */
+const GROUPS_FEW = 16;
 /** the run's length in characters: the longest shared prefix a column's values can have and still be told apart by
  *  their bounds (a URL's `https://example.com/item/` is 25), measured (docs/DESIGN.md "The libc key for the candidates
  *  alone"); a longer one costs each row's bounds more and saves little */
@@ -97,6 +109,7 @@ const and = (args: AstNode[]): AstNode => {
   const flat = args.flatMap((a) => isNodeOf(a, "BoolExpr") && bodyOf(a).boolop === "AND_EXPR" ? bodyOf(a).args as AstNode[] : [a]);
   return flat.length === 1 ? flat[0]! : { BoolExpr: { boolop: "AND_EXPR", args: flat } };
 };
+const row = (args: AstNode[]): AstNode => ({ RowExpr: { args, row_format: "COERCE_EXPLICIT_CALL" } });
 const nullTest = (arg: AstNode, type: "IS_NULL" | "IS_NOT_NULL"): AstNode => ({ NullTest: { arg, nulltesttype: type } });
 const chr = (code: number): AstNode => call("chr", [int(code)]);
 
@@ -246,6 +259,13 @@ function libcKeyOf(n: unknown): { call: AstNode; x: AstNode; collate: string } |
   return { call: n as AstNode, x, collate: String((bodyOf(collate!).sval as Body).sval ?? "") };
 }
 
+/** the same libc key's call under another of the order's functions (`__mason_libc_key_or_null`) */
+function renamed(call: AstNode, name: string): AstNode {
+  const c = structuredClone(call);
+  bodyOf(c).funcname = [S(name)];
+  return c;
+}
+
 /** the same libc key's call of another value: its session and collcollate kept, `x` replaced by `value` */
 function keyOf(call: AstNode, value: AstNode): AstNode {
   const c = structuredClone(call);
@@ -371,9 +391,13 @@ function threshold(s: Body, item: AstNode, x: AstNode, value: AstNode, aggregate
 
 /** a top N found: its SELECT, its first sort key (`sort`, whose node is the libc key `call` of `x`), where NULL sorts,
  *  and how many rows it keeps (its LIMIT and OFFSET) */
-interface Top { s: Body; sort: Body; call: AstNode; x: AstNode; bound: Bound; desc: boolean; nullsFirst: boolean; n: number }
+interface Top { s: Body; sort: Body; call: AstNode; x: AstNode; collate: string; bound: Bound; desc: boolean; nullsFirst: boolean; n: number }
 /** a min or max found: the arg_min / arg_max call (`f`), its CASE's arm, and the libc key `call` of `x` in it */
-interface Pick { f: Body; case: Body; call: AstNode; x: AstNode; bound: Bound; min: boolean }
+interface Pick { f: Body; case: Body; call: AstNode; x: AstNode; collate: string; bound: Bound; min: boolean; refusal: string }
+
+/** a grouped min or max's WITH query of its groups (`Values.pickGrouped`): its name, its group keys' columns, the
+ *  columns of each group's least and greatest value, and of whether each is a value the order could not key */
+interface GroupedValues { name: string; alias: string; probe: string; few: string; keys: string[]; min: string; max: string; minUnkeyed: string; maxUnkeyed: string }
 
 const col = (...names: string[]): AstNode => ({ ColumnRef: { fields: names.map(S) } });
 /** a node without its offsets: two spellings of one expression at two places */
@@ -384,6 +408,43 @@ function namesIn(v: unknown, out = new Set<string>()): Set<string> {
   else if (Array.isArray(v)) for (const x of v) namesIn(x, out);
   else if (isObject(v)) for (const x of Object.values(v)) namesIn(x, out);
   return out;
+}
+
+/** a call in `v` of a function of Mason's (`__mason_*`), or over a window (an aggregate is no group's key: Postgres
+ *  refuses it, 42803) */
+function callsMason(v: unknown): boolean {
+  if (Array.isArray(v)) return v.some(callsMason);
+  if (!isObject(v)) return false;
+  if (isNodeOf(v, "FuncCall") && (nameOf(bodyOf(v).funcname).toLowerCase().startsWith("__mason_") || bodyOf(v).over !== undefined)) return true;
+  return Object.values(v).some(callsMason);
+}
+
+/**
+ * THE KEYS OF A GROUPED SELECT, each as an expression of its FROM item's rows, which the WITH query of its pairs
+ * computes again over the same rows (`Values.pickGrouped`), or null where one cannot be: a grouping set, ROLLUP or
+ * CUBE, a key that reads a subquery, a `*`, an aggregate or a window, a key that calls a function of Mason's (a
+ * jsonb's or a numeric's key: a JavaScript call a row, which the pairs would make again) or a window, and a bare name that is an
+ * output's name and not its column (the pairs' SELECT has no such output). A key written as its output's number is
+ * that output's expression.
+ */
+function groupKeys(s: Body): AstNode[] | null {
+  const targets = (s.targetList ?? []) as AstNode[];
+  const aliases = new Map(targets.flatMap((t) => isNodeOf(t, "ResTarget") && typeof bodyOf(t).name === "string" ? [[String(bodyOf(t).name).toLowerCase(), bodyOf(t).val as AstNode] as const] : []));
+  const out: AstNode[] = [];
+  for (const g of (s.groupClause ?? []) as AstNode[]) {
+    const n = constInt(g);
+    const target = n === null ? undefined : targets[n - 1];
+    const e = n === null ? g : target !== undefined && isNodeOf(target, "ResTarget") ? bodyOf(target).val as AstNode : undefined;
+    if (e === undefined || !isObject(e) || isNodeOf(e, "GroupingSet") || holds(e, new Set(["SubLink", "A_Star", "GroupingFunc"])) || callsMason(e)) return null;
+    // (a bare name the SELECT names an output, which the engine may read as that output)
+    if (n === null && isNodeOf(e, "ColumnRef")) {
+      const fields = bodyOf(e).fields as AstNode[];
+      const named = fields.length === 1 ? aliases.get(String(bodyOf(fields[0]).sval ?? "").toLowerCase()) : undefined;
+      if (named !== undefined && shapeOf(named) !== shapeOf(e)) return null;
+    }
+    out.push(e);
+  }
+  return out.length > 0 ? out : null;
 }
 
 /** the SELECTs that may read the query around them: inside a subquery expression or a LATERAL item, at any depth. A
@@ -426,6 +487,7 @@ const itemName = (item: AstNode): string | null => {
  */
 class Values {
   private readonly made = new Map<Body, Map<string, string>>();
+  private readonly groupedMade = new Map<Body, Map<string, GroupedValues>>();
   private readonly counted: (n: AstNode) => AstNode;
   /** every name the statement holds, lower-cased (the engine's identifiers are read without case): a name chosen here
    *  is none of them, nor one chosen before (`fresh`). Each begins with the statement's own prefix (src/duck/own-names.ts),
@@ -452,8 +514,9 @@ class Values {
   }
 
   /** the WITH query of the DISTINCT values of `x` over the SELECT's rows, made once per SELECT and x: its name */
-  of(s: Body, item: AstNode, x: AstNode, bound: Bound): string {
-    const shape = shapeOf(x);
+  of(s: Body, item: AstNode, x: AstNode, collate: string, bound: Bound): string {
+    // (by x and the order: two collations of one value weigh it two ways — the review of PR 1104)
+    const shape = `${collate}\u0000${shapeOf(x)}`;
     const mine = this.made.get(s) ?? new Map<string, string>();
     this.made.set(s, mine);
     const known = mine.get(shape);
@@ -493,9 +556,131 @@ class Values {
     Object.assign(p.f, { funcname: [S("any_value")], args: [chosen], funcformat: "COERCE_EXPLICIT_CALL" });
   }
 
+  /**
+   * A GROUPED MIN OR MAX, ITS GROUPS FEW BESIDE ITS ROWS: each group's least and greatest value is a row of a WITH query
+   * (`groupedQueries`), made once per SELECT, x and order, LEFT JOINed to the SELECT's rows by the group's keys (once a
+   * WITH query), and the pick stays the engine's `arg_min` / `arg_max` as written, its rows narrowed to those holding
+   * that value: `arg_min(x, CASE WHEN x IS NOT NULL THEN CASE WHEN <few> THEN CASE WHEN x = <the group's min> THEN
+   * ROW(CASE WHEN <unkeyed> THEN error(<the order's refusal>) ELSE '' END, x) END ELSE ROW(<key>, x) END END)`. The
+   * refusal is the engine's, where the value picked is one the order could not key, on a row the statement reads (as
+   * the key a row raised it), and no function is called a group or a row.
+   * WHERE THE GROUPS ARE MANY (`probe`: more than a sixteenth of the rows) the WITH queries read no row and the pick is
+   * the key a row, as written: the aggregate holds what it held, nothing beside it (the second review of PR 1104: a row a
+   * group of thresholds, candidates and picks beside the aggregate held more than the key a row did, and spilled past
+   * the ceiling where it answered, 3.9 M groups of names over 4.5 M rows).
+   */
+  pickGrouped(s: Body, item: AstNode, groups: AstNode[], p: Pick): void {
+    // (by x and the order: the review of PR 1104, `min(n), min(n COLLATE zh)` answered the first's for both; a min and
+    // a max of one order read one query's two columns)
+    const shape = `${p.collate}\u0000${shapeOf(p.x)}`;
+    let made = this.groupedMade.get(s)?.get(shape);
+    if (made === undefined) {
+      made = this.groupedQueries(s, item, groups, p);
+      const of = this.groupedMade.get(s) ?? new Map<string, GroupedValues>();
+      of.set(shape, made);
+      this.groupedMade.set(s, of);
+      // its row of each group, joined to the SELECT's rows (at most one: a row a group)
+      const from = s.fromClause as AstNode[];
+      const on = and(made.keys.map((k, i) => ({ A_Expr: { kind: "AEXPR_NOT_DISTINCT", name: [S("=")], lexpr: col(made!.alias, k), rexpr: structuredClone(groups[i]!) } })));
+      s.fromClause = [{ JoinExpr: { jointype: "JOIN_LEFT", larg: from[0], rarg: { RangeVar: { relname: made.name, inh: true, relpersistence: "p", alias: { aliasname: made.alias } } }, quals: on } }];
+    }
+    const [value, unkeyed] = p.min ? [made.min, made.minUnkeyed] : [made.max, made.maxUnkeyed];
+    const refusedOr = { CaseExpr: { args: [{ CaseWhen: { expr: col(made.alias, unkeyed), result: call("error", [str(`mason[0A000]: ${p.refusal}`)]) } }], defresult: str("") } };
+    const picked = { CaseExpr: { args: [{ CaseWhen: { expr: op("=", structuredClone(p.x), col(made.alias, value)), result: row([refusedOr, structuredClone(p.x)]) } }] } };
+    p.case.result = { CaseExpr: { args: [{ CaseWhen: { expr: Values.scalar(Values.over(made.probe, [col(made.few)])), result: picked } }], defresult: p.case.result as AstNode } };
+  }
+
+  /** a SELECT's probe of its groups (`probe`), made once a SELECT: its WITH query's name and its one column */
+  private readonly probes = new Map<Body, { probe: string; few: string }>();
+  /**
+   * WHETHER A SELECT'S GROUPS ARE FEW BESIDE ITS ROWS: `approx_count_distinct` of its keys' hash (a HyperLogLog, a few
+   * kilobytes whatever the groups) at most a sixteenth of its rows, a WITH query of one row over its FROM item and WHERE.
+   * Measured over 4.5 M rows: 20 and 100,000 groups are few, 3.9 M groups of names are not (docs/DESIGN.md "Grouped and
+   * listed")
+   */
+  private probe(s: Body, item: AstNode, groups: AstNode[]): { probe: string; few: string } {
+    const known = this.probes.get(s);
+    if (known !== undefined) return known;
+    const probe = this.fresh("probe"), few = this.fresh("few");
+    const groupsSeen = call("approx_count_distinct", [call("hash", groups.map((g) => structuredClone(g)))]);
+    const rowsSeen = { FuncCall: { funcname: [S("count")], agg_star: true, funcformat: "COERCE_EXPLICIT_CALL" } };
+    const query: Body = { targetList: [{ ResTarget: { name: few, val: op("<=", op("*", groupsSeen, int(GROUPS_FEW)), rowsSeen) } }],
+      fromClause: [this.counted(structuredClone(item))], ...(s.whereClause !== undefined ? { whereClause: structuredClone(s.whereClause as AstNode) } : {}),
+      limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE" };
+    const w = (s.withClause as Body | undefined) ?? {};
+    s.withClause = { ...w, ctes: [...(w.ctes as unknown[] | undefined ?? []), { CommonTableExpr: { ctename: probe, ctematerialized: "CTEMaterializeAlways", ctequery: { SelectStmt: query } } }] };
+    const made = { probe, few };
+    this.probes.set(s, made);
+    return made;
+  }
+
+  /**
+   * The WITH query of a grouped min or max (`pickGrouped`): each group's least and greatest value, from two passes over
+   * the SELECT's own rows that hold no more than a row a group and the candidates (the review of PR 1104: the DISTINCT
+   * (group, value) pairs, materialised, made 64 such statements at once spill past the spill ceiling, 53400, where the
+   * key a row answered every one):
+   *  - the thresholds, a row a group: its least hi and greatest lo, and its least and greatest value by their bytes,
+   *    which are one where the group holds one value, its answer then with no key;
+   *  - the candidates (lo <= the least hi; hi >= the greatest lo) of a group of more than one value, DISTINCT, each
+   *    keyed once (`__mason_libc_key_or_null`), the least (greatest) by that key and then its bytes. A value the order
+   *    cannot key is NULL there, taken before every key (`''` below every key, `'z'` above) and marked (`unkeyed`), so
+   *    a group holding one as a candidate is refused once a statement reads it, as the key a row refused every row it
+   *    read.
+   * The weights are computed a row in each pass (the pairs weighed a distinct value once, but held every pair).
+   */
+  private groupedQueries(s: Body, item: AstNode, groups: AstNode[], p: Pick): GroupedValues {
+    const { probe, few } = this.probe(s, item, groups);
+    const name = this.fresh("groups"), bounds = this.fresh("thresholds"), alias = this.fresh("group");
+    const keys = groups.map(() => this.fresh("g"));
+    const [min, max, minUnkeyed, maxUnkeyed] = [this.fresh("min"), this.fresh("max"), this.fresh("min_unkeyed"), this.fresh("max_unkeyed")];
+    const [tmin, tmax, bmin, bmax, low, high] = [this.fresh("tmin"), this.fresh("tmax"), this.fresh("bmin"), this.fresh("bmax"), this.fresh("low"), this.fresh("high")];
+    const [rows, t, cands, picks] = [this.fresh("rows"), this.fresh("threshold"), this.fresh("candidates"), this.fresh("picks")];
+    const select = (b: Body): Body => ({ ...b, limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE" });
+    const from = (relname: string, aliasname?: string): AstNode => ({ RangeVar: { relname, inh: true, relpersistence: "p", ...(aliasname === undefined ? {} : { alias: { aliasname } }) } });
+    const derived = (b: Body, aliasname: string): AstNode => ({ RangeSubselect: { subquery: { SelectStmt: b }, alias: { aliasname } } });
+    const named = (val: AstNode, as?: string): AstNode => ({ ResTarget: { ...(as === undefined ? {} : { name: as }), val } });
+    const same = (a: string, b: string): AstNode => and(keys.map((k) => ({ A_Expr: { kind: "AEXPR_NOT_DISTINCT", name: [S("=")], lexpr: col(a, k), rexpr: col(b, k) } })));
+    // the SELECT's own rows of a value: each group's keys, the value and its run's weights, a row at a time
+    const weighed = (): Body => select({ targetList: [...groups.map((g, i) => named(structuredClone(g), keys[i])), named(structuredClone(p.x), this.v), named(weightsOf(p.bound, structuredClone(p.x)), this.w)],
+      fromClause: [this.counted(structuredClone(item))],
+      // (no row where the groups are many: the key a row answers there)
+      whereClause: and([...(s.whereClause !== undefined ? [structuredClone(s.whereClause as AstNode)] : []), nullTest(structuredClone(p.x), "IS_NOT_NULL"),
+        Values.scalar(Values.over(probe, [col(few)]))]) });
+    // a row a group: its least hi, its greatest lo, and its least and greatest value by their bytes
+    const thresholds = select({ targetList: [...keys.map((k) => named(col(k), k)), named(call("min", [this.mark(false)]), tmin), named(call("max", [this.mark(true)]), tmax),
+      named(call("min", [col(this.v)]), bmin), named(call("max", [col(this.v)]), bmax)],
+      fromClause: [derived(weighed(), rows)], groupClause: keys.map((k) => col(k)) });
+    // the candidates of each group of more than one value, once each, keyed once
+    const isLow = (): AstNode => op("<=", op("||", col(rows, this.w), chr(L)), col(t, tmin)), isHigh = (): AstNode => op(">=", op("||", col(rows, this.w), chr(H)), col(t, tmax));
+    const candidates = select({ distinctClause: [{}],
+      targetList: [...keys.map((k) => named(col(t, k), k)), named(col(rows, this.v), this.v), named(isLow(), low), named(isHigh(), high)],
+      fromClause: [{ JoinExpr: { jointype: "JOIN_INNER", larg: derived(weighed(), rows), rarg: from(bounds, t), quals: same(rows, t) } }],
+      whereClause: and([op("<>", col(t, bmin), col(t, bmax)), { BoolExpr: { boolop: "OR_EXPR", args: [isLow(), isHigh()] } }]) });
+    const keyed = select({ targetList: [{ ResTarget: { val: { ColumnRef: { fields: [{ A_Star: {} }] } } } }, named(keyOf(renamed(p.call, "__mason_libc_key_or_null"), col(this.v)), this.k)],
+      fromClause: [derived(candidates, cands)] });
+    const by = (lowest: boolean): AstNode => ({ CaseExpr: { args: [{ CaseWhen: { expr: col(lowest ? low : high),
+      result: row([{ CoalesceExpr: { args: [col(this.k), str(lowest ? "" : "z")] } }, col(this.v)]) } }] } });
+    const unkeyed = (): AstNode => nullTest(col(this.k), "IS_NULL");
+    const picked = select({ targetList: [...keys.map((k) => named(col(k), k)),
+      named(call("arg_min", [col(this.v), by(true)]), min), named(call("arg_min", [unkeyed(), by(true)]), minUnkeyed),
+      named(call("arg_max", [col(this.v), by(false)]), max), named(call("arg_max", [unkeyed(), by(false)]), maxUnkeyed)],
+      fromClause: [derived(keyed, this.fresh("keyed"))], groupClause: keys.map((k) => col(k)) });
+    // each group: its one value, or its candidates' pick
+    const one = (): AstNode => op("=", col(t, bmin), col(t, bmax));
+    const either = (single: string, pick: string): AstNode => ({ CaseExpr: { args: [{ CaseWhen: { expr: one(), result: col(t, single) } }], defresult: col(picks, pick) } });
+    const flag = (pick: string): AstNode => ({ CaseExpr: { args: [{ CaseWhen: { expr: one(), result: { A_Const: { boolval: {} } } } }], defresult: col(picks, pick) } });
+    const groupsQuery = select({ targetList: [...keys.map((k) => named(col(t, k), k)),
+      named(either(bmin, min), min), named(flag(minUnkeyed), minUnkeyed), named(either(bmax, max), max), named(flag(maxUnkeyed), maxUnkeyed)],
+      fromClause: [{ JoinExpr: { jointype: "JOIN_LEFT", larg: from(bounds, t), rarg: derived(picked, picks), quals: same(t, picks) } }] });
+    const w = (s.withClause as Body | undefined) ?? {};
+    const cte = (ctename: string, q: Body): AstNode => ({ CommonTableExpr: { ctename, ctematerialized: "CTEMaterializeAlways", ctequery: { SelectStmt: q } } });
+    s.withClause = { ...w, ctes: [...(w.ctes as unknown[] | undefined ?? []), cte(bounds, thresholds), cte(name, groupsQuery)] };
+    return { name, alias, probe, few, keys, min, max, minUnkeyed, maxUnkeyed };
+  }
+
   /** the top N: its FROM item LEFT JOINed to the keys of the values the bounds keep, sorted by the joined key */
   top(t: Top, item: AstNode, own: string): void {
-    const name = this.of(t.s, item, t.x, t.bound);
+    const name = this.of(t.s, item, t.x, t.collate, t.bound);
     const keys = this.fresh("keys"), bounds = this.fresh("bounds");
     // ASC: the n-th smallest value's hi (fewer than n values: `H`, above every lo); DESC: the n-th largest lo ('')
     const threshold: AstNode = { SelectStmt: {
@@ -543,6 +728,74 @@ export interface BoundContext {
   own?: string;
 }
 
+/**
+ * A SELECT DISTINCT SORTED BY A LIBC KEY SORTS ITS DISTINCT ROWS (issue 666: the engine computed the ORDER BY's key for
+ * every row before the DISTINCT, 13 s for the 16,900 codes of 4.5 M rows and 18 s for their eight statuses). The SELECT
+ * becomes `SELECT <its outputs> FROM (SELECT DISTINCT … AS __mason_d1, …) AS __mason_sorted ORDER BY <its keys over
+ * those columns> [LIMIT …]`, so the key is computed once a distinct row, and a LIMIT over it is a top N the bounds
+ * then key for its candidates alone. The rows and their order are the same: the keys of a SELECT DISTINCT read its
+ * outputs alone (Postgres's 42P10 otherwise), so each key is written over the outputs it reads, by their expression or
+ * their name. A SELECT this cannot write so stays as written: a DISTINCT ON, a `*` or an output of no name, a set
+ * operation, a lock, a key reading anything but its outputs, and a SELECT that may read the query around it.
+ * Returns whether any SELECT was written so.
+ */
+function distinctSorted(tree: AstNode, own: string): boolean {
+  const inner = correlatable(tree);
+  const taken = namesIn(tree);
+  // (each name the statement's own prefix and a word, as `Values` chooses them: src/duck/own-names.ts)
+  const fresh = (word: string): string => { const base = `${own}${word}`; let name = base; for (let i = 1; taken.has(name.toLowerCase()); i++) name = `${base}${i}`; taken.add(name.toLowerCase()); return name; };
+  let any = false;
+  for (const s of selectsIn(tree)) {
+    const distinct = s.distinctClause as unknown[] | undefined;
+    if (!Array.isArray(distinct) || distinct.length !== 1 || kindOf(distinct[0]) !== null || inner.has(s) || !plainSelect(s) || !present(s.sortClause)) continue;
+    const sorts = s.sortClause as AstNode[];
+    if (!sorts.some((k) => isNodeOf(k, "SortBy") && holdsLibcKey(bodyOf(k).node))) continue;
+    const targets = s.targetList as AstNode[];
+    const outputs = targets.map((t) => isNodeOf(t, "ResTarget") && typeof bodyOf(t).name === "string" && isObject(bodyOf(t).val) && !holds(bodyOf(t).val, new Set(["A_Star"]))
+      ? { name: String(bodyOf(t).name), val: bodyOf(t).val as AstNode } : null);
+    if (outputs.some((o) => o === null)) continue;
+    const alias = fresh("sorted");
+    const columns = outputs.map(() => fresh("d"));
+    const shapes = outputs.map((o) => shapeOf(o!.val));
+    // each key over the outputs: an output's expression, or its name, is its column; anything else that reads a row stays
+    let unread = false;
+    const over = (v: unknown): unknown => {
+      if (Array.isArray(v)) return v.map(over);
+      // (a constant reads no row: an output that is one stays the constant)
+      if (!isObject(v) || isNodeOf(v, "A_Const")) return v;
+      const at = shapes.indexOf(shapeOf(v as AstNode));
+      if (at >= 0) return col(alias, columns[at]!);
+      if (isNodeOf(v, "ColumnRef")) {
+        const fields = bodyOf(v).fields as AstNode[];
+        const named = fields.length === 1 ? outputs.findIndex((o) => o!.name.toLowerCase() === String(bodyOf(fields[0]).sval ?? "\u0000").toLowerCase()) : -1;
+        if (named >= 0) return col(alias, columns[named]!);
+        unread = true;
+        return v;
+      }
+      if (isNodeOf(v, "SubLink")) { unread = true; return v; }
+      return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, over(x)]));
+    };
+    const keys = sorts.map((k) => over(k) as AstNode);
+    if (unread) continue;
+    const { withClause, sortClause: _sorts, limitCount, limitOffset, limitOption, ...rest } = s;
+    void _sorts;
+    const body: Body = { ...rest, targetList: outputs.map((o, i) => ({ ResTarget: { name: columns[i], val: o!.val } })) };
+    for (const k of Object.keys(s)) delete s[k];
+    Object.assign(s, {
+      ...(withClause === undefined ? {} : { withClause }),
+      targetList: outputs.map((o, i) => ({ ResTarget: { name: o!.name, val: col(alias, columns[i]!) } })),
+      fromClause: [{ RangeSubselect: { subquery: { SelectStmt: body }, alias: { aliasname: alias } } }],
+      sortClause: keys,
+      ...(limitCount === undefined ? {} : { limitCount }), ...(limitOffset === undefined ? {} : { limitOffset }),
+      limitOption: limitOption ?? "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE",
+    });
+    any = true;
+  }
+  return any;
+}
+/** `v` holds a libc key the rewrite wrote */
+const holdsLibcKey = (v: unknown): boolean => libcKeyOf(v) !== null || (Array.isArray(v) ? v.some(holdsLibcKey) : isObject(v) && Object.values(v).some(holdsLibcKey));
+
 /** a role's walled reads in `v`: each `SELECT * FROM (… LIMIT <barrier>) AS <wall>` */
 const wallsIn = (v: unknown, alias: string): number => selectsIn(v).filter((s) => {
   const from = s.fromClause as unknown[] | undefined;
@@ -555,7 +808,9 @@ const wallsIn = (v: unknown, alias: string): number => selectsIn(v).filter((s) =
  * Postgres's of the statement it was written from.
  */
 export async function libcBounded(tree: AstNode, analysis: TreeValue, context: BoundContext): Promise<AstNode | null> {
-  const tops: Top[] = [], picks: Array<{ s: Body; each: Pick[] }> = [];
+  const tops: Top[] = [], picks: Array<{ s: Body; each: Pick[]; groups: AstNode[] | null }> = [];
+  // a SELECT DISTINCT sorted by a libc key sorts its distinct rows (and, under a LIMIT, is a top N as any other below)
+  const sortedAfter = distinctSorted(tree, context.own ?? OWN_PREFIX);
   const ctes = withQueries(tree);
   const boundFor = (collate: string): Bound | null => { const o = context.order(collate); return o === undefined ? null : boundOf(o); };
   for (const s of selectsIn(tree)) {
@@ -571,11 +826,15 @@ export async function libcBounded(tree: AstNode, analysis: TreeValue, context: B
       // (where NULL sorts: the engine's default_null_order is Postgres's, last ascending and first descending)
       const desc = first!.sortby_dir === "SORTBY_DESC";
       const nullsFirst = first!.sortby_nulls === "SORTBY_NULLS_FIRST" || (desc && first!.sortby_nulls !== "SORTBY_NULLS_LAST");
-      if (bound !== null) tops.push({ s, sort: first!, call: key.call, x: key.x, bound, desc, nullsFirst, n: count + offset });
+      if (bound !== null) tops.push({ s, sort: first!, call: key.call, x: key.x, collate: key.collate, bound, desc, nullsFirst, n: count + offset });
       continue;
     }
-    // A MIN OR A MAX: arg_min / arg_max over the libc key's CASE (src/duck/rewrite.ts textMinMax), ungrouped, no FILTER
-    if (present(s.groupClause) || present(s.distinctClause) || present(s.sortClause) || s.limitCount !== undefined || s.limitOffset !== undefined) continue;
+    // A MIN OR A MAX: arg_min / arg_max over the libc key's CASE (src/duck/rewrite.ts textMinMax), no FILTER; ungrouped,
+    // or grouped by keys the WITH query of its pairs can compute again (`groupKeys`)
+    // (a `*` beside a GROUP BY would list the groups' joined columns: as written)
+    const groups = present(s.groupClause) && !holds(s.targetList, new Set(["A_Star"])) ? groupKeys(s) : null;
+    if (present(s.groupClause) ? groups === null
+      : present(s.distinctClause) || present(s.sortClause) || s.limitCount !== undefined || s.limitOffset !== undefined) continue;
     const each: Pick[] = [];
     const visit = (v: unknown): void => {
       if (Array.isArray(v)) { v.forEach(visit); return; }
@@ -588,23 +847,24 @@ export async function libcBounded(tree: AstNode, analysis: TreeValue, context: B
         const k = libcKeyOf(result);
         if ((name === "arg_min" || name === "arg_max") && k !== null && f.over === undefined && f.agg_filter === undefined && f.agg_distinct !== true) {
           const bound = boundFor(k.collate);
-          if (bound !== null) each.push({ f, case: when!, call: k.call, x: k.x, bound, min: name === "arg_min" });
+          if (bound !== null) each.push({ f, case: when!, call: k.call, x: k.x, collate: k.collate, bound, min: name === "arg_min", refusal: uncoveredRefusal(context.order(k.collate)!).message });
           return;
         }
       }
       Object.values(v).forEach(visit);
     };
-    visit(s.targetList);
-    if (each.length > 0) picks.push({ s, each });
+    // (grouped, a pick may stand in the HAVING and the ORDER BY too, each read per group)
+    visit(groups === null ? s.targetList : [s.targetList, s.havingClause, s.sortClause]);
+    if (each.length > 0) picks.push({ s, each, groups });
   }
-  if (tops.length === 0 && picks.length === 0) return null;
+  if (tops.length === 0 && picks.length === 0) return sortedAfter ? tree : null;
   // the statement reads its rows alike twice (the module's header): Postgres's analysis and pg_proc decide it
   const reads = statementReads(analysis);
-  if (reads.windowsOrSets) return null;
-  if ((await context.volatile([...functionsCalled(analysis).oids].filter((f) => f > 0).sort((a, b) => a - b))).size > 0) return null;
+  if (reads.windowsOrSets) return sortedAfter ? tree : null;
+  if ((await context.volatile([...functionsCalled(analysis).oids].filter((f) => f > 0).sort((a, b) => a - b))).size > 0) return sortedAfter ? tree : null;
   // a top N in a statement of no aggregate; a min or max in the one query that aggregates
   const chosen = { tops: reads.aggregates === 0 ? tops : [], picks: reads.aggregates === 1 ? picks : [] };
-  if (chosen.tops.length === 0 && chosen.picks.length === 0) return null;
+  if (chosen.tops.length === 0 && chosen.picks.length === 0) return sortedAfter ? tree : null;
   const counted = (n: AstNode): AstNode => { if (context.wall !== null) context.wall.added += wallsIn(n, context.wall.alias); return n; };
   // a SELECT that may read the query around it is bounded row by row (its threshold a subquery over its own rows); any
   // other reads its DISTINCT values once, a WITH query of its own (`Values`)
@@ -624,11 +884,16 @@ export async function libcBounded(tree: AstNode, analysis: TreeValue, context: B
     const kept = op(t.desc ? ">=" : "<=", own, limit);
     t.s.whereClause = t.s.whereClause === undefined ? kept : and([t.s.whereClause as AstNode, kept]);
   }
-  for (const { s, each } of chosen.picks) {
+  for (const { s, each, groups } of chosen.picks) {
     const item = oneItem(s, ctes)!;
+    // a grouped SELECT that may read the query around it stays as written
+    if (groups !== null) {
+      if (!inner.has(s)) for (const p of each) values.pickGrouped(s, item, groups, p);
+      continue;
+    }
     if (!inner.has(s)) {
       // every WITH query first: each reads the SELECT's WHERE as written
-      const names = each.map((p) => values.of(s, item, p.x, p.bound));
+      const names = each.map((p) => values.of(s, item, p.x, p.collate, p.bound));
       each.forEach((p, i) => values.pick(p, names[i]!));
       continue;
     }

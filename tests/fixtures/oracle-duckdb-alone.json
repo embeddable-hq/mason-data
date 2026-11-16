@@ -1,19 +1,19 @@
 {
-  "statements": 7525,
+  "statements": 7566,
   "mason": {
-    "exact": 7009,
+    "exact": 7050,
     "decided": 46,
     "refused": 470,
     "differs": 0
   },
   "duckdb": {
-    "exact": 1963,
-    "name": 1404,
+    "exact": 1967,
+    "name": 1410,
     "refused": 1694,
-    "value": 1095,
-    "rows": 627,
-    "text": 83,
-    "other": 659
+    "value": 1116,
+    "rows": 635,
+    "text": 84,
+    "other": 660
   },
   "gaps": {
     "copyPhase": {
@@ -94,7 +94,7 @@
       }
     },
     "everyAsk": {
-      "asked": 105282,
+      "asked": 105961,
       "refused": {
         "array-lower-bound": { "planted": 0, "natural": 2 },
         "array-remove-type": { "planted": 3, "natural": 0 },
@@ -118,7 +118,7 @@
         "json-of-type": { "planted": 3, "natural": 3 },
         "json-path-type": { "planted": 0, "natural": 48 },
         "json-rows-in-select": { "planted": 3, "natural": 0 },
-        "jsonb-compare": { "planted": 3, "natural": 225 },
+        "jsonb-compare": { "planted": 3, "natural": 227 },
         "jsonb-set": { "planted": 0, "natural": 3 },
         "latest-order": { "planted": 6, "natural": 0 },
         "latest-quotient": { "planted": 3, "natural": 0 },

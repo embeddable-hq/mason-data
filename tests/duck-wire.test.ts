@@ -8940,8 +8940,9 @@ test("libc top N: a top N and an ungrouped min / max are bounded natively, the d
     await c.query("SET TimeZone = 'Asia/Kolkata'");
     assert.deepEqual((await answer(c, bound, [4])).rows, after, `${bound}, after SET TimeZone`);
     await c.query("RESET TimeZone");
-    for (const sql of ["SELECT d FROM colls GROUP BY d ORDER BY d LIMIT 3", "SELECT DISTINCT d FROM colls ORDER BY 1 LIMIT 3", "SELECT id, d FROM colls ORDER BY d FETCH FIRST 2 ROWS WITH TIES",
-      "SELECT id % 2, min(d) FROM colls GROUP BY 1", "SELECT min(d) FILTER (WHERE id > 3) FROM colls", "SELECT id, d FROM colls WHERE random() < 2 ORDER BY d LIMIT 3",
+    // (a grouped min / max and a SELECT DISTINCT sorted are keyed once a distinct value too: the test after this one)
+    for (const sql of ["SELECT d FROM colls GROUP BY d ORDER BY d LIMIT 3", "SELECT id, d FROM colls ORDER BY d FETCH FIRST 2 ROWS WITH TIES",
+      "SELECT min(d) FILTER (WHERE id > 3) FROM colls", "SELECT id, d FROM colls WHERE random() < 2 ORDER BY d LIMIT 3",
       "SELECT a.id FROM colls a JOIN colls b ON b.id = a.id ORDER BY a.d LIMIT 3", "SELECT id FROM colls ORDER BY d", "SELECT id FROM colls ORDER BY c LIMIT 3",
       "SELECT max(d) OVER () FROM colls LIMIT 1", "SELECT id FROM colls ORDER BY d LIMIT 3 + 0", "SELECT d FROM colls UNION ALL SELECT d FROM colls ORDER BY 1 LIMIT 3",
       "SELECT count(*) FROM (SELECT id FROM colls ORDER BY d LIMIT 3) s", "SELECT min(d) FROM (SELECT d FROM colls LIMIT 5) s"]) {
@@ -9002,6 +9003,128 @@ test("libc top N: a top N and an ungrouped min / max are bounded natively, the d
       }
     } finally { await store.writer.run("DELETE FROM public.colls WHERE id >= 200"); }
   } finally { await c.end(); await a.close(); }
+});
+
+// ISSUE 666, THE THIRD ROUND: a GROUPED min / max under a libc order keys each group's candidate values alone (the
+// bounds of each DISTINCT (group, value) pair, src/duck/libc-bound.ts `pickGrouped`), and a SELECT DISTINCT sorted by
+// the order sorts its distinct rows (`distinctSorted`), never the key a row: 5 to 28 s against Postgres's 0.1 to 0.5 s
+// over 0.9 to 4.5 M rows. Each group below holds values whose bytes order otherwise than the order does (`b` before `B`,
+// `é` between `e` and `f`, a space and `-` ignored at the first level), NULLs, and a group of NULLs alone
+test("libc grouped: a grouped min / max and a SELECT DISTINCT sorted are keyed once a distinct candidate, each answer the order's", async () => {
+  const letters = handLibcOrder(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...lettersOf({ e: "é" })], [" ", "-\u0001\u0002\u007f"], { collate: "en_US.utf8" });
+  const { api: a, c } = await collsApi(await store.listener({ provider: "c", collate: "en_US.utf8", locale: null }, undefined, letters, () => copies, undefined, { collations: PG_COLLATIONS }));
+  const pool = ["beta", "Beta", "alpha", "é", "e", "", " alpha", "-x", "10", "b", "f", "B", null];
+  // (the group is the ICU column's: a digit, or NULL; group 9 holds NULLs alone)
+  const rows: Array<[number, string | null, string | null]> = Array.from({ length: 1200 }, (_, n) => [7000 + n, pool[(n * 7) % pool.length]!, n % 11 === 0 ? null : String(n % 4)]);
+  for (let n = 0; n < 5; n++) rows.push([8500 + n, null, "9"]);
+  await store.writer.run(`INSERT INTO public.colls SELECT id, x, x, g FROM (VALUES ${rows.map(([i, x, g]) => `(${i}, ${x === null ? "NULL" : `'${x}'`}, ${g === null ? "NULL" : `'${g}'`})`).join(", ")}) AS s(id, x, g)`);
+  const cmp = (x: string, y: string): number => { const [k, l] = [libcKey(letters, x), libcKey(letters, y)]; return k !== l ? (k < l ? -1 : 1) : Buffer.compare(Buffer.from(x), Buffer.from(y)); };
+  const least = (xs: Array<string | null>, desc = false): string | null => xs.filter((x): x is string => x !== null).sort((x, y) => desc ? cmp(y, x) : cmp(x, y))[0] ?? null;
+  const groupsOf = <K,>(key: (r: [number, string | null, string | null]) => K, where: (r: [number, string | null, string | null]) => boolean = () => true): Map<K, Array<string | null>> => {
+    const out = new Map<K, Array<string | null>>();
+    for (const r of rows.filter(where)) out.set(key(r), [...out.get(key(r)) ?? [], r[1]]);
+    return out;
+  };
+  // the groups by the ICU column, NULL first, then its digits
+  const byI = [...groupsOf((r) => r[2])].sort(([x], [y]) => x === null ? -1 : y === null ? 1 : x < y ? -1 : 1);
+  const distinct = (desc: boolean, nullsFirst: boolean, where: (r: [number, string | null, string | null]) => boolean = () => true): Array<string | null> => {
+    const values = [...new Set(rows.filter(where).map((r) => r[1]))];
+    const sorted = values.filter((x): x is string => x !== null).sort((x, y) => desc ? cmp(y, x) : cmp(x, y));
+    return values.includes(null) ? (nullsFirst ? [null, ...sorted] : [...sorted, null]) : sorted;
+  };
+  try {
+    const sent = async (sql: string): Promise<string> => String((await answer(c, `EXPLAIN ${sql}`)).rows.map((r) => String(r[0])).find((l) => l.includes("Sent to the engine")) ?? "");
+    const keyRows = async (): Promise<number> => { const f = await store.functionRows(); return ["__mason_libc_key", "__mason_libc_key_or_null"].reduce((n, k) => n + (f.get(k) ?? 0), 0); };
+    const w = "id >= 7000";
+    const mod3 = [...groupsOf((r) => r[0] % 3)].sort(([x], [y]) => x - y);
+    const grouped: Array<[string, unknown[][]]> = [
+      [`SELECT i, min(d), max(d) FROM colls WHERE ${w} GROUP BY i ORDER BY i NULLS FIRST`, byI.map(([g, xs]) => [g, least(xs), least(xs, true)])],
+      [`SELECT id % 3 AS g, max(d), count(*) FROM colls WHERE ${w} GROUP BY 1 ORDER BY 1`, mod3.map(([g, xs]) => [String(g), least(xs, true), String(xs.length)])],
+      [`SELECT id % 3, min(d) FROM colls WHERE ${w} GROUP BY id % 3 HAVING min(d) IS NOT NULL ORDER BY max(d) DESC, 1`,
+        mod3.filter(([, xs]) => least(xs) !== null).sort(([g, xs], [h, ys]) => cmp(least(ys, true)!, least(xs, true)!) || g - h).map(([g, xs]) => [String(g), least(xs)])],
+      [`SELECT i, id % 2 AS p, min(d), max(d::varchar(3)) FROM colls WHERE ${w} AND i IS NOT NULL GROUP BY 1, 2 ORDER BY 1, 2`,
+        [...groupsOf((r) => `${r[2]}|${r[0] % 2}`, (r) => r[2] !== null)].sort(([x], [y]) => x < y ? -1 : 1)
+          .map(([k, xs]) => [...k.split("|"), least(xs), least(xs.map((x) => x === null ? null : x.slice(0, 3)), true)])],
+      [`SELECT i, min(d) FROM colls WHERE ${w} AND id % 5 = 1 GROUP BY i HAVING i <> '1' ORDER BY i NULLS LAST LIMIT 3`,
+        [...groupsOf((r) => r[2], (r) => r[0] % 5 === 1)].filter(([g]) => g !== "1").sort(([x], [y]) => x === null ? 1 : y === null ? -1 : x < y ? -1 : 1).slice(0, 3).map(([g, xs]) => [g, least(xs)])],
+      [`SELECT i, min(d) FROM colls WHERE ${w} AND id < 0 GROUP BY i`, []],
+    ];
+    for (const [sql, want] of grouped) {
+      assert.match(await sent(sql), /__mason_groups\d* AS MATERIALIZED .*arg_m(in|ax)\(.*CASE WHEN \(SELECT (\()?__mason_few\)? FROM __mason_probe\) THEN CASE WHEN .* = __mason_group\d*\.__mason_m(in|ax) THEN ROW\(CASE WHEN __mason_group\d*\.__mason_m(in|ax)_unkeyed THEN error\('mason\[0A000\]: /, sql);
+      const before = await keyRows();
+      assert.deepEqual((await answer(c, sql)).rows, want, sql);
+      // (each group's candidates: a few of the thirteen values a group, never its hundreds of rows)
+      const keyed = await keyRows() - before;
+      assert.ok(keyed <= 2 * 6 * pool.length, `${sql}: the libc key was handed ${keyed} rows of ${rows.length}: per row, not per candidate`);
+    }
+    // GROUPS MANY BESIDE THE ROWS (the second review of PR 1104: 3.9 M groups over 4.5 M rows spilled past the ceiling
+    // where the key a row answered): a group a row, keyed a row as written, the groups' WITH queries reading no row
+    const byId = rows.filter((r) => r[0] < 7008).map((r) => [String(r[0]), r[1], r[1]]);
+    for (const sql of [`SELECT id, min(d), max(d) FROM colls WHERE ${w} AND id < 7008 GROUP BY id ORDER BY id`]) {
+      assert.match(await sent(sql), /__mason_probe\d* AS MATERIALIZED .*approx_count_distinct\(.*arg_min\(d, CASE WHEN NOT \(d IS NULL\) THEN CASE WHEN \(SELECT (\()?__mason_few\)? FROM __mason_probe\) THEN .* ELSE ROW\(__mason_libc_key\(/, sql);
+      assert.deepEqual((await answer(c, sql)).rows, byId, sql);
+    }
+    const sorted: Array<[string, unknown[][]]> = [
+      [`SELECT DISTINCT d FROM colls WHERE ${w} ORDER BY d`, distinct(false, false).map((x) => [x])],
+      [`SELECT DISTINCT d FROM colls WHERE ${w} ORDER BY d DESC`, distinct(true, true).map((x) => [x])],
+      [`SELECT DISTINCT d FROM colls WHERE ${w} ORDER BY 1 NULLS FIRST`, distinct(false, true).map((x) => [x])],
+      [`SELECT DISTINCT d AS v, i FROM colls WHERE ${w} AND i = '2' ORDER BY v DESC NULLS LAST, i`, distinct(true, false, (r) => r[2] === "2").map((x) => [x, "2"])],
+      [`SELECT DISTINCT d FROM colls WHERE ${w} ORDER BY 1 LIMIT 3`, distinct(false, false).slice(0, 3).map((x) => [x])],
+      // (no É: the hand order has none)
+      [`SELECT DISTINCT upper(d) AS u FROM colls WHERE ${w} AND d NOT IN ('', 'é') ORDER BY u LIMIT 4 OFFSET 1`,
+        [...new Set(rows.filter((r) => r[1] !== null && r[1] !== "" && r[1] !== "é").map((r) => r[1]!.toUpperCase()))].sort(cmp).slice(1, 5).map((x) => [x])],
+    ];
+    for (const [sql, want] of sorted) {
+      // (the distinct rows sorted by their key; under a LIMIT, the top N of them keyed for its candidates alone)
+      assert.match(await sent(sql), /FROM \( SELECT DISTINCT .* AS __mason_d\d*.* \) AS __mason_sorted\d* (ORDER BY .*__mason_libc_key\(|LEFT JOIN \( SELECT __mason_v, __mason_libc_key\()/, sql);
+      const before = await keyRows();
+      assert.deepEqual((await answer(c, sql)).rows, want, sql);
+      const keyed = await keyRows() - before;
+      assert.ok(keyed <= 4 * pool.length, `${sql}: the libc key was handed ${keyed} rows of ${rows.length}: per row, not once a distinct value`);
+    }
+    // a byte order, ICU's and a FILTER stay as they were: the engine's own min, ICU's key, the key a row
+    for (const [sql, pattern] of [[`SELECT i, min(c) FROM colls WHERE ${w} GROUP BY i`, /arg_min|min\(c\)/], [`SELECT id % 2, max(d COLLATE "und-x-icu") FROM colls WHERE ${w} GROUP BY 1`, /arg_max\(d, CASE WHEN .* COLLATE /],
+      [`SELECT i, min(d) FILTER (WHERE id > 7500) FROM colls WHERE ${w} GROUP BY i`, /arg_min\(d, CASE WHEN .*__mason_libc_key\(/], [`SELECT DISTINCT c FROM colls WHERE ${w} ORDER BY c`, /ORDER BY c$/]] as const) {
+      const text = await sent(sql);
+      assert.match(text, pattern, sql);
+      assert.ok(!text.includes("__mason_groups") && !text.includes("__mason_sorted"), `${sql}: ${text}`);
+    }
+  } finally { await store.writer.run("DELETE FROM public.colls WHERE id >= 7000"); await c.end(); await a.close(); }
+});
+
+// ISSUE 666, THE THIRD ROUND: a value the order cannot key (`libc-uncovered`: the hand order lists no `€`) refuses a
+// grouped min / max only where it is a candidate of a group the statement reads (it always is: its run is empty), never
+// for a group a HAVING or an outer query's WHERE drops, where the key a row refused every row read
+test("libc grouped: a value the order cannot key refuses a grouped min / max only in a group the statement reads", async () => {
+  const letters = handLibcOrder(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...lettersOf({ e: "é" })], [" ", "-\u0001\u0002\u007f"], { collate: "en_US.utf8" });
+  const { api: a, c } = await collsApi(await store.listener({ provider: "c", collate: "en_US.utf8", locale: null }, undefined, letters, () => copies, undefined, { collations: PG_COLLATIONS }));
+  const rows: Array<[number, string, string]> = [];
+  for (const [g, xs] of [["0", ["B", "b", "a", "c"]], ["1", ["é", "f", "e", "E"]], ["3", ["€", "z", "y"]], ["4", ["x€", "w"]], ["5", ["a", "b", "x€"]]] as Array<[string, string[]]>) {
+    // (twenty rows a value: the groups few beside the rows, so the groups' WITH queries answer)
+    for (const x of xs) for (let n = 0; n < 20; n++) rows.push([9000 + rows.length, x, g]);
+  }
+  await store.writer.run(`INSERT INTO public.colls SELECT id, x, x, g FROM (VALUES ${rows.map(([i, x, g]) => `(${i}, '${x}', '${g}')`).join(", ")}) AS s(id, x, g)`);
+  try {
+    const wrong: string[] = [];
+    for (const [sql, want] of [
+      ["SELECT i, min(d), max(d) FROM colls WHERE id >= 9000 GROUP BY i HAVING i IN ('0', '1') ORDER BY i", [["0", "a", "c"], ["1", "e", "f"]]],
+      ["SELECT * FROM (SELECT i AS g, min(d) AS lo, max(d) AS hi FROM colls WHERE id >= 9000 GROUP BY 1) q WHERE q.g = '1'", [["1", "e", "f"]]],
+      ["WITH q AS (SELECT i AS g, max(d) AS m FROM colls WHERE id >= 9000 GROUP BY 1) SELECT m FROM q WHERE g = '0'", [["c"]]],
+      ["SELECT i, max(d) FROM colls WHERE id >= 9000 AND d NOT LIKE '%€%' GROUP BY i ORDER BY i", [["0", "c"], ["1", "f"], ["3", "z"], ["4", "w"], ["5", "b"]]],
+      // group 5: `x€` is a candidate of its greatest (its run, `x`, is above every other value's) and of no least
+      ["SELECT i, min(d) FROM colls WHERE id >= 9000 GROUP BY i HAVING i = '5'", [["5", "a"]]],
+    ] as Array<[string, unknown[][]]>) {
+      const got = await answer(c, sql).then((r) => JSON.stringify(r.rows), (e: Error) => `refused: ${e.message}`);
+      if (got !== JSON.stringify(want)) wrong.push(`${sql}\n  ${got}`);
+    }
+    assert.deepEqual(wrong, [], wrong.join("\n"));
+    // a group the statement reads holding `€`: the key would decide, refused by name as the key a row refused
+    for (const sql of ["SELECT i, min(d) FROM colls WHERE id >= 9000 GROUP BY i ORDER BY i", "SELECT i, max(d) FROM colls WHERE id >= 9000 GROUP BY i HAVING i = '4'",
+      "SELECT i, max(d) FROM colls WHERE id >= 9000 GROUP BY i HAVING i = '5'",
+      "SELECT i, min(d) FROM colls WHERE id >= 9000 GROUP BY i HAVING min(d) = 'a'"]) {
+      await assert.rejects(answer(c, sql), (e: pg.DatabaseError) => e.code === "0A000" && /holds a character Mason cannot order .*libc-uncovered/.test(e.message), sql);
+    }
+  } finally { await store.writer.run("DELETE FROM public.colls WHERE id >= 9000"); await c.end(); await a.close(); }
 });
 
 // ISSUE 464: mode() of a text under a libc order keys each DISTINCT value once (src/duck/rewrite.ts `modeKeyedOnce`):
@@ -9123,6 +9246,38 @@ test("collation resolver: two libc collations in one session, each by its own or
     assert.deepEqual((await answer(c, "SELECT 'a' < 'B', 'B' < 'a'")).rows, [["t", "f"]]);
     assert.equal(reads, 1, "the second collation's order is read once, then held");
   } finally { await c.end(); await a.close(); }
+});
+
+// THE REVIEW OF PR 1104: a grouped min / max keyed one value under two libc orders in one statement from ONE WITH query,
+// cached by the value alone (src/duck/libc-bound.ts `pickGrouped`, and the ungrouped `of`), so `min(d), min(d COLLATE
+// zh)` answered the first's for both, and a min of one order beside a max of the other read one query. Each pick is held
+// to its own order here: the database's weighs é as e, the second (whose ASCII is the database's, so both have bounds)
+// as a letter after z. Every form keys its WITH queries by the value AND the order
+test("libc grouped: a value under two libc orders in one statement, each min and max by its own order", async () => {
+  const database = handLibcOrder(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...lettersOf({ e: "é" })], [" ", "-"], { collate: "en_US.utf8" });
+  const after = handLibcOrder(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...lettersOf({}), "é"], [" ", "-"], { collate: "xx_XX.utf8" });
+  const xx = { schema: "public", name: "mason_xx", provider: "c", collate: "xx_XX.utf8", locale: null, deterministic: true };
+  const { api: a, c } = await collsApi(await store.listener({ provider: "c", collate: "en_US.utf8", locale: null }, undefined, database, () => copies, undefined,
+    { collations: [...PG_COLLATIONS, xx], readLibc: async () => after }), [xx]);
+  // three groups (the ICU column's digit), each value twenty times: é is the first of group 1 under the database's order
+  // and the last under the second's
+  const groups: Array<[string, string[]]> = [["1", ["é", "f", "g"]], ["2", ["b", "c"]], ["3", ["y", "é", "q"]]];
+  const rows = groups.flatMap(([g, xs]) => xs.flatMap((x) => Array.from({ length: 20 }, () => [g, x] as const))).map(([g, x], i) => [9500 + i, g, x] as const);
+  await store.writer.run(`INSERT INTO public.colls SELECT id, x, x, g FROM (VALUES ${rows.map(([i, g, x]) => `(${i}, '${x}', '${g}')`).join(", ")}) AS s(id, x, g)`);
+  const least = (o: typeof database, xs: string[], desc = false): string => [...xs].sort((x, y) => (libcKey(o, x) < libcKey(o, y) ? -1 : 1) * (desc ? -1 : 1))[0]!;
+  try {
+    const w = "WHERE id >= 9500";
+    for (const [sql, want] of [
+      [`SELECT i, min(d), min(d COLLATE mason_xx) FROM colls ${w} GROUP BY i ORDER BY i`, groups.map(([g, xs]) => [g, least(database, xs), least(after, xs)])],
+      [`SELECT i, min(d COLLATE mason_xx), min(d) FROM colls ${w} GROUP BY i ORDER BY i`, groups.map(([g, xs]) => [g, least(after, xs), least(database, xs)])],
+      [`SELECT i, max(d), max(d COLLATE mason_xx) FROM colls ${w} GROUP BY i ORDER BY i`, groups.map(([g, xs]) => [g, least(database, xs, true), least(after, xs, true)])],
+      [`SELECT i, min(d COLLATE mason_xx), max(d) FROM colls ${w} GROUP BY i ORDER BY i`, groups.map(([g, xs]) => [g, least(after, xs), least(database, xs, true)])],
+      [`SELECT min(d), min(d COLLATE mason_xx), max(d COLLATE mason_xx), max(d) FROM colls ${w}`,
+        [[least(database, groups.flatMap(([, xs]) => xs)), least(after, groups.flatMap(([, xs]) => xs)), least(after, groups.flatMap(([, xs]) => xs), true), least(database, groups.flatMap(([, xs]) => xs), true)]]],
+    ] as Array<[string, unknown[][]]>) assert.deepEqual((await answer(c, sql)).rows, want, sql);
+    // (the data tells the orders apart)
+    assert.deepEqual([least(database, ["é", "f", "g"]), least(after, ["é", "f", "g"]), least(database, ["é", "f", "g"], true), least(after, ["é", "f", "g"], true)], ["é", "f", "g", "é"]);
+  } finally { await store.writer.run("DELETE FROM public.colls WHERE id >= 9500"); await c.end(); await a.close(); }
 });
 
 // ISSUE 982: TABLESAMPLE was refused only because the allowlist lacked its node, so wherever the allowlist was off (the

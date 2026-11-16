@@ -725,6 +725,9 @@ export function libcOrderNote(o: LibcOrder): string | null {
     `${rare.toLocaleString("en-US")} of rare characters, ${o.held.common.toLocaleString("en-US")} of ASCII or Latin alone (Mason gaps libc-rare-letter, libc-mark-run-form)`;
 }
 
+/** the refusal of a text holding a character the order does not cover: its words alone, never the value (issue 128);
+ *  the key raises it, and src/duck/libc-bound.ts writes it where a grouped min or max picked such a value */
+export const uncoveredRefusal = (o: LibcOrder): PgEvalError => new PgEvalError("0A000", `a text being ordered holds a character Mason cannot order as the database's collation ${o.collate} does (${gapMark("libc-uncovered")})`);
 /** The refusal of every text under an order `holdLibcOrder` did not follow: by the gap and the collation, as `libc-uncovered`'s. */
 const unreadRefusal = (o: LibcOrder): PgEvalError => new PgEvalError("0A000", `the database's collation ${o.collate} orders text in a way Mason could not read, so text under it is not ordered (${gapMark("libc-locale-unread")})`);
 
@@ -776,7 +779,7 @@ export function libcKey(o: LibcOrder, s: string): string {
     at++;
     if (o.uncovered[g] === 1) {
       // never the value, nor the character: a refusal reaches any user, of a row a role may hide (issue 128)
-      throw new PgEvalError("0A000", `a text being ordered holds a character Mason cannot order as the database's collation ${o.collate} does (${gapMark("libc-uncovered")})`);
+      throw uncoveredRefusal(o);
     }
     if (o.special[g] === 0) {
       const w = o.l1[g]!;

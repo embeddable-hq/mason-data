@@ -129,6 +129,9 @@ export const COLLATION_CASES: Array<{ name: string; sql: string }> = [
   { name: "collation: a top N of an en_US column", sql: "SELECT id, l FROM colls ORDER BY l, id LIMIT 3" },
   { name: "collation: a top N under COLLATE en_US, descending", sql: "SELECT id FROM colls ORDER BY d COLLATE \"en_US\" DESC, id LIMIT 3" },
   { name: "collation: min and max of an en_US column", sql: "SELECT min(l), max(l) FROM colls" },
+  // the third round: grouped, each group's candidates keyed once, and a SELECT DISTINCT sorted by its distinct rows
+  { name: "collation: a grouped min and max of an en_US column", sql: "SELECT id % 3, min(l), max(l), min(d COLLATE \"en_US\") FROM colls GROUP BY 1 ORDER BY 1" },
+  { name: "collation: SELECT DISTINCT an en_US column, sorted", sql: "SELECT DISTINCT l FROM colls ORDER BY l DESC NULLS LAST" },
   // (and equal char(n) values of another padding under byte order: the first argument; #253 B, CI fix 2, char-n-minmax
   // retired. One statement, so the legs' fixture counts stay those of the run they were written from)
   { name: "collation: GREATEST and LEAST of an ICU char(n)", sql: "SELECT id, greatest(b, 'b'), least(b, 'B'), greatest(b COLLATE \"C\", 'b'), least(b COLLATE \"C\", d), least(d::char(4) COLLATE \"C\", d::char(8)) FROM colls ORDER BY id" },
