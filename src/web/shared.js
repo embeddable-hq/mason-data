@@ -647,7 +647,7 @@ export const copyable = (id, text, afterHtml = "") =>
  *  the Copy (a "Shown once" badge). */
 export const copyBlock = (id, text, afterHtml = "") =>
   `<div class="copyblock"><pre><code id="${esc(id)}">${esc(text)}</code></pre>` +
-  `<span class="copy-side">${button("Copy", { copy: id }, "small", { room: ROOMS.copy })}${afterHtml}</span></div>`;
+  `<span class="copyblock-side">${button("Copy", { copy: id }, "small", { room: ROOMS.copy })}${afterHtml}</span></div>`;
 
 /** How long a Copy button says Copied (or what to press) before it says Copy again. */
 export const COPIED_MS = 2000;

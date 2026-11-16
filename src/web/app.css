@@ -759,11 +759,11 @@ form.formcard input { width: 18em; }
 .copyblock pre { flex: 1 1 auto; min-width: 0; margin: 0; overflow-x: auto; white-space: pre; padding: var(--space-2) var(--space-3);
   background: var(--sunken); border: 1px solid var(--line-strong); border-radius: 0; color: var(--fg); font-size: var(--text-sm); }
 .copyblock pre code { overflow-wrap: normal; font-size: inherit; }
-.copyblock .copy-side { flex: none; display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-1); }
-.copyblock .copy-side .badge { height: var(--control-sm); }
+.copyblock .copyblock-side { flex: none; display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-1); }
+.copyblock .copyblock-side .badge { height: var(--control-sm); }
 .copyblock button[data-copied] { color: var(--ok); border-color: var(--ok); }
 /* a phone: the block the width of its box, its Copy (and Shown once) under it, as a fact's Copy is under its value */
-@media (max-width: 640px) { .copyblock { flex-direction: column; align-items: stretch; } .copyblock .copy-side { flex-direction: row; align-items: center; } }
+@media (max-width: 640px) { .copyblock { flex-direction: column; align-items: stretch; } .copyblock .copyblock-side { flex-direction: row; align-items: center; } }
 /* the first-run checklist (renderChecklist): a step a row, ✓ in green or ○ muted, a step to do with its one action */
 .checklist { background: var(--surface); border: 2px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); padding: var(--space-4) var(--space-5); margin: var(--space-6) 0 var(--space-6); }
 .checklist .checklist-title { margin-bottom: var(--space-3); font-size: var(--text-lg); display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2) var(--space-3); }

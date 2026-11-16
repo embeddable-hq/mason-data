@@ -5885,7 +5885,7 @@ test("Users: Connect an MCP client (issue 1114) — Claude Code's line and the J
   const json = codeOf(html, "users-mcp-json");
   assert.deepEqual(JSON.parse(json), { mcpServers: { mason: { command: "npx", args: ["-y", "@mason-data/cli@0.22.0", "mcp"], env: { MASON_URL: shown } } } });
   assert.equal(json, JSON.stringify(JSON.parse(json), null, 2), "pretty-printed");
-  for (const id of ["claude-code", "json"]) assert.match(html, new RegExp(`<pre><code id="users-mcp-${id}">[\\s\\S]*?</code></pre><span class="copy-side"><button type="button" class="small" data-copy="users-mcp-${id}" data-room="Press ⌘C">Copy</button></span></div>`), `${id}: a block with its Copy`);
+  for (const id of ["claude-code", "json"]) assert.match(html, new RegExp(`<pre><code id="users-mcp-${id}">[\\s\\S]*?</code></pre><span class="copyblock-side"><button type="button" class="small" data-copy="users-mcp-${id}" data-room="Press ⌘C">Copy</button></span></div>`), `${id}: a block with its Copy`);
   assert.equal(textOf(html).replace(/<code[\s\S]*$/, ""), "Connect an MCP client Claude Code: run this in a terminal. claude mcp add mason --env MASON_URL=\"postgres://<user>:<password>@127.0.0.1:5433/shop\" -- npx -y @mason-data/cli@0.22.0 mcp Copy " +
     "Claude Desktop, Cursor and other clients: add this to the client's MCP settings. { \"mcpServers\": { \"mason\": { \"command\": \"npx\", \"args\": [ \"-y\", \"@mason-data/cli@0.22.0\", \"mcp\" ], \"env\": { \"MASON_URL\": \"postgres://<user>:<password>@127.0.0.1:5433/shop\" } } } } Copy " +
     "Put a user's name and password in place of <user> and <password> . The client's computer needs Node 22.13 or later. " +
@@ -5935,7 +5935,7 @@ test("New user added: a closed Connect an MCP client under the URL — the box's
   assert.ok(section.includes(a.password), "the password in both, as the URL carries it");
   // each line with its Copy, Shown once under it as the password's is beside its own
   for (const id of ["claude-code", "json"]) {
-    assert.match(section, new RegExp(`<pre><code id="added-mcp-${id}">[^]*?</code></pre><span class="copy-side"><button type="button" class="small" data-copy="added-mcp-${id}" data-room="Press ⌘C">Copy</button><span class="badge warn">Shown once</span></span></div>`), id);
+    assert.match(section, new RegExp(`<pre><code id="added-mcp-${id}">[^]*?</code></pre><span class="copyblock-side"><button type="button" class="small" data-copy="added-mcp-${id}" data-room="Press ⌘C">Copy</button><span class="badge warn">Shown once</span></span></div>`), id);
   }
   assert.equal(textOf(section), `Connect an MCP client Claude Code: run this in a terminal. ${codeOf(section, "added-mcp-claude-code")} Copy Shown once ` +
     "Running this line saves the password in your shell history. Pasting the JSON into the client's settings file avoids that. " +
