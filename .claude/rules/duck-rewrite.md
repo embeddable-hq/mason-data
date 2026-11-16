@@ -50,6 +50,15 @@ paths:
   read's column qualified in one arm of its CASE: DuckDB's 42804, a review finding). The walker records a node
   of the statement met twice outside its own rule's answer (`nodesPlacedTwice`, src/duck/rewrite.ts), and
   `tests/duck-wire.test.ts`, `tests/duck-corpus.test.ts` and the oracle hold it to none. ("A `->>` is DuckDB's own read")
+- **What a bare name in a FROM reads is decided once, by Postgres's scoping, in `src/duck/cte-names.ts`** (issue 981):
+  the listener's route and the hidden columns' view (`exposes`, `hideKept`, src/duck/kept-route.ts) ask `cteReads`.
+  The rewrite first renames apart a WITH query whose name the statement gives to anything else (`cteNamesApart`: its
+  reads keep the old name as their alias), so every later reader, DuckDB included, meets one meaning per name. It
+  compares names without case, as DuckDB binds them, in the clash and in the new name (the review of PR 1093:
+  `WITH small AS (…) … FROM "Small"` read the WITH query, and a table `"__MASON_WITH0"` the renamed one). Why:
+  each reader resolved names by rules of its own. Each read a WITH query's own body `FROM t` as the WITH query, where
+  Postgres reads the table (a count of 0, and XX000 from a pass-through followed into itself), and `hideKept` read a
+  name a set operation's arm's own WITH binds as the table of that name.
 - **A rewrite the deparser cannot spell is a refusal, never a different statement**: the rewritten tree is deparsed,
   parsed again and compared node for node (`treeDifference`). ("How a statement is answered")
 - **No DuckDB macro**: with the `postgres` extension loaded, a macro with a lambda or calling a macro
@@ -298,12 +307,16 @@ paths:
   of its own scan, no operator named DELIM (`delimiterJoin`). ("The plan fixture")
 - **A whole row an outer join may leave unmatched is NULL there, decided in one place** (`rowPresence`,
   src/duck/rewrite.ts; issue 1008). Postgres's analysis says which rows may be (`Typed.nulled`, its `varnullingrels`).
-  Mason tells an unmatched row by a column of it that no matched row holds NULL: a table's NOT NULL column (the
-  catalog's attnotnull, `notNullColumns` in src/duck/plan.ts), or a subquery's output that is one read bare, a count
-  or a constant. Every reader of the row (its text, its json, json_agg's element) is NULL where that column is. A
-  subquery of one row joined ON TRUE is never unmatched (`alwaysMatched`). A row nothing tells is refused,
-  `null-extended-row`. Why: the row was written from its columns, so an unmatched row read `(,)` and
-  `{"id":null}` where Postgres reads NULL. `tests/duck-wire.test.ts` "issue 1008", the oracle's `issue 1008:`.
+  Mason tells an unmatched row by a column of it that no matched row holds NULL: a column of its table's primary key
+  (`rowKeys` in src/duck/plan.ts), or a subquery's output that is one read bare, a count or a constant. It holds only
+  while that column cannot be NULL. The primary key is the key Mason syncs by, which the sync holds to the source
+  before each read, so it holds; a NOT NULL that is no key may be dropped on the source after the catalog read it, so it
+  is never asked. Every reader of the row (its text, its json, json_agg's element) is NULL where that column is. No
+  presence is asked where no unmatched row reaches a reader (`neverUnmatched`): a WHERE strict in one of the item's
+  columns, or a one-row item joined ON a condition always true. A row nothing tells is refused, `null-extended-row`.
+  A whole row's column names have one reader, Postgres's (`Typed.rowColumns`: a WITH query's column list, a name held
+  twice renamed in each place by `wholeRowTwins`). Why: the row was written from its columns, so an unmatched row read
+  `(,)` and `{"id":null}` where Postgres reads NULL. `tests/duck-wire.test.ts` "issue 1008", the oracle's `issue 1008:`.
 - **A result's names, types and typmods are Postgres's**, from the analysis, and a numeric Postgres computes exactly is
   computed by `src/lib/pg-numeric.ts`, never DuckDB's double or HUGEINT. ("How a statement is answered")
 - **A whole numeric the rewrite writes is a DECIMAL(19, 0), never a DECIMAL(38, 0)** (`wholeNumeric`, issue 929): an

@@ -244,6 +244,18 @@ test("an engine error quotes a value that looks like a hidden scale column's nam
   ]), []);
 });
 
+test("issue 981: a WITH query named like a copy, declared in a set operation's arm, is read as the WITH query when the statement lists a copy's columns", async () => {
+  // A `*` over a copy reads it through its view of the visible columns (src/duck/kept-route.ts hideKept). That pass
+  // took a name that a set operation's arm's own WITH binds for the copy of that name, and read the table instead.
+  assert.deepEqual(await unlike([
+    // (arms of no numeric: an arm the rewrite wraps in a subquery of its own is a node, which that pass read right)
+    "(WITH p AS (SELECT * FROM q WHERE id > 1) SELECT count(*) FROM p) UNION ALL SELECT 1 ORDER BY 1",
+    "(WITH r AS (SELECT * FROM p WHERE g = 1) SELECT id, g FROM r) UNION ALL (SELECT id, g FROM p WHERE g = 3) ORDER BY 1",
+    "SELECT 0 UNION ALL (WITH x AS (SELECT * FROM q), p AS (SELECT * FROM x WHERE id < 3) SELECT count(*) FROM p) ORDER BY 1",
+    "(WITH p AS (SELECT * FROM q WHERE id > 1) SELECT count(*), sum(u) FROM p) UNION ALL SELECT 1, 1 ORDER BY 1",
+  ]), []);
+});
+
 test("a set operation that compares rows keeps a plain numeric's one scale (mixed-scale-numeric), never splitting equal values", async () => {
   const c = new pg.Client({ host: "127.0.0.1", port: api.port, database: "app", user: "mason", password: mintToken(API_KEY, 600).token });
   await c.connect();

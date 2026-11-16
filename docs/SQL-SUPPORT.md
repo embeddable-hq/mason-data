@@ -20,21 +20,21 @@ each). The synced data is read-only.
 | The types: "char", a type the source made, bigint, bit, bit varying, boolean, box, bytea, character, character varying, cid, cidr, circle, date, daterange, double precision, inet, int4multirange, int4range, int8range, integer, interval, json, jsonb, jsonpath, line, lseg, macaddr, macaddr8, money, name, numeric, numrange, oid, path, pg_lsn, point, polygon, real, regclass, regtype, smallint, text, tid, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsquery, tsrange, tstzmultirange, tstzrange, tsvector, uuid, xid, xid8, xml; arrays of bigint, bit, boolean, character, character varying, cidr, date, double precision, inet, int4range, integer, interval, json, jsonb, macaddr, money, numeric, oid, point, real, smallint, text, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsvector, uuid; the source's enums and citext; a table's row | answered (93 types verified) |
 | Functions, operators, aggregates, window functions and casts | answered exactly: 255 functions, 388 operators, 97 aggregates, 58 window functions and 126 casts verified; "What is verified" below names each |
 | Transactions, SET, SHOW, the catalog (`pg_catalog`, `information_schema`) and the protocol a tool uses | answered: what a BI tool asks at connection and before a query |
-| Anything else: 64 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
+| Anything else: 65 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
 
 ## Why not DuckDB by itself
 
-DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 7,518 statements,
+DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 7,501 statements,
 each sent as written to Mason and to a plain DuckDB connection over the same synced tables (tests/integration/duck-oracle.itest.ts):
 
-| Of 7,518 statements | Mason | DuckDB alone |
+| Of 7,501 statements | Mason | DuckDB alone |
 |---|---|---|
 | answered exactly as Postgres: the rows, their text, the column names | 93% | 26% |
 | answered differently by a decision the registry lists ("Answered differently" below) | 1% | — |
 | refused, naming what to write instead (SQLSTATE 0A000, `Mason gap <id>`) | 6% | — |
 | the right rows under DuckDB's own column names (`count_star()` for `count`, the expression's text for an unnamed column) | — | 19% |
 | refused with DuckDB's own error (a function it lacks, syntax it does not read) | — | 22% |
-| a wrong value (`7 / 2` is 3.5, LIKE's backslash escape, a float4 beside a literal, a numeric's rounding) | 0% | 15% |
+| a wrong value (`7 / 2` is 3.5, LIKE's backslash escape, a float4 beside a literal, a numeric's rounding) | 0% | 14% |
 | wrong rows, or the rows in another order | — | 8% |
 | the same value in other text (`1.0` for `1`, a numeric's scale, a timestamptz without its offset) | — | 1% |
 | another error than Postgres's, or answered where Postgres refuses | — | 9% |
@@ -55,7 +55,7 @@ Postgres did, after the first sync and after two rounds of changes. A statement 
 What is known **beyond** that list is below. A refusal names its gap in the error's detail (`Mason gap <id>`) and
 says what to write instead in its hint.
 
-## Refused (64)
+## Refused (65)
 
 A statement using one of these is refused with SQLSTATE 0A000, where Postgres would answer it.
 
@@ -81,6 +81,7 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `json-of-type` | to_json / array_to_json / json_build_object of a value (or an array of elements) of a type Mason does not write as json | answers | refused | cast the value to text, a number, a boolean, a timestamp or json first |
 | `extract-julian` | extract(julian FROM …) | answers | refused | extract(epoch FROM …) / 86400 + 2440587.5 |
 | `with-ordinality` | a function in FROM … WITH ORDINALITY | numbers the rows | refused | row_number() OVER () instead |
+| `tablesample` | TABLESAMPLE SYSTEM or BERNOULLI on a table, at any percent, with or without REPEATABLE, wherever the table is read (a subquery, a CTE, a join, a view) | a sample of the table: about that percent of its pages (SYSTEM) or of its rows (BERNOULLI) | refused: the synced table has none of the source's pages, so its sample would not be Postgres's. A literal percent or seed Postgres rejects (past 100, NaN, NULL) gets Postgres's own error | read the whole table, or a part of it by a filter (WHERE id % 10 = 0) |
 | `array-subquery-element` | ARRAY(SELECT x …) whose x is a numeric, an array or a row; array_agg(x) of a numeric quotient or average not rounded to a fixed scale (round, trunc or a cast to numeric(p,s)); x = ANY or ALL (ARRAY(SELECT …)) | a numeric[] computed exactly, a multi-dimensional array (2202E on an empty element, 22004 on a NULL one), a record[] | refused (DuckDB makes a list of doubles, of lists, of structs; it binds ANY (ARRAY(SELECT …)) as a comparison of its own) | ARRAY(SELECT x::text …) or array_agg(x::text), array_agg(x ORDER BY …) of a column in a subquery, or x = ANY (SELECT …) without the ARRAY |
 | `json-path-type` | a json read's path cast to a type that changes its text (`varchar(n)[]`, `char(n)[]`, `name[]`) | answers | refused | cast the path to `text[]` |
 | `multidim-array` | a multi-dimensional array literal, or one bound as an array parameter (`$1::int[]`, `= ANY($1)`) | answers | refused | a one-dimensional array |
@@ -111,7 +112,7 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `binary-held-type` | a column of a type Mason holds as its text, in binary format, but a point or a box | the type's binary form | refused | ask for the column in text format |
 | `citext-forms` | GROUP BY, DISTINCT, min, max, a set operation, = ANY (an array), ALL of a subquery (`ci < ALL (SELECT …)`), a row ordered by <, <=, > or >= (`(ci, id) < ('ab', 3)`), or a row compared by <, <=, >, >= or <> with ANY of a subquery, over a citext | groups and sorts without regard to case, answering one spelling | refused (=, <>, <, >, IN (…), LIKE and ORDER BY are answered, case-insensitively) | GROUP BY lower(x), or x::text where case matters |
 | `bytea-forms` | encode / decode to a format other than hex, base64 or escape, or one not written as a literal; convert_to / convert_from of an encoding other than UTF8 | answers | refused | encode(x, 'hex'), 'base64' or 'escape'; the UTF8 encoding |
-| `null-extended-row` | the whole row of a subquery or WITH query an outer join may leave unmatched (`row_to_json(d)`, `d::text` of `a LEFT JOIN (SELECT …) d`), where none of its columns is a table's NOT NULL column read bare, a count or a constant; or of a set operation, or a query with grouping sets | NULL where nothing matched, a row of NULLs where a row matched | refused: Mason cannot tell an unmatched row from a matched row of NULLs (a table's whole row is answered, and so is a subquery's that selects its primary key, a count or a constant, or that gives one row and is joined ON TRUE) | select the table's primary key in the subquery, or name its columns (json_build_object('id', d.id, …)) |
+| `null-extended-row` | the whole row of a subquery or WITH query an outer join may leave unmatched (`row_to_json(d)`, `d::text` of `a LEFT JOIN (SELECT …) d`), where none of its columns is a column of a table's primary key read bare, a count or a constant, or where it is a set operation or has grouping sets; and the whole row of a table with no primary key (a generated table) there | NULL where nothing matched, a row of NULLs where a row matched | refused: Mason cannot tell an unmatched row from a matched row of NULLs. A table's whole row is answered, told by its primary key; so is a subquery's that selects a column of a primary key, a count or a constant. Answered too: a WHERE strict in one of its columns (`WHERE d.v = 'x'`), and a subquery of one row joined ON a condition always true | select the table's primary key in the subquery, or name its columns (json_build_object('id', d.id, …)) |
 | `row-value` | a row as a value outside the SELECT list, a cast to text and the json functions (compared, tested with IS NULL, grouped, sorted, a row output sorted by its number or name included); a row of a row; a row of a table Mason synced in part; a row holding a numeric quotient or average, anywhere | compares, tests and groups a row by its columns | refused | compare, test or sort its columns |
 | `zone-abbreviation` | a time zone written as an abbreviation or a POSIX zone (`CST`, `IST`, `UTC+3`, `+05`) in AT TIME ZONE or date_trunc | a fixed offset (`CST` is -06 all year; `UTC+3` is three hours WEST) | refused, written or held by a row (DuckDB reads several as another zone: `CST` as Chicago's, `IST` as India's, `UTC+3` as east) | an IANA zone name (America/Chicago, Asia/Kolkata), in any case; UT, Z and UTC are UTC |
 | `volatile-window` | a window ordered or partitioned by random() or another volatile function (a random row per group) | a new value per row | refused (DuckDB refuses a volatile expression there, and computes a deterministic one once for every row) | SELECT …, row_number() OVER (ORDER BY r) FROM (SELECT *, random() AS r FROM t) AS s |

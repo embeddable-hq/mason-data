@@ -161,6 +161,11 @@ export interface Typed {
   /** a whole-row VAR (varattno 0) of a TABLE of its query's FROM: the table's catalog OID. Absent for any other node,
    *  and for the whole row of a subquery, a CTE, a function or a VALUES list */
   rowOf?: number;
+  /** a whole-row VAR of a subquery or a WITH query: its columns' names, in order. `shown` are Postgres's own (a WITH
+   *  query's column list, an output's name or the name Postgres made up for it), what its json writes; `read` are the
+   *  names the engine reads them by, a name held twice in any case renamed in each place (`wholeRowTwins`). The ONE
+   *  reader of a whole row's column names (src/duck/rewrite.ts `rowFields`, `rowPresence`). Absent for anything else */
+  rowColumns?: { shown: string[]; read: string[] };
   /** a FUNCEXPR of a set-returning function (`funcretset`): in a SELECT list, any number of rows a row, none included */
   retset?: true;
   /** a VAR read from a FUNCTION of its query's FROM (an RTE_FUNCTION): the function's FROM name and the column's name
@@ -556,6 +561,8 @@ function typedOf(v: TreeNode, t: { type: number; typmod: number }, rtables: Tree
   if (v._node === "VAR" && nulledVar(v)) typed.nulled = true;
   const rowOf = v._node === "VAR" ? wholeRowRelation(v, rtables) : null;
   if (rowOf !== null) typed.rowOf = rowOf;
+  const rowColumns = v._node === "VAR" ? wholeRowColumns(v, rtables) : null;
+  if (rowColumns !== null) typed.rowColumns = rowColumns;
   if (v._node === "FUNCEXPR" && v.funcretset === "true") typed.retset = true;
   const column = v._node === "VAR" ? columnOf(v, rtables) : null;
   if (column !== null) typed.column = column;
@@ -837,16 +844,28 @@ function wholeRowRelation(v: TreeNode, rtables: TreeNode[][]): number | null {
   const relid = rte === undefined ? null : num(rte.relid ?? null);
   return rte === undefined || attno !== 0 || num(rte.rtekind ?? null) !== RTE_RELATION || relid === null || relid === 0 ? null : relid;
 }
-/** whether the tree holds a whole row an outer join may NULL-extend (a VAR of varattno 0, `Typed.nulled`): src/duck/plan.ts
- *  then reads which columns of the tables never hold NULL (`notNullColumns`), which `rowPresence` asks */
-export function nulledWholeRows(tree: TreeValue): boolean {
-  const visit = (v: TreeValue): boolean => {
-    if (Array.isArray(v)) return v.some(visit);
-    if (!isNode(v)) return false;
-    if (v._node === "VAR" && num(v.varattno ?? null) === 0 && nulledVar(v)) return true;
-    return Object.entries(v).some(([k, x]) => k !== "_node" && visit(x));
+/** Typed.rowColumns */
+function wholeRowColumns(v: TreeNode, rtables: TreeNode[][]): { shown: string[]; read: string[] } | null {
+  const up = num(v.varlevelsup ?? null) ?? 0, varno = num(v.varno ?? null), attno = num(v.varattno ?? null);
+  const rte = varno === null ? undefined : rtables[rtables.length - 1 - up]?.[varno - 1];
+  if (rte === undefined || attno !== 0 || num(rte.rtekind ?? null) === RTE_RELATION || !isNode(rte.eref ?? null)) return null;
+  const shown = strings((rte.eref as TreeNode).colnames);
+  return { shown, read: twinNames(rte, true) ?? shown };
+}
+/** the tables a statement reads, where it holds a whole row an outer join may NULL-extend (a VAR of varattno 0,
+ *  `Typed.nulled`); none where it holds none. src/duck/plan.ts reads their primary keys for `rowPresence` */
+export function nulledRowTables(tree: TreeValue): number[] {
+  const relids = new Set<number>();
+  let nulled = false;
+  const visit = (v: TreeValue): void => {
+    if (Array.isArray(v)) { for (const x of v) visit(x); return; }
+    if (!isNode(v)) return;
+    if (v._node === "VAR" && num(v.varattno ?? null) === 0 && nulledVar(v)) nulled = true;
+    if (v._node === "RANGETBLENTRY" && num(v.rtekind ?? null) === RTE_RELATION) { const r = num(v.relid ?? null); if (r !== null && r > 0) relids.add(r); }
+    for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x);
   };
-  return visit(tree);
+  visit(tree);
+  return nulled ? [...relids].sort((a, b) => a - b) : [];
 }
 /** Typed.column */
 function columnOf(v: TreeNode, rtables: TreeNode[][]): NonNullable<Typed["column"]> | null {
@@ -898,12 +917,43 @@ function qualifierOf(v: TreeNode, rtables: TreeNode[][]): string | null {
 }
 
 /** a FROM item's columns with each one that has a twin in another case renamed `<name>__mason_<n>`; null when none has */
-function twinNames(rte: TreeNode): string[] | null {
+function twinNames(rte: TreeNode, same = false): string[] | null {
   if (num(rte.rtekind ?? null) === RTE_JOIN || num(rte.rtekind ?? null) === 0 || !isNode(rte.eref ?? null)) return null;
   const cols = strings((rte.eref as TreeNode).colnames);
   const lower = cols.map((c) => c.toLowerCase());
-  const twin = (i: number): boolean => lower.some((l, j) => j !== i && l === lower[i] && cols[j] !== cols[i]);
+  const twin = (i: number): boolean => lower.some((l, j) => j !== i && l === lower[i] && (same || cols[j] !== cols[i]));
   return cols.some((_, i) => twin(i)) ? cols.map((c, i) => twin(i) ? `${c}__mason_${i + 1}` : c) : null;
+}
+
+/**
+ * THE SUBQUERIES AND WITH QUERIES WHOSE WHOLE ROW IS READ AND WHO HOLD A NAME TWICE (`SELECT d.id, c.id FROM d JOIN c
+ * …`), by the name the query calls them: every column of such a name renamed `<name>__mason_<n>`, as `caseTwins` renames
+ * a twin in another case. The row reads each column by its name (`Typed.rowColumns`), and a name held twice reads the
+ * first column twice. No other read can name such a column (Postgres refuses it as ambiguous), so the renaming reaches
+ * only the row's reads; src/duck/rewrite.ts names the item's columns by an alias list of these.
+ */
+export function wholeRowTwins(tree: TreeValue): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  const rtables: TreeNode[][] = [];
+  const visit = (v: TreeValue): void => {
+    if (Array.isArray(v)) { for (const x of v) visit(x); return; }
+    if (!isNode(v)) return;
+    if (v._node === "QUERY") {
+      rtables.push((Array.isArray(v.rtable) ? v.rtable : []).filter(isNode));
+      try { for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x); } finally { rtables.pop(); }
+      return;
+    }
+    if (v._node === "VAR" && num(v.varattno ?? null) === 0) {
+      const up = num(v.varlevelsup ?? null) ?? 0, varno = num(v.varno ?? null);
+      const rte = varno === null ? undefined : rtables[rtables.length - 1 - up]?.[varno - 1];
+      const names = rte === undefined || num(rte.rtekind ?? null) === RTE_RELATION ? null : twinNames(rte, true);
+      const alias = rte !== undefined && isNode(rte.eref ?? null) ? (rte.eref as TreeNode).aliasname : undefined;
+      if (names !== null && typeof alias === "string") out.set(alias, names);
+    }
+    for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x);
+  };
+  visit(tree);
+  return out;
 }
 
 /** Typed.renamed */

@@ -9,7 +9,7 @@ import { deparseSync, QuoteUtils } from "pgsql-deparser";
 import type { Node } from "libpg-query";
 import { HELD_ROW_INPUT, HELD_TYPE_INPUT } from "../api/postgres/schema.ts";
 import { heldName, heldType, isHeldArray, PARAM_ARRAYS } from "./held-types.ts";
-import { collationOids, functionsCalled, nulledWholeRows, outputExpressions, textOrdering, type TreeValue } from "./pgtree.ts";
+import { collationOids, functionsCalled, nulledRowTables, outputExpressions, textOrdering, type TreeValue } from "./pgtree.ts";
 import { gapRefusal, StatementError, type DuckPlan } from "./statement.ts";
 import { parseSql } from "../api/postgres/parser.ts";
 import { analyze, catalogRows, readParameters } from "./analyze.ts";
@@ -19,6 +19,7 @@ import { expandViews, MAX_VIEW_DEPTH, viewRefused } from "./views.ts";
 import { selectListAfterLimit } from "./late.ts";
 import { libcBounded } from "./libc-bound.ts";
 import { pgTyplen } from "./types.ts";
+import { sampleRefusal } from "./tablesample.ts";
 import type { CopyState } from "./sync.ts";
 import { giveTurns, datumText, masonCalls, rewrite, treeDifference, Unrewritable, type EnumTypes, type RowColumn } from "./rewrite.ts";
 import type { CollationResolver, StatementCollations } from "./collation.ts";
@@ -101,17 +102,18 @@ async function distinctKeys(catalog: (bytes: Uint8Array) => Promise<Uint8Array>,
   return distinctKeyCounts(tree, uniqueColumnsOf(await catalogRows(catalog, uniqueColumnsSql(relids))));
 }
 
-/** the primary keys that may prove a grouped LIMIT grouped by a whole key (src/duck/late.ts `keyFirst`), read only for a
- *  statement that has one */
-/** THE COLUMNS THAT NEVER HOLD NULL (the catalog's attnotnull: a primary key's, a NOT NULL's), by `<relid>:<attno>`, read
- *  only for a statement holding a whole row an outer join may NULL-extend (`nulledWholeRows`): such a column NULL is the
- *  row NULL-extended (src/duck/rewrite.ts `rowPresence`, issue 1008) */
-async function notNullColumns(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, tree: PgAnalysis["tree"]): Promise<ReadonlySet<string>> {
-  if (!nulledWholeRows(tree)) return new Set();
-  const rows = await catalogRows(catalog, "SELECT a.attrelid::text, a.attnum::text FROM pg_attribute a WHERE a.attnotnull AND a.attnum > 0 AND NOT a.attisdropped AND a.attrelid >= 16384");
-  return new Set(rows.map(([relid, attno]) => `${relid}:${attno}`));
+/** THE PRIMARY KEYS OF THE TABLES A STATEMENT READS, read only where it holds a whole row an outer join may NULL-extend
+ *  (`nulledRowTables`): a key column NULL is the row NULL-extended (src/duck/rewrite.ts `rowPresence`, issue 1008). The
+ *  catalog's primary key is the key Mason syncs the table by, which the sync holds to the source before each read
+ *  (src/cdc/key-held.ts), and no row of the copy has a NULL in it. A NOT NULL column that is no key may lose its NOT NULL
+ *  on the source after the catalog read it, so it is never asked */
+async function rowKeys(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, tree: PgAnalysis["tree"]): Promise<PrimaryKeys> {
+  const relids = nulledRowTables(tree);
+  return relids.length === 0 ? new Map() : primaryKeysOf(await catalogRows(catalog, uniqueColumnsSql(relids)));
 }
 
+/** the primary keys that may prove a grouped LIMIT grouped by a whole key (src/duck/late.ts `keyFirst`), read only for a
+ *  statement that has one */
 async function joinKeys(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, tree: PgAnalysis["tree"]): Promise<PrimaryKeys> {
   const relids = groupedLimitTables(tree);
   return relids.length === 0 ? new Map() : primaryKeysOf(await catalogRows(catalog, uniqueColumnsSql(relids)));
@@ -544,6 +546,9 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
       return { ...inner, ...(reads !== undefined ? { reads } : {}), rowFilters };
     }
   }
+  // a TABLESAMPLE: after the role's refusals (a filtered table's is the role's), before the rewrite and the allowlist
+  const sample = sampleRefusal(analysis.tree, stmt, text);
+  if (sample !== null) throw sample;
   // the catalog's own OIDs for the types a database made (citext, an enum): the rewrite knows a few by name. The wire
   // sends the analysis's OID as it is, the catalog's, never the source's (issue 861): a client that looks it up in pg_type
   // or sends it back as a parameter's type reads the type itself
@@ -605,14 +610,14 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   // (`outputs`), whose stored column holds the engine's DECIMAL as a copy of the column does, no scale beside it
   const scales = outputs ? null : await scaleLookup(catalog, analysis.types, userTypes);
   const keyCounts = await distinctKeys(catalog, analysis.tree);
-  const notNull = await notNullColumns(catalog, analysis.tree);
+  const keysOfRows = await rowKeys(catalog, analysis.tree);
   // WHAT EACH COLLATION OF THE ANALYSIS MEANS (src/duck/collation.ts), resolved before the rewrite reads any: a libc
   // order not read yet is read here, before the plan is made; a collation the source lacks or Mason cannot follow refused
   let collations: StatementCollations;
   try { collations = await resolver.prepare((sql) => catalogRows(catalog, sql), collationOids(analysis.tree)); }
   catch (e) { throw e instanceof Unrewritable ? unrewritableError(e, text) : e; }
   const analysed = performance.now();
-  const rewritten = (l = lookup, sc = scales): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, typeNames, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts, boundPaths, scales: sc, notNull });
+  const rewritten = (l = lookup, sc = scales): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, typeNames, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts, boundPaths, scales: sc, rowKeys: keysOfRows });
   try {
     ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams, wholeNumericArrays } = rewritten());
     // the oracle's (`eager`): every read stored before the plan is made, and the plan made again over them
