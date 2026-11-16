@@ -9007,25 +9007,45 @@ test("issue 982: every TABLESAMPLE is refused by name, wherever the table is rea
       "SELECT id FROM sampled UNION ALL SELECT id FROM sampled TABLESAMPLE SYSTEM (100)",
       "SELECT count(*) FROM sampled_half",
       "SELECT count(*) FROM sampled_all a JOIN sampled_half h USING (id)",
-      // arguments that read the query around them or a table: never run over the catalog's tables of no rows, whose
-      // NULL or missing name is not Postgres's answer
+      // arguments that are no literal, whatever Postgres would make of them: never worked out, never run (an operator, a
+      // function, a column of the query around them, a subquery, a cast of a cast, a literal no float4 holds)
       "SELECT count(*) FROM sampled a, LATERAL (SELECT * FROM sampled TABLESAMPLE SYSTEM (a.id * 50)) s",
       "SELECT (SELECT count(*) FROM sampled TABLESAMPLE BERNOULLI (100) REPEATABLE (a.id)) FROM sampled a",
       "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM ((SELECT max(id) * 50 FROM sampled))",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (1 / 0)",
+      "SELECT count(*) FROM (SELECT * FROM sampled TABLESAMPLE SYSTEM (100 + 1)) s",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (abs(-200))",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (200::float8::float4)",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (200::int)",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (1e40)",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (200) REPEATABLE (1e400)",
+      // two samples that would raise apart: which raises is the plan's
+      "SELECT count(*) FROM sampled a TABLESAMPLE SYSTEM (200), sampled b TABLESAMPLE SYSTEM (NULL)",
+      // a literal in range, however it is written
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (100.0000001)",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (' 1e2 ')",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM ('100'::numeric) REPEATABLE ('-Infinity'::float8)",
+      "SELECT count(*) FROM sampled TABLESAMPLE BERNOULLI (-0.0) REPEATABLE ('NaN')",
     );
     for (const sql of forms) refused(sql, await outcome(sql));
     // what Postgres itself rejects is its error, word for word: at its analysis (an unknown method, two arguments, a view
-    // sampled) and as the sample starts (a percent past 100 or NULL, a NULL seed, a division by zero), the same here
-    // as the catalog Postgres's own run of the statement over its table of no rows
+    // sampled, a literal no float4 reads) and, worked out from the literal, as the sample starts (a percent past 100,
+    // NaN or NULL, a NULL seed), the same here as the catalog Postgres's own run of the statement over its table of no rows
     for (const sql of [
       "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (200)",
       "SELECT count(*) FROM sampled TABLESAMPLE BERNOULLI (-1)",
+      "SELECT count(*) FROM sampled TABLESAMPLE BERNOULLI (100.001)",
       "SELECT count(*) FROM sampled TABLESAMPLE BERNOULLI ('NaN')",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM ('  -Inf ')",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM ('NaN'::numeric)",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (200::float8) REPEATABLE (7)",
       "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (NULL)",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (NULL::float8) REPEATABLE (NULL)",
       "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (50) REPEATABLE (NULL)",
-      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (1 / 0)",
-      "SELECT count(*) FROM (SELECT * FROM sampled TABLESAMPLE SYSTEM (100 + 1)) s",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (200) REPEATABLE (NULL)",
+      "SELECT count(*) FROM sampled a TABLESAMPLE SYSTEM (200), sampled b TABLESAMPLE BERNOULLI (300)",
       "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM ('abc')",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM ('1e39')",
       "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (50, 50)",
       "SELECT count(*) FROM sampled TABLESAMPLE system_rows (10)",
       "SELECT count(*) FROM sampled_all TABLESAMPLE SYSTEM (100)",
@@ -9045,4 +9065,42 @@ test("issue 982: every TABLESAMPLE is refused by name, wherever the table is rea
     await assert.rejects(c.query("SELECT count(*) FROM big TABLESAMPLE SYSTEM (200)"), (e: pg.DatabaseError) => e.code === "2202H" && e.message === "sample percentage must be between 0 and 100");
     assert.deepEqual((await answer(c, "SELECT count(*) FROM big")).rows, [["150000"]]);
   } finally { await c.end(); }
+});
+
+// THE REVIEW OF PR 1092: a sample's arguments were run in the catalog Postgres to find Postgres's error, as its superuser,
+// on the one connection every session shares, before the allowlist. So a function in them ran there: a set_config
+// reached through ts_rewrite set a parameter for every session until the catalog restarted, pg_read_file read the server's
+// files into the error, lo_from_bytea left large objects, pg_advisory_lock a lock, pg_sleep held the catalog. The class:
+// a statement's own expression run where the session's role and transaction do not hold. The decision: nothing of a
+// statement runs in the catalog; Postgres's error is worked out from a literal alone, and anything else is the gap.
+test("the review of PR 1092: a TABLESAMPLE's arguments never run in the catalog Postgres: each is refused by name, and the catalog is as it was", async () => {
+  const c = await client();
+  const other = await client();
+  try {
+    const state = async (): Promise<unknown[][]> => [
+      ...(await answer(other, "SELECT NULL = NULL AS x")).rows,
+      ...(await answer(other, "SHOW transform_null_equals")).rows,
+      ...(await answer(other, "SHOW IntervalStyle")).rows,
+      ...(await answer(other, "SELECT count(*) FROM pg_catalog.pg_largeobject_metadata")).rows,
+      ...(await answer(other, "SELECT count(*) FROM pg_catalog.pg_locks WHERE locktype = 'advisory'")).rows,
+    ];
+    const before = await state();
+    assert.deepEqual(before, [[null], ["off"], ["postgres"], ["0"], ["0"]]);
+    const setting = (name: string, value: string): string =>
+      `SELECT count(*) FROM big TABLESAMPLE SYSTEM (length(ts_rewrite('a'::tsquery, 'select ''a''::tsquery, ''b''::tsquery from (select set_config(''${name}'', ''${value}'', false)) s')::text) + 40)`;
+    for (const sql of [
+      setting("transform_null_equals", "on"),
+      setting("IntervalStyle", "sql_standard"),
+      "SELECT count(*) FROM big TABLESAMPLE SYSTEM (current_user::text::float4)",
+      "SELECT count(*) FROM big TABLESAMPLE SYSTEM (pg_read_file('postgresql.auto.conf')::float4)",
+      "SELECT count(*) FROM big TABLESAMPLE SYSTEM (lo_from_bytea(0, 'hello')::text::float4 * 0 + 50)",
+      "SELECT count(*) FROM big TABLESAMPLE BERNOULLI (50) REPEATABLE (pg_advisory_lock(42)::text::float4)",
+      "SELECT count(*) FROM big TABLESAMPLE SYSTEM (length(pg_sleep(3)::text) * 0 + 50)",
+    ]) {
+      const started = performance.now();
+      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /^Mason gap tablesample\b/.test(e.detail ?? "") && !/postgres|hello/.test(e.message), sql);
+      assert.ok(performance.now() - started < 2_500, `${sql}: answered at once, nothing run`);
+    }
+    assert.deepEqual(await state(), before, "the catalog every session shares is as it was");
+  } finally { await c.end(); await other.end(); }
 });
