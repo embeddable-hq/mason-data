@@ -107,10 +107,13 @@ paths:
   catch-up would read every row in one read of the source), checked every `REWRITE_RECHECK_MS` (30 s), never backed
   off, the old copy serving; a CLUSTER, VACUUM FULL or SET TABLESPACE keeps each row's xmin and goes on. **A wait is
   never a failure** (issue 1066: #1058 recorded a first sync that waited as `failed`, so `mason add t && mason wait`
-  exited 1 while Mason only waited): no `error`, a first sync's phase `waiting`, said as `CopyState.syncWaits` (its
+  exited 1 while Mason only waited): no `error` of its own (it clears only the whole sync's own, `wholeErrors`, or an
+  older Mason's wait, `OLDER_WAIT_ERROR`; a stream's or a poll's stays), a first sync's phase `waiting`, said as `CopyState.syncWaits` (its
   why and when it was checked), `sync.state` `waiting`, a `sync_waits` event that is no failure, and on the table's
   line (`notStreamedReason`), each time in the words of its last check. **The transaction is named only while it is
-  open** (`holderSql`, `holderOf`, read at every check, the decided ones included): #1058's words kept naming the
+  open, and only one running at the snapshot** (`holderSql`, `holderOf`, `snapshotHolder`, read at every check, the
+  decided ones included; a resumed sync's old snapshot taken with none running has the next id as its xmin, which a
+  later transaction takes): #1058's words kept naming the
   first of two transactions older than the rewrite after it ended, a pid another session may hold by then. **That check reads a SAMPLE, never the
   whole table** (issue 1066: #1058's read every row of an ALTERed table under AccessShareLock, minutes on a large one,
   a migration's ALTER queued behind it and the application behind the ALTER): `rowsHeldSql` reads the first
@@ -131,8 +134,13 @@ paths:
   the stream holds the table's changes from a writer's turn before that poll, in the side table's columns
   (`sideColumns`) and a stay that goes on past the swap, and the swap's turn applies them (`applySideHeld`), the
   table marked behind in the swap's transaction until then (a crash between is caught up by one poll). A mark set
-  while it caught up (a slot made, `makingSlot`) is left to its own catch-up. `tests/integration/duck-rewrite.itest.ts`
-  "loaded again after a transaction began" holds it in both modes.
+  while it caught up (a slot made, `makingSlot`) is left to its own catch-up. **A table served is marked behind, in
+  the ledger, as its side table's catch-up begins, and a catch-up that ends without a swap ends its stay**
+  (`releaseSide`; the review of PR 1084: a sync again whole whose column change was reverted while it read had its
+  table back in the stream, served, and a failed side poll dropped what the stream held and had acknowledged, for
+  good, and wrote changes decoded in the side table's wider columns to the table served): one poll from the table's
+  own watermark catches it up, and nothing decoded in the side's columns reaches it. `tests/integration/duck-rewrite.itest.ts`
+  "loaded again after a transaction began" and "loses no change the stream held" hold it.
 - **A passthrough read (`pq`) names its columns through `pgColumnSql`**, the copy's chunks and the poll alike: an exact
   numeric as text, and as `text[]` a citext[] / inet[] / json[] (`KEPT_ARRAYS`) and an enum array (`enumLists`, by its
   stored type) — `postgres_query` hands each over as one VARCHAR DuckDB cannot cast to the column (the

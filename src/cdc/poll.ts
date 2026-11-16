@@ -23,6 +23,18 @@ export function snapshotXmin(snapshot: string): bigint {
   return BigInt(m[1]!);
 }
 
+/**
+ * THE TRANSACTION THAT HOLDS A SNAPSHOT'S XMIN BACK, from the snapshot's text (`xmin:xmax:xip,…`): its xmin, the oldest
+ * transaction running when it was taken — or null when none was (xmin = xmax, the next id to be taken, which a later,
+ * unrelated transaction takes: a resumed sync's old snapshot must never name it, issue 1066).
+ */
+export function snapshotHolder(snapshot: string): bigint | null {
+  const m = /^(\d+):(\d+):/.exec(snapshot);
+  if (!m) throw new Error(`not a pg_snapshot: ${JSON.stringify(snapshot)}`);
+  const xmin = BigInt(m[1]!), xmax = BigInt(m[2]!);
+  return xmin < xmax ? xmin : null;
+}
+
 /** The poll's snapshot, its xmin and xmax (64-bit transaction ids, Postgres 13+), read as the transaction's first statement. */
 export const SNAPSHOT_SQL = "SELECT pg_current_snapshot()::text, pg_snapshot_xmax(pg_current_snapshot())::text";
 

@@ -14,9 +14,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   - `mason wait` keeps waiting for a first sync that waits, within its `--timeout`. Before, it exited 1, so
     `mason add <table> && mason wait` read the wait as a failure. A table synced before is served meanwhile, so
     `mason wait` is ready for it.
-  - In `mason status --json` and `mason wait --json`, the table's `error` is now `null` and its `sync.state` is
-    `waiting`. A new `syncWaits` says why, and when Mason last checked. If a script or an alert looks for `failed` to
-    catch this case, it no longer matches.
+  - In `mason status --json` and `mason wait --json`, the wait is no longer the table's `error`, and its `sync.state`
+    is `waiting`. A new `syncWaits` says why, and when Mason last checked. If a script or an alert looks for `failed`
+    to catch this case, it no longer matches. Another error on the table, such as its stream's, is still said.
   - The event is now `sync_waits`, and it is not a failure. Before, it was `full_sync_failed`.
   - The message names the transaction and its pid only while that transaction is still open. Before, it could name
     one that had already ended, whose pid may belong to another session by then.

@@ -507,7 +507,12 @@ under another transaction's write fails its commit, hence swaps on the writer's 
   for its back-off. So the decision is that what a swap puts in is the whole table as of one snapshot: the one poll
   runs into the side table first, the swap carries that poll's snapshot as the watermark, and under replication the
   changes the stream held from before that poll are applied in the swap's own writer's turn. It costs the source
-  nothing more (the same poll, earlier); the table serves its previous data for the poll's time longer. #1058's wait
+  nothing more (the same poll, earlier); the table serves its previous data for the poll's time longer. The review of
+  PR 1084 found what the stream holds meanwhile is acknowledged as it is held: a sync again whole whose column change
+  was reverted while it read (issue 79) had its table back in the stream, served, and a side poll that failed dropped
+  those changes for good, and let changes decoded in the side table's wider columns reach the narrower table served.
+  So a table served is marked behind, in the ledger, as the side table's catch-up begins, and a catch-up that ends
+  without a swap ends its stay: one poll from its own watermark catches it up, as main's catch-up after a swap did. #1058's wait
   stays for a rewrite after the open transaction began: there the chunks read nothing, and the catch-up would read every
   row in one read of the source.
 - **A sync that waits is never a failure** (issue 1066). #1058 recorded a first sync that waited for an open
