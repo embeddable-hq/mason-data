@@ -697,6 +697,34 @@ before.
 `src/duck/stream.ts` (`relationMoved`), `src/cdc/shape.ts` (`identitySql`); `tests/duck-column-identity.test.ts`,
 `tests/integration/cli-column-identity.itest.ts`.
 
+### One entry's problem holds its table alone (issue 1074, 2026-11-16)
+
+**Decision.** When the run reads the sources file again, each entry is checked against the catalog on its own
+(`entryTables`). An entry that passes is taken as it is now. An entry that does not is held as the run took it before:
+its table is not synced, it serves what it holds, and its line says what is wrong with the line to write. The sync holds
+it as it holds a table for its columns (`unplaced`). An entry the run never took is not synced, and said among the
+run's warnings. A problem of the whole file (it does not parse, its `url:` names another database, it goes silent on
+`sync:` over a slot, or it sets a table to `replication` the run never checked the database for) still keeps every table
+as the run took it.
+
+**Why.** With `t3: { columns: [id, amount_total] }`, a rename of `amount_total` on the database made `entryProblems`
+refuse the whole file at the run's re-read, because the name is close to a column the table has. The run kept every
+table as it took it before, so a column added to another table was never synced, and a column renamed elsewhere made
+that table's polls fail, until a restart. One entry's problem is that entry's.
+
+**Fail closed.** A renamed column a `columns:` entry lists is never synced under its new name by a guess. The line the
+hold gives (`renamedColumns`) is checked against `entryProblems`, but only the person writes it: `mason add` through the
+run takes it at once, and a hand edit at the next time the run reads the file (a restart, an add or a remove, or a
+table's columns changing). The run has no watch on the file: the README says a hand edit applies at the next start.
+
+**What is left.** A start still refuses the whole file on any entry's problem: the file is the person's to fix before
+anything runs. `mason add` and `mason remove` still refuse while another entry fails against the database
+(`othersHold`), so a held entry is fixed by its own `mason add`, or removed.
+
+**Where.** `src/cli/sources.ts` (`entryTables`, `rereadSources`, `renamedColumns`, `refusedEntryText`), `src/cli/dev.ts`,
+`src/duck/sync.ts` (`setTables`' `held`, `placeColumns`); `tests/cli-sources.test.ts`, `tests/duck-sync-added.test.ts`,
+`tests/integration/cli-entry-hold.itest.ts`.
+
 ### Logical replication
 
 **Decision.** A table whose `sync:` is `replication` is kept current from the change log (`src/duck/stream.ts`); the rules

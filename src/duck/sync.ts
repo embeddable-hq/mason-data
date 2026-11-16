@@ -1266,7 +1266,8 @@ export class Sync {
    *  named before, and one that holds a table not by its own record */
   private readonly formerRecords = new Map<number, FormerRecord>();
   /** THE TABLES HELD BY THEIR COLUMNS' IDENTITY (issue 1073), and why: a column the sources file left out would be synced
-   *  under another name. Not copied, polled, caught up or streamed; their synced data served as it was */
+   *  under another name — or by their entry, which the run cannot take as it is (issue 1074). Not copied, polled, caught
+   *  up or streamed; their synced data served as it was */
   private readonly unplaced = new Map<string, string>();
   /** the error each table a named publication did not carry was given (`settlePrepared`): cleared by the pass that finds
    *  it carried again, and by nothing else that pass */
@@ -1999,14 +2000,16 @@ export class Sync {
    *  here and current (said as its records say it, `addedText`), a removed one dropped. `confirmed`: the tables whose
    *  entry the person just wrote against the database's columns as they are now (`mason add` through the run), taken
    *  afresh by name (src/duck/column-identity.ts). `readOnly`: the project's files are deployed read-only, so the
-   *  sources file is the owner's committed word, which confirms a column left out that did not move.
+   *  sources file is the owner's committed word, which confirms a column left out that did not move. `held`: the tables
+   *  whose entry the run cannot take as it is (issue 1074, src/cli/sources.ts `rereadSources`), each as the run took it
+   *  before, and why: held as a table held for its columns is (`placeColumns`).
    *  What it returns is the catalog rebuilt over them (never rejected: a failure is said in the log) */
-  setTables(tables: readonly AddedTable[], o: { confirmed?: ReadonlyArray<{ table: string; shape: string | undefined }>; readOnly?: boolean } = {}): Promise<void> {
+  setTables(tables: readonly AddedTable[], o: { confirmed?: ReadonlyArray<{ table: string; shape: string | undefined }>; readOnly?: boolean; held?: ReadonlyMap<string, string> } = {}): Promise<void> {
     // (called at mason start and at mason add / remove only: the catalog's keys and constraints are the source's as of
     // then — docs/DESIGN.md "A count of distinct keys")
     const before = this.tables;
     this.tables = new Map(tables.map((t) => [t.source, t]));
-    this.placeColumns(tables, new Map((o.confirmed ?? []).map((c) => [c.table, c.shape])), o.readOnly === true);
+    this.placeColumns(tables, new Map((o.confirmed ?? []).map((c) => [c.table, c.shape])), o.readOnly === true, o.held ?? new Map());
     // said as it happens: what is added, each table as its records say it is (`addedText`), and what is no longer
     // (dropped at the next pass)
     const added = tables.filter((t) => !before.has(t.source));
@@ -2846,10 +2849,12 @@ export class Sync {
    * out, under another name, is HELD (`unplaced`): said in the log, as an event and as its error while it is held (`state`:
    * `mason status`, the web page), with the line to write; not copied, polled, caught up or streamed, its synced data
    * served as it was. A replicated one is marked behind, so it is caught up by one poll once it is let go (the stream
-   * skips its changes meanwhile). Every other table's record is written as taken. A copy recorded by a Mason before columns had numbers
+   * skips its changes meanwhile). A table whose ENTRY the run cannot take (`entryHeld`, issue 1074) is held the same way,
+   * as the run took it before, its record left as it was: what it syncs is decided again once its entry is fixed.
+   * Every other table's record is written as taken. A copy recorded by a Mason before columns had numbers
    * takes them from its table now, where its names and types are the same: never read again for it.
    */
-  private placeColumns(tables: readonly AddedTable[], confirmed: ReadonlyMap<string, string | undefined>, readOnly: boolean): void {
+  private placeColumns(tables: readonly AddedTable[], confirmed: ReadonlyMap<string, string | undefined>, readOnly: boolean, entryHeld: ReadonlyMap<string, string>): void {
     const wasHeld = new Map(this.unplaced);
     this.unplaced.clear();
     // EVERY RECORD READ BEFORE ANY IS WRITTEN (issue 1080): two tables, or two schemas, that swap names bring each its
@@ -2877,6 +2882,8 @@ export class Sync {
     const heldBy: Array<[string, ColumnRecord, string]> = [];
     const unconfirmed: string[] = [];
     for (const t of tables) {
+      const byEntry = entryHeld.get(t.source);
+      if (byEntry !== undefined) { this.unplaced.set(t.source, byEntry); continue; }
       // A CONFIRMATION IS OF THE TABLE THE ADD SAW (the re-check of PR 1078): its oid, and each column's number, name and
       // type (its shape). Any of it changed since, and it is no confirmation: the table is placed as the run took it
       const asked = confirmed.has(t.source);

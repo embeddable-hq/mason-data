@@ -416,6 +416,46 @@ test("the file read again while the run is up: a mistake keeps the tables read b
   assert.deepEqual([fixed.tables.map((t) => t.source), fixed.problem, fixed.said], [["public.orders"], null, null]);
 });
 
+test("the file read again while the run is up: an entry the catalog refuses holds its table alone, said with the line to write; the others are taken (issue 1074)", () => {
+  const RUN = "postgres://me@localhost:5432/shop";
+  const read = (text: string): Sources.ProjectSource => ({ ...(parse(text) as Sources.SourceFile), resolved: RUN, from: "mason/sources/app.yml", publicationName: null });
+  const text = "kind: postgres\nurl: x\ntables:\n  orders:\n    columns: [id, status, amount]\n  customers: {}\n";
+  const first = S.addedTables(parse(text) as Sources.SourceFile, CATALOG, "shop", "/app") as Sources_AddedTable[];
+  const prev: Sources.RunSources = { file: parse(text) as Sources.SourceFile, tables: first, problem: null };
+  // on the database: orders.amount renamed amount_total, and customers gained a column
+  const renamed = { ...orders, columns: orders.columns.map((c) => c.name === "amount" ? { ...c, name: "amount_total" } : c) };
+  const grown = { ...customers, columns: [...customers.columns, col("email")] };
+  const catalog = [renamed, grown, events, invoices];
+  const r = S.rereadSources(prev, read(text), RUN, catalog, "shop", "/app");
+  assert.equal(r.problem, null, "the file is taken: one entry's problem is that entry's");
+  assert.equal(r.said, null);
+  assert.deepEqual(r.tables.map((t) => [t.source, t.columns.map((c) => c.name)]), [
+    ["public.orders", ["id", "status", "amount"]],
+    ["public.customers", ["id", "name", "email"]],
+  ], "orders as the run took it before (held, never synced under the new name); customers with its new column");
+  assert.equal(r.tables[0], first[0], "the held table is the one the run took before");
+  assert.deepEqual(r.refused, [{ table: "public.orders", held: true,
+    text: "public.orders is not synced: mason/sources/app.yml: tables.orders.columns: public.orders has no column amount — did you mean `amount_total`? " +
+      "(its columns: id, customer_id, status, amount_total, api_token, payload). Mason holds the table and serves its synced data as it was. " +
+      "To sync its columns as the database names them now, write columns: [id, status, amount_total] on tables.orders, then run mason stop && mason start. " +
+      "Or run mason add orders --columns id,status,amount_total while Mason runs, which takes it at once." }]);
+  // a project deployed read-only: the committed file is the way, and mason add is refused there
+  const ro = S.rereadSources(prev, read(text), RUN, catalog, "shop", "/app", { readOnly: true });
+  assert.match(ro.refused![0]!.text, /Mason holds the table and serves its synced data as it was\. To sync its columns as the database names them now, write columns: \[id, status, amount_total\] on tables\.orders in the committed sources file, and start Mason with it\.$/);
+  // read again (another table's column changed): still held as the run took it, never the guess
+  const again = S.rereadSources(r, read(text), RUN, catalog, "shop", "/app");
+  assert.equal(again.tables[0], first[0]);
+  // the entry fixed: taken as it says now, nothing refused
+  const fixed = S.rereadSources(again, read(text.replace("amount]", "amount_total]")), RUN, catalog, "shop", "/app");
+  assert.deepEqual([fixed.tables.map((t) => t.columns.map((c) => c.name)), fixed.refused], [[["id", "status", "amount_total"], ["id", "name", "email"]], []]);
+  // an entry the run never took that the catalog refuses: not synced, said, every other entry taken
+  const added = S.rereadSources(prev, read(`${text}  invoices: {}\n`), RUN, catalog, "shop", "/app");
+  assert.deepEqual(added.tables.map((t) => t.source), ["public.orders", "public.customers"]);
+  assert.deepEqual(added.refused!.map((x) => [x.table, x.held]), [["public.orders", true], ["public.invoices", false]]);
+  assert.equal(added.refused![1]!.text, "public.invoices is not synced: mason/sources/app.yml: tables.invoices: shop has no table public.invoices this user can read. " +
+    "Mason syncs it once its entry is fixed. Fix its entry, then run mason stop && mason start. Or run mason add invoices --columns … while Mason runs, which takes it at once.");
+});
+
 test("the small mistakes: $NAME without braces, a name YAML reads as a boolean, null or number — each told what to write", () => {
   assert.deepEqual(problems("kind: postgres\nurl: $DATABASE_URL\ntables: {}\n"), ["url: $DATABASE_URL — write ${DATABASE_URL}: a variable is named in braces"]);
   assert.deepEqual(problems("kind: postgres\nurl: x\ntables:\n  true: {}\n  1: {}\n  orders: { columns: [id, null, 2] }\n"), [

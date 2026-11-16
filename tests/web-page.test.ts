@@ -132,7 +132,7 @@ const COPYING = stateOf([copied("public.customers", 1200, "2026-10-27T09:00:01.0
 const FAILED = stateOf([copied("public.customers", 1200, "2026-10-27T09:00:01.000Z"),
   { source: "public.orders", phase: "failed", rows: null, bytes: null, seconds: null, copiedAt: null, error: "could not read the next chunk: connection reset\nthe sync tries it again in 5 min" },
   { ...copied("public.events", 30_000_000, "2026-10-27T09:04:00.000Z"), kept: { by: "poll", sync: { mode: "off" }, syncedAt: "2026-10-27T09:04:00.000Z", nextAt: null } }],
-  { warnings: ["mason/sources/shop.yml: tables.ordrs: no such table (Mason syncs the tables it read before; mason start reads the file again)"], replication: true });
+  { warnings: ["mason/sources/shop.yml: tables.ordrs: no such table (Mason syncs the tables it read before. Fix the file, then run mason stop && mason start)"], replication: true });
 const NONE = stateOf([]);
 for (const s of [NONE]) for (const t of s.tables) t.added = false;
 

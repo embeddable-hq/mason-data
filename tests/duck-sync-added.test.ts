@@ -603,3 +603,23 @@ test("replication the database will not set up is said on the replicated table's
     assert.match(keptText(a as KeptState), /give its entry sync: poll <interval> \(poll 5m\) in the sources file to poll it instead/);
   });
 });
+
+test("a table whose entry the run cannot take is held alone: not synced, its synced data served, its line saying why; the others kept current, and it is let go once its entry is fixed (issue 1074)", async () => {
+  const why = "public.b is not synced: mason/sources/app.yml: tables.b.columns: public.b has no column x. Mason holds the table and serves its synced data as it was.";
+  await withSync({ mode: "poll", tables: [table("a"), table("b")], seed: async (run) => { for (const n of ["a", "b"]) { await run(copied(n)); await run(polled(n)); } } }, async (sync, logged, events) => {
+    // the option read through a cast: the file loads at a commit without it (scripts/fails-without.ts)
+    await (sync.setTables as (t: AddedTable[], o: { held: ReadonlyMap<string, string> }) => Promise<void>).call(sync, [table("a"), table("b")], { held: new Map([["public.b", why]]) });
+    const state = (s: string) => sync.state().find((x) => x.source === s)!;
+    assert.deepEqual([state("public.b").phase, state("public.b").error], ["copied", why], "its synced data served, its line saying why");
+    assert.equal(state("public.a").error, null, "the other table is not held");
+    assert.equal(sync.pollRefusal(["public.b"])?.message, why, "a sync by hand of it is refused with why");
+    assert.equal(sync.pollRefusal(["public.a"]), null, "the other is synced by hand");
+    assert.ok(logged.includes(`public.b: ${why}`), logged.join("\n"));
+    assert.ok(events.some((e) => e.table === "public.b" && e.message === why), "said as an event");
+    // its entry fixed: let go, and synced again
+    await sync.setTables([table("a"), table("b")]);
+    assert.equal(state("public.b").error, null);
+    assert.equal(sync.pollRefusal(["public.b"]), null);
+    assert.ok(logged.includes("public.b: its columns are placed again, so it is synced again"), logged.join("\n"));
+  });
+});

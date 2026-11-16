@@ -77,6 +77,8 @@ paths:
   sync it, the table is HELD (`unplaced`): it is not copied, polled, caught up or streamed, it serves what it holds, and
   its line says why with the line to write. Only `mason add` confirms it (through the run, or recorded in `.mason/` while
   Mason is stopped, src/cli/confirmed.ts), and only for the table's shape as the add read it, or its entry removed. A
+  table whose ENTRY the run's re-read cannot take is held the same way (`setTables`' `held`, issue 1074), as the run
+  took it before, its record left as it was: one entry's problem never stops the others being kept current. A
   table is placed against EVERY record of its oid, every entry's and the ones kept by oid
   (`_mason.column_identity_former`), all read before any is written (issue 1080: two tables or schemas swapped names and
   the entry syncing every column served the other's left-out column). In a project deployed read-only the committed file is
