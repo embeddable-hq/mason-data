@@ -4758,7 +4758,7 @@ export class Sync {
    * synced data, or is not served. In replication mode the stream holds the table's changes from a writer's turn before
    * that poll's snapshot, in the side table's columns (`sideColumns`) and a stay of their own, which goes on past the
    * swap; the swap's own turn applies them (`swapCaughtUp`), as a catch-up's held changes are (src/duck/stream.ts "why
-   * replaying is safe"). Answers what it read, "columns changed" (its columns are read again: `columnsChanged`), or
+   * replaying is safe"). Answers what it read, "columns changed" (its columns are read again: `columnsChanged`; or held for them, `unplaced`), or
    * "copy again" (a numeric wider than the side table's column).
    *
    * A TABLE SERVED IS MARKED BEHIND FIRST, in the ledger (`_mason.catch_up`), unless it is already (the review of PR
@@ -4771,9 +4771,12 @@ export class Sync {
   private async catchUpSide(t: AddedTable, watermark: string): Promise<SideCaught | "columns changed" | "copy again"> {
     const holding = this.replicated(t);
     let mark: { why: string } | undefined;
+    let unplaced = false;
     // J, as a catch-up's: from the writer's turn on, every batch's changes of this table are held (`applyStreamed`), in a
     // new stay of the side table's columns — what the stream decoded before is older than the poll's snapshot
     await this.onWriter(async () => {
+      // held for its columns (`unplaced`, issue 1073): never caught up, so never swapped in, until it is let go
+      if (this.unplaced.has(t.source)) { unplaced = true; return; }
       if (holding && this.states.get(t.source)?.phase === "copied" && !this.behind.has(t.source)) {
         await this.store.writer.run(`INSERT OR REPLACE INTO ${MASON_SCHEMA}.catch_up VALUES (${literal(t.source)}, ${literal(WHOLE_READ_WHY)}, now())`);
         this.behind.set(t.source, { why: WHOLE_READ_WHY });
@@ -4783,6 +4786,7 @@ export class Sync {
       if (holding) { this.held.set(t.source, noChanges()); this.streamed.delete(t.source); }
       this.refreshStreamed();
     });
+    if (unplaced) return "columns changed";
     const started = Date.now();
     const into: IntoSide = { table: `${t.table}${SIDE_SUFFIX}`, watermark };
     const found = await this.poll(this.rebuilder, [t], { into });
@@ -5244,9 +5248,12 @@ export class Sync {
       // Its ledger row is written in the same turn, before the held changes are applied (which count from its rows) and
       // before the stream can write it: the table is a copy of these columns from here (`needsCopy`), or it would not
       // join the stream
-      let seconds = 0, copiedAt = "", saidJoin = false;
+      let seconds = 0, copiedAt = "", saidJoin = false, heldBack = false;
       await this.onWriter(async () => {
         if (this.cutting.has(t.source)) throw new Removed(t.source);
+        // HELD FOR ITS COLUMNS meanwhile (`unplaced`, issue 1073): never swapped in, and its catch-up never ended — the
+        // stream skipped its changes while it was held (a table served stays marked behind: `catchUpSide`)
+        if (caught !== null && this.unplaced.has(t.source)) { heldBack = true; return; }
         let held = false;
         if (caught === null) await this.swap(t, side, { snapshot: p.snapshot, behind: null });
         else held = await this.swapCaughtUp(t, side, caught);
@@ -5258,6 +5265,13 @@ export class Sync {
         this.wholeErrors.delete(t.source);
         if (held) saidJoin = await this.applySideHeld(t);
       });
+      if (heldBack) {
+        await this.releaseSide(t.source);
+        this.copyLive.delete(t.source);
+        this.log(`sync of ${t.source} stopped before it was served: ${this.unplaced.get(t.source) ?? "its columns are held"} (its whole read is kept)`);
+        if (first) await this.record({ ...was, phase: "waiting", error: null }, undefined, w);
+        return;
+      }
       this.copyLive.delete(t.source);
       kept = null;
       this.retries.delete(t.source);

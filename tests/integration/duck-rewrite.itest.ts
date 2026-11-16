@@ -197,6 +197,8 @@ async function syncedWith(f: Fixture, mode: Mode, columns: string): Promise<void
 }
 
 const emptied = (f: Fixture): string[] => f.logged.filter((l) => /^synced public\.t: 0 row\(s\)/.test(l));
+/** w added, as mason add adds it: its entry confirmed, so the column the first sync left out is synced again (src/duck/column-identity.ts) */
+const CONFIRMED_W = (f: Fixture): { confirmed: Array<{ table: string; shape: string | undefined }> } => ({ confirmed: [{ table: "public.t", shape: f.whole.shape }] });
 
 for (const mode of ["poll", "replication"] as const) {
   const skip = mode === "poll" ? skipPoll : skipStream;
@@ -340,7 +342,7 @@ for (const mode of ["poll", "replication"] as const) {
       // under replication the stream carries the source's own TRUNCATE to the table served, which the source then was:
       // its least count is the read's from here
       const before = f.served().least;
-      await f.sync.setTables([f.whole]);
+      await f.sync.setTables([f.whole], CONFIRMED_W(f));
       await f.sync.once();
       const text = f.logged.join("\n");
       assert.deepEqual(emptied(f), [], `never swapped in empty\n${text}`);
@@ -400,7 +402,7 @@ test("poll: a whole sync that waits names the transaction it waits for only whil
     first = await openTransaction(f.url, "SELECT txid_current()");
     second = await openTransaction(f.url, "SELECT txid_current()");
     psql(f.url, "ALTER TABLE t ALTER COLUMN v TYPE int USING v + 0");
-    await f.sync.setTables([f.whole]);
+    await f.sync.setTables([f.whole], CONFIRMED_W(f));
     await f.sync.once();
     const why = (): string => f.sync.state().find((s) => s.source === "public.t")?.syncWaits?.why ?? "";
     assert.match(why(), new RegExp(`^its sync waits for transaction ${first.xid()} \\(pid \\d+ in pg_stat_activity\\) to end\\.`), `the oldest open transaction, named\n${f.logged.join("\n")}`);
@@ -438,7 +440,7 @@ test("poll: a sync again whole that waits keeps an error another flow recorded o
     await hooks.record({ ...own(), error: other });
     holder = await openTransaction(f.url, "SELECT txid_current()");
     psql(f.url, "ALTER TABLE t ALTER COLUMN v TYPE int USING v + 0");
-    await f.sync.setTables([f.whole]);
+    await f.sync.setTables([f.whole], CONFIRMED_W(f));
     await f.sync.once();
     assert.match(now().syncWaits?.why ?? "", /^its sync waits for transaction /, `it waits\n${f.logged.join("\n")}`);
     assert.equal(now().error, other, "the other flow's error is kept while it waits");
@@ -506,7 +508,7 @@ for (const ends of ["a rewrite under its read", "its backend terminated"] as con
         return poll(lane, all, o);
       };
       armed = true;
-      await f.sync.setTables([f.whole, u]);
+      await f.sync.setTables([f.whole, u], CONFIRMED_W(f));
       await f.sync.once();
       await failing;
       // the stream goes on, past those changes, with another table's
