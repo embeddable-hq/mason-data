@@ -4516,18 +4516,22 @@ wholeBeside("a whole numeric's own arithmetic is Postgres's", [
   "SELECT div(i, 2) AS q, count(*) FROM bins GROUP BY 1 ORDER BY 1 NULLS FIRST",
   "SELECT 2.5e2 * 2.5e2 AS w, 1e37 + 1 AS x, extract(epoch FROM date '2024-01-02') AS e"]);
 
-// issue 464: to_char of a time in a format DuckDB's strftime writes as Postgres does is DuckDB's own strftime, never the
-// function a row (a grouped month was x8-18 of Postgres over 4.5 M rows), and Postgres's text in every zone: a NULL, a
-// microsecond, before 1970, a zone's local mean time, each side of a clock change; ±infinity and every other format
-// stay the function's (src/duck/to-char.ts `strftimeTemplate`, src/duck/rewrite.ts `toChar`)
-test("issue 464: to_char of a time in a format strftime writes is the engine's own, Postgres's text in every zone and type", async () => {
+// issue 464: to_char of a time in a template the engine writes as Postgres does is the engine's own strftime and
+// date_part, never the function a row (a grouped month was x8-18 of Postgres over 4.5 M rows, a quarter or a padded
+// month's name x8 over a million), and Postgres's text in every zone: a NULL, a microsecond, before 1970, a zone's local
+// mean time, each side of a clock change; ±infinity and every other template stay the function's (src/duck/to-char.ts
+// `nativeTemplate`, src/duck/rewrite.ts `toChar`, `nativeText`)
+test("issue 464: to_char of a time in a template the engine writes is the engine's own, Postgres's text in every zone and type", async () => {
   const c = await client();
   const called = async (): Promise<number> => (await store.functionRows()).get("__mason_to_char_time") ?? 0;
   const native = ["YYYY-MM", "YYYY-MM-DD", "Mon YYYY", "FMMonth YYYY", "Dy DD Mon", "FMDay, DDD", "YYYY-MM-DD HH24:MI:SS", 'YYYY-MM-DD"T"HH24:MI:SS.US', "HH24:MI:SS.MS",
-    "IYYY-IW", "YYYYMMDD", 'YYYY "100%" MM', "FMMon/FMDy"];
-  // a pattern strftime does not write as Postgres does: a quarter, a padded name, FM on a number, an ordinal, another
-  // case, a translated name
-  const kept = ['YYYY-"Q"Q', "Month YYYY", "FMDD", "DDth", "yyyy-mm", "MON YYYY", "TMMonth", "Day", "HH12:MI AM", "WW",
+    "IYYY-IW", "YYYYMMDD", 'YYYY "100%" MM', "FMMon/FMDy",
+    // a quarter, a padded name, FM on a number, an ordinal, another case, a meridiem, an era, a Roman month, a fraction
+    'YYYY-"Q"Q', "Month YYYY", "FMDD", "DDth", "yyyy-mm", "MON YYYY", "Day", "HH12:MI AM", "WW",
+    "MONTH|month|DAY|day|DY|dy|mon|FMMONTH", "Q|Qth|FMDDth|ddTH|J|W|IDDD|ID|D|CC|RM|rm|FMRM|Y,YYY|YYY|YY|Y|IYY|IY|I", "hh p.m.|a.m.|PM|SSSS|FF1|FF5|ad|B.C.|FMHH24",
+    "FMMS|FMUS|Y,YYYth"];
+  // a template the engine does not write: a translated name, an ordinal of a name, FM before a literal
+  const kept = ["TMMonth", "MonthTH", "FMx",
     // a template that writes nothing, or nothing but its prefix (the review of PR 955: an empty strftime format is
     // DuckDB's bind error), the empty one (NULL), and one prefix an item (`FMFM` writes `FM`)
     "FM", '""', "", "FMFM", "FMTMMonth", "fmFMDD", "FXFMDD", "FMFXDD"];
@@ -4537,7 +4541,8 @@ test("issue 464: to_char of a time in a format strftime writes is the engine's o
       await truth.exec(`SET TimeZone = '${zone}'`);
       try {
         for (const fmt of [...native, ...kept]) {
-          const time = /HH|MI|SS|MS|US/.test(fmt);
+          // a pattern of the time of day: a date's is the function's (a zone's midnight)
+          const time = /HH|hh|MI|SS|MS|US|AM|PM|a\.m\.|p\.m\.|FF/.test(fmt);
           for (const [sql, finite] of [[`SELECT id, to_char("at", '${fmt}') AS v FROM instants ORDER BY id`, false], [`SELECT id, to_char(ts, '${fmt}') AS v FROM nullish ORDER BY id`, true],
             [`SELECT id, to_char(d, '${fmt}') AS v FROM ratios ORDER BY id`, !time]] as const) {
             const before = await called();
@@ -4553,7 +4558,12 @@ test("issue 464: to_char of a time in a format strftime writes is the engine's o
           "SELECT to_char(created_at, 'Mon YYYY') AS m, sum(amount) FROM orders GROUP BY to_char(created_at, 'Mon YYYY') ORDER BY to_char(created_at, 'Mon YYYY') DESC",
           "SELECT s.m, count(*) FROM (SELECT to_char(\"at\", 'YYYY-MM-DD') AS m FROM instants) s GROUP BY s.m ORDER BY s.m NULLS FIRST",
           "SELECT id, CASE WHEN id > 1 THEN to_char(created_at, 'YYYY') ELSE 'x' END FROM orders ORDER BY id",
-          "SELECT to_char(created_at, 'YYYY-MM') FROM orders UNION ALL SELECT to_char(ts, 'YYYY-MM') FROM nullish ORDER BY 1 NULLS FIRST"]) {
+          "SELECT to_char(created_at, 'YYYY-MM') FROM orders UNION ALL SELECT to_char(ts, 'YYYY-MM') FROM nullish ORDER BY 1 NULLS FIRST",
+          // a quarter and a padded name grouped, by number, by name and by the expression, and through a derived table
+          "SELECT to_char(o.created_at, 'YYYY \"Q\"Q') AS q, count(*) FROM orders o GROUP BY 1 ORDER BY 1",
+          "SELECT to_char(created_at, 'Month YYYY') AS m, sum(amount) FROM orders GROUP BY m ORDER BY m DESC",
+          "SELECT to_char(created_at, 'Day') AS d, count(*) FROM orders GROUP BY to_char(created_at, 'Day') ORDER BY to_char(created_at, 'Day')",
+          "SELECT s.q, count(*) FROM (SELECT to_char(\"at\", 'YYYY-\"Q\"Q') AS q FROM instants) s GROUP BY s.q ORDER BY s.q NULLS FIRST"]) {
           const before = await called();
           assert.deepEqual(await answer(c, sql), await postgres(sql), `${sql} in ${zone}`);
           if (!/instants/.test(sql)) assert.equal(await called() - before, 0, `${sql} in ${zone}: rows handed to the function`);
@@ -4571,6 +4581,18 @@ test("issue 464: to_char of a time in a format strftime writes is the engine's o
     // a format bound as a parameter is read where it runs: the function's, as before
     const sql = "SELECT id, to_char(created_at, $1) FROM orders ORDER BY id";
     assert.deepEqual(await answer(c, sql, ["YYYY-MM"]), await postgres(sql, ["YYYY-MM"]));
+    // a statement prepared in one zone and executed after a later SET reads the value in the zone it runs in
+    const prepared = { name: "issue464_zoned", text: "SELECT id, to_char(\"at\", 'YYYY \"Q\"Q Month DDth HH12 a.m. J IDDD') AS v FROM instants WHERE id > $1 ORDER BY id", values: [0], rowMode: "array", types: raw };
+    await c.query(prepared as pg.QueryConfig);
+    for (const zone of ["Asia/Kathmandu", "America/New_York"]) {
+      await c.query(`SET TimeZone = '${zone}'`);
+      await truth.exec(`SET TimeZone = '${zone}'`);
+      try {
+        const before = await called();
+        assert.deepEqual((await c.query(prepared as pg.QueryConfig)).rows, (await postgres(prepared.text, [0])).rows, `the prepared statement in ${zone}`);
+        assert.ok(await called() - before <= 2, `the prepared statement in ${zone}: rows handed to the function beside ±infinity`);
+      } finally { await truth.exec("SET TimeZone = 'UTC'"); }
+    }
   } finally { await c.query("SET TimeZone = 'UTC'"); await c.end(); }
 });
 

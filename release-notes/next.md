@@ -36,6 +36,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   such value it read refused it. These are still slow: a `mode()` of a `char(n)` or
   a `citext`, one ordered with `USING`, and one of a value that calls `random()` or reads a subquery or an outer
   query's column.
+- **`to_char` of a date or a time is faster with a quarter, a padded name and most other patterns.** Over a million
+  rows, a count by `to_char(created_at, 'YYYY "Q"Q')` or by `to_char(created_at, 'Month YYYY')` took about 4 s and
+  now takes 0.1 to 0.15 s, where Postgres takes about 0.4 s. This now holds for every pattern in every case, padded or
+  with `FM`, with `TH` after a number. These are still slow: `TM`, `FX`, a time zone's `TZ`, `TZH`, `TZM` and `OF`,
+  `SP`, a format passed as a parameter, a year before 1 or after 9999, and a date formatted with a time of day.
 
 ## What was wrong and is now right
 
