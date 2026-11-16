@@ -132,6 +132,19 @@ paths:
     year 1 to 9999 AD in any zone (a CASE: NULL is NULL, ±infinity, BC and a year past 9999 the function's).
     `tests/duck-functions.test.ts` holds each taken template to the function, `tests/duck-wire.test.ts` "issue 464"
     the wire in three zones, the plan fixture's `issue 464` and the oracle's `issue 464: to_char` statements;
+  - **a mode() of a text or varchar under a libc order keys each distinct value once** (`modeKeyedOnce`, issue 464: the
+    libc key's function a row, a status by tenant was ×6 of Postgres over a million rows): its ORDER BY is
+    `(SELECT __mason_libc_key_or_null(x, collate)) NULLS FIRST, x`, a scalar subquery of the value, which the engine
+    computes over the distinct values and joins back, and the engine's mode() then picks the most frequent, of equals the
+    first in that order, as Postgres's does. **The key refuses only where it decides** (the review of PR 1089): the join
+    keys every value of the aggregate's whole input, before a HAVING or an outer WHERE drops a group, where the key a row
+    came after the engine pushed that filter down. So a value the order cannot key is NULL there, first among equals, and
+    the value picked is keyed again once a group (`__mason_libc_checked`), which raises `libc-uncovered` only where such
+    a value ties for the most frequent; it never refuses where the key a row answered. These stay the key a row: a type
+    other than text and varchar (a char(n), a citext, a name), an order by an operator (USING), a value calling a
+    volatile function, and a value that reads a subquery or a column of an outer query.
+    `tests/duck-wire.test.ts` "issue 464: mode()" (both), the plan fixture's `text under libc: mode()` and the oracle's
+    `collation: mode()` and `issue 464: mode()` statements;
   - **a count(DISTINCT x) of a key is count(x)** (`src/duck/distinct-key.ts`): x alone its table's PRIMARY KEY in
     the CATALOG's pg_index (the key the copy is written by; never a sources file's `key:`, and NEVER another UNIQUE
     index — the copy may hold its value twice for a moment, and the catalog's indexes are the source's as of the start

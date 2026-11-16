@@ -85,6 +85,9 @@ export interface TableState extends Omit<CatalogTable, "columns"> {
     compaction?: Compaction } | null;
   /** why its copy failed (the sync tries again by itself, src/duck/sync.ts copyRetryDelayMs); null otherwise */
   error: string | null;
+  /** its whole sync waits for an open transaction on the database to end (src/duck/sync.ts `CopyState.syncWaits`, issue
+   *  1066): why, and when that was last checked. A wait, never a failure; absent otherwise */
+  syncWaits?: { why: string; checkedAt: string };
   /** an added table's sync: its state, its last sync and its age (src/cli/readiness.ts tableSync); a run from before it has none */
   sync?: SyncFacts;
   /** how the run keeps the copy current now — its sync, when it was last synced — the sync's one derivation (src/duck/sync.ts KeptCurrent): absent for a
@@ -345,7 +348,7 @@ export function tableRows(s: RunState, now: number = Date.now()): Array<{ line: 
       fraction = c.fraction ?? 0;
       // a count says it is copying; "reading the first chunk" says so itself
       what = /^\d/.test(c.text) ? `syncing ${c.text}` : c.text;
-    } else { fraction = 0; what = "waiting for its first sync to start"; }
+    } else { fraction = 0; what = t.syncWaits?.why ?? "waiting for its first sync to start"; }
     return { t, r, at: t.copy?.updatedAt ?? "", line: `${bar(fraction)} ${`${Math.floor(fraction * 100)}%`.padStart(4)}  ${what}` };
   });
   rows.sort((a, b) => a.r - b.r || a.at.localeCompare(b.at) || a.t.table.localeCompare(b.t.table));
@@ -537,7 +540,9 @@ const STATUS_USAGE = `usage: mason status [--json]
     (an added table's columns that mason add <table> with no --columns leaves out: they look like secrets),
     columnsPending (its columns changed on the database: the columns its next whole read syncs; absent otherwise),
     addedColumns, copy, error (addedColumns: the columns its synced data holds now; error: why its sync failed: its first sync, or the poll, catch-up, stream or
-    publication check keeping a synced table current; null otherwise), kept, syncRefusal (why mason sync <table> is
+    publication check keeping a synced table current; null otherwise), syncWaits (its whole sync waits for an open
+    transaction on the database to end, which is no failure, and its sync's state is waiting: { why, checkedAt };
+    absent otherwise), kept, syncRefusal (why mason sync <table> is
     refused now, in its words: its first sync not finished or failed, being read again whole, being caught up; null
     when it would run), rebuilding (its own sync running now, its first sync or a read again whole, or the one poll
     after it: { kind, startedAt }; absent otherwise), sync: { state (synced, syncing, catching-up: served and caught up by one poll
@@ -1706,8 +1711,8 @@ export function removedReport(removed: readonly string[], file: string, o: { run
 
 /** An added table as mason wait --json says it: its copy, its error, and how it is kept current, as the run's state has
  *  them (mason status --json's own fields, never derived again here) */
-export function waitTable(t: TableState): Pick<TableState, "table" | "copy" | "error" | "kept"> {
-  return { table: t.table, copy: t.copy, error: t.error, ...(t.kept ? { kept: t.kept } : {}), ...(t.sync ? { sync: t.sync } : {}) };
+export function waitTable(t: TableState): Pick<TableState, "table" | "copy" | "error" | "kept" | "syncWaits"> {
+  return { table: t.table, copy: t.copy, error: t.error, ...(t.syncWaits ? { syncWaits: t.syncWaits } : {}), ...(t.kept ? { kept: t.kept } : {}), ...(t.sync ? { sync: t.sync } : {}) };
 }
 
 const WAIT_USAGE = `usage: mason wait [<table>…] [--timeout <duration>] [--json]
@@ -1734,11 +1739,15 @@ const WAIT_USAGE = `usage: mason wait [<table>…] [--timeout <duration>] [--jso
   or the sync keeping a synced table current failed (its poll, its catch-up, the stream, or a named publication that
   does not carry it), or the generated table's run failed, or it or a parent was refused
   before it was built (printed, with what to do; Mason tries a failed one again by itself); 124 timed out.
+  A sync that waits for an open transaction on the database to end is no failure: a first sync's wait goes on, and a
+  table synced before is served meanwhile.
   A generated table that serves and holds everything synced is ready (0) though its last run failed: after editing its
   file, read mason status for whether the new definition was refused or failed.
 
   The --json answer, once it ends: { ready, failed, waiting, timedOut, tables: [{ table, copy, error,
-    kept }] (copy: { phase, rowsCopied, progress: the chunks done, reading and for how long, the
+    syncWaits, kept }] (syncWaits, as mason status --json says it: its whole sync waits for an open
+    transaction on the database, which is no failure: { why, checkedAt })
+    (copy: { phase, rowsCopied, progress: the chunks done, reading and for how long, the
     rate, the seconds left, while its chunks are read }; kept as mason status --json says it —
     { by: poll, sync: { mode: off } or { mode: poll, every, seconds }, syncedAt (its last whole read
     or poll), nextAt (its next poll; null: off) }; kept's pending, when it applies, says why
@@ -2007,7 +2016,7 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
     or null: none older) }; with --events { events: [{ at, kind (full_sync_failed, poll_failed,
     catch_up_failed, stream_failed, source_unreachable, generated_failed, compact_failed, sync_failed (a sync asked by hand failed),
     restart, full_sync, recovered, synced (a sync
-    asked by hand), sync_changed (a table's sync: changed), columns_changed (a table's columns changed on the database), sync_stopped (a table's sync stopped because the table was removed), polled (a poll on its schedule, with --scheduled), streamed (a
+    asked by hand), sync_changed (a table's sync: changed), columns_changed (a table's columns changed on the database), sync_stopped (a table's sync stopped because the table was removed), sync_waits (a table's whole sync waits for an open transaction on the database: no failure), polled (a poll on its schedule, with --scheduled), streamed (a
     minute of the stream's changes to a table, with --scheduled), ui_error (the web page met an error of its own)), failed,
     table (null: the whole sync, the run or the web page),
     message, code (a failure: its SQLSTATE, its system error such as ECONNREFUSED, its error class, disk_short (a

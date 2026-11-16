@@ -15,6 +15,17 @@ test("the watermark is the snapshot's xmin: the oldest transaction still running
   assert.throws(() => snapshotXmin("not a snapshot"), /not a pg_snapshot/);
 });
 
+// A SYNC THAT WAITS NAMES ONLY A TRANSACTION THAT WAS RUNNING AT ITS SNAPSHOT (issue 1066, the review of PR 1084): a
+// snapshot taken with none running has the next id as its xmin, which a later, unrelated transaction takes — a resumed
+// sync's old snapshot named that one as what it waited for
+test("the transaction holding a snapshot's xmin back is one running when it was taken, never the next id to be taken", () => {
+  const holder = (pollModule as { snapshotHolder?: (s: string) => bigint | null }).snapshotHolder;
+  assert.equal(typeof holder, "function", "src/cdc/poll.ts exports snapshotHolder");
+  assert.equal(holder!("742:755:742,750"), 742n);
+  assert.equal(holder!("8589934600:8589934600:"), null, "none was running: nothing to name");
+  assert.throws(() => holder!("not a snapshot"), /not a pg_snapshot/);
+});
+
 /** What xmin8Sql's expression computes, in JS, for a 32-bit xmin: the 64-bit id it stands for. */
 function xmin8(current: bigint, xmin: bigint): bigint {
   const m = /^\(\((-?\d+)::bigint - \(xmin::text::bigint > (\d+)\)::int\) << 32 \| xmin::text::bigint\)$/.exec(xmin8Sql(current));

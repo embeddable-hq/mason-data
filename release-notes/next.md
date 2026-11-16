@@ -6,6 +6,20 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **A sync that waits for an open transaction on your database now reads as waiting, never as failed.** Mason waits
+  when a table was rewritten after a transaction that is still open began. It checks again every 30 seconds and goes
+  on by itself.
+  - `mason status` and the web page now say Waiting, with the transaction the sync waits for. Before, they said
+    Failed.
+  - `mason wait` keeps waiting for a first sync that waits, within its `--timeout`. Before, it exited 1, so
+    `mason add <table> && mason wait` read the wait as a failure. A table synced before is served meanwhile, so
+    `mason wait` is ready for it.
+  - In `mason status --json` and `mason wait --json`, the wait is no longer the table's `error`, and its `sync.state`
+    is `waiting`. A new `syncWaits` says why, and when Mason last checked. If a script or an alert looks for `failed`
+    to catch this case, it no longer matches. Another error on the table, such as its stream's, is still said.
+  - The event is now `sync_waits`, and it is not a failure. Before, it was `full_sync_failed`.
+  - The message names the transaction and its pid only while that transaction is still open. Before, it could name
+    one that had already ended, whose pid may belong to another session by then.
 - **You can see, before you upgrade, which synced tables the new release reads again whole.** Run
   `npx @mason-data/cli@<version> upgrade --check` in the project's folder while Mason runs, with the version you are
   upgrading to. It lists each table that release's first start reads again from your database, why, how large it is,
@@ -14,8 +28,24 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   - It works only for an upgrade from this release or a later one. An older Mason does not say what its synced data
     holds, and the command says so. For an upgrade from 0.22.0 or before, read each release's "Before you upgrade".
 
+- **`mode() WITHIN GROUP (ORDER BY …)` of a `text` or `varchar` is faster under a libc collation**, such as a database
+  whose collation is `en_US.utf8`. Over a million rows, the most common status per tenant took 2.2 s and now takes
+  under 0.1 s, about a fifth of Postgres's time. The answers are Postgres's, as before: of values equally common, the
+  first in the collation's order wins. Under a locale other than English, a value holding a character Mason cannot order
+  as the collation does now refuses the query only when it is among the most common values of its group. Before, any
+  such value it read refused it. These are still slow: a `mode()` of a `char(n)` or
+  a `citext`, one ordered with `USING`, and one of a value that calls `random()` or reads a subquery or an outer
+  query's column.
+
 ## What was wrong and is now right
 
+- **A table synced whole is no longer served with rows missing until its catch-up.** This is a first sync, or a
+  table synced again whole, such as after its columns change.
+  - Before, the synced table held only the rows written before the oldest open transaction on your database began.
+    It was served like that until its catch-up a moment later, or longer when the catch-up failed. In the worst case
+    it served 0 rows: a `TRUNCATE`, then another transaction left open, then the reload.
+  - Now each whole sync is caught up before it is served. Until then, a table synced before keeps serving its previous
+    data, and a new table is not served yet.
 - **A WITH query named like the table it reads now gives Postgres's answer.** In
   `WITH orders AS (SELECT * FROM orders WHERE status = 'paid') SELECT count(*) FROM orders`, the WITH query's own
   `FROM orders` reads the table, as on Postgres. Before, Mason counted 0 rows. With a join, the query failed with

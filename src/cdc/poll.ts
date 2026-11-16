@@ -23,6 +23,18 @@ export function snapshotXmin(snapshot: string): bigint {
   return BigInt(m[1]!);
 }
 
+/**
+ * THE TRANSACTION THAT HOLDS A SNAPSHOT'S XMIN BACK, from the snapshot's text (`xmin:xmax:xip,…`): its xmin, the oldest
+ * transaction running when it was taken — or null when none was (xmin = xmax, the next id to be taken, which a later,
+ * unrelated transaction takes: a resumed sync's old snapshot must never name it, issue 1066).
+ */
+export function snapshotHolder(snapshot: string): bigint | null {
+  const m = /^(\d+):(\d+):/.exec(snapshot);
+  if (!m) throw new Error(`not a pg_snapshot: ${JSON.stringify(snapshot)}`);
+  const xmin = BigInt(m[1]!), xmax = BigInt(m[2]!);
+  return xmin < xmax ? xmin : null;
+}
+
 /** The poll's snapshot, its xmin and xmax (64-bit transaction ids, Postgres 13+), read as the transaction's first statement. */
 export const SNAPSHOT_SQL = "SELECT pg_current_snapshot()::text, pg_snapshot_xmax(pg_current_snapshot())::text";
 
@@ -84,9 +96,8 @@ export const HELD_SAMPLE_ROWS = 1_000;
 
 /**
  * WHETHER A COPY HELD TO `watermark` WOULD READ ANY ROW OF A TABLE (issues 1025, 1066), from a SAMPLE of its rows in the
- * reading transaction's snapshot: among the first `rows` visible rows of a plain scan, one the hold keeps (`kept`), any
- * at all (`any`), and the backend whose transaction is the watermark, when one is (`pid`: what holds every snapshot's
- * xmin back). Asked only of a table whose file the snapshot sees was made at or after the watermark (`fileFactsSql`
+ * reading transaction's snapshot: among the first `rows` visible rows of a plain scan, one the hold keeps (`kept`) and
+ * any at all (`any`). Asked only of a table whose file the snapshot sees was made at or after the watermark (`fileFactsSql`
  * `fresh` and `replaced`), so by a rewrite, and a rewrite treats EVERY row alike: an ALTER TABLE that rewrites, a
  * TRUNCATE and a load, or pg_repack writes every row again, with an xmin the hold leaves out, so no row of any sample is
  * kept; a CLUSTER, a VACUUM FULL or a SET TABLESPACE keeps every row's xmin, so the first row read is kept. The sample
@@ -97,10 +108,22 @@ export const HELD_SAMPLE_ROWS = 1_000;
  * the scan stops at the LIMIT, and the caller bounds its time (pages emptied by deletes are read past) with a timeout.
  */
 export function rowsHeldSql(pgFrom: string, watermark: bigint, rows: number = HELD_SAMPLE_ROWS): string {
-  const low = watermark & 0xffffffffn;
-  return `SELECT COALESCE(bool_or(s.kept), false) AS kept, count(*) > 0 AS any, ` +
-    `(SELECT pid FROM pg_stat_activity WHERE backend_xid = '${low}'::xid LIMIT 1) AS pid ` +
+  return `SELECT COALESCE(bool_or(s.kept), false) AS kept, count(*) > 0 AS any ` +
     `FROM (SELECT ${xminBeforeSql(watermark)} AS kept FROM ${pgFrom} LIMIT ${Math.max(1, Math.floor(rows))}) s`;
+}
+
+/**
+ * THE TRANSACTION A WHOLE SYNC WAITS FOR, AS IT IS NOW (issue 1066): whether the watermark's transaction — the oldest
+ * one running when the sync's snapshot was taken, which holds every snapshot's xmin back — is still in progress
+ * (`open`, `pg_xact_status`, which needs no privilege), and the backend running it, when one is and the role may see it
+ * (`pid`). A sync that waits names it only while it is open: once it ends, its id and its pid are another's to take.
+ * Catalog reads only, one row. A watermark no transaction has taken yet (a snapshot taken with none running: its xmin
+ * is the next id, which `pg_xact_status` refuses as in the future) is no open transaction.
+ */
+export function holderSql(watermark: bigint): string {
+  const low = watermark & 0xffffffffn;
+  return `SELECT CASE WHEN '${watermark}'::xid8 < pg_snapshot_xmax(pg_current_snapshot()) THEN pg_xact_status('${watermark}'::xid8) = 'in progress' ELSE false END AS open, ` +
+    `(SELECT pid FROM pg_stat_activity WHERE backend_xid = '${low}'::xid LIMIT 1) AS pid`;
 }
 
 /** `xminBeforeSql` is exact while the transaction's latest id is within 2^31 of the watermark: held to a margin of half
