@@ -183,7 +183,8 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   table with no primary key.
 - **Users** (`#users`), in this order: the list of users, right under the title (and its read-only line), then the add
   box (the add form; and, where it may be opened, a Temporary cloud login) with the card of what it made beside it,
-  then Connect, so a card that appears moves nothing above it. A person arriving on the page — its address opened, a
+  then **Connect a Postgres client or BI tool** and **Connect an MCP client**, so a card that appears moves nothing
+  above it. A person arriving on the page — its address opened, a
   link of the sidebar or another followed — starts with the cursor in the form's **Name**, once the form is written;
   never at a poll's write after that, never at a hash of the page already shown (a tab of the list, a range), never taken from what the person focused since they arrived, never on a touch
   screen (`(pointer: coarse)`, where it would open the keyboard over the page), and not on a read-only page, which has
@@ -213,16 +214,37 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   each with **Copy** and laid out the same way, the User its name as plain text (a field `mason user add --json` does
   not carry is not shown); "Shown once" in the password's row, right of its **Copy** and of the button's height
   (`--control-sm`); and one line, "The password is only shown once", over **I have copied it**. No Database row: the
-  URL already carries the database, and the database, host, port and SSL mode are Connect's on the same page (`mason
-  user add` in a terminal still prints all of them). No psql line: the URL is the same thing, pasted after `psql`. Mason
-  keeps no copy, so it is never shown again. Under the rows, a status line: "Waiting for its first query…" until Mason
+  URL already carries the database, and the database, host, port and SSL mode are Connect a Postgres client or BI
+  tool's on the same page (`mason user add` in a terminal still prints all of them). No psql line: the URL is the same
+  thing, pasted after `psql`. Mason keeps no copy, so it is never shown again. Right under the URL, across the rows'
+  width, a closed section, **Connect an MCP client** (issue 1114): the same two lines as the page's box of that name,
+  built by the same function (`mcpSnippets`), with this user's URL, its password in it — Claude Code's line, then one
+  line saying it saves the password in the shell's history and that the JSON in the client's settings file avoids
+  that, then the JSON — each with **Copy** and "Shown once" under it. They live as the password does: in the page's
+  memory while the dialog is open, dropped at **I have copied it**. The package is pinned to the run's version as the
+  user was added, so a later read never rewrites the dialog. A section's long line scrolls inside its own block, and
+  the section never widens the dialog. A field the JSON does not carry (no URL) leaves the section out. A temporary
+  cloud login's dialog has no such section: it is for a tool in the cloud, which runs no command on a computer of its
+  own. Under the rows, a status line: "Waiting for its first query…" until Mason
   has seen the user — a session of it open (`/api/state` `sessions`), or a statement of it since it was added
   (`/api/users?lastUsed=1` `lastUsedAt`) — then "Connected", held once seen. While it waits, the state is read every
   5 s instead of 30 s.
-- **Users**, Connect: once for the run, where a tool connects — host, port, database and SSL mode, each with **Copy**,
-  and the URL with `<user>:<password>` in place, with **Copy** — as `mason status` says it, with no psql line (the URL
-  is the same thing, pasted after `psql`). No user's row carries a URL:
+- **Users**, **Connect a Postgres client or BI tool**: once for the run, where a tool connects — host, port, database
+  and SSL mode, each with **Copy**, and the URL with `<user>:<password>` in place, with **Copy** — as `mason status`
+  says it, with no psql line (the URL is the same thing, pasted after `psql`). No user's row carries a URL:
   the card shown once when a user is added is the only place its password is copied.
+- **Users**, **Connect an MCP client** (issue 1114), under it, from the same facts (`/api/state` `postgres.shown`,
+  `engine.version`), so it says nothing `/api/state` cannot: **Claude Code**'s line to run, `claude mcp add mason --env
+  MASON_URL="<url>" -- npx -y @mason-data/cli@<version> mcp`, and the JSON for **Claude Desktop, Cursor and other
+  clients**' MCP settings (`npx` as the command, `MASON_URL` in `env`), pretty-printed, each in a block with **Copy**;
+  that a user's name and password go in place of `<user>` and `<password>` and the client's computer needs Node 22.13
+  or later (cli/package.json `engines`, held equal by a test); and that the web versions of ChatGPT and claude.ai can't
+  connect this way yet. The URL is in the server's environment, never on its command line (`mason mcp` reads
+  `MASON_URL`). The package is pinned to the run's version where it is a release npm has (`0.22.0`: the package's, or
+  a release image's), so the client runs the same Mason as the server; a checkout's `dev` or an image of main's
+  `main-<sha>` leaves it unpinned. It is shown wherever the box above is (a served run and a read-only page too), with
+  the same note on a server's page, and not where the run says no URL. A long line scrolls inside its own block, never
+  the page (`copyBlock`).
 - **Users**, the add box's **Temporary cloud login** (under `mason start` only: never under `mason serve`, whose run
   refuses it, and never on a read-only page, `pageReadOnly`, whatever `MASON_UI_READ_ONLY_ALLOW` still allows; there
   the box is the plain add form, with no segments): `mason share` from the page, for a tool in the cloud that cannot
@@ -250,7 +272,7 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   /api/share/<user>/beat`, every 15 s, hidden or not): two minutes without one (the tab closed, crashed or asleep) and
   it, its sessions and the tunnel's client end. How it ended (Stop, the tunnel dropped, from `/api/state`
   `shareEnded`) is said in the card's place, and a refusal there is the run's Failure; the pane is the form again.
-  Connect says, where it is offered, that a tool in the cloud that can't reach this machine uses Temporary public
+  Connect a Postgres client or BI tool says, where it is offered, that a tool in the cloud that can't reach this machine uses Temporary public
   login in the box above.
 - **Users**, the list: two tabs over the table, a segmented control as the time range's, each with its count —
   **Active** (the default, `#users`: the users not removed, a disabled one among them with its Disabled status) and
@@ -623,7 +645,7 @@ under the server's own Host it needs the run's token, which never reaches your m
 - **Connect says what its URL's host is**: the Postgres API's address as the server sees it, often `localhost`, which a
   tool elsewhere replaces with the server's own address. With `MASON_PG_PUBLIC_URL` set (the address a client reaches,
   behind a load balancer or a DNS name: docs/POSTGRES-API.md "The address clients reach"), Connect, the Users page's
-  Connect and a user's card print that address, its port and its `sslmode`, and say nothing of the host
+  Connect a Postgres client or BI tool and Connect an MCP client, and a user's card, print that address, its port and its `sslmode`, and say nothing of the host
   (`/api/state` `postgres.public`).
 
 `mason ui` on the server itself is refused, naming `--ssh`: nobody sits at a browser there. `mason status` says the same line.

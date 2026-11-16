@@ -3,7 +3,7 @@
  * POST /api/users/<name>/from, /disable and /enable, DELETE /api/users/<name>. An added user's password lives in this page's memory while its one-time dialog is open, never in
  * storage, a URL or a log line.
  */
-import { actId, badge, button, code, copyable, copyClick, duration, empty, esc, json, pop, renderFailure, ROOMS, serverHostNote, spanText, status, utcMinute, readOnlyLine, usersReadOnly, sendButton, failurePop, listTable } from "../shared.js";
+import { actId, badge, button, code, copyable, copyBlock, copyClick, details, duration, empty, esc, json, pop, renderFailure, ROOMS, serverHostNote, spanText, status, utcMinute, readOnlyLine, usersReadOnly, sendButton, failurePop, listTable } from "../shared.js";
 import { VIEW_HASHES } from "../routes.js";
 
 /** The users as the page reads them: with each one's last use (`mason user list` asks the same), then every 30 s. */
@@ -190,11 +190,50 @@ export function renderUsersConnect(pg, served = false, shareTip = false) {
   if (!pg || typeof pg.shown !== "string") return "";
   const rows = [["Host", pg.host, "users-connect-host"], ["Port", String(pg.port), "users-connect-port"], ["Database", pg.database, "users-connect-database"],
     ["SSL mode", pg.sslmode ?? "disable", "users-connect-sslmode"], ["URL", pg.shown, "users-connect-url"]];
-  return `<div class="connect"><p class="connect-title">Connect</p>` +
+  return `<div class="connect"><p class="connect-title">Connect a Postgres client or BI tool</p>` +
     `<dl class="facts">${rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${copyable(id, v)}</dd>`).join("")}</dl>` +
     serverHostNote(pg, served) +
     `<p class="tip"><span>Put a user's name and password in place of ${code("<user>")} and ${code("<password>")}. The password is shown only once, when you add the user. If it's lost, remove the user and add it again.</span></p>` +
     (shareTip ? `<p class="tip">A tool in the cloud that can't reach this machine: choose Temporary cloud login in the box above.</p>` : "") + `</div>`;
+}
+
+/** The npm package an MCP client runs `mason mcp` from, on its own computer (cli/package.json `name`). */
+export const MCP_PACKAGE = "@mason-data/cli";
+/** The Node that package needs there (cli/package.json `engines.node`, held equal by the tests). */
+export const MCP_NODE = "22.13";
+
+/** The package as npx is told it: pinned to the run's version (`/api/state` `engine.version`) where that is a release
+ *  (`0.22.0`: the npm package's, or a release image's), so the client runs the same Mason as the server and npx never
+ *  runs an older one it has cached. A checkout (`dev`) or an image built from main (`main-<sha>`) is no version npm
+ *  has, so the package is not pinned there. */
+export const mcpPackage = (version) => typeof version === "string" && /^\d+\.\d+\.\d+$/.test(version) ? `${MCP_PACKAGE}@${version}` : MCP_PACKAGE;
+
+/** What an MCP client is given to run `mason mcp` (src/cli/mcp.ts) as a user: the URL in its environment as MASON_URL,
+ *  never on its command line. `claudeCode`: the line to run; `json`: the server for a client's MCP settings. */
+export function mcpSnippets(url, version) {
+  const pkg = mcpPackage(version);
+  return {
+    claudeCode: `claude mcp add mason --env MASON_URL="${url}" -- npx -y ${pkg} mcp`,
+    json: JSON.stringify({ mcpServers: { mason: { command: "npx", args: ["-y", pkg, "mcp"], env: { MASON_URL: url } } } }, null, 2),
+  };
+}
+
+/**
+ * HOW AN MCP CLIENT CONNECTS (issue 1114), under the Postgres client or BI tool's box (renderUsersConnect) and from the same facts (`/api/state`
+ * `postgres`, the URL with `<user>:<password>`, and `engine.version`): Claude Code's line, and the JSON for Claude
+ * Desktop, Cursor and other clients, each with Copy. The client runs `mason mcp` on its own computer through npx, so
+ * that computer needs Node. Shown where that box is, with the same note on a server. "" when the run
+ * did not say where a tool connects.
+ */
+export function renderUsersMcp(pg, served = false, version = null) {
+  if (!pg || typeof pg.shown !== "string") return "";
+  const s = mcpSnippets(pg.shown, version);
+  return `<div class="connect connect-mcp"><p class="connect-title">Connect an MCP client</p>` +
+    `<p class="mcp-for">Claude Code: run this in a terminal.</p>${copyBlock("users-mcp-claude-code", s.claudeCode)}` +
+    `<p class="mcp-for">Claude Desktop, Cursor and other clients: add this to the client's MCP settings.</p>${copyBlock("users-mcp-json", s.json)}` +
+    serverHostNote(pg, served) +
+    `<p class="tip"><span>Put a user's name and password in place of ${code("<user>")} and ${code("<password>")}. The client's computer needs Node ${esc(MCP_NODE)} or later.</span></p>` +
+    `<p class="tip">The web versions of ChatGPT and claude.ai can't connect this way yet.</p></div>`;
 }
 
 // ------------------------------------------------------------------ Temporary cloud login (mason share, from the page)
@@ -484,9 +523,22 @@ function toggle(u, disabled, asking, busy = false) {
  *  them: its head (the title, `#once-title`, and the facts), its status line and its foot (the line over its button). */
 export const NO_ONCE = Object.freeze({ "once-head": "", "once-status": "", "once-foot": "" });
 
-/** The one-time dialog's facts: a label and its value each, a value with an id its Copy, "Shown once" beside the password's. */
-const onceFacts = (rows, passwordId) => `<dl class="facts">${rows.filter(([, v]) => v !== undefined && v !== null).map(([k, v, id]) =>
-  `<dt>${esc(k)}</dt><dd>${id === null ? esc(v) : copyable(id, v, id === passwordId ? badge("Shown once", "warn") : "")}</dd>`).join("")}</dl>`;
+/** The one-time dialog's facts: a label and its value each, a value with an id its Copy, "Shown once" beside the password's;
+ *  `under`: HTML under a row, by its label, the whole width of the rows (a `dd` of its own: New user added's MCP section). */
+const onceFacts = (rows, passwordId, under = {}) => `<dl class="facts">${rows.filter(([, v]) => v !== undefined && v !== null).map(([k, v, id]) =>
+  `<dt>${esc(k)}</dt><dd>${id === null ? esc(v) : copyable(id, v, id === passwordId ? badge("Shown once", "warn") : "")}</dd>` +
+  (under[k] ? `<dd class="under">${under[k]}</dd>` : "")).join("")}</dl>`;
+
+/** A user just added's MCP lines (issue 1114): Connect an MCP client's two snippets, built by the box's own `mcpSnippets`
+ *  with this user's URL, its password in it, so each is "Shown once" as the password is; a closed section under the URL. */
+const addedMcp = (url, version) => {
+  const s = mcpSnippets(url, version);
+  const once = badge("Shown once", "warn");
+  return details("added-mcp", "Connect an MCP client",
+    `<p class="mcp-for">Claude Code: run this in a terminal.</p>${copyBlock("added-mcp-claude-code", s.claudeCode, once)}` +
+    `<p class="tip">Running this line saves the password in your shell history. Pasting the JSON into the client's settings file avoids that.</p>` +
+    `<p class="mcp-for">Claude Desktop, Cursor and other clients: add this to the client's MCP settings.</p>${copyBlock("added-mcp-json", s.json, once)}`, false, "once-mcp");
+};
 
 /**
  * A USER JUST ADDED (`mason user add --json`'s shape), as the parts of the one-time dialog (index.html `#once`, a modal
@@ -496,14 +548,17 @@ const onceFacts = (rows, passwordId) => `<dl class="facts">${rows.filter(([, v])
  * button's height, "Shown once"; under the rows, whether it has connected (`o.connected`, `addedSeen`): Waiting for its
  * first query…, then Connected — a part of its own, so its change rewrites nothing the person is copying from; then one
  * line: the password is only shown once. No Database row: the URL already carries the database, and the Database, Host,
- * Port and SSL mode are the run's, said by Connect on the same page (renderUsersConnect); `mason user add` in a terminal
- * prints them all. No psql line: the URL is the same thing, pasted after `psql`. A field the JSON does not carry (the
- * URL while Mason does not run) is not shown. Mason keeps no copy, so it is never shown again.
+ * Port and SSL mode are the run's, said by Connect a Postgres client or BI tool on the same page (renderUsersConnect);
+ * `mason user add` in a terminal prints them all. No psql line: the URL is the same thing, pasted after `psql`. Under
+ * the URL, a closed "Connect an MCP client" (`addedMcp`, issue 1114), its lines pinned to `o.version`: the run's version
+ * when the user was added. A field the JSON does not carry (the URL while Mason does not run) is not shown, nor its MCP
+ * section. Mason keeps no copy, so it is never shown again.
  */
 export function renderAdded(a, o = {}) {
   return {
     "once-head": `<p class="once-title" id="once-title">New user added</p>` +
-      onceFacts([["URL", a.url, "added-url"], ["User", a.user, null], ["Password", a.password, "added-password"]], "added-password"),
+      onceFacts([["URL", a.url, "added-url"], ["User", a.user, null], ["Password", a.password, "added-password"]], "added-password",
+        typeof a.url === "string" ? { URL: addedMcp(a.url, o.version ?? null) } : {}),
     "once-status": connectedLine(o.connected === true),
     "once-foot": `<p class="tip">The password is only shown once</p>`,
   };
@@ -535,7 +590,7 @@ export const page = {
     // show: the list's tab, the hash's (`route`: #users?show=removed)
     // addSent: what the last Add a user sent ({ name, role, from }), the form written with it while it is sent and once it
     // is refused; fromSent: what a From… sent ({ name, from }), its form written with it while it is sent
-    const m = { actionFailure: null, added: null, addedSeen: false, confirming: null, refused: null, held: null, show: "active", addKind: "user", addSent: null, fromSent: null };
+    const m = { actionFailure: null, added: null, addedVersion: null, addedSeen: false, confirming: null, refused: null, held: null, show: "active", addKind: "user", addSent: null, fromSent: null };
     // addKind: what the add box creates, "user" (New user) or "share" (Temporary cloud login): the box's own choice
     const users = () => ctx.read(USERS)?.body ?? null;
     // the temporary cloud login, the add box's second kind: its own model, beats and actions
@@ -552,6 +607,9 @@ export const page = {
         const r = await ctx.send("user-add", USERS_POST, json("POST", { name, ...(role ? { role } : {}), ...(from !== null ? { from } : {}) }), { refresh: [USERS], onAnswer: (r) => {
           if ("failure" in r) { m.actionFailure = r.failure; return; }
           m.added = r.body;
+          // the run's version as the user is added, for its MCP lines: kept with the password, so a later read never
+          // rewrites the dialog the person copies from
+          m.addedVersion = ctx.read(STATE)?.body?.engine?.version ?? null;
           m.addedSeen = false;
           m.addSent = null;
         } });
@@ -605,7 +663,7 @@ export const page = {
         } });
         return "body" in r;
       },
-      dismissAdded() { m.added = null; m.addedSeen = false; },
+      dismissAdded() { m.added = null; m.addedVersion = null; m.addedSeen = false; },
       dismissRefused() { m.refused = null; },
       /** Add a user's refusal dismissed: the form keeps what was sent, for the person to change */
       dismissAddFailure() { m.actionFailure = null; },
@@ -663,8 +721,10 @@ export const page = {
           "add-user-box": renderAddUser(s, offer, { busy: ctx.sending("user-add"), sent: m.addSent }),
           "add-share-box": offer ? renderSharePane(s, share.m, ctx.read(SHARE_CHOICES)) : "",
           "users-connect": renderUsersConnect(s?.postgres, s?.served === true, offer),
+          // how an MCP client connects, from the same facts, under it
+          "users-mcp": renderUsersMcp(s?.postgres, s?.served === true, s?.engine?.version ?? null),
           // a user just added, or a cloud login just opened: the one-time dialog's parts (the shell opens it while `once()` names it)
-          ...(m.added ? renderAdded(m.added, { connected: m.addedSeen }) : renderShareOnce(s, share.m, ctx.now().getTime())),
+          ...(m.added ? renderAdded(m.added, { connected: m.addedSeen, version: m.addedVersion }) : renderShareOnce(s, share.m, ctx.now().getTime())),
           // what the box made, under it: a temporary cloud login
           added: renderShareCard(s, { ...share.m, stopping: ctx.sending("share-stop") }, ctx.now().getTime()),
           // Add a user refused: a popover beside its button, with Dismiss, which moves nothing under the form

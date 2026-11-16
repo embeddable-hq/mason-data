@@ -642,6 +642,13 @@ const popScroll = new Map();
 export const copyable = (id, text, afterHtml = "") =>
   `<span class="copyrow"><code id="${esc(id)}">${esc(text)}</code> ${button("Copy", { copy: id }, "small", { room: ROOMS.copy })}${afterHtml ? ` ${afterHtml}` : ""}</span>`;
 
+/** A block of code with its Copy button (`copyClick` copies what the `<code id>` holds): a command or a client's settings,
+ *  its lines kept as they are and scrolled inside its own box, so a long line never widens the page. `afterHtml`: under
+ *  the Copy (a "Shown once" badge). */
+export const copyBlock = (id, text, afterHtml = "") =>
+  `<div class="copyblock"><pre><code id="${esc(id)}">${esc(text)}</code></pre>` +
+  `<span class="copyblock-side">${button("Copy", { copy: id }, "small", { room: ROOMS.copy })}${afterHtml}</span></div>`;
+
 /** How long a Copy button says Copied (or what to press) before it says Copy again. */
 export const COPIED_MS = 2000;
 

@@ -132,6 +132,9 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
 - **A password is shown once and kept nowhere**: an added user's password, and a temporary cloud login's, lives in the
   page's memory only while its one-time dialog is open (index.html's `<dialog id="once">`), dropped at its "I have copied
   it", the one thing that closes it; never in storage, a URL or a log line (the server logs `user <name> added`, never the password).
+  So are the dialog's MCP lines, which carry it (issue 1114: its closed "Connect an MCP client", under the URL, each
+  line "Shown once"). They are built by the Users page's "Connect an MCP client" box's own `mcpSnippets`, the box's with
+  `<user>:<password>` and the dialog's with the user's URL, so the two cannot drift.
 - **Tests assert on what a page WROTE, never geometry**: the renderers are pure functions of the JSON returning HTML
   (`renderStatus`, `renderTables`, `renderUsers`, `renderFailure`, `renderNav`; `renderAdded` and `renderShareOnce`
   the one-time dialog's parts, HTML each), the app runs over a fake
@@ -180,7 +183,8 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   chart's mark (`--chart-mark`, checked against both themes' surfaces). The shadow is the quiet stone step alone:
   the reader's eye goes to what changed state, not to decoration.
 - **A component is a helper of src/web/shared.js, not markup copied into a page** (`status`, `card`/`cards`, `badge`,
-  `button`, `panel`, `listTable`, `empty`, `skeleton`, `details`): one place to change how a thing looks, and the tests
+  `button`, `panel`, `listTable`, `empty`, `skeleton`, `details`, `copyable`, `copyBlock`: a block of code that
+  scrolls inside its own box): one place to change how a thing looks, and the tests
   assert on what the helper wrote. A section's heading is index.html's own (it reads before the script runs).
 - **A number is text first; a chart is an addition** (src/web/charts.js over the vendored uPlot): every value a chart
   draws is also in a card or a table, a holder is hidden until it is drawn, and when uPlot cannot load the page reads
