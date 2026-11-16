@@ -18,9 +18,9 @@ each). The synced data is read-only.
 |---|---|
 | A `SELECT` over the synced tables (and the source's views over them): joins, subqueries, WITH queries, UNION / INTERSECT / EXCEPT, GROUP BY and grouping sets, HAVING, DISTINCT, ORDER BY under the database's collation, LIMIT / OFFSET / FETCH FIRST, window functions, CASE, COALESCE / NULLIF / GREATEST / LEAST, IN and ANY / ALL, parameters, EXPLAIN | answered exactly as Postgres answers it: 44 constructs and 92 forms of them verified |
 | The types: "char", a type the source made, bigint, bit, bit varying, boolean, box, bytea, character, character varying, cid, cidr, circle, date, daterange, double precision, inet, int4multirange, int4range, int8range, integer, interval, json, jsonb, jsonpath, line, lseg, macaddr, macaddr8, money, name, numeric, numrange, oid, path, pg_lsn, point, polygon, real, regclass, regtype, smallint, text, tid, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsquery, tsrange, tstzmultirange, tstzrange, tsvector, uuid, xid, xid8, xml; arrays of bigint, bit, boolean, character, character varying, cidr, date, double precision, inet, int4range, integer, interval, json, jsonb, macaddr, money, numeric, oid, point, real, smallint, text, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsvector, uuid; the source's enums and citext; a table's row | answered (93 types verified) |
-| Functions, operators, aggregates, window functions and casts | answered exactly: 255 functions, 388 operators, 97 aggregates, 58 window functions and 126 casts verified; "What is verified" below names each |
+| Functions, operators, aggregates, window functions and casts | answered exactly: 256 functions, 388 operators, 97 aggregates, 58 window functions and 126 casts verified; "What is verified" below names each |
 | Transactions, SET, SHOW, the catalog (`pg_catalog`, `information_schema`) and the protocol a tool uses | answered: what a BI tool asks at connection and before a query |
-| Anything else: 64 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
+| Anything else: 63 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
 
 ## Why not DuckDB by itself
 
@@ -55,7 +55,7 @@ Postgres did, after the first sync and after two rounds of changes. A statement 
 What is known **beyond** that list is below. A refusal names its gap in the error's detail (`Mason gap <id>`) and
 says what to write instead in its hint.
 
-## Refused (64)
+## Refused (63)
 
 A statement using one of these is refused with SQLSTATE 0A000, where Postgres would answer it.
 
@@ -79,7 +79,6 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `regexp-functions` | regexp_split_to_table / regexp_split_to_array / regexp_count / regexp_instr / regexp_substr / regexp_like | answers | refused | ~ to test, substring(text from pattern) to take a part, regexp_replace to replace |
 | `regexp-matches-forms` | regexp_matches in FROM | answers | refused | regexp_matches in the SELECT list |
 | `json-of-type` | to_json / array_to_json / json_build_object of a value (or an array of elements) of a type Mason does not write as json | answers | refused | cast the value to text, a number, a boolean, a timestamp or json first |
-| `extract-julian` | extract(julian FROM …) | answers | refused | extract(epoch FROM …) / 86400 + 2440587.5 |
 | `with-ordinality` | a function in FROM … WITH ORDINALITY | numbers the rows | refused | row_number() OVER () instead |
 | `tablesample` | TABLESAMPLE SYSTEM or BERNOULLI on a table, at any percent, with or without REPEATABLE, wherever the table is read (a subquery, a CTE, a join, a view) | a sample of the table: about that percent of its pages (SYSTEM) or of its rows (BERNOULLI) | refused: the synced table has none of the source's pages, so its sample would not be Postgres's. A literal percent or seed Postgres rejects (past 100, NaN, NULL) gets Postgres's own error | read the whole table, or a part of it by a filter (WHERE id % 10 = 0) |
 | `array-subquery-element` | ARRAY(SELECT x …) whose x is a numeric, an array or a row; array_agg(x) of a numeric quotient or average not rounded to a fixed scale (round, trunc or a cast to numeric(p,s)); x = ANY or ALL (ARRAY(SELECT …)) | a numeric[] computed exactly, a multi-dimensional array (2202E on an empty element, 22004 on a NULL one), a record[] | refused (DuckDB makes a list of doubles, of lists, of structs; it binds ANY (ARRAY(SELECT …)) as a comparison of its own) | ARRAY(SELECT x::text …) or array_agg(x::text), array_agg(x ORDER BY …) of a column in a subquery, or x = ANY (SELECT …) without the ARRAY |
@@ -93,7 +92,7 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `libc-uncovered` | ORDER BY, <, >, min / max of text (or of a jsonb, by its strings) holding a character whose order under a libc collation Mason could not read: under a locale other than English's (`en_*`, where it never is, nor is anything refused), a symbol with a first-level weight of its own (`㏩`, `㊿`) or any rare character the read was held to and differed on | answers, in the collation's order | refused when a value holding one is ordered (the order is read from the database, every character held to it, and glibc's every other character is followed); a top N or a min / max orders only the values that may be among its answers (src/duck/libc-bound.ts), so one outside them is not refused | ORDER BY x COLLATE "C" for byte order, or normalize(x, NFKC) where it spells the character out |
 | `libc-locale-unread` | ORDER BY, <, >, min / max of text (or of a jsonb, by its strings) under a database whose libc collation Mason's read does not follow: a locale that tailors ASCII or Latin (tr_TR, sv_SE, cs_CZ) or another C library's. An `en_*` locale never is; the read says which at the start and mason status repeats it | answers, in the collation's order | refused whenever text is ordered; everything else is answered, equality, GROUP BY and DISTINCT of text included | add COLLATE "C" or an ICU collation (COLLATE "und-x-icu") to the comparison or the sort |
 | `hypothetical-set` | a hypothetical-set aggregate: rank, dense_rank, percent_rank or cume_dist(…) WITHIN GROUP (ORDER BY …) | the rank the value would have among the rows | refused | count the rows below the value in a subquery |
-| `infinite-extract` | extract(year, decade, century, millennium, isoyear or epoch FROM) an infinite date or timestamp | Infinity (a numeric) | refused when a row holds one (DuckDB's DECIMAL has no Infinity) | filter the infinite values out (isfinite(x)), or date_part(…), which is a double |
+| `infinite-extract` | extract(year, decade, century, millennium, julian, isoyear or epoch FROM) an infinite date or timestamp | Infinity (a numeric) | refused when a row holds one (DuckDB's DECIMAL has no Infinity) | filter the infinite values out (isfinite(x)), or date_part(…), which is a double |
 | `time-timetz-coerced` | a time Postgres casts to a timetz where Mason cannot write the cast: an arm of a UNION, INTERSECT or EXCEPT written as a * or as a set operation of its own with an ORDER BY or a LIMIT; a time BETWEEN a time bound and a timetz one; a CASE of a time WHEN a time and WHEN a timetz | casts the time to a timetz at the session zone's offset on the transaction's date | refused (a time beside a timetz in a comparison, IN, BETWEEN, CASE, COALESCE, GREATEST, LEAST, NULLIF, an ARRAY, a VALUES list, a function's argument and a set operation's named columns is answered) | cast the time: tm::timetz |
 | `time-date-trunc` | date_trunc of a time (Postgres truncates it as an interval) | an interval | refused | date_trunc of a timestamp, or extract the parts |
 | `quote-ident` | quote_ident() | quotes an identifier when it must be | refused (it needs Postgres's keyword list) | quote it in the statement, or format('%s', …) |
@@ -168,7 +167,7 @@ Not about one statement: what the prototype cannot do yet.
 | `spill-limit` | a statement that spills more to disk than Mason keeps for statements: a sort, a join or an aggregate past the memory limit | spills up to temp_file_limit, or until the disk is full | fails alone with 53400 past half of the disk's room, what is free and what statements have spilled (or MASON_SPILL_LIMIT), so the sync keeps room to write; a disk that is really full is 53100 | ask for less at once (a filter, a LIMIT, fewer or narrower columns), free disk, or raise MASON_SPILL_LIMIT |
 | `log-literals` | .mason/mason.log's statement lines | - | each statement DuckDB ran, whole, literals included | keep the log private |
 
-## What is verified (1153)
+## What is verified (1154)
 
 ### Types (93)
 
@@ -266,7 +265,7 @@ Not about one statement: what the prototype cannot do yet.
 - a value of type xid8
 - a value of type xml
 
-### Functions (255)
+### Functions (256)
 
 - the function "bit"(bit,integer,boolean)
 - the function "extract"(text,date)
@@ -340,6 +339,7 @@ Not about one statement: what the prototype cannot do yet.
 - the function date_bin(interval,timestamp without time zone,timestamp without time zone)
 - the function date_part(text,date)
 - the function date_part(text,interval)
+- the function date_part(text,time with time zone)
 - the function date_part(text,time without time zone)
 - the function date_part(text,timestamp with time zone)
 - the function date_part(text,timestamp without time zone)

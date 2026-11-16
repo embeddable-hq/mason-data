@@ -336,8 +336,8 @@ over the same tables. **DuckDB alone answers only 26% of them exactly as Postgre
 It answers 1% differently, each by a decision it lists, and it refuses 6% with an error that says what to write
 instead. None was answered with a wrong value.
 
-[docs/SQL-SUPPORT.md](docs/SQL-SUPPORT.md) is generated from the code. It lists the 1,153 verified pieces (types, functions,
-operators, aggregates, window functions, casts, constructs and their forms). It also lists the 64 refused shapes, the
+[docs/SQL-SUPPORT.md](docs/SQL-SUPPORT.md) is generated from the code. It lists the 1,154 verified pieces (types, functions,
+operators, aggregates, window functions, casts, constructs and their forms). It also lists the 63 refused shapes, the
 20 that are answered differently and the 8 limits, each with what to write instead.
 <!-- END GENERATED -->
 

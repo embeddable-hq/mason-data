@@ -335,7 +335,8 @@ export function arrayToString(items: ReadonlyArray<string | null>, sep: string, 
 /**
  * extract(field FROM interval), as Postgres 18 computes it (interval_part_common): the interval's parts each truncated
  * toward zero — years and months of its months, its days, hours, minutes, seconds and micros of its time — as numeric
- * text (a second with 6 decimals, a millisecond with 3, an epoch with 6: a year is 365.25 days, a month 30).
+ * text (a second with 6 decimals, a millisecond with 3, an epoch with 6: a year is 365.25 days, a month 30). The field
+ * is Postgres's own name for it, as src/duck/date-units.ts reads every spelling (the rewrite passes no other).
  */
 export function intervalPart(field: string, months: number, days: number, micros: bigint): string {
   const year = Math.trunc(months / 12), mon = months % 12;
@@ -346,19 +347,19 @@ export function intervalPart(field: string, months: number, days: number, micros
     return neg ? `-${text}` : text;
   };
   switch (field) {
-    case "microsecond": case "microseconds": return fixed(usec, 0);
-    case "millisecond": case "milliseconds": return fixed(usec, 3);
-    case "second": case "seconds": return fixed(usec, 6);
-    case "minute": case "minutes": return `${minute}`;
-    case "hour": case "hours": return `${hour}`;
-    case "day": case "days": return `${days}`;
-    case "week": case "weeks": return `${Math.trunc(days / 7)}`;
-    case "month": case "months": return `${mon}`;
+    case "microseconds": return fixed(usec, 0);
+    case "milliseconds": return fixed(usec, 3);
+    case "second": return fixed(usec, 6);
+    case "minute": return `${minute}`;
+    case "hour": return `${hour}`;
+    case "day": return `${days}`;
+    case "week": return `${Math.trunc(days / 7)}`;
+    case "month": return `${mon}`;
     case "quarter": return `${months >= 0 ? Math.trunc(mon / 3) + 1 : -(Math.trunc(-mon / 3) + 1)}`;
-    case "year": case "years": return `${year}`;
-    case "decade": case "decades": return `${Math.trunc(year / 10)}`;
-    case "century": case "centuries": return `${Math.trunc(year / 100)}`;
-    case "millennium": case "millennia": return `${Math.trunc(year / 1000)}`;
+    case "year": return `${year}`;
+    case "decade": return `${Math.trunc(year / 10)}`;
+    case "century": return `${Math.trunc(year / 100)}`;
+    case "millennium": return `${Math.trunc(year / 1000)}`;
     case "epoch":
       return fixed(micros + (31_557_600n * BigInt(year) + 2_592_000n * BigInt(mon) + 86_400n * BigInt(days)) * 1_000_000n, 6);
     default: throw new Error(`unit "${field}" not supported for type interval`);

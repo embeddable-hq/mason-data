@@ -39,6 +39,21 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **Every name Postgres takes for a field of `extract` and `date_part` now gives that field's value.** Postgres takes
+  `sec`, `secs` and `s` for `second`, `ms` and `msec` for `milliseconds`, `us` for `microseconds`, `mins`, `hrs`,
+  `mons`, `yrs`, `jd` and more. Before, `extract(sec FROM ts)` dropped the fraction of a second, so
+  `sum(extract(sec FROM ts))` was wrong. On an `interval`, `sec` and `ms` were refused, and names such as `j` and `mm`
+  failed with 22P02.
+  - `extract(julian FROM …)` is now answered for a date, a timestamp and a timestamptz, with Postgres's digits.
+    Before, it was refused.
+  - `extract(epoch FROM …)` of a `time with time zone` now counts its offset, as Postgres does. Before, it gave the time
+    of day alone.
+  - `date_part` of a `date` now answers `hour`, `minute`, `second` and their other names with 0, as Postgres does.
+    Before, they were refused.
+  - A name a type does not take now gets Postgres's own error, such as `unit "foo" not recognized for type
+    timestamp without time zone` (22023), or `unit "day" not supported for type time without time zone` (0A000). It
+    is raised only when a row holds a value, as on Postgres, so a query over no rows or over NULLs answers.
+
 - **A query with `TABLESAMPLE` is now refused by name.** A sample is of your database's pages or rows, which the
   synced table does not hold. Before, Mason refused it only as something it had not verified yet. Without that check,
   `TABLESAMPLE SYSTEM (100)` was answered with 100 rows, not every row. Now every form is refused with

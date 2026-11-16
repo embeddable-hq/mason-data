@@ -431,6 +431,51 @@ const pairs = <T>(xs: readonly T[]): Array<[T, T]> => xs.flatMap((a) => xs.map((
 export interface Matrixed { name: string; sql: string; zone?: string; inOrder?: boolean }
 const q = (name: string, sql: string, zone?: string): Matrixed => ({ name: `type matrix: ${name}`, sql, ...(zone === undefined ? {} : { zone }) });
 
+/** issue 1006: every name Postgres takes for a field of extract and date_part (src/backend/utils/adt/datetime.c,
+ *  deltatktbl then datetktbl, ten characters compared), by field */
+const FIELD_SPELLINGS: Record<string, string[]> = {
+  microseconds: ["microseconds", "microsecond", "us", "usec", "usecs", "usecond", "useconds"],
+  milliseconds: ["milliseconds", "millisecond", "ms", "msec", "msecs", "msecond", "mseconds"],
+  second: ["second", "seconds", "s", "sec", "secs"], minute: ["minute", "minutes", "m", "min", "mins", "mm"],
+  hour: ["hour", "hours", "h", "hr", "hrs"], day: ["day", "days", "d"], week: ["week", "weeks", "w"],
+  month: ["month", "months", "mon", "mons"], quarter: ["quarter", "qtr"], year: ["year", "years", "y", "yr", "yrs"],
+  decade: ["decade", "decades", "dec", "decs"], century: ["century", "centuries", "c", "cent"],
+  millennium: ["millennium", "millennia", "mil", "mils"], julian: ["julian", "j", "jd"],
+  isoyear: ["isoyear"], dow: ["dow"], isodow: ["isodow"], doy: ["doy"], epoch: ["epoch"],
+  timezone: ["timezone"], timezone_hour: ["timezone_hour", "timezone_h"], timezone_minute: ["timezone_minute", "timezone_m"],
+};
+const TIME_OF_DAY_FIELDS = ["microseconds", "milliseconds", "second", "minute", "hour"];
+const DATE_FIELDS = ["day", "week", "month", "quarter", "year", "decade", "century", "millennium", "julian", "isoyear", "dow", "isodow", "doy"];
+const ZONE_FIELDS = ["timezone", "timezone_hour", "timezone_minute"];
+/** the fields each type's extract answers (its part function's switch); date_part of a date is of the date as a
+ *  timestamp, Postgres's SQL function */
+const FIELDS_OF: Record<"d" | "ts" | "tz" | "iv" | "tm" | "timetz", { extract: string[]; datePart: string[] }> = (() => {
+  const both = (f: string[]): { extract: string[]; datePart: string[] } => ({ extract: f, datePart: f });
+  const timestamp = [...TIME_OF_DAY_FIELDS, ...DATE_FIELDS, "epoch"];
+  return {
+    d: { extract: [...DATE_FIELDS, "epoch"], datePart: timestamp }, ts: both(timestamp), tz: both([...timestamp, ...ZONE_FIELDS]),
+    tm: both([...TIME_OF_DAY_FIELDS, "epoch"]), timetz: both([...TIME_OF_DAY_FIELDS, ...ZONE_FIELDS, "epoch"]),
+    iv: both([...TIME_OF_DAY_FIELDS, "day", "week", "month", "quarter", "year", "decade", "century", "millennium", "epoch"]),
+  };
+})();
+/** issue 1006's statements over one column: each field the type answers in every spelling, by extract and date_part,
+ *  grouped as a time of day, a date and the rest; then a name of each kind a type may refuse (a field its extract lacks,
+ *  a name of no table, a reserved word, a month), each Postgres's error where Postgres refuses it */
+function* fieldSpellings(c: keyof typeof FIELDS_OF, table: string, where: string): Generator<Matrixed> {
+  const column = c === "timetz" ? "tz" : c;
+  const { extract, datePart } = FIELDS_OF[c];
+  for (const group of [TIME_OF_DAY_FIELDS, DATE_FIELDS, [...ZONE_FIELDS, "epoch"]]) {
+    const reads = [...group.filter((f) => extract.includes(f)).flatMap((f) => FIELD_SPELLINGS[f]!.map((s) => `extract('${s}' from ${column})`)),
+      ...group.filter((f) => datePart.includes(f)).flatMap((f) => FIELD_SPELLINGS[f]!.map((s) => `date_part('${s}', ${column})`))];
+    if (reads.length > 0) yield q(`issue 1006: every spelling of ${group[0]}'s group, ${c}`, `SELECT id, ${reads.join(", ")} FROM ${table} WHERE ${where} ORDER BY id`);
+  }
+  const lacked = Object.keys(FIELD_SPELLINGS).find((f) => !extract.includes(f));
+  for (const name of [...(lacked === undefined ? [] : [FIELD_SPELLINGS[lacked]!.at(-1)!]), "secondz", "now", "jan"]) {
+    yield q(`issue 1006: extract('${name}' from ${c})`, `SELECT id, extract('${name}' from ${column}) FROM ${table} WHERE ${where} ORDER BY id`);
+    yield q(`issue 1006: date_part('${name}', ${c})`, `SELECT id, date_part('${name}', ${column}) FROM ${table} WHERE ${where} ORDER BY id`);
+  }
+}
+
 /** a literal of each family to compare a column with */
 const LITERALS: Partial<Record<Col, string[]>> = {
   i2: ["1", "1.5", "-300"], i4: ["1", "100000", "2.5"], i8: ["1", "9007199254740993", "-5.5"], f4: ["1.5", "0.1", "2"], f8: ["1.5", "0.1", "1e-10"],
@@ -672,6 +717,7 @@ function* mappedTypes(): Generator<Matrixed> {
   yield q("mapped: a text read as a held type", "SELECT id, t::macaddr FROM typed WHERE false");
   yield q("mapped: an oid compared", "SELECT id FROM mapped WHERE oi > 1 ORDER BY id");
   yield q("mapped: an oid as a bigint", "SELECT id, oi::bigint FROM mapped ORDER BY id");
+  yield* fieldSpellings("timetz", "mapped", "true");
   // a timetz: read in zones with daylight saving and a half-hour offset, compared by its instant and then its zone
   for (const zone of ["UTC", "America/New_York", "Asia/Kolkata"]) {
     yield q(`mapped timetz in ${zone}: rows`, "SELECT id, tz, tz3, tz::text FROM mapped ORDER BY id", zone);
@@ -686,12 +732,17 @@ function* mappedTypes(): Generator<Matrixed> {
     yield q(`mapped timetz in ${zone}: a literal's value`, "SELECT '12:30:00'::timetz::text = ('12:30:00'::timetz)::text, '12:30:00+01'::timetz, id FROM mapped WHERE id = 1", zone);
     yield q(`mapped timetz in ${zone}: min, max, grouped`, "SELECT min(tz), max(tz), tz IS NULL FROM mapped GROUP BY 3 ORDER BY 3", zone);
     yield q(`mapped timetz in ${zone}: its parts`, "SELECT id, extract(hour FROM tz), extract(timezone FROM tz), extract(minute FROM tz) FROM mapped WHERE tz IS NOT NULL ORDER BY id", zone);
+    // issue 1006: a timetz's epoch is its time less its offset east, whatever the session's zone
+    yield q(`mapped timetz in ${zone}: its epoch`, "SELECT id, extract(epoch FROM tz), date_part('epoch', tz), extract(epoch FROM tz3), date_part('epoch', tz3) FROM mapped ORDER BY id", zone);
     yield q(`mapped timetz in ${zone}: as a time`, "SELECT id, tz::time FROM mapped ORDER BY id", zone);
     yield q(`mapped timetz in ${zone}: at a zone`, "SELECT id, tz AT TIME ZONE 'UTC' FROM mapped ORDER BY id", zone);
     yield q(`mapped timetz in ${zone}: an hour on`, "SELECT id, tz + interval '1 hour' FROM mapped ORDER BY id", zone);
     yield q(`mapped timetz in ${zone}: a time as one`, "SELECT id, tm::timetz FROM typed WHERE id < 3 ORDER BY id", zone);
     yield q(`mapped timetz in ${zone}: a timestamptz as one`, "SELECT id, tz::timetz FROM typed WHERE id < 3 ORDER BY id", zone);
     yield q(`mapped tstzrange in ${zone}: rows`, "SELECT id, rz, mz, rz::text, length(mz::text) FROM mapped ORDER BY id", zone);
+    // issue 1006: a timestamptz's fields in every spelling are its wall clock's in the session's zone
+    yield q(`issue 1006: a timestamptz's fields in ${zone}`, "SELECT id, extract('hrs' from tz), extract('mins' from tz), extract('timezone' from tz), date_part('timezone_h', tz), " +
+      "extract('timezone_m' from tz), extract('d' from tz), extract('jd' from tz), date_part('j', tz), extract('secs' from tz) FROM typed WHERE id < 100 ORDER BY id", zone);
     // A TIME BESIDE A TIMETZ, cast implicitly as Postgres casts it (time_timetz: the zone's offset on the transaction's
     // date, issue 167): every place Postgres coerces it, and where it does not (time beside time). Where New York's
     // offset decides, both -04 and -05 are named, so the statement is decisive on any day
@@ -843,6 +894,7 @@ function* matrix(): Generator<Matrixed> {
     for (const field of ["century", "day", "decade", "dow", "doy", "epoch", "hour", "isodow", "isoyear", "microseconds", "millennium", "milliseconds", "minute", "month", "quarter", "second", "timezone", "week", "year"]) {
       yield q(`extract(${field} from ${c})`, `SELECT id, extract(${field} from ${c}), date_part('${field}', ${c}) FROM typed ORDER BY id`);
     }
+    yield* fieldSpellings(c as "d" | "ts" | "tz" | "iv" | "tm", "typed", ORDINARY);
     yield q(`${c} + - interval`, `SELECT id, ${c} + interval '1 day', ${c} - interval '1 month', ${c} + interval '90 minutes' FROM typed WHERE ${ORDINARY} ORDER BY id`);
     yield q(`${c} + iv`, `SELECT id, ${c} + iv, ${c} - iv FROM typed WHERE ${ORDINARY} ORDER BY id`);
     yield q(`${c} to_char`, `SELECT id, to_char(${c}, 'YYYY-MM-DD HH24:MI:SS.US'), to_char(${c}, 'FMMonth DD, YYYY') FROM typed WHERE ${ORDINARY} ORDER BY id`);

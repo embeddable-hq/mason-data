@@ -43,6 +43,7 @@ import { jsonbText, parseJson, storedPairs, type Json } from "./jsonb.ts";
 import { atTimeZoneOf, isUtc, UTC_NAMES } from "../lib/timezone.ts";
 import type { CaseMapping, DuckCollation, StatementCollations } from "./collation.ts";
 import { pgTrim } from "./text.ts";
+import { dateUnit, partUnit, type DateField, type PartType } from "./date-units.ts";
 
 /** A parse-tree node (`{ Kind: body }`) and a body, as libpg-query's JSON has them. */
 type Body = Record<string, any>;
@@ -102,9 +103,10 @@ const DATE = 1082, TIMESTAMP = 1114, TIMESTAMPTZ = 1184, INTERVAL = 1186, JSON_O
 const INTEGERS = new Set([INT2, INT4, INT8]);
 const FLOATS = new Set([FLOAT4, FLOAT8]);
 /** the fields of a time that grow with it, ±Infinity of an infinite one (Postgres 14+); the rest are NULL of it */
-const MONOTONIC = new Set(["year", "years", "decade", "decades", "century", "centuries", "millennium", "millennia", "isoyear", "epoch", "julian"]);
-/** an interval field's numeric scale: a second's is 6, a millisecond's 3, an epoch's 6 */
-const INTERVAL_SCALE: Record<string, string> = { second: "6", seconds: "6", millisecond: "3", milliseconds: "3", epoch: "6" };
+const MONOTONIC: ReadonlySet<DateField> = new Set(["year", "decade", "century", "millennium", "isoyear", "epoch", "julian"]);
+/** extract's numeric scale of a field of a time or an interval: a second's is 6, a millisecond's 3, an epoch's 6 (a
+ *  timestamp's Julian day's is its row's, `julianScale`) */
+const PART_SCALE: Partial<Record<DateField, string>> = { second: "6", milliseconds: "3", epoch: "6" };
 const NUMBER_TYPES = new Set([INT2, INT4, INT8, FLOAT4, FLOAT8, NUMERIC]);
 /** an array type's element (the numbers', where an IN list's element type decides a comparison) */
 const NUMBER_ELEMENT: Record<number, number> = { 1005: INT2, 1007: INT4, 1016: INT8, 1021: FLOAT4, 1022: FLOAT8, 1231: NUMERIC };
@@ -128,6 +130,8 @@ const ARRAYS = new Set([1000, 1001, 1005, 1007, 1009, 1014, 1015, 1016, 1021, 10
 /** inet[], which the copy holds as a list of its text (src/duck/sync.ts KEPT_ARRAYS) */
 const INET_ARRAY = 1041;
 const TIMETZ = 1266;
+/** the types extract and date_part read a field of, by OID (src/duck/date-units.ts) */
+const PART_TYPES: Record<number, PartType> = { [DATE]: "date", [TIMESTAMP]: "timestamp", [TIMESTAMPTZ]: "timestamptz", [TIME]: "time", [TIMETZ]: "timetz", [INTERVAL]: "interval" };
 /** time[] and timetz[] */
 const TIME_ARRAY = 1183, TIMETZ_ARRAY = 1270;
 /** numeric[] and record[] */
@@ -3290,6 +3294,9 @@ class Rewriter {
         const args = (b.args ?? []) as AstNode[];
         const plain = b.over === undefined && b.agg_within_group !== true;
         if (type !== NUMERIC) return asCell();
+        // extract(julian …) of a timestamp: the engine's value at 28 decimals, written at its row's scale (`julianScale`)
+        const julian = this.julianScale(n);
+        if (julian !== null) return numeric({ op: "rescale", arg: cell(n), scale: cell(julian) });
         // percentile_disc or mode() picked by an exact order key: the picked row's exact text (`pickedByExactKey`)
         if (this.picksByExactKey(b)) {
           const text = this.pickedByExactKey(name, bodyOf(this.clone(n)), (key) => this.exactText(key));
@@ -4299,6 +4306,7 @@ class Rewriter {
       // a plain numeric whose copy holds each value's own scale (issue 946): one row's, never a group's (an aggregate
       // reads it: `summed`)
       case "ColumnRef": return this.scaleOf(n, false);
+      case "FuncCall": return this.julianScale(n);
       case "CaseExpr": {
         const whens = (b.args ?? []) as AstNode[];
         const results = whens.map((w) => of(bodyOf(w).result));
@@ -4505,9 +4513,12 @@ class Rewriter {
         // (extract's numeric: a second and an epoch to the microsecond, milliseconds to three places, the rest whole; a
         // date's every part whole, as the rewrite writes them, `extract`)
         if (lastName(b.funcname) === "extract" && args.length === 2) {
-          const field = (constString(args[0]) ?? "").toLowerCase();
-          if (field === "") return null;
-          return this.typeOf(args[1]!) === DATE ? 0 : Number(INTERVAL_SCALE[field] ?? "0");
+          const written = constString(args[0]);
+          const unit = written === null ? null : dateUnit(written);
+          if (unit === null || unit.field === null) return null;
+          if (this.typeOf(args[1]!) === DATE) return 0;
+          // (a timestamp's Julian day: its row's, `julianScale`)
+          return unit.field === "julian" ? null : Number(PART_SCALE[unit.field] ?? "0");
         }
         // (latest, Mason's, answers one row's value: its scale is its argument's)
         // (any_value and first, the rewrite's read of a column per group, are one row's value too)
@@ -6414,15 +6425,37 @@ class Rewriter {
     throw new Unrewritable(`${fnName}() of a value of type OID ${oid ?? "unknown"} is not supported by Mason`, "cast the value to text, a number, a boolean, a timestamp or json first", "json-of-type");
   }
 
+  /**
+   * THE FIELD OF AN EXTRACT OR A DATE_PART, read as Postgres reads its name (src/duck/date-units.ts, issue 1006): every
+   * spelling of a field (`sec`, `secs`, `s`, `seconds`) is that field, so each reaches the same code below, and the call
+   * sent as written names the field by its own name (DuckDB read `sec` as a whole second). A name the type does not
+   * answer raises Postgres's error where Postgres raises it, at a row that holds a value: none of a NULL or of no rows,
+   * and none of an infinity for a timestamp's zone fields. Null where the name is no constant or the type is none of the
+   * six: the call as written, as before.
+   */
+  private partField(args: AstNode[], type: number | null, result: string[]): { field: DateField } | { refused: AstNode } | null {
+    const name = constString(args[0]);
+    const part = type === null ? undefined : PART_TYPES[type];
+    if (name === null || part === undefined) return null;
+    const unit = partUnit(name, part);
+    if ("field" in unit) {
+      if (name !== unit.field) args[0] = strConst(unit.field);
+      return unit;
+    }
+    const x = args[1]!;
+    const guard = unit.finiteOnly ? fn("isfinite", [x]) : isNotNull(x);
+    return { refused: cast(caseWhen([[guard, fn("error", [strConst(`mason[${unit.code}]: ${unit.message}`)])]], null), result) };
+  }
+
   /** EXTRACT, as the exact numeric Postgres returns: `epoch` and `second` with their fraction, the rest whole */
   private extract(args: AstNode[]): AstNode | null {
-    const field = (constString(args[0]) ?? "").toLowerCase();
-    const x = args[1]!;
-    const type = this.typeOf(x);
-    this.unitSupported(field, type);
+    const type = this.typeOf(args[1]!);
+    const unit = this.partField(args, type, ["decimal", "19", "0"]);
+    if (unit === null || "refused" in unit) return unit === null ? null : unit.refused;
+    const field = unit.field, x = args[1]!;
     // an interval's parts as Postgres computes them (src/duck/functions.ts intervalPart)
     if (type === INTERVAL) {
-      const scale = INTERVAL_SCALE[field];
+      const scale = PART_SCALE[field];
       const part = fn("__mason_interval_part", [strConst(field), x]);
       return scale === undefined ? wholeNumeric(part) : cast(part, ["decimal", "38", scale]);
     }
@@ -6435,49 +6468,105 @@ class Rewriter {
     return this.extractFinite(field, x, type);
   }
 
-  /** Postgres refuses a unit a type does not have (at run time, so its analysis does not): its words, its SQLSTATE */
-  private unitSupported(field: string, type: number | null): void {
-    const name = type === DATE ? "date" : type === TIMESTAMP ? "timestamp without time zone" : type === TIME ? "time without time zone" : null;
-    const refused = type === DATE ? ["hour", "minute", "second", "milliseconds", "microseconds", "timezone", "timezone_hour", "timezone_minute", "timezone_m"]
-      : type === TIMESTAMP || type === TIME ? ["timezone", "timezone_hour", "timezone_minute"] : [];
-    if (name !== null && refused.includes(field)) throw new Unrewritable(`unit "${field}" not supported for type ${name}`, "", { postgres: "0A000" });
-  }
-
-  private extractFinite(field: string, x: AstNode, type: number | null): AstNode | null {
+  private extractFinite(field: DateField, x: AstNode, type: number | null): AstNode | null {
     const micros = (expr: AstNode, scale: string): AstNode => op("*", cast(expr, ["decimal", "38", "0"]), numConst(scale));
     switch (field) {
       case "epoch":
-        return type === DATE ? wholeNumeric(fn("epoch", [x])) : micros(fn("epoch_us", [x]), "0.000001");
+        return type === DATE ? wholeNumeric(fn("epoch", [x])) : micros(this.epochMicros(x, type), "0.000001");
       case "second": return micros(fn("microsecond", [x]), "0.000001");
       case "milliseconds": return micros(fn("microsecond", [x]), "0.001");
       case "microseconds": return wholeNumeric(fn("microsecond", [x]));
-      case "julian": throw new Unrewritable("extract(julian …) is not supported by Mason", "compute it from extract(epoch …) / 86400 + 2440587.5", "extract-julian");
+      case "julian": return this.julian(x, type);
       default: return null;
     }
   }
 
+  /**
+   * extract(julian …), as Postgres's numeric: a date's Julian day (extract_date), and a timestamp's plus the fraction of
+   * its day (timestamp_part_common: its wall clock's, a timestamptz's in the session's zone), the microseconds of its
+   * day divided by a day's at numeric_div's scale and rounded half up. That scale (select_div_scale) is 28 decimals for
+   * under 865 µs, 24 for under 8,650,000 µs, else 20. The value is computed in a HUGEINT and sent at 28 decimals; a
+   * reader that prints it writes it at its row's scale (`julianScale`).
+   */
+  private julian(x: AstNode, type: number | null): AstNode {
+    const epochDay = (): AstNode => cast(strConst("1970-01-01"), ["date"]);
+    if (type === DATE) return wholeNumeric(op("+", op("-", x, epochDay()), intConst(2440588)));
+    const wall = (): AstNode => this.wallClock(x, type);
+    const huge = hugeConst;
+    const pow = (n: number): AstNode => huge(`1${"0".repeat(n)}`);
+    const us = (): AstNode => this.dayMicros(x, type);
+    // round(µs · 10^r / 86,400,000,000) half up, at 28 decimals
+    const fraction = (r: number): AstNode => {
+      const rounded = op("//", op("+", op("*", op("*", us(), pow(r)), huge("2")), huge("86400000000")), huge("172800000000"));
+      return r === 28 ? rounded : op("*", rounded, pow(28 - r));
+    };
+    const day = op("+", cast(op("-", cast(wall(), ["date"]), epochDay()), ["hugeint"]), huge("2440588"));
+    const scaled = op("+", op("*", day, pow(28)), caseWhen([[op("<", us(), huge("865")), fraction(28)], [op("<", us(), huge("8650000")), fraction(24)]], fraction(20)));
+    return op("*", cast(scaled, ["decimal", "38", "0"]), numConst(`0.${"0".repeat(27)}1`));
+  }
+
+  /** a timestamp's wall clock: itself, or a timestamptz's in the session's zone (DuckDB's cast reads its TimeZone) */
+  private wallClock(x: AstNode, type: number | null): AstNode {
+    return type === TIMESTAMPTZ ? cast(this.clone(x), ["timestamp"]) : this.clone(x);
+  }
+
+  /** the microseconds of a timestamp's day, as a HUGEINT */
+  private dayMicros(x: AstNode, type: number | null): AstNode {
+    return cast(fn("epoch_us", [cast(this.wallClock(x, type), ["time"])]), ["hugeint"]);
+  }
+
+  /**
+   * THE SCALE POSTGRES WRITES ONE ROW'S extract(julian …) OF A TIMESTAMP AT (`julian`): numeric_div's for the day's
+   * microseconds, 28 under 865, 24 under 8,650,000, else 20, as an integer the engine holds exactly. Its print, its text
+   * and a sum of it read it (`exactOf`'s rescale, `rowScale`). Null for anything else.
+   */
+  private julianScale(n: AstNode): AstNode | null {
+    if (kindOf(n) !== "FuncCall" || lastName(bodyOf(n).funcname) !== "extract") return null;
+    const args = (bodyOf(n).args ?? []) as AstNode[];
+    const name = args.length === 2 ? constString(args[0]) : null;
+    const type = args.length === 2 ? this.typeOf(args[1]!) : null;
+    if (name === null || dateUnit(name).field !== "julian" || (type !== TIMESTAMP && type !== TIMESTAMPTZ)) return null;
+    const us = (): AstNode => this.dayMicros(args[1]!, type);
+    return cast(caseWhen([[op("<", us(), hugeConst("865")), intConst(28)], [op("<", us(), hugeConst("8650000")), intConst(24)]], intConst(20)), ["integer"]);
+  }
+
+  /** a time's epoch in microseconds; a timetz's is its time of day less its zone's offset east (time->time + zone) */
+  private epochMicros(x: AstNode, type: number | null): AstNode {
+    if (type !== TIMETZ) return fn("epoch_us", [x]);
+    return op("-", fn("epoch_us", [this.clone(x)]), op("*", cast(fn("date_part", [strConst("timezone"), x]), ["bigint"]), intConst(1000000)));
+  }
+
   /** date_part: Postgres's double precision, a second with its fraction; ±Infinity of an infinite time */
   private datePart(args: AstNode[]): AstNode | null {
-    const field = (constString(args[0]) ?? "").toLowerCase();
-    const x = args[1]!;
-    const type = this.typeOf(x);
-    this.unitSupported(field, type);
+    const written = this.typeOf(args[1]!);
+    // date_part(text, date) is Postgres's SQL function over the date as a timestamp: a timestamp's fields and errors
+    const type = written === DATE ? TIMESTAMP : written;
+    const unit = this.partField(args, type, ["double"]);
+    if (unit === null || "refused" in unit) return unit === null ? null : unit.refused;
+    const field = unit.field;
+    // (a date's time of day is midnight's, as its timestamp's; its other fields are the date's own)
+    const x = written === DATE && ["microseconds", "milliseconds", "second", "minute", "hour"].includes(field) ? cast(args[1]!, ["timestamp"]) : args[1]!;
     if (type === INTERVAL) return cast(fn("__mason_interval_part", [strConst(field), x]), ["double"]);
-    if ((type === DATE || type === TIMESTAMP || type === TIMESTAMPTZ) && MONOTONIC.has(field)) {
-      const inner = this.datePartFinite(field, this.clone(x)) ?? fn("date_part", [strConst(field), this.clone(x)]);
+    if ((type === TIMESTAMP || type === TIMESTAMPTZ) && MONOTONIC.has(field)) {
+      const inner = this.datePartFinite(field, this.clone(x), written) ?? fn("date_part", [strConst(field), this.clone(x)]);
       // tested as NOT isfinite: isfinite of a NULL is NULL, which would take an infinite branch
       const infinite = (): AstNode => not(fn("isfinite", [this.clone(x)]));
       return caseWhen([[and([infinite(), op(">", this.clone(x), cast(strConst("2000-01-01"), ["date"]))]), cast(strConst("Infinity"), ["double"])],
         [infinite(), cast(strConst("-Infinity"), ["double"])]], inner);
     }
-    return this.datePartFinite(field, x);
+    return this.datePartFinite(field, x, written);
   }
 
-  private datePartFinite(field: string, x: AstNode): AstNode | null {
+  private datePartFinite(field: DateField, x: AstNode, type: number | null): AstNode | null {
     switch (field) {
       case "second": return op("/", cast(fn("microsecond", [x]), ["double"]), numConst("1000000.0"));
       case "milliseconds": return op("/", cast(fn("microsecond", [x]), ["double"]), numConst("1000.0"));
-      case "epoch": return this.typeOf(x) === DATE ? cast(fn("epoch", [x]), ["double"]) : op("/", cast(fn("epoch_us", [x]), ["double"]), numConst("1000000.0"));
+      case "epoch": {
+        if (type === DATE) return cast(fn("epoch", [x]), ["double"]);
+        const seconds = op("/", cast(fn("epoch_us", [type === TIMETZ ? this.clone(x) : x]), ["double"]), numConst("1000000.0"));
+        // (a timetz's in Postgres's order of operations, time / 1e6 + zone, so its double is Postgres's to the last bit)
+        return type === TIMETZ ? op("-", seconds, cast(fn("date_part", [strConst("timezone"), x]), ["double"])) : seconds;
+      }
       default: return null;
     }
   }
@@ -8151,6 +8240,11 @@ function decimalConst(text: string): AstNode {
  */
 /** the width a sum of whole numerics is read at (`funcCall`'s sum): its digits, and 38 minus it decimals beside a DECIMAL */
 const SUM_WIDTH = 28;
+
+/** a whole constant as a HUGEINT; one that fits an integer is written as one, so it reads back as the node it is */
+function hugeConst(digits: string): AstNode {
+  return cast(Number(digits) <= 2147483647 ? intConst(Number(digits)) : numConst(digits), ["hugeint"]);
+}
 
 function wholeNumeric(n: AstNode, digits = 19): AstNode {
   return cast(n, ["decimal", String(Math.min(38, Math.max(19, digits))), "0"]);

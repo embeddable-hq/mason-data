@@ -120,6 +120,14 @@ const APARAMS = "(1, 1, 10, 'a', '00000000-0000-0000-0000-000000000001', 1.5, tr
   "(4, NULL, NULL, 'NULL', NULL, NULL, true, NULL, NULL, NULL), " +
   "(5, 5, 50, 'he said \"hi\"', '00000000-0000-0000-0000-000000000005', 3.0001, false, '2026-02-01', '2026-02-01 00:00:00+00', 1e-10), " +
   "(6, 6, 60, 'x\\y', '00000000-0000-0000-0000-000000000006', 3.00010000000000000002, true, '2026-02-02', '2026-02-02 00:00:00+00', 6)";
+/** issue 1006's rows, the same literals on both sides: fractions of a second, a second's end, 24:00, zones off UTC by
+ *  half hours and a quarter hour, a negative interval, the ends of an ISO year, the edges of a Julian day's decimals (865
+ *  microseconds, 8.65 seconds), and a NULL in every column */
+const PARTS = "(1, '2026-03-08 01:02:05.123456', '2026-03-08 01:02:05.123456+00', '2026-03-08', '13:45:07.5', '13:45:07.250001+05:30', '1 year 2 months 3 days 04:05:06.789012'), " +
+  "(2, '2000-12-31 23:59:59.999999', '1999-12-31 23:59:59.999999-08', '2024-12-30', '24:00:00', '23:59:59.999999-03', '-1 year -1 months -15 days -04:05:06.789012'), " +
+  "(3, '1970-01-01 00:00:00.000864', '2026-07-04 12:30:00.000865+02', '1970-01-01', '00:00:00', '00:00:00+00', '-00:00:00.5'), " +
+  "(4, '2026-01-01 00:00:08.65', '2021-01-03 00:00:08.649999+00', '2021-01-03', '23:59:59.999999', '12:00:00-12:15', '100 years 25 hours 61 minutes 7.000001 seconds'), " +
+  "(5, NULL, NULL, NULL, NULL, NULL, NULL)";
 /** issue 983's second round, rows of the same table, with no column of their own (the store's fixture sits at the 40
  *  MB of "a statement past what may spill"; a timestamp column against wider arrays is the oracle's and the sweep's):
  *  instants either side of a day's end in zones off UTC by half hours, and either side of a change of daylight saving
@@ -230,6 +238,9 @@ const DDL = [
   "CREATE TABLE public.aparams (id INTEGER PRIMARY KEY, s SMALLINT, b BIGINT, x VARCHAR, u UUID, n DECIMAL(30,20), f BOOLEAN, d DATE, ts TIMESTAMPTZ, fl DOUBLE)",
   `INSERT INTO public.aparams (id, s, b, x, u, n, f, d, ts, fl) VALUES ${APARAMS}`,
   `INSERT INTO public.aparams (id, ts, d) VALUES ${AZONES}`,
+  // issue 1006, after the others: a column of each type extract and date_part read
+  "CREATE TABLE public.parts (id INTEGER PRIMARY KEY, ts TIMESTAMP, tz TIMESTAMPTZ, d DATE, t TIME, ttz TIMETZ, iv INTERVAL)",
+  `INSERT INTO public.parts VALUES ${PARTS}`,
 ];
 // the same rows in Postgres, typed as the source would type them
 const PG_DDL = [
@@ -320,6 +331,8 @@ const PG_DDL = [
   "CREATE TABLE public.aparams (id integer PRIMARY KEY, s smallint, b bigint, x text, u uuid, n numeric(30,20), f boolean, d date, ts timestamptz, fl double precision)",
   `INSERT INTO public.aparams (id, s, b, x, u, n, f, d, ts, fl) VALUES ${APARAMS}`,
   `INSERT INTO public.aparams (id, ts, d) VALUES ${AZONES}`,
+  "CREATE TABLE public.parts (id integer PRIMARY KEY, ts timestamp, tz timestamptz, d date, t time, ttz timetz, iv interval)",
+  `INSERT INTO public.parts VALUES ${PARTS}`,
 ];
 const schema: PgSchema = {
   database: "app",
@@ -390,6 +403,9 @@ const schema: PgSchema = {
     { name: "aparams", primaryKey: ["id"], joins: [],
       columns: [{ name: "id", type: "int4" }, { name: "s", type: "int2" }, { name: "b", type: "int8" }, { name: "x", type: "text" }, { name: "u", type: "uuid" },
         { name: "n", type: "numeric", spelled: "numeric(30,20)" }, { name: "f", type: "bool" }, { name: "d", type: "date" }, { name: "ts", type: "timestamptz" }, { name: "fl", type: "float8" }] },
+    { name: "parts", primaryKey: ["id"], joins: [],
+      columns: [{ name: "id", type: "int4" }, { name: "ts", type: "timestamptz", spelled: "timestamp without time zone" }, { name: "tz", type: "timestamptz" }, { name: "d", type: "date" },
+        { name: "t", type: "text", spelled: "time without time zone" }, { name: "ttz", type: "text", spelled: "time with time zone" }, { name: "iv", type: "text", spelled: "interval" }] },
   ],
   // as the source prints them under a search_path of pg_catalog alone (src/cli/preflight.ts VIEWS_SQL); `lost` reads a
   // table Mason has not copied, so the catalog leaves it out
@@ -610,7 +626,7 @@ test("what reads no table is the catalog Postgres's; a schema'd table is in the 
     // machine as Postgres names it
     assert.match(String((await answer(c, "SELECT version()")).rows[0]![0]), /^PostgreSQL 18\.6 \(mason-data 0\.6\.1\) on (aarch64|x86_64)-(linux|darwin)$/);
     const tables = await answer(c, "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ('public', 'sales') ORDER BY 1, 2");
-    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "aparams"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "bins"], ["public", "chars"], ["public", "clock_times"], ["public", "deep_t"], ["public", "ga"], ["public", "instants"], ["public", "invoices"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnat"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "pnum"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "timetz_runs"], ["public", "timetz_runs3"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["public", "wides"], ["sales", "accounts"], ["sales", "invoices"]]);
+    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "aparams"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "bins"], ["public", "chars"], ["public", "clock_times"], ["public", "deep_t"], ["public", "ga"], ["public", "instants"], ["public", "invoices"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnat"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "parts"], ["public", "pnum"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "timetz_runs"], ["public", "timetz_runs3"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["public", "wides"], ["sales", "accounts"], ["sales", "invoices"]]);
     const cols = await answer(c, "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = 'sales' AND table_name = 'invoices' ORDER BY ordinal_position");
     assert.deepEqual(cols.rows, [["id", "integer"], ["total", "numeric"]]);
   } finally { await c.end(); }
@@ -1001,6 +1017,83 @@ test("the rerun over BIRD and TPC-DS: quotients alike, a NULL date, a BETWEEN be
     await alike("SELECT a FROM ratios INTERSECT SELECT b FROM ratios EXCEPT SELECT 0.1 FROM ratios ORDER BY 1");
     // a date where Postgres chose a timestamptz's function, grouped by the same expression: widened once in each place
     await alike("SELECT date_trunc('week', d) AS w, sum(n) FROM ratios GROUP BY date_trunc('week', d) ORDER BY 1");
+  } finally { await c.end(); }
+});
+
+// issue 1006: Postgres takes other names for a field of extract and date_part (its datetime.c's deltatktbl and
+// datetktbl, the first ten characters compared), and each must be that field: `sec` dropped the fraction of a second
+// (DuckDB read it as a whole second), and `sec` of an interval was refused. A name a type does not answer is
+// Postgres's error, at a row: 22023 "not recognized", 0A000 "not supported". Written out here from Postgres's tables,
+// never from the module that reads them
+const SPELLINGS: Record<string, string[]> = {
+  microseconds: ["microseconds", "microsecond", "microsecon", "us", "usec", "usecs", "usecond", "useconds", "MicroSecondsXyz"],
+  milliseconds: ["milliseconds", "millisecond", "millisecon", "ms", "msec", "msecs", "msecond", "mseconds", "MS"],
+  second: ["second", "seconds", "s", "sec", "secs", "SEC"], minute: ["minute", "minutes", "m", "min", "mins", "mm"],
+  hour: ["hour", "hours", "h", "hr", "hrs"], day: ["day", "days", "d"], week: ["week", "weeks", "w"], month: ["month", "months", "mon", "mons"],
+  quarter: ["quarter", "qtr"], year: ["year", "years", "y", "yr", "yrs"], decade: ["decade", "decades", "dec", "decs"],
+  century: ["century", "centuries", "c", "cent"], millennium: ["millennium", "millennia", "mil", "mils"], julian: ["julian", "j", "jd"],
+  isoyear: ["isoyear"], dow: ["dow"], isodow: ["isodow"], doy: ["doy"], timezone: ["timezone"], timezone_hour: ["timezone_hour", "timezone_h"],
+  timezone_minute: ["timezone_minute", "timezone_m"], epoch: ["epoch"],
+};
+const TIME_OF_DAY = ["microseconds", "milliseconds", "second", "minute", "hour"];
+const OF_A_DATE = ["day", "week", "month", "quarter", "year", "decade", "century", "millennium", "julian", "isoyear", "dow", "isodow", "doy"];
+const ZONE = ["timezone", "timezone_hour", "timezone_minute"];
+/** what each type's extract answers (its part function's switch), by column of `parts` */
+const ANSWERED: Record<string, string[]> = {
+  ts: [...TIME_OF_DAY, ...OF_A_DATE, "epoch"], tz: [...TIME_OF_DAY, ...OF_A_DATE, ...ZONE, "epoch"], d: [...OF_A_DATE, "epoch"],
+  t: [...TIME_OF_DAY, "epoch"], ttz: [...TIME_OF_DAY, ...ZONE, "epoch"],
+  iv: [...TIME_OF_DAY, "day", "week", "month", "quarter", "year", "decade", "century", "millennium", "epoch"],
+};
+test("issue 1006: every name Postgres takes for a field of extract and date_part is that field, of every type, and every other its error", async () => {
+  const c = await client();
+  try {
+    const q = (s: string): string => `'${s}'`;
+    const alike = async (sql: string): Promise<void> => assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+    const refused = async (sql: string): Promise<void> => {
+      const said = async (run: Promise<unknown>): Promise<[string, string] | null> => run.then(() => null, (e: { code?: string; message: string }) => [e.code ?? "", e.message]);
+      const [m, p] = [await said(c.query(sql)), await said(truth.query(sql))];
+      assert.notEqual(p, null, `${sql}: Postgres answered`);
+      assert.deepEqual(m, p, sql);
+    };
+    for (const [column, fields] of Object.entries(ANSWERED)) {
+      for (const field of fields) {
+        const names = SPELLINGS[field]!;
+        // (an extract that grows with time of an infinite value is refused by name, infinite-extract: none here)
+        await alike(`SELECT id, ${names.map((n) => `extract(${q(n)} FROM ${column})`).join(", ")}, ${names.map((n) => `date_part(${q(n)}, ${column})`).join(", ")} FROM parts ORDER BY id`);
+      }
+      // date_part(text, date) is Postgres's SQL function over the date as a timestamp: a timestamp's fields and errors
+      const partFields = column === "d" ? ANSWERED.ts! : fields;
+      if (column === "d") for (const field of TIME_OF_DAY) await alike(`SELECT id, ${SPELLINGS[field]!.map((n) => `date_part(${q(n)}, d)`).join(", ")} FROM parts ORDER BY id`);
+      // a field the type does not answer, a name no table has, a reserved word, a token of another kind (a month, a
+      // day of the week), a name with a space, and one past 63 bytes of two-byte letters: Postgres's words for each
+      const others = (answered: string[]): string[] => Object.keys(SPELLINGS).filter((f) => !answered.includes(f)).map((f) => SPELLINGS[f]!.at(-1)!);
+      const unknown = ["foo", "now", "allballs", "jan", "monday", "ago", "minutes ", "", "é".repeat(40)];
+      for (const name of [...others(fields), ...unknown]) await refused(`SELECT id, extract(${q(name)} FROM ${column}) FROM parts ORDER BY id`);
+      for (const name of [...others(partFields), ...unknown]) {
+        await refused(`SELECT id, date_part(${q(name)}, ${column}) FROM parts ORDER BY id`);
+        // raised at a row that holds a value, as Postgres raises it: none of a NULL
+        await alike(`SELECT id, extract(${q(name)} FROM ${column}), date_part(${q(name)}, ${column}) FROM parts WHERE ${column} IS NULL`);
+      }
+    }
+    // the issue's statement, a seconds' sum, and the fields of an interval it refused
+    await alike("SELECT sum(extract(sec FROM ts)), sum(extract(seconds FROM tz)), sum(extract(secs FROM t)), sum(extract(sec FROM iv)), sum(extract(ms FROM iv)) FROM parts");
+    await alike("SELECT extract(sec FROM ts) AS s, count(*) FROM parts GROUP BY 1 ORDER BY 1 NULLS FIRST");
+    // a timestamp's zone fields are NULL of an infinity, its error only of a finite value
+    await alike("SELECT id, date_part('timezone', CASE WHEN id = 1 THEN 'infinity'::timestamp END), extract(timezone_h FROM CASE WHEN id = 2 THEN '-infinity'::timestamp END) FROM parts ORDER BY id");
+    await refused("SELECT id, date_part('timezone', ts) FROM parts ORDER BY id");
+    // a timestamp's Julian day at its row's scale (numeric_div's: 28, 24 or 20 decimals), as its text, a difference and a sum
+    await alike("SELECT id, extract(jd FROM ts)::text, extract(julian FROM tz) - extract(julian FROM d), (extract(j FROM ts) * 2)::text FROM parts ORDER BY id");
+    await alike("SELECT sum(extract(julian FROM ts)), sum(extract(jd FROM tz)) FROM parts");
+    // in a zone off UTC by a half hour, a timestamptz's wall clock
+    await c.query("SET TimeZone = 'Asia/Kolkata'");
+    await truth.query("SET TimeZone = 'Asia/Kolkata'");
+    try {
+      await alike(`SELECT id, extract(hrs FROM tz), extract(mins FROM tz), extract(timezone_m FROM tz), extract(doy FROM tz), date_part('jd', tz) FROM parts ORDER BY id`);
+      await alike(`SELECT id, extract(jd FROM tz), extract(julian FROM tz)::text FROM parts ORDER BY id`);
+    } finally {
+      await c.query("SET TimeZone = 'UTC'");
+      await truth.query("SET TimeZone = 'UTC'");
+    }
   } finally { await c.end(); }
 });
 
