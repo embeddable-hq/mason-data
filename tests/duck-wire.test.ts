@@ -9069,7 +9069,7 @@ test("libc grouped: a value the order cannot key refuses a grouped min / max onl
   const letters = handLibcOrder(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...lettersOf({ e: "é" })], [" ", "-\u0001\u0002\u007f"], { collate: "en_US.utf8" });
   const { api: a, c } = await collsApi(await store.listener({ provider: "c", collate: "en_US.utf8", locale: null }, undefined, letters, () => copies, undefined, { collations: PG_COLLATIONS }));
   const rows: Array<[number, string, string]> = [];
-  for (const [g, xs] of [["0", ["B", "b", "a", "c"]], ["1", ["é", "f", "e", "E"]], ["3", ["€", "z", "y"]], ["4", ["x€", "w"]]] as Array<[string, string[]]>) {
+  for (const [g, xs] of [["0", ["B", "b", "a", "c"]], ["1", ["é", "f", "e", "E"]], ["3", ["€", "z", "y"]], ["4", ["x€", "w"]], ["5", ["a", "b", "x€"]]] as Array<[string, string[]]>) {
     for (const x of xs) for (let n = 0; n < 3; n++) rows.push([9000 + rows.length, x, g]);
   }
   await store.writer.run(`INSERT INTO public.colls SELECT id, x, x, g FROM (VALUES ${rows.map(([i, x, g]) => `(${i}, '${x}', '${g}')`).join(", ")}) AS s(id, x, g)`);
@@ -9079,7 +9079,9 @@ test("libc grouped: a value the order cannot key refuses a grouped min / max onl
       ["SELECT i, min(d), max(d) FROM colls WHERE id >= 9000 GROUP BY i HAVING i IN ('0', '1') ORDER BY i", [["0", "a", "c"], ["1", "e", "f"]]],
       ["SELECT * FROM (SELECT i AS g, min(d) AS lo, max(d) AS hi FROM colls WHERE id >= 9000 GROUP BY 1) q WHERE q.g = '1'", [["1", "e", "f"]]],
       ["WITH q AS (SELECT i AS g, max(d) AS m FROM colls WHERE id >= 9000 GROUP BY 1) SELECT m FROM q WHERE g = '0'", [["c"]]],
-      ["SELECT i, max(d) FROM colls WHERE id >= 9000 AND d NOT LIKE '%€%' GROUP BY i ORDER BY i", [["0", "c"], ["1", "f"], ["3", "z"], ["4", "w"]]],
+      ["SELECT i, max(d) FROM colls WHERE id >= 9000 AND d NOT LIKE '%€%' GROUP BY i ORDER BY i", [["0", "c"], ["1", "f"], ["3", "z"], ["4", "w"], ["5", "b"]]],
+      // group 5: `x€` is a candidate of its greatest (its run, `x`, is above every other value's) and of no least
+      ["SELECT i, min(d) FROM colls WHERE id >= 9000 GROUP BY i HAVING i = '5'", [["5", "a"]]],
     ] as Array<[string, unknown[][]]>) {
       const got = await answer(c, sql).then((r) => JSON.stringify(r.rows), (e: Error) => `refused: ${e.message}`);
       if (got !== JSON.stringify(want)) wrong.push(`${sql}\n  ${got}`);
@@ -9087,6 +9089,7 @@ test("libc grouped: a value the order cannot key refuses a grouped min / max onl
     assert.deepEqual(wrong, [], wrong.join("\n"));
     // a group the statement reads holding `€`: the key would decide, refused by name as the key a row refused
     for (const sql of ["SELECT i, min(d) FROM colls WHERE id >= 9000 GROUP BY i ORDER BY i", "SELECT i, max(d) FROM colls WHERE id >= 9000 GROUP BY i HAVING i = '4'",
+      "SELECT i, max(d) FROM colls WHERE id >= 9000 GROUP BY i HAVING i = '5'",
       "SELECT i, min(d) FROM colls WHERE id >= 9000 GROUP BY i HAVING min(d) = 'a'"]) {
       await assert.rejects(answer(c, sql), (e: pg.DatabaseError) => e.code === "0A000" && /holds a character Mason cannot order .*libc-uncovered/.test(e.message), sql);
     }
@@ -9212,6 +9215,38 @@ test("collation resolver: two libc collations in one session, each by its own or
     assert.deepEqual((await answer(c, "SELECT 'a' < 'B', 'B' < 'a'")).rows, [["t", "f"]]);
     assert.equal(reads, 1, "the second collation's order is read once, then held");
   } finally { await c.end(); await a.close(); }
+});
+
+// THE REVIEW OF PR 1104: a grouped min / max keyed one value under two libc orders in one statement from ONE WITH query,
+// cached by the value alone (src/duck/libc-bound.ts `pickGrouped`, and the ungrouped `of`), so `min(d), min(d COLLATE
+// zh)` answered the first's for both, and a min of one order beside a max of the other read one query. Each pick is held
+// to its own order here: the database's weighs é as e, the second (whose ASCII is the database's, so both have bounds)
+// as a letter after z. Every form keys its WITH queries by the value AND the order
+test("libc grouped: a value under two libc orders in one statement, each min and max by its own order", async () => {
+  const database = handLibcOrder(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...lettersOf({ e: "é" })], [" ", "-"], { collate: "en_US.utf8" });
+  const after = handLibcOrder(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...lettersOf({}), "é"], [" ", "-"], { collate: "xx_XX.utf8" });
+  const xx = { schema: "public", name: "mason_xx", provider: "c", collate: "xx_XX.utf8", locale: null, deterministic: true };
+  const { api: a, c } = await collsApi(await store.listener({ provider: "c", collate: "en_US.utf8", locale: null }, undefined, database, () => copies, undefined,
+    { collations: [...PG_COLLATIONS, xx], readLibc: async () => after }), [xx]);
+  // three groups (the ICU column's digit), each value three times: é is the first of group 1 under the database's order
+  // and the last under the second's
+  const groups: Array<[string, string[]]> = [["1", ["é", "f", "g"]], ["2", ["b", "c"]], ["3", ["y", "é", "q"]]];
+  const rows = groups.flatMap(([g, xs]) => xs.flatMap((x) => [0, 1, 2].map(() => [g, x] as const))).map(([g, x], i) => [9500 + i, g, x] as const);
+  await store.writer.run(`INSERT INTO public.colls SELECT id, x, x, g FROM (VALUES ${rows.map(([i, g, x]) => `(${i}, '${x}', '${g}')`).join(", ")}) AS s(id, x, g)`);
+  const least = (o: typeof database, xs: string[], desc = false): string => [...xs].sort((x, y) => (libcKey(o, x) < libcKey(o, y) ? -1 : 1) * (desc ? -1 : 1))[0]!;
+  try {
+    const w = "WHERE id >= 9500";
+    for (const [sql, want] of [
+      [`SELECT i, min(d), min(d COLLATE mason_xx) FROM colls ${w} GROUP BY i ORDER BY i`, groups.map(([g, xs]) => [g, least(database, xs), least(after, xs)])],
+      [`SELECT i, min(d COLLATE mason_xx), min(d) FROM colls ${w} GROUP BY i ORDER BY i`, groups.map(([g, xs]) => [g, least(after, xs), least(database, xs)])],
+      [`SELECT i, max(d), max(d COLLATE mason_xx) FROM colls ${w} GROUP BY i ORDER BY i`, groups.map(([g, xs]) => [g, least(database, xs, true), least(after, xs, true)])],
+      [`SELECT i, min(d COLLATE mason_xx), max(d) FROM colls ${w} GROUP BY i ORDER BY i`, groups.map(([g, xs]) => [g, least(after, xs), least(database, xs, true)])],
+      [`SELECT min(d), min(d COLLATE mason_xx), max(d COLLATE mason_xx), max(d) FROM colls ${w}`,
+        [[least(database, groups.flatMap(([, xs]) => xs)), least(after, groups.flatMap(([, xs]) => xs)), least(after, groups.flatMap(([, xs]) => xs), true), least(database, groups.flatMap(([, xs]) => xs), true)]]],
+    ] as Array<[string, unknown[][]]>) assert.deepEqual((await answer(c, sql)).rows, want, sql);
+    // (the data tells the orders apart)
+    assert.deepEqual([least(database, ["é", "f", "g"]), least(after, ["é", "f", "g"]), least(database, ["é", "f", "g"], true), least(after, ["é", "f", "g"], true)], ["é", "f", "g", "é"]);
+  } finally { await store.writer.run("DELETE FROM public.colls WHERE id >= 9500"); await c.end(); await a.close(); }
 });
 
 // ISSUE 982: TABLESAMPLE was refused only because the allowlist lacked its node, so wherever the allowlist was off (the

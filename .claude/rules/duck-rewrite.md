@@ -593,10 +593,14 @@ paths:
   and ¹ ² ³; a mark of no first-level weight dropped), each read from the order and `strip_accents` held to `stripped`
   over every character of `FOLD_BLOCKS`; a head of ASCII alone is read unfolded, since folding every value doubled a
   unique wide column's time. **A grouped min / max keys each group's candidates alone** (`pickGrouped`, the third round
-  of issue 666: keyed a row, 5 to 28 s against Postgres's 0.1 to 0.5 s): the SELECT's DISTINCT (group, value) pairs,
-  each with its value's weights, are a WITH query, each group's least and greatest candidate by the key another (the
-  key once a candidate pair, and none in a group of one value), and each pick reads its group's row through a lookup
-  inside `any_value`. Only where every key of the GROUP BY can be computed again over the same rows: no grouping set,
+  of issue 666: keyed a row, 5 to 28 s against Postgres's 0.1 to 0.5 s): a pass over the SELECT's rows gives each group
+  its thresholds and its least and greatest value by their bytes (one value: its answer, unkeyed), a second its DISTINCT
+  candidates, each keyed once, and each group's least and greatest candidate by the key is a WITH query's row, which
+  each pick reads through a lookup inside `any_value`. **What it holds is a row a group and the candidates, never every
+  distinct value or (group, value) pair**: the pairs, materialised, made 64 such statements at once spill past the
+  spill ceiling (53400) where the key a row answered every one (the review of PR 1104). Every WITH query is keyed by
+  the value AND its order: one value under two collations is two (the same review: `min(n), min(n COLLATE zh)`
+  answered the first's for both). Only where every key of the GROUP BY can be computed again over the same rows: no grouping set,
   and no key that reads a subquery, calls a function of Mason's or a window, or is a bare name an output gives another
   meaning. A value the order cannot key is picked first and marked, and the engine's `error()` raises its refusal above
   the aggregate, where the statement reads that group: computed inside the lookup, it refused for a group an outer

@@ -998,7 +998,7 @@ test("issue 666: a grouped min / max and a SELECT DISTINCT sorted under a libc o
   // each min and max handed it every row (491,520 for a min and a max)
   for (const [sql, most] of [
     // a group's candidates are the values whose bounds reach its least (greatest) one, each keyed once, beside the ORDER
-    // BY's key of each group: a few a group (measured: 11, 11, 15, 105,006 and 24 rows)
+    // BY's key of each group: a few a group (measured: 7, 7, 9, 70,004 and 16 rows)
     ["SELECT o.tenant_id, min(o.status), max(o.status) FROM orders o GROUP BY 1 ORDER BY 1", 3 + 3 * 6],
     [`SELECT o.tenant_id, min(${SKEWED}), max(${SKEWED}) FROM orders o GROUP BY 1 ORDER BY 1`, 3 + 3 * 7],
     ["SELECT o.tenant_id, min(o.notes), max(o.notes) FROM orders o GROUP BY 1 ORDER BY 1", 3 + 3 * 8],

@@ -725,10 +725,10 @@ export function libcOrderNote(o: LibcOrder): string | null {
     `${rare.toLocaleString("en-US")} of rare characters, ${o.held.common.toLocaleString("en-US")} of ASCII or Latin alone (Mason gaps libc-rare-letter, libc-mark-run-form)`;
 }
 
-/** The refusal of every text under an order `holdLibcOrder` did not follow: by the gap and the collation, as `libc-uncovered`'s. */
 /** the refusal of a text holding a character the order does not cover: its words alone, never the value (issue 128);
  *  the key raises it, and src/duck/libc-bound.ts writes it where a grouped min or max picked such a value */
 export const uncoveredRefusal = (o: LibcOrder): PgEvalError => new PgEvalError("0A000", `a text being ordered holds a character Mason cannot order as the database's collation ${o.collate} does (${gapMark("libc-uncovered")})`);
+/** The refusal of every text under an order `holdLibcOrder` did not follow: by the gap and the collation, as `libc-uncovered`'s. */
 const unreadRefusal = (o: LibcOrder): PgEvalError => new PgEvalError("0A000", `the database's collation ${o.collate} orders text in a way Mason could not read, so text under it is not ordered (${gapMark("libc-locale-unread")})`);
 
 const utf8Length = (g: number): number => g < 0x80 ? 1 : g < 0x800 ? 2 : g < 0x10000 ? 3 : 4;

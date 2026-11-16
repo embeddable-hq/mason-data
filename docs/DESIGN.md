@@ -3573,56 +3573,71 @@ data below, 5 to 32 s against Postgres's 0.1 to 0.5 s. A grouped min / max wrote
 `SELECT DISTINCT x … ORDER BY x` computed the ORDER BY's key for every row before the DISTINCT.
 
 **A grouped min / max keys each group's candidates** (`pickGrouped`, src/duck/libc-bound.ts). The bounds work for a
-group as they work for a statement. So the SELECT's DISTINCT (group, value) pairs are a WITH query, each with its
-value's weights, and each group's thresholds and its least and greatest candidate by the key are another. Each pick
-reads its group's row through a lookup inside `any_value`. Three forms were measured first, over the same data:
+group as they work for a statement. A first pass over the SELECT's rows gives each group its thresholds (its least hi
+and greatest lo) and its least and greatest value by their bytes, which are one where the group holds one value: that
+value is its answer, with no key. A second pass gives each group of more than one value its DISTINCT candidates, each
+keyed once. Each group's least and greatest candidate by the key is a row of a WITH query, which each pick reads through
+a lookup inside `any_value`. Both passes hold a row a group and the candidates, and the weights are computed a row in
+each. These forms were measured first, over the same data:
 - **The key once a distinct value, joined back** (#1089's form for `mode()`): the codes by region went from 12 s to
   0.7 s, but the names went from 5.4 s to 11.5 s over 0.9 M rows. Every distinct name is keyed (0.84 M of them), and
   each of min and max planned its own join.
-- **The pairs' bounds, each pair weighed** (3.9 M names by region): 7.7 s of the engine's thread time in the weights.
-  Weighing each distinct value once and joining it to its pairs (0.83 M values) won where the pairs are many. A
-  window for the thresholds cost 1.6 s of thread time; a GROUP BY joined back cost less.
+- **The DISTINCT (group, value) pairs, materialised, each weighed once a distinct value** (the PR's first form): the
+  names by region in 2.1 s, the codes in 0.5 s, about 1.5 times faster than the two passes alone. But it held every
+  pair (3.9 M of them), and the review of PR 1104 ran the names by region 16 at once under a 1 GiB engine limit, and 64
+  at once under 4 GiB: some refused with 53400, past the spill ceiling (about 4.2 GB of temporary files), where the key
+  a row answered every one. Nothing admits a heavy statement in Mason (`.claude/rules/duck-memory.md`): each runs
+  beside the others, so a form may hold no more than the key a row did, a row a group.
 - **The check of a value the order cannot key.** Inside the lookup, it was computed for every group the rows hold,
   before a HAVING or an outer query's WHERE dropped one. So it refused a statement main answered (the test's
   `WHERE q.g = '1'` over a grouped derived table). A call of `__mason_libc_checked` a group, above the aggregate, cost
   4 M calls over two million groups of one row. So the group's row marks such a pick, and the engine's own `error()`
   raises the order's refusal above the aggregate, only where the mark is set.
-A group of one value needs no key, and none is computed. The keys of the GROUP BY must be computed again over the same
-rows (`groupKeys`): a grouping set, a key that calls a function of Mason's (a jsonb's or a numeric's key) or reads a
-subquery, and a bare name an output gives another meaning stay as written.
+**One value under two orders is two WITH queries.** The review of PR 1104 also found them cached by the value alone, so
+`SELECT g, min(n), min(n COLLATE zh) … GROUP BY g` answered the database's least for both (`中` sorts first under
+zh_CN, `a` under en_US). Every WITH query this module writes is keyed by the value and its order. The keys of the
+GROUP BY must be computed again over the same rows (`groupKeys`): a grouping set, a key that calls a function of
+Mason's (a jsonb's or a numeric's key) or reads a subquery, and a bare name an output gives another meaning stay as
+written.
 
 **A SELECT DISTINCT sorted by a libc key sorts its distinct rows** (`distinctSorted`). It becomes a SELECT of its
 outputs over the DISTINCT as a derived table, each key written over those columns. Under a LIMIT, that is a top N of
 one FROM item, which the second round keys for its candidates alone.
 
-**Measured** over the wire on a shared 4-core machine (load 6 to 13), main and the change in turn, three rounds each,
+**Measured** over the wire on a shared 4-core machine (load 1 to 2), main and the change in turn, three rounds each,
 with the source Postgres 16 (`en_US.utf8`) beside them. A time is the best of three. The data: 0.9 M names in 20
-groups; 4.5 M sales with a status 97 % one value, 16,900 codes, 0.83 M names and 20 regions; 12 M rows of codes.
+groups; 4.5 M sales with a status 97 % one value, 16,900 codes, 0.83 M names and 20 regions.
 
 | statement | rows | main | this change | Postgres |
 |---|---|---|---|---|
-| `grp, min(name), max(name) … GROUP BY grp` | 0.9 M | 7.62 s | 1.32 s | 0.13 s |
-| `region, min(code), max(code) … GROUP BY region` | 4.5 M | 14.3 s | 0.53 s | 0.54 s |
-| `region, min(name), max(name) … GROUP BY region` | 4.5 M | 31.9 s | 2.08 s | 0.45 s |
-| `status, min(name), max(name) … GROUP BY status` | 4.5 M | 26.9 s | 1.10 s | 0.37 s |
-| the same by `id % 100000` (100,000 groups) | 4.5 M | 30.6 s | 5.84 s | 0.55 s |
-| `min(code), max(code)` by `id` (2 M groups of one row), `LIMIT 5` | 12 M | 6.49 s | 1.69 s | 0.00 s |
-| `name, min(status), max(code)` by name (0.83 M groups), `LIMIT 5` | 4.5 M | 39.1 s | 20.8 s | 3.44 s |
-| `SELECT DISTINCT code … ORDER BY code` | 4.5 M | 12.8 s | 0.24 s | 0.28 s |
-| `SELECT DISTINCT name … ORDER BY name LIMIT 100` | 0.9 M | 5.70 s | 0.56 s | 0.68 s |
-| `SELECT DISTINCT status … ORDER BY status` | 4.5 M | 17.1 s | 0.06 s | 0.22 s |
+| `grp, min(name), max(name) … GROUP BY grp` | 0.9 M | 5.86 s | 0.67 s | 0.07 s |
+| `region, min(code), max(code) … GROUP BY region` | 4.5 M | 13.2 s | 1.08 s | 0.35 s |
+| `region, min(name), max(name) … GROUP BY region` | 4.5 M | 28.4 s | 2.97 s | 0.41 s |
+| `status, min(name), max(name) … GROUP BY status` | 4.5 M | 30.0 s | 3.34 s | 0.53 s |
+| the same by `id % 100000` (100,000 groups), `LIMIT 5` | 4.5 M | 33.7 s | 6.51 s | 0.60 s |
+| `name, min(status), max(code)` by name (0.83 M groups), `LIMIT 5` | 4.5 M | 42.1 s | 21.2 s | 4.30 s |
+| `SELECT DISTINCT code … ORDER BY code` | 4.5 M | 20.3 s | 0.24 s | 0.46 s |
+| `SELECT DISTINCT name … ORDER BY name LIMIT 100` | 0.9 M | 7.09 s | 0.44 s | 0.93 s |
+| `SELECT DISTINCT status … ORDER BY status` | 4.5 M | 18.3 s | 0.06 s | 0.25 s |
+| `* ORDER BY code FETCH FIRST 10 ROWS WITH TIES` | 4.5 M | 16.3 s | 16.1 s | 2.27 s |
 
-In a quieter hour the first four took 0.5, 0.25, 1.3 and 1.0 s. The ungrouped min / max and the top N were unchanged.
-Grouped by the names themselves, most of the time is the ORDER BY's key of each of the 0.83 M groups, which this change
-does not touch.
+The ungrouped min / max and the top N were unchanged. Grouped by the names themselves, most of the time is the ORDER
+BY's key of each of the 0.83 M groups, which this change does not touch.
 
-**Memory.** The pairs are a materialised WITH query held while the statement runs. Measured as the server's peak
-resident memory above its idle size, one statement in a fresh process, a 3 GiB engine limit: the names by region
-took 1,351 MiB against main's 737 MiB (3.9 M pairs and 0.83 M weighed values); the names by 100,000 groups took
-2,230 MiB against main's 4,304 MiB; the names in 20 groups 884 against 743 MiB; and every distinct name, sorted, 811
-against 1,208 MiB. Over its limit the engine spills the WITH query to disk.
+**Many at once.** The names by region, every statement started at once, the server's peak resident memory across the
+run (main beside the change, under the same load):
 
-**What is left.** `FETCH FIRST … WITH TIES` still keys every row (15 s against 1.9 s); its first n rows plus their ties
+| at once | engine limit | main | this change |
+|---|---|---|---|
+| 16 | 1 GiB | 16 answered in 472 s, peak 845 MiB | 16 answered in 48 s, peak 1,137 MiB |
+| 64 | 4 GiB | 44 answered, 20 stopped by a 30-minute statement timeout, peak 1,009 MiB | 64 answered in 191 s, peak 1,088 MiB |
+| 64 | 1 GiB | not run (over an hour) | 64 answered in 199 s, peak 722 MiB |
+
+And 16 at once under 1 GiB of the names by 100,000 groups: main 545 s and 9,230 MiB, the change 99 s and 5,119 MiB; of
+`SELECT DISTINCT name … ORDER BY name LIMIT 100` over 4.5 M rows: main 503 s and 7,295 MiB, the change 12 s and
+2,352 MiB. No statement refused.
+
+**What is left.** `FETCH FIRST … WITH TIES` still keys every row (16 s against 2.3 s); its first n rows plus their ties
 are the rows a top N's threshold keeps, so the second round's filter would serve it. A grouped top N, a window's ORDER
 BY, a FILTER'd or grouping-set min / max, and a SELECT DISTINCT with no LIMIT over values each their own (every value
 keyed once) are as before or close to it.
