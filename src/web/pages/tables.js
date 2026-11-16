@@ -273,8 +273,10 @@ function pickForm(t, cols, ticked = null, adding = false) {
 
 // ------------------------------------------------------------------ an added table's columns (issue 884)
 
-/** The element an added table's column form opens from (the summary in its note), and its popovers' anchor. */
+/** The element an added table's column form opens from (the summary in its Columns column), and its popovers' anchor. */
 export const columnsId = (table) => `columns-tables-${table}`;
+/** The same control in the row's note, shown only while the Columns column has no room: its popovers' anchor then. */
+export const columnsNoteId = (table) => `columns-note-tables-${table}`;
 
 const sameSet = (a, b) => a.length === b.length && a.every((x) => b.includes(x));
 const counted = (k, word) => `${n(k)} ${word}${k === 1 ? "" : "s"}`;
@@ -393,8 +395,10 @@ export function columnsForm(t, cols, ticked = null, saving = false) {
 /** Where one table's Sync choice is read when it opens (src/cli/run-server.ts tableSyncChoice): its sync now, each poll's
  *  cost on the database, and Live's checks — the database's read then, never with the state the page polls. */
 export const syncPath = (table) => `api/tables/${encodeURIComponent(table)}/sync`;
-/** The element a table's Sync choice opens from, and its popovers' anchor: unique in the document. */
+/** The element a table's Sync choice opens from (in its Sync column), and its popovers' anchor: unique in the document. */
 export const syncId = (table) => `sync-tables-${table}`;
+/** The same control in the row's note, shown only while the Sync column has no room: its popovers' anchor then. */
+export const syncNoteId = (table) => `sync-note-tables-${table}`;
 
 /** An interval in words: 300 → "5 minutes", 3600 → "hour". */
 const intervalWords = (seconds) => seconds % 86_400 === 0 ? (seconds === 86_400 ? "day" : `${seconds / 86_400} days`)
@@ -602,14 +606,15 @@ export function renderTables(s, ui = {}) {
   // why no table can be added or removed from here (that, or a server's sources file this run cannot write), or null
   const readOnly = viewOnly ?? s.sourcesReadOnly ?? null;
   const stream = s.stream ? new Map(streamRows(s.stream, now).tables) : null;
-  // SEVEN NARROW COLUMNS OF FIXED WIDTHS, NOTHING LONG IN A CELL, AND NOTHING A CLICK INSERTS: a table's state is its word
-  // over its copy's bar (a line kept for it when it has none); its last sync an age over how long it took; whatever is
-  // said at length — the words `mason wait` prints, an error, why it cannot be added, its stream state — is ITS NOTE, a
-  // line of its own under the row, across every column, written for every row (empty when it says nothing), so a note
-  // that comes or goes moves no row. A question (Remove), a form (Columns…) and what an action answered are POPOVERS
-  // beside the row's actions (`pop`), written after the table: a click moves no other row and no column
+  // NINE NARROW COLUMNS OF FIXED WIDTHS, NOTHING LONG IN A CELL, AND NOTHING A CLICK INSERTS: a table's state is its word
+  // over its copy's bar (a line kept for it when it has none); its columns and its sync are the buttons that open its
+  // column form and its Sync choice (issue 1110); its last sync an age over how long it took; whatever is said at
+  // length — the words `mason wait` prints, an error, why it cannot be added, its stream state — is ITS NOTE, a line of
+  // its own under the row, across every column, written for every row (empty when it says nothing), so a note that
+  // comes or goes moves no row. A question (Remove), a form (Columns…) and what an action answered are POPOVERS beside
+  // the button that asked (`pop`), written after the table: a click moves no other row and no column
   // (`table-layout: fixed`, the stylesheet's widths by the header's classes; a button whose label changes keeps its room).
-  const head = [["Table", "name"], ["State", "state"], ["Rows", "num rows"], ["Key", "key"], ["Last sync", "num last"], ["Size", "num size"], ["", "act"]];
+  const head = [["Table", "name"], ["State", "state"], ["Rows", "num rows"], ["Key", "key"], ["Columns", "cols"], ["Sync", "sync"], ["Last sync", "num last"], ["Size", "num size"], ["", "act"]];
   const sizeCell = sizeCellOf(sizes);
   const under = (html, cls = "") => `<tr class="under${cls ? ` ${cls}` : ""}"><td colspan="${head.length}"><div class="under-body">${html}</div></td></tr>`;
   const cell = (v, cls = "", title = "") => `<td${cls ? ` class="${cls}"` : ""}${title ? ` title="${esc(title)}"` : ""}>${esc(v)}</td>`;
@@ -665,41 +670,50 @@ export function renderTables(s, ui = {}) {
     const took = t.added && y?.syncSeconds != null ? `<span class="took" title="${esc(tookTitle(y))}">took ${esc(tookText(y))}</span>` : "";
     const last = t.added && y?.syncedAt && y?.ageSeconds != null
       ? `<td class="num last"><span title="${esc(`${utcText(y.syncedAt)} UTC`)}">${esc(`${duration(y.ageSeconds)} ago`)}</span>${took}</td>` : `<td class="num last">${took}</td>`;
+    // ITS SYNC, in its Sync column: what the run keeps it by now, and — where the page may edit the sources file — the
+    // button that opens its Sync choice (a dialog beside it); read-only, the words alone, the reason their title. In
+    // the column the header says Sync, so the words alone ("Off"); in the note, where the column gave way, "Sync: Off"
+    const keptNow = keptSync(t);
+    const syncText = keptNow === null ? null : syncWords(keptNow);
+    const syncCtl = (inNote) => {
+      // read-only, a sync the run does not say is not shown: there is no button to label
+      if (!t.added || adding_ || (readOnly !== null && syncText === null)) return "";
+      const words = inNote ? (syncText === null ? "Sync…" : `Sync: ${syncText}`) : syncText ?? "Choose…";
+      return readOnly !== null ? `<span class="syncnow dim" title="${esc(readOnly)}">${esc(words)}</span>`
+        : `<button type="button" class="small link syncnow" id="${esc(inNote ? syncNoteId(t.table) : syncId(t.table))}" data-choose-sync="${esc(t.table)}"${syncOpen === t.table ? ` aria-expanded="true"` : ""} title="${esc(`Choose how Mason keeps ${name} current`)}">${esc(words)}</button>`;
+    };
+    // ITS COLUMNS, in its Columns column: which it syncs in a few words (`columnsSummary`), the button that opens its
+    // column form where the page may edit the sources file; read-only, the words alone
+    const summary = t.added && !adding_ ? columnsSummary(t) : null;
+    const colsCtl = (inNote) => summary === null ? ""
+      : readOnly !== null ? `<span class="syncnow dim" title="${esc(summary.title)}">${esc(summary.text)}</span>`
+      : `<button type="button" class="small link syncnow" id="${esc(inNote ? columnsNoteId(t.table) : columnsId(t.table))}" data-choose="${esc(t.table)}"${choosing === t.table ? ` aria-expanded="true"` : ""} title="${esc(`${summary.title}. Choose which columns Mason syncs`)}">${esc(summary.text)}</button>`;
+    // a popover of its sync or its columns is anchored to the control in the column, or, where the column gave way, to the
+    // same control in the note (`orAnchor`: placePops takes the one shown)
+    const syncAnchor = { anchor: syncId(t.table), orAnchor: syncNoteId(t.table) };
+    const colsAnchor = { anchor: columnsId(t.table), orAnchor: columnsNoteId(t.table) };
+    if (syncOpen === t.table && t.added && readOnly === null) {
+      pops.push(pop(syncAnchor.anchor, renderSyncChoice(t, syncChoice, syncAsk, open(`synccheck:${t.table}`), syncPicked, busy("syncsave", t.table)), { kind: "dialog", label: `Sync ${name}`, orAnchor: syncAnchor.orAnchor }));
+    }
     // what is said at length, its note under the row: the words the CLI prints after a bar that is not full and current,
     // an error (its first line; the whole in a details), why it cannot be added as it is, its stream state (replication mode)
-    // ITS SYNC, first on its note: what the run keeps it by now, and — where the page may edit the sources file — the
-    // button that opens its Sync choice (a dialog beside it); read-only, the words alone, the reason their title
-    const keptNow = keptSync(t);
-    const syncWord = keptNow === null ? "Sync…" : `Sync: ${syncWords(keptNow)}`;
-    // ITS COLUMNS, beside its sync: which it syncs in a few words (`columnsSummary`), the button that opens its column
-    // form where the page may edit the sources file; read-only, the words alone
-    const summary = t.added && !adding_ ? columnsSummary(t) : null;
-    const colsCtl = summary === null ? ""
-      : readOnly !== null ? `<span class="syncnow dim" title="${esc(summary.title)}">${esc(summary.text)}</span>`
-      : `<button type="button" class="small link syncnow" id="${esc(columnsId(t.table))}" data-choose="${esc(t.table)}"${choosing === t.table ? ` aria-expanded="true"` : ""} title="${esc(`${summary.title}. Choose which columns Mason syncs`)}">${esc(summary.text)}</button>`;
-    const syncCtl = !t.added || adding_ ? ""
-      : readOnly !== null ? `<span class="syncnow dim" title="${esc(readOnly)}">${esc(syncWord)}</span>`
-      : `<button type="button" class="small link syncnow" id="${esc(syncId(t.table))}" data-choose-sync="${esc(t.table)}"${syncOpen === t.table ? ` aria-expanded="true"` : ""} title="${esc(`Choose how Mason keeps ${name} current`)}">${esc(syncWord)}</button>`;
-    if (syncOpen === t.table && t.added && readOnly === null) {
-      pops.push(pop(syncId(t.table), renderSyncChoice(t, syncChoice, syncAsk, open(`synccheck:${t.table}`), syncPicked, busy("syncsave", t.table)), { kind: "dialog", label: `Sync ${name}` }));
-    }
     const said_ = adding_ ? `<span class="dim">adding it…</span>`
       : t.added ? [
-        syncCtl,
-        colsCtl,
         l && l.state !== "done" && !t.error ? `<span class="what-copy t-${l.state}">${esc(l.what)}</span>` : "",
         t.error ? `<span class="err">${esc(firstLine(t.error))}</span>${t.error.includes("\n") ? details(`error:${t.table}`, "the whole error", `<pre>${esc(t.error)}</pre>`, open(`error:${t.table}`)) : ""}` : "",
         stream && stream.get(t.table) ? `<span class="stream dim">Stream: ${esc(stream.get(t.table))}</span>` : "",
       ].filter(Boolean).join("")
       : f.state ? `<span class="dim">${esc(f.state)}</span>` : "";
-    // A COLUMN THE LIST'S CARD HAS NO ROOM FOR (app.css: Key, then Size, then Last sync, then Rows give way to the name)
-    // says its fact here, in the note: each `.fold` is shown only while its column is hidden, its words the stylesheet's
-    // (`data-fold`, drawn by `::before`) so the row's text is its cells' alone wherever every column is shown
+    // A COLUMN THE LIST'S CARD HAS NO ROOM FOR (app.css: Key, then Size, Last sync, Rows, Columns and Sync give way to
+    // the name) says its fact here, in the note, in the columns' order: each `.fold` is shown only while its column is
+    // hidden. A fact's words are the stylesheet's (`data-fold`, drawn by `::before`), so the row's text is its cells'
+    // alone wherever every column is shown. Columns and Sync are controls, so their fold is the control itself, with an
+    // id of its own: the one shown is the one a person presses, and the one their popovers are anchored to
     const sizeText = size?.text ? `size ${size.text}` : "";
     const lastText = t.added && y?.syncedAt && y?.ageSeconds != null ? `last sync ${duration(y.ageSeconds)} ago${y.syncSeconds != null ? `, took ${tookText(y)}` : ""}`
       : t.added && y?.syncSeconds != null ? `took ${tookText(y)}` : "";
-    const folds = [["rows", t.added && t.copy && t.copy.phase !== "failed" ? `${rows} rows` : rows], ["key", f.key], ["last", lastText], ["size", sizeText]]
-      .filter(([, x]) => x).map(([c, x]) => `<span class="fold f-${c}" data-fold="${esc(x)}"></span>`).join("");
+    const folds = [["rows", t.added && t.copy && t.copy.phase !== "failed" ? `${rows} rows` : rows], ["key", f.key], ["cols", colsCtl(true), true], ["sync", syncCtl(true), true], ["last", lastText], ["size", sizeText]]
+      .filter(([, x]) => x).map(([c, x, html]) => html ? `<span class="fold f-${c}">${x}</span>` : `<span class="fold f-${c}" data-fold="${esc(x)}"></span>`).join("");
     const note = under(folds + said_, "note");
     if (asking) {
       pops.push(pop(anchor, `<p class="confirm">Remove ${esc(name)}? Mason will stop syncing it and delete its synced data.</p>` +
@@ -709,23 +723,25 @@ export function renderTables(s, ui = {}) {
     // a refused add with its form open: the refusal is said in the form's popover, over the boxes as they were ticked
     // a table not added: Columns… (Add with its columns); an added one: its columns' summary (its column form)
     const formOpen = choosing === t.table && (!t.added || (summary !== null && readOnly === null));
-    const formAnchor = t.added ? columnsId(t.table) : anchor;
+    const formAnchor = t.added ? colsAnchor : { anchor, orAnchor: "" };
     const refusedHere = outcome?.table === t.table && "failure" in outcome;
     if (formOpen) {
-      pops.push(pop(formAnchor, (refusedHere ? renderFailure(outcome.failure) + anywayActions(t, outcome, busy, false) : "") + (t.added ? columnsForm(t, columns, ticked, busy("columns", t.table)) : pickForm(t, columns, ticked, adding_)),
-        { kind: "dialog", label: t.added ? `The columns ${name} syncs` : `Add ${name}` }));
+      pops.push(pop(formAnchor.anchor, (refusedHere ? renderFailure(outcome.failure) + anywayActions(t, outcome, busy, false) : "") + (t.added ? columnsForm(t, columns, ticked, busy("columns", t.table)) : pickForm(t, columns, ticked, adding_)),
+        { kind: "dialog", label: t.added ? `The columns ${name} syncs` : `Add ${name}`, orAnchor: formAnchor.orAnchor }));
     }
     if (outcome?.table === t.table && !(formOpen && refusedHere)) {
       // a sync saved (or refused) is said beside the sync it changed; an add or a remove beside the row's actions
       // a column form saved, beside its columns' summary
-      pops.push(pop(outcome.at === "sync" && t.added && readOnly === null ? syncId(t.table) : outcome.at === "columns" && t.added && summary !== null && readOnly === null ? columnsId(t.table) : anchor,"failure" in outcome ? `${renderFailure(outcome.failure)}${outcome.anyway ? anywayActions(t, outcome, busy, true) : `<p class="pop-actions">${button("Dismiss", { dismissOutcome: "", popClose: "" }, "small")}</p>`}`
-        : "added" in outcome ? renderTableAdded(outcome.added, outcome.at ?? false) : renderTablesRemoved(outcome.removed)));
+      const at = outcome.at === "sync" && t.added && readOnly === null ? syncAnchor : outcome.at === "columns" && t.added && summary !== null && readOnly === null ? colsAnchor : { anchor, orAnchor: "" };
+      pops.push(pop(at.anchor, "failure" in outcome ? `${renderFailure(outcome.failure)}${outcome.anyway ? anywayActions(t, outcome, busy, true) : `<p class="pop-actions">${button("Dismiss", { dismissOutcome: "", popClose: "" }, "small")}</p>`}`
+        : "added" in outcome ? renderTableAdded(outcome.added, outcome.at ?? false) : renderTablesRemoved(outcome.removed), { orAnchor: at.orAnchor }));
     }
     if (synced?.table === t.table) {
       pops.push(pop(anchor, "failure" in synced ? `${renderFailure(synced.failure)}${button("Dismiss", { dismissSynced: "", popClose: "" }, "small")}` : "busy" in synced ? renderBusy(synced.busy) : renderSynced(synced.synced, t.table, s, synced.picked ?? [t.table])));
     }
     return `<tr class="${t.added ? `c-added s-${y?.state ?? "unknown"}` : t.reason ? "c-cannot" : "c-not"}${said_ ? " has-note" : ""}"><th scope="row" class="name"><code class="name" title="${esc(t.table)}">${nameBreaks(t.table)}</code></th>` +
-      `<td class="state">${state}${bar}</td>${cell(rows, "num rows", rows)}${cell(f.key, "mono key", f.key)}${last}` +
+      `<td class="state">${state}${bar}</td>${cell(rows, "num rows", rows)}${cell(f.key, "mono key", f.key)}` +
+      `<td class="cols">${colsCtl(false)}</td><td class="sync">${syncCtl(false)}</td>${last}` +
       `${size ? cell(size.text, "num size", size.title) : cell("", "num size")}` +
       `<td class="act" id="${esc(anchor)}">${act}</td></tr>` + note;
   };

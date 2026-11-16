@@ -3,8 +3,11 @@
  * src/web/shared.js `placePops`): the page over the server's own state (`runState`) and its own files (PAGE_ROUTES).
  *
  * - THE NAME COLUMN KEEPS A USABLE WIDTH at every width from 1000 to 1400 px (it was 2 px at 1024 px: the fixed columns
- *   filled the list's least width): the less important columns give way first — Key, then Size, then Last sync, then
- *   Rows — each hidden column's fact said in the row's note instead, and the page never scrolls sideways.
+ *   filled the list's least width): the less important columns give way first — Key, then Size, Last sync, Rows,
+ *   Columns and Sync — each hidden column's fact said in the row's note instead, and the page never scrolls sideways.
+ * - AN ADDED TABLE'S COLUMNS AND SYNC ARE COLUMNS OF THE LIST (issue 1110): each control is shown once at every width,
+ *   in its column or, where the column gave way, in the row's note, and a press at its centre reaches it. Opening the
+ *   Sync choice or the column form moves no row and no column, its popover beside the control shown.
  * - WHAT ADD OR SYNC NOW ANSWERED COVERS NO OTHER CONTROL: the "said" popover beside a row's actions is placed where it
  *   covers no button, link or box of another row (or of its own), or else lets a click through to what is under it —
  *   at every width from 1000 to 1400 px and on a phone.
@@ -87,6 +90,14 @@ const server = http.createServer((req, res) => {
   const json = (body: unknown) => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
   if (url.pathname === "/api/state") return json(stateNow());
   if (url.pathname === "/api/usage") return json({ samples: [], copySizes: [] });
+  // what the Sync choice and the column form read as they open (src/cli/sync-choice.ts, `mason tables <table> --json`)
+  const form = /^\/api\/tables\/([^/]+)\/(sync|columns)$/.exec(url.pathname);
+  if (form !== null) {
+    const t = decodeURIComponent(form[1]!);
+    if (form[2] === "columns") return json({ table: t, columns: ["id", "name", "status", "created_at", "api_token"].map((c) => ({ name: c, type: c === "id" ? "bigint" : "text", nullable: true, comment: null, references: null })) });
+    return json({ table: t, sync: { value: "off", from: "default" }, rows: 1200, bigRows: false, live: { allowed: true, checks: [] },
+      polls: [["poll 5m", 300], ["poll 15m", 900], ["poll 1h", 3600], ["poll 1d", 86_400]].map(([sync, seconds]) => ({ sync, seconds, cost: null })) });
+  }
   if (url.pathname === "/api/pick" || url.pathname === "/api/sync") {
     let body = "";
     req.on("data", (c: Buffer) => { body += c.toString(); });
@@ -140,7 +151,8 @@ const layout = (p: Page) => p.evaluate<{ widths: Record<string, number>; page: n
       if (!(tr.querySelector("td." + cls)?.textContent ?? "").trim()) continue;
       const fold = note?.querySelector(".fold.f-" + cls);
       const name = tr.querySelector("code.name")?.textContent;
-      if (!fold || fold.getBoundingClientRect().width < 1 || !(fold.dataset.fold ?? "").trim()) unsaid.push(name + ": " + cls);
+      // a fact's fold says it by its data-fold; a control's (Columns, Sync) is the control itself
+      if (!fold || fold.getBoundingClientRect().width < 1 || !((fold.dataset.fold ?? "") || fold.textContent).trim()) unsaid.push(name + ": " + cls);
     }
   }
   return { widths, page: document.documentElement.scrollWidth - window.innerWidth, unsaid };
@@ -156,6 +168,82 @@ test(`the name column keeps a usable width at every width from 1000 to 1400 px; 
     assert.deepEqual(l.unsaid, [], `${width} px: each hidden column's fact is in every row's note`);
   }
 });
+
+/** Each added table's Columns and Sync controls: how many of each are shown (a box laid out), where (its cell or its
+ *  note), and whether a press at its centre reaches it. Read in the page, each scrolled to the window's middle. */
+const controls = (p: Page) => p.evaluate<{ rows: number; out: string[]; where: Record<string, string> }>(`(() => {
+  const out = [], where = {};
+  const rows = [...document.querySelectorAll("#tables table.catalog tbody tr.c-added")];
+  for (const tr of rows) {
+    const name = tr.querySelector("code.name")?.getAttribute("title") ?? "?";
+    const note = tr.nextElementSibling;
+    for (const [what, attr] of [["columns", "data-choose"], ["sync", "data-choose-sync"]]) {
+      const all = [...tr.querySelectorAll("[" + attr + "]"), ...note.querySelectorAll("[" + attr + "]")];
+      const shown = all.filter((b) => b.getClientRects().length > 0);
+      if (shown.length !== 1) { out.push(name + "'s " + what + ": " + shown.length + " shown"); continue; }
+      const b = shown[0];
+      where[what] = b.closest("tr.under") ? "note" : "column";
+      b.scrollIntoView({ block: "center", inline: "nearest" });
+      const r = b.getBoundingClientRect();
+      if (r.width < 8 || r.height < 16) { out.push(name + "'s " + what + " is " + Math.round(r.width) + " × " + Math.round(r.height) + " px"); continue; }
+      const hit = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+      if (hit === null || !(hit === b || b.contains(hit))) out.push(name + "'s " + what + " is under " + (hit?.tagName ?? "nothing") + " at its centre");
+      // its words whole: a label wider than its column wraps in its button, never cut
+      if (b.scrollWidth > b.clientWidth + 0.5) out.push(name + "'s " + what + " is cut (" + b.scrollWidth + " > " + b.clientWidth + ")");
+    }
+  }
+  return { rows: rows.length, out, where };
+})()`);
+
+/** Every row and cell of the list, and each header: where it is and how big, to the tenth of a pixel. */
+const boxes = (p: Page) => p.evaluate<string[]>(`(() => {
+  const b = (e) => { const r = e.getBoundingClientRect(); return [r.left, r.top + window.scrollY, r.width, r.height].map((x) => Math.round(x * 10) / 10).join(","); };
+  return [...document.querySelectorAll("#tables table.catalog tr, #tables table.catalog tr > *")].map((e) => e.tagName + " " + b(e));
+})()`);
+
+/** 1000 to 1600 px every 40 px, 900 and 1024 (the icon rail; the width the owner met) and phones. */
+const CONTROL_WIDTHS = [375, 390, 900, 1024, ...Array.from({ length: 16 }, (_, i) => 1000 + 40 * i)].sort((a, b) => a - b);
+
+test(`each added table's Columns and Sync are shown once and can be pressed — in their columns, or in the note where those gave way — at 375 to 1600 px (issue 1110)`, { skip: noBrowser }, async () => {
+  const seen: string[] = [];
+  for (const width of CONTROL_WIDTHS) {
+    const p = await open(width);
+    const c = await controls(p);
+    await p.close();
+    assert.equal(c.rows, 7, `${width} px: the added tables`);
+    assert.deepEqual(c.out, [], `${width} px: each control once, whole, and pressable`);
+    seen.push(`${width}: ${c.where.columns}/${c.where.sync}`);
+  }
+  // both in their columns on a wide screen, both in the note on a phone
+  assert.ok(seen.includes("1600: column/column") && seen.includes("375: note/note"), seen.join(", "));
+});
+
+for (const [what, attr, form] of [["the Sync choice", "data-choose-sync", "form[data-sync-form]"], ["the column form", "data-choose", "form[data-pick-form]"]] as const) {
+  test(`opening ${what} moves no row, cell or column, and its popover is beside the control shown: 375, 900, 1024, 1280 and 1600 px (issue 1110)`, { skip: noBrowser }, async () => {
+    for (const width of [375, 900, 1024, 1280, 1600]) {
+      const p = await open(width);
+      const sel = `#tables [${attr}="public.order_items"]`;
+      await p.evaluate(`[...document.querySelectorAll(${JSON.stringify(sel)})].find((b) => b.getClientRects().length).scrollIntoView({ block: "center" })`);
+      const before = await boxes(p);
+      await p.click(`${sel}:visible`);
+      await p.waitForSelector(`.pop.ask:not([hidden]) ${form}`);
+      await p.waitForTimeout(200);
+      const after = await boxes(p);
+      const beside = await p.evaluate<{ gap: number; right: number }>(`(() => {
+        const pop = document.querySelector(".pop.ask:not([hidden])").getBoundingClientRect();
+        const b = [...document.querySelectorAll(${JSON.stringify(sel)})].find((x) => x.getClientRects().length).getBoundingClientRect();
+        // the popover under or over the control (4 px apart), or, too tall for either side, kept inside the window (placePops);
+        // its right edge on the control's unless the window's gutter moved it
+        const clamped = pop.top <= 16.5 || pop.bottom >= window.innerHeight - 16.5;
+        return { gap: clamped ? 0 : Math.min(Math.abs(pop.top - b.bottom), Math.abs(b.top - pop.bottom)), right: Math.abs(pop.right - b.right) <= 1 || pop.left <= 16.5 || pop.right >= window.innerWidth - 16.5 ? 0 : pop.right - b.right };
+      })()`);
+      await p.close();
+      assert.deepEqual(after.filter((x, i) => x !== before[i]), [], `${width} px: nothing moved`);
+      assert.equal(after.length, before.length, `${width} px: no row or cell added`);
+      assert.ok(beside.gap <= 5 && beside.right === 0, `${width} px: beside the control (${JSON.stringify(beside)})`);
+    }
+  });
+}
 
 /** Every table's name and state word that a person cannot read whole: cut inside its cell (its text past its box), not
  *  the table's name, outside the list's card, past the window, or under something laid over it (a pinned column). */

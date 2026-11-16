@@ -199,8 +199,8 @@ for (const width of [1280, 1024, 900, 375]) {
 
 for (const width of [1280, 375]) {
   test(`a table's Sync choice: its radios one a line at one left edge, at ${width} px (issue 875)`, { skip }, () => inChromium(async (browser) => {
-    const page = await served(browser, width, "tables", "[data-choose-sync]");
-    await page.click('[data-choose-sync="public.customers"]');
+    const page = await served(browser, width, "tables", "[data-choose-sync]:visible");
+    await page.click('[data-choose-sync="public.customers"]:visible');
     await page.waitForSelector("form.syncpick input[type=radio]", { timeout: 5_000 });
     assert.equal(await page.evaluate(() => document.querySelectorAll("form.syncpick input[type=radio]").length, null), 6, "Off, four polls and Live");
     assert.equal(await radiosLie(page, "form.syncpick"), "column");

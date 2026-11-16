@@ -606,18 +606,18 @@ test("the tables: each of the database's, added, not added or cannot be added wi
   const text = textOf(html);
   // TWO tables, Added over Not added: an added table shows its sync columns, one not added its rows and key; seven short
   // columns, whatever is long (a reason, an error, a copy's words, a Remove's question) a line of its own under the row
-  assert.match(text, /^Added \(3\) Table State Rows Key Last sync Size public\.customers /);
+  assert.match(text, /^Added \(3\) Table State Rows Key Columns Sync Last sync Size public\.customers /);
   assert.equal([...html.matchAll(/<table /g)].length, 2, "two tables: Added, then Not added");
   const listed = [...html.matchAll(/<th scope="row" class="name"><code class="name" title="([^"]*)">/g)].map((m) => m[1]);
   assert.equal(new Set(listed).size, 7, "each table listed once");
-  assert.match(text, /public\.customers Synced 100% 1,200 key id View events Sync now Remove Sync… All columns public\.orders /, "every added table has its bar: 100% once copied");
+  assert.match(text, /public\.customers Synced 100% 1,200 key id All columns Choose… View events Sync now Remove All columns Sync… public\.orders /, "every added table has its bar: 100% once copied");
   assert.equal([...html.matchAll(/<span class="indicator (\w+)"><span class="dot" aria-hidden="true"><\/span>([^<]*)<\/span>/g)].map((m) => `${m[1]} ${m[2]}`).join(", "),
     "ok Synced, ok Synced, ok Synced, unknown Not added, unknown Not added, unknown Not added, unknown Not added", "a state is a dot AND the CLI's word");
   assert.match(html, /^<h3 class="list-h">Added <span class="dim">\(3\)<\/span><\/h3><div class="list"><table class="catalog">/, "Added: its heading and count over its card");
   assert.match(html, /<\/table><\/div><h3 class="list-h">Not added <span class="dim">\(4\)<\/span><\/h3><div class="list"><table class="catalog">/, "Not added under it, a card of its own");
   assert.match(text, /public\.audit Not added ~50 rows key id Add Columns… public\.accounts /);
   assert.match(text, /public\.event_log Not added ~900 rows no key Name its key… cannot be added as it is: no primary key: name the columns that tell its rows apart, mason add event_log --key tenant_id,id \(its unique index event_log_tenant_id_id_key\) public\.staging /);
-  assert.match(html, /<\/tr><tr class="under note"><td colspan="7"><div class="under-body">(?:<span class="fold[^"]*" data-fold="[^"]*"><\/span>)*<span class="dim">cannot be added as it is: no primary key/, "the reason on a line of its own under its row, across every column");
+  assert.match(html, /<\/tr><tr class="under note"><td colspan="9"><div class="under-body">(?:<span class="fold[^"]*" data-fold="[^"]*"><\/span>)*<span class="dim">cannot be added as it is: no primary key/, "the reason on a line of its own under its row, across every column");
   assert.match(text, /public\.staging Not added rows unknown key id Add Columns… A synced table's size/);
   assert.match(html, /<button type="button" class="small" data-sync-table="public\.customers" data-room="Syncing…">Sync now<\/button>/);
   assert.ok(!/data-sync-table="public\.(audit|event_log)"/.test(html), "no Sync for a table not added");
@@ -2260,7 +2260,7 @@ test("the app: Add sends POST api/pick, says what was added beside its table's a
   assert.deepEqual(run.asked, [`POST api/pick ${JSON.stringify({ table: "public.accounts", picked: true })}`, "GET api/state"],
     "every column, as mason add accounts asks; then the state again (the page's own read: nothing else)");
   const v = app.view();
-  assert.match(textOf(v.tables!), /public\.accounts Waiting ~300 rows key id View events Sync now Remove Sync… All but 1 column waiting for its first sync to start public\.event_log/);
+  assert.match(textOf(v.tables!), /public\.accounts Waiting ~300 rows key id All but 1 column Choose… View events Sync now Remove All but 1 column Sync… waiting for its first sync to start public\.event_log/);
   assert.match(textOf(popOf(v.tables!, "act-tables-public.accounts")), /^Added public\.accounts: every column but password_hash\. Its sync is Off: .* Left out password_hash: it looks like a secret/);
   assert.match(textOf(v.status!), /public\.accounts waiting for its first sync to start/, "the Overview shows the copy starting");
   app.dismissOutcome();
@@ -2782,7 +2782,7 @@ test("in the browser: the tables are written when they change, never at every po
   const { el, on, tick, settle } = fakeBrowser(run, "#tables");
   await settle();
   const tables = el("tables");
-  assert.match(textOf(tables.html), /public\.orders Syncing 15% 280,000 key id View events Sync now Remove Sync… All columns syncing /);
+  assert.match(textOf(tables.html), /public\.orders Syncing 15% 280,000 key id All columns Choose… View events Sync now Remove All columns Sync… syncing /);
   await on.get("click")!({ target: { closest: () => ({ dataset: { removeTable: "public.orders" } }) } });
   assert.match(textOf(tables.html), /Remove orders\? Mason will stop syncing it and delete its synced data\. Remove orders Cancel/);
   let writes = tables.writes;
@@ -2794,7 +2794,7 @@ test("in the browser: the tables are written when they change, never at every po
   run.answers.set("GET api/state", rowsOf(350));
   tick(); await settle();
   assert.equal(tables.writes, writes, "rows that moved while a Remove asks do not write the tables again: the confirm stays the one clicked");
-  assert.match(textOf(tables.html), /public\.orders Syncing 15% 280,000 key id View events Sync now Remove Sync… All columns syncing .* public\.audit Not added ~50 rows key id Add Columns… /);
+  assert.match(textOf(tables.html), /public\.orders Syncing 15% 280,000 key id All columns Choose… View events Sync now Remove All columns Sync… syncing .* public\.audit Not added ~50 rows key id Add Columns… /);
   assert.match(textOf(popOf(tables.html, "act-tables-public.orders")), /^Remove orders\? /, "the confirm, beside the row it asks about");
   await on.get("click")!({ target: { closest: () => ({ dataset: { cancelRemoveTable: "" } }) } });
   assert.match(textOf(tables.html), /public\.audit Not added ~350 rows key id/, "Cancel writes the rows as they are now");
@@ -3193,11 +3193,11 @@ test("Tables: each added table's state, rows, last sync and its age, how long it
   const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
   const html = renderTables(SYNCED, { sizes: USAGE });
   const text = textOf(html);
-  assert.match(text, /^Added \(3\) Table State Rows Key Last sync Size /);
-  assert.match(text, /public\.customers Synced 100% 1,200 key id 30 s ago took 0\.4 s 512\.0 KiB View events Sync now Remove /);
-  assert.match(text, /public\.orders Failed 100% ~2,000,000 rows key id 65 min ago took 63 s View events Sync now Remove Sync… All columns poll: connection reset the whole error poll: connection reset the sync tries it again in 5 s /);
+  assert.match(text, /^Added \(3\) Table State Rows Key Columns Sync Last sync Size /);
+  assert.match(text, /public\.customers Synced 100% 1,200 key id All columns Choose… 30 s ago took 0\.4 s 512\.0 KiB View events Sync now Remove /);
+  assert.match(text, /public\.orders Failed 100% ~2,000,000 rows key id All columns Choose… 65 min ago took 63 s View events Sync now Remove All columns Sync… poll: connection reset the whole error poll: connection reset the sync tries it again in 5 s /);
   // a copy served but not kept current: its amber bar, and the words mason status prints after it, under the row
-  assert.match(text, /public\.events Synced 100% 30,000,000 key id 2 min ago took 13 min 3\.0 GiB View events Sync now Remove Sync: Off All columns Not added \(1\) Table State Rows Key Last sync Size public\.audit /, "a table whose sync is off is synced, its age its Last sync");
+  assert.match(text, /public\.events Synced 100% 30,000,000 key id All columns Off 2 min ago took 13 min 3\.0 GiB View events Sync now Remove All columns Sync: Off Not added \(1\) Table State Rows Key Columns Sync Last sync Size public\.audit /, "a table whose sync is off is synced, its age its Last sync");
   assert.match(text, /public\.audit Not added ~50 rows key id Add Columns… /, "a table not added has no sync, and is in the Not added list");
   assert.equal([...html.matchAll(/<table /g)].length, 2);
   // the last sync is an age, its UTC time in a title; rows, age, span and size are mono and right-aligned
@@ -3300,7 +3300,7 @@ test("Tables: what a sync did is said as mason sync says it, beside its Sync; a 
   run.answers.set("GET api/state", answer(withSync({ ...started, state: "synced", endedAt: "2026-10-27T09:05:31.000Z", answer: answered })));
   await app.poll();
   // the button says it in its own room, and what the sync did is said beside it, as mason sync prints it
-  assert.match(textOf(app.view().tables!), /public\.events Synced .* Synced ✓ Remove Sync: Off All columns Not added \(1\) Table State Rows Key Last sync Size public\.audit /);
+  assert.match(textOf(app.view().tables!), /public\.events Synced .* Synced ✓ Remove All columns Sync: Off Not added \(1\) Table State Rows Key Columns Sync Last sync Size public\.audit /);
   assert.match(app.view().tables!, /<button type="button" class="small" data-sync-table="public\.events" data-room="Syncing…">Synced ✓<\/button>/);
   assert.equal(textOf(popOf(app.view().tables!, "act-tables-public.events")), "Synced public.events: 34 added, ~1,200 updated, 5 deleted. public.events 34 added, ~1,200 updated, 5 deleted, 30,001,229 rows now · 8.5 s public.events's sync is off, so it stays as it is now until you press Sync now again. Dismiss");
   app.dismissSynced();
@@ -3397,7 +3397,7 @@ test("Tables: while the page's Sync now of a table runs, its State says Syncing 
 
 test("Tables: the search box narrows both lists and Failed only lists the failed tables alone, kept across polls; a form open keeps its table and its list still", async () => {
   const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
-  assert.match(textOf(renderTables(CATALOG_STATE, { filter: "ORD" })), /^1 with “ORD” in the name Added \(1\) Table State Rows Key Last sync Size public\.orders Synced 100% 2,000,000 key id View events Sync now Remove .* Not added \(0\) No table that is not added has “ORD” in its name\./);
+  assert.match(textOf(renderTables(CATALOG_STATE, { filter: "ORD" })), /^1 with “ORD” in the name Added \(1\) Table State Rows Key Columns Sync Last sync Size public\.orders Synced 100% 2,000,000 key id All columns Choose… View events Sync now Remove .* Not added \(0\) No table that is not added has “ORD” in its name\./);
   assert.equal(renderTables(CATALOG_STATE, { filter: "" }), renderTables(CATALOG_STATE), "nothing typed: every table, as before");
   assert.match(textOf(renderTables(CATALOG_STATE, { filter: "zzz", choosing: "public.audit", columns: columnsOf("public.audit") })), /^1 with “zzz” in the name .* public\.audit Not added ~50 rows key id Add Columns… The columns to sync/, "the table whose form is open stays");
   assert.match(textOf(renderTables(SYNCED, { filter: "nope" })), /Added \(0\) No added table's name has “nope”\. Not added \(0\) No table that is not added has “nope” in its name\./);
@@ -4423,7 +4423,7 @@ test("Tables: in replication mode each added table's stream state is a column, i
   const html = renderTables(st, { now: NOW });
   const text = textOf(html);
   // the stream state is a line under each added table's row, never a column: what it says is long
-  assert.match(text, /^Added \(\d+\) Table State Rows Key Last sync Size public\.customers /);
+  assert.match(text, /^Added \(\d+\) Table State Rows Key Columns Sync Last sync Size public\.customers /);
   const { tables } = fn<[unknown, number], { tables: Array<[string, string]> }>("streamRows")(STREAM, NOW);
   for (const [t, words] of tables.filter(([t]) => ["public.customers", "public.orders", "public.events"].includes(t))) assert.ok(text.includes(words), `${t}: ${words}`);
   assert.match(text, /public\.customers Synced .* streamed · 1,000 added, 200 updated, 4 deleted this run /);
@@ -5647,7 +5647,7 @@ test("Add: the row says Adding… from the click, then waiting for its copy, the
   assert.equal(await adding, true);
   // answered: the state is read again and the row shows the copy waiting to start, an indeterminate bar
   row = accountsRow(app.view().tables!);
-  assert.match(textOf(row), /public\.accounts Waiting ~300 rows key id View events Sync now Remove Sync… All but 1 column waiting for its first sync to start/);
+  assert.match(textOf(row), /public\.accounts Waiting ~300 rows key id All but 1 column Choose… View events Sync now Remove All but 1 column Sync… waiting for its first sync to start/);
   assert.match(row, /<span class="copybar indeterminate" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-label="public\.accounts: its first sync" aria-valuetext="waiting for its first sync to start"><span class="track" aria-hidden="true"><span class="fill"[^>]*><\/span><\/span><\/span>/);
   assert.ok(!/aria-valuenow/.test(row), "waiting: no value, an indeterminate bar");
   // syncing 37%: the bar's value, the aria, and the words mason wait prints (copyingText, held equal)
@@ -5940,7 +5940,7 @@ test("Tables: a synced table with no size says why — under the log's size, Mea
   const html = renderTables(state, { sizes, now: NOW });
   const sizeCell = (t: string): string => {
     const row = new RegExp(`<tr class="c-added[^"]*"><th scope="row" class="name"><code class="name" title="${t.replace(".", "\\.")}">.*?</tr>`).exec(html)?.[0] ?? assert.fail(`no row for ${t}`);
-    return [...row.matchAll(/<td[^>]*>.*?<\/td>/g)].map((m) => m[0])[4]!;
+    return [...row.matchAll(/<td[^>]*>.*?<\/td>/g)].map((m) => m[0])[6]!;
   };
   assert.equal(sizeCell("public.customers"), `<td class="num size">512.0 KiB</td>`, "measured: its size, no tooltip");
   assert.equal(sizeCell("public.orders"), `<td class="num size" title="Under 3 MiB. Its rows aren&#39;t in the main file yet, so it can&#39;t be measured exactly.">&lt; 3 MiB</td>`,
@@ -6083,6 +6083,98 @@ test("Tables: a table added or removed keeps its row in its list, its state chan
 
 const queriesPage = await import(path.join(WEB, "pages", "queries.js") as string).catch(() => ({})) as Record<string, (...a: never[]) => unknown>;
 
+// AN ADDED TABLE'S COLUMNS AND ITS SYNC ARE COLUMNS OF THE LIST (issue 1110), not the note under its row: each a button
+// that opens its form, in a cell of its own under its header. Where the column gives way (app.css), the same control is
+// in the note, with an id of its own, and its popover is anchored to whichever of the two is shown
+test("Tables: an added table's columns and its sync are columns of the list, Columns and Sync, each the button that opens its form; the note keeps the long words, and the same controls only where their columns gave way (issue 1110)", () => {
+  const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
+  const html = renderTables(CATALOG_STATE);
+  const heads = [...html.matchAll(/<th scope="col"( class="([^"]+)")?>([^<]*)<\/th>/g)].slice(0, 9).map((m) => `${m[3]}:${m[2]}`);
+  assert.deepEqual(heads, ["Table:name", "State:state", "Rows:num rows", "Key:key", "Columns:cols", "Sync:sync", "Last sync:num last", "Size:num size", ":act"], "Columns and Sync have a header each, between Key and Last sync");
+  const rowOf = (h: string, t: string) => new RegExp(`<tr class="[^"]*"><th scope="row" class="name"><code class="name" title="${t.replace(".", "\\.")}">.*?</tr><tr class="under note">.*?</tr>`).exec(withoutPops(h))?.[0] ?? assert.fail(`no row for ${t}`);
+  const cellOf = (row: string, cls: string) => new RegExp(`<td class="${cls}">(.*?)</td>`).exec(row)?.[1] ?? assert.fail(`no ${cls} cell`);
+  const noteOf = (row: string) => /<tr class="under note"><td colspan="9"><div class="under-body">(.*)<\/div><\/td><\/tr>$/.exec(row)?.[1] ?? assert.fail("no note");
+  // an added table: its two buttons in their cells, with the ids their popovers are anchored to; in the column the
+  // header says Sync, so its words alone
+  const customers = rowOf(html, "public.customers");
+  assert.equal(cellOf(customers, "cols"), `<button type="button" class="small link syncnow" id="columns-tables-public.customers" data-choose="public.customers" title="Every column, and any column added to the table later that does not look like a secret. Choose which columns Mason syncs">All columns</button>`);
+  assert.equal(cellOf(customers, "sync"), `<button type="button" class="small link syncnow" id="sync-tables-public.customers" data-choose-sync="public.customers" title="Choose how Mason keeps customers current">Choose…</button>`);
+  // its note: the same two controls, each in its fold (shown only while its column gave way), with ids of their own,
+  // in the columns' order; nothing else of them in the note
+  const note = noteOf(customers);
+  assert.match(note, /<span class="fold f-cols"><button type="button" class="small link syncnow" id="columns-note-tables-public\.customers" data-choose="public\.customers"[^>]*>All columns<\/button><\/span><span class="fold f-sync"><button type="button" class="small link syncnow" id="sync-note-tables-public\.customers" data-choose-sync="public\.customers"[^>]*>Sync…<\/button><\/span>/);
+  assert.equal([...note.replace(/<span class="fold f-(cols|sync)">.*?<\/span>/g, "").matchAll(/syncnow/g)].length, 0, "no control in the note but in a fold");
+  assert.deepEqual([...note.matchAll(/class="fold f-(\w+)"/g)].map((m) => m[1]), ["rows", "key", "cols", "sync"], "the folds in the columns' order");
+  // a sync the run keeps: its words in the column ("Off"), "Sync: Off" in the note, where no header says Sync
+  const off = (CATALOG_STATE.tables as unknown as Array<Record<string, unknown>>).map((t) => t.table === "public.customers" ? { ...t, kept: { by: "poll", sync: { mode: "off" }, syncedAt: null, nextAt: null } } : t);
+  const offRow = rowOf(renderTables({ ...CATALOG_STATE, tables: off }), "public.customers");
+  assert.match(cellOf(offRow, "sync"), />Off<\/button>$/);
+  assert.match(noteOf(offRow), /id="sync-note-tables-public\.customers"[^>]*>Sync: Off<\/button>/);
+  // the note keeps the long words: the progress, the error, the stream (held by the tests of each); a row whose note then
+  // says nothing but its folds is still written
+  assert.ok(!/what-copy|class="err"|class="stream/.test(note), "customers is synced: nothing long to say");
+  // a table not added: both cells empty, its own actions (Add, Columns…) where they were
+  const audit = rowOf(html, "public.audit");
+  assert.equal(cellOf(audit, "cols"), "");
+  assert.equal(cellOf(audit, "sync"), "");
+  assert.ok(!/f-cols|f-sync/.test(noteOf(audit)), "no fold of them in its note");
+  assert.match(audit, /<td class="act" id="act-tables-public\.audit">.*data-add-table="public\.audit".*data-choose="public\.audit".*<\/td>/);
+  // read-only: the same words, dim, with no button, in the cells and the folds alike; a sync the run does not say is
+  // not shown (there is no button to label)
+  const why = "This server's sources file can't be changed from here.";
+  const ro = rowOf(renderTables({ ...CATALOG_STATE, sourcesReadOnly: why, sourcesReadOnlyKind: "deployed" }), "public.customers");
+  assert.equal(cellOf(ro, "cols"), `<span class="syncnow dim" title="Every column, and any column added to the table later that does not look like a secret">All columns</span>`);
+  assert.equal(cellOf(ro, "sync"), "");
+  assert.ok(!/<button[^>]*(data-choose|data-choose-sync)=/.test(ro), "no button");
+  assert.match(noteOf(ro), /<span class="fold f-cols"><span class="syncnow dim"[^>]*>All columns<\/span><\/span>/);
+  assert.ok(!noteOf(ro).includes("f-sync"), "nothing of a sync the run does not say");
+  const roOff = rowOf(renderTables({ ...CATALOG_STATE, tables: off, sourcesReadOnly: why, sourcesReadOnlyKind: "deployed" }), "public.customers");
+  assert.equal(cellOf(roOff, "sync"), `<span class="syncnow dim" title="This server&#39;s sources file can&#39;t be changed from here.">Off</span>`);
+  assert.match(noteOf(roOff), /<span class="fold f-sync"><span class="syncnow dim"[^>]*>Sync: Off<\/span><\/span>/);
+  // ITS SYNC CHOICE AND ITS COLUMN FORM, OPENED: a popover anchored to the control in the column, or to the one in the
+  // note where the column gave way; no row, no cell added
+  const rowsOf = (h: string) => [...withoutPops(h).matchAll(/<tr\b[^>]*>/g)].length;
+  const cellsOf = (h: string) => [...withoutPops(h).matchAll(/<t[hd]\b[^>]*>/g)].length;
+  for (const [what, opened, anchor, or] of [
+    ["the Sync choice", renderTables(CATALOG_STATE, { syncOpen: "public.customers" }), "sync-tables-public.customers", "sync-note-tables-public.customers"],
+    ["the column form", renderTables(CATALOG_STATE, { choosing: "public.customers", columns: columnsOf("public.customers") }), "columns-tables-public.customers", "columns-note-tables-public.customers"],
+  ] as const) {
+    const pops = popsOf(opened);
+    assert.equal(pops.length, 1, `${what}: one popover`);
+    assert.equal(pops[0]!.anchor, anchor, `${what}: anchored to the control in its column`);
+    assert.match(pops[0]!.html, new RegExp(`^<div class="pop ask" data-anchor="${anchor.replace(/\./g, "\\.")}" role="dialog" aria-label="[^"]+" data-or-anchor="${or.replace(/\./g, "\\.")}">`), `${what}: or to the one in the note`);
+    assert.equal(rowsOf(opened), rowsOf(html), `${what}: no row inserted`);
+    assert.equal(cellsOf(opened), cellsOf(html), `${what}: no cell added`);
+  }
+  // THE STYLESHEET: each column its width; Columns and Sync give way last (after Key, Size, Last sync, Rows), each
+  // folding its control into the note and hiding the one in its cell, so one of each is shown to press
+  const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const gives = [...css.matchAll(/@container catalog \(max-width: (\d+)px\) \{ table\.catalog :is\(th, td\)\.(\w+) \{ width: 0; padding: 0; visibility: hidden; \}(.*)\}/g)].map((m) => ({ at: Number(m[1]), col: m[2]!, rest: m[3]! }));
+  assert.deepEqual(gives.sort((a, b) => b.at - a.at).map((g) => g.col), ["key", "size", "last", "rows", "cols", "sync"], "the order the columns give way in");
+  for (const c of ["cols", "sync"]) {
+    const g = gives.find((x) => x.col === c)!;
+    assert.match(g.rest, new RegExp(`table\\.catalog td\\.${c} \\.syncnow \\{ display: none; \\} table\\.catalog \\.fold\\.f-${c} \\{ display: inline; \\}`), `${c}: its control folds into the note, the cell's not shown`);
+  }
+  // each width the sum of the columns shown and 200 px for the name, less 1: the name never under 200 px
+  const px = (c: string) => Number(new RegExp(`table\\.catalog th\\.${c} \\{ width: (\\d+)px; \\}`).exec(css)![1]);
+  let shown = ["state", "rows", "key", "cols", "sync", "last", "size", "act"].reduce((n, c) => n + px(c), 0) + 200;
+  for (const g of gives) { assert.equal(g.at, shown - 1, `${g.col} gives way under ${shown} px`); shown -= px(g.col); }
+  assert.equal(Number(/table\.catalog \{ table-layout: fixed; width: 100%; --least: (\d+)px; \}/.exec(css)![1]), shown, "the least width: the name, the state and the actions");
+});
+
+/** placePops with a popover's `data-or-anchor` (issue 1110): its anchor when that is shown, else the other. */
+test("a popover anchored to a control written twice is placed beside the one shown (issue 1110)", () => {
+  const placePops = fn<[unknown, unknown], unknown[]>("placePops");
+  const el = (left: number, shown: boolean) => ({ getBoundingClientRect: () => ({ left, top: 100, right: left + 100, bottom: 120, width: 100, height: 20 }), getClientRects: () => shown ? [{}] : [] });
+  const pop = () => ({ dataset: { anchor: "cell", orAnchor: "note" }, offsetWidth: 300, offsetHeight: 120, hidden: false, style: {} as Record<string, string> });
+  for (const [cell, note, left] of [[true, false, "700px"], [false, true, "100px"], [true, true, "700px"]] as const) {
+    const p = pop();
+    const ids: Record<string, unknown> = { cell: el(900, cell), note: el(300, note) };
+    placePops({ querySelectorAll: () => [p], getElementById: (id: string) => ids[id] ?? null }, { innerWidth: 1280, innerHeight: 900 });
+    assert.equal(p.style.left, left, `the cell's control ${cell ? "shown" : "hidden"}, the note's ${note ? "shown" : "hidden"}`);
+  }
+});
+
 test("layout guard: a click moves no row and no column — a question, a form and an answer are popovers beside the button, never a row; a changing label keeps its room; fixed columns; the actions never wrap; a table's card scrolls, never the page", () => {
   const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
   const renderUsers = fn<[unknown, unknown, number?, unknown?], string>("renderUsers");
@@ -6137,7 +6229,7 @@ test("layout guard: a click moves no row and no column — a question, a form an
   // each list's header row left out: a table's rows alone
   const trs = rowsOf(html).filter((tr) => tr !== "<tr>");
   trs.forEach((tr, i) => assert.equal(tr.startsWith('<tr class="under note"'), i % 2 === 1, `row ${i}: a table's row, then its note line: ${tr}`));
-  for (const row of html.split("<tr").filter((r) => r.includes('<th scope="row" class="name">'))) assert.equal([...row.matchAll(/<td/g)].length, 6, `six cells beside the name: ${row.slice(0, 120)}`);
+  for (const row of html.split("<tr").filter((r) => r.includes('<th scope="row" class="name">'))) assert.equal([...row.matchAll(/<td/g)].length, 8, `eight cells beside the name: ${row.slice(0, 120)}`);
   assert.ok(!/class="what"/.test(html), "no Note column");
   // a table not added keeps its bar's line, empty, so Add → its bar moves no row
   assert.match(html, /Not added<\/span><span class="copyline none" aria-hidden="true"><\/span><\/td>/);
@@ -6184,7 +6276,7 @@ test("layout guard: a click moves no row and no column — a question, a form an
   assert.ok(css.includes("  table.users { display: table; }") && phone.indexOf("table.users { display: table; }") < phone.indexOf("\n}"), "on a phone the card scrolls, so the actions pin");
   assert.match(rule('table.users th[scope="row"]'), /overflow: hidden/);
   const heads = [...html.matchAll(/<th scope="col" class="([^"]+)">/g)].map((m) => m[1]!.split(" ").pop()!);
-  const COLUMNS = ["name", "state", "rows", "key", "last", "size", "act"];
+  const COLUMNS = ["name", "state", "rows", "key", "cols", "sync", "last", "size", "act"];
   assert.deepEqual(heads, [...COLUMNS, ...COLUMNS], "Added and Not added: the same columns, so they line up one over the other");
   for (const c of heads.filter((x) => x !== "name")) assert.match(rule(`table.catalog th.${c}`), /width: \d+px/, `the ${c} column has its width`);
   assert.match(rule("td.act"), /white-space: nowrap/, "a row's actions never wrap");
