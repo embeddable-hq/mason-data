@@ -497,6 +497,30 @@ under another transaction's write fails its commit, hence swaps on the writer's 
   picking the row's scale by `arg_min` / `arg_max` cost about 2× grouped and 10× ungrouped, for a value already equal).
 - **A failed copy backs off** (`copyRetryDelayMs`: four times the attempt, at least 5 minutes, doubled per failure, at
   most 6 hours; at once after a restart or a column change) and keeps its committed chunks.
+- **A whole read is served only together with its catch-up** (issue 1066, 2026-11-15; `catchUpSide`). The chunks keep
+  the rows written before the first snapshot's xmin, and the catch-up poll from that watermark brought the copy
+  current — after the swap, so the table served in between held only what the chunks kept. The review of #1058 met the
+  worst case: a TRUNCATE, then a transaction left open, then the reload committed. No rewrite came after the open
+  transaction began, so #1058's wait did not apply, and every row was past the watermark: the sync again swapped in 0
+  rows and served them until its catch-up. Waiting on more cases would not close the class: any load or update since
+  the oldest open transaction began was missing the same way, for the catch-up's time or, when the catch-up failed,
+  for its back-off. So the decision is that what a swap puts in is the whole table as of one snapshot: the one poll
+  runs into the side table first, the swap carries that poll's snapshot as the watermark, and under replication the
+  changes the stream held from before that poll are applied in the swap's own writer's turn. It costs the source
+  nothing more (the same poll, earlier); the table serves its previous data for the poll's time longer. The review of
+  PR 1084 found what the stream holds meanwhile is acknowledged as it is held: a sync again whole whose column change
+  was reverted while it read (issue 79) had its table back in the stream, served, and a side poll that failed dropped
+  those changes for good, and let changes decoded in the side table's wider columns reach the narrower table served.
+  So a table served is marked behind, in the ledger, as the side table's catch-up begins, and a catch-up that ends
+  without a swap ends its stay: one poll from its own watermark catches it up, as main's catch-up after a swap did. #1058's wait
+  stays for a rewrite after the open transaction began: there the chunks read nothing, and the catch-up would read every
+  row in one read of the source.
+- **A sync that waits is never a failure** (issue 1066). #1058 recorded a first sync that waited for an open
+  transaction as `failed`, and kept an error on the line of a table synced again whole, so `mason status` and the page
+  said Failed and `mason wait` exited 1, while Mason only waited and would go on by itself. A wait is now its own state
+  (`CopyState.syncWaits`, `sync.state` `waiting`, a `sync_waits` event), and its words name the transaction only while
+  it is still open, read at every check (`holderSql`): with two transactions older than the rewrite, #1058's words kept
+  naming the first after it ended, a pid another session may hold by then.
 - **`mason stop` interrupts a copy**, re-sent every 50 ms (DuckDB loses an interrupt that arrives before its statement
   starts), and cancels on the source a chunk the interrupt has not ended within 200 ms ("A stop while a read waits on
   the source"); the table is `waiting`, never failed.

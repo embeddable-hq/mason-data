@@ -501,6 +501,44 @@ test("behind, left out, a failed catch-up, a stream down, off: each table's line
   assert.equal(line, "1,200 rows · synced · behind by 1 h 58 min: the last pass, which reads every table again whole, took 1 s, and Mason waits four times a pass between passes to keep the database's load to a fifth");
 });
 
+// A WHOLE SYNC THAT WAITS FOR AN OPEN TRANSACTION IS WAITING, NEVER FAILED (issue 1066): a first sync that waited was
+// `failed`, and a sync again whole kept an error on its line, so the page said Failed and mason wait exited 1 while Mason
+// was only waiting. Its words are the CLI's, on the Overview, the Tables page and in what mason wait waits for.
+test("a whole sync that waits for an open transaction: Waiting on the page and mason status alike, its words the CLI's, never Failed; a first sync is not ready, one synced before is (issue 1066)", () => {
+  const ago = (s: number): string => new Date(NOW - s * 1000).toISOString();
+  const WHY = "its sync waits for transaction 1234 (pid 567 in pg_stat_activity) to end. It was open on the database before the table was rewritten (an ALTER TABLE that rewrites it, a TRUNCATE and a load, or a tool such as pg_repack). So a sync now would read none of its rows. Mason checks again every 30 s.";
+  const syncWaits = { why: WHY, checkedAt: ago(4) };
+  const every15 = { mode: "poll", every: "15m", seconds: 900 };
+  const first: CopyState = { source: "public.events", phase: "waiting", rows: null, bytes: null, seconds: null, copiedAt: null, error: null, syncWaits };
+  const again: CopyState = { ...copied("public.customers", 1200, ago(7200)), syncWaits,
+    kept: { by: "poll", sync: every15, syncedAt: ago(7200), nextAt: null, pending: `${WHY} The synced data serves as it was until then.`, promisedSeconds: 960, lateWhy: WHY } } as CopyState;
+  const s = stateOf([first, again], { now: NOW });
+  const tableLine = fn<[unknown, number], { state: string; fraction: number; what: string }>("tableLine");
+  const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
+  for (const t of s.tables.filter((x) => x.table === first.source || x.table === again.source)) {
+    assert.equal(t.sync?.state, "waiting", `${t.table}: waiting, in one word`);
+    assert.equal(t.error, null, `${t.table}: no error`);
+    assert.deepEqual(t.syncWaits, syncWaits, `${t.table}: the wait and its check, as mason status --json says them`);
+    const cli = commands.tableLines(s, NOW).find((l) => l.startsWith(t.table))!;
+    const ours = tableLine(t, NOW);
+    assert.ok(asPage(cli).endsWith(`  ${ours.what}`), `${t.table}:\n${cli}\n${ours.what}`);
+    assert.ok(ours.what.includes(WHY), `${t.table}: the wait said on its line: ${ours.what}`);
+    assert.doesNotMatch(ours.what, /failed/, `${t.table}: never a failure`);
+    assert.notEqual(ours.state, "failed");
+    const row = renderTables(s).split("<tr").find((r) => r.includes(`<code class="name" title="${t.table}">`))!;
+    assert.match(row, /<\/span>Waiting</, `${t.table}: the Tables page says Waiting`);
+    assert.doesNotMatch(row, /<\/span>Failed</, `${t.table}: never Failed`);
+  }
+  // a first sync that waits is not ready (mason wait keeps waiting, within its own timeout); one synced before serves
+  const r = s.readiness!;
+  assert.deepEqual(r.failed, [], "no table failed");
+  assert.ok(r.waiting.includes(`public.events: ${WHY}`), `the first sync waits, in its words: ${r.waiting.join(" | ")}`);
+  assert.ok(!r.waiting.some((w) => w.startsWith("public.customers")), "one synced before is served, so ready");
+  assert.equal(commands.readinessWord(r), "Under way");
+  // and its event is no failure
+  assert.ok(EVENT_KINDS.includes("sync_waits") && !isFailure("sync_waits"));
+});
+
 test("a synced table's space on its line, the page's words the CLI's: its deleted rows' share, its last compaction, a compaction that failed (issue 851)", () => {
   const kept = { by: "poll", sync: { mode: "off" }, syncedAt: "2026-10-27T09:00:09.000Z", nextAt: null, promisedSeconds: null, lateWhy: null };
   const none = { deadShare: null, wasteShare: null, checkedAt: null, at: null, seconds: null, error: null, retryAt: null, waiting: null };

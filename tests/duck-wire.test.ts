@@ -36,7 +36,7 @@ import * as wire from "./postgres-api/wire.ts";
 import { withinDuckDBRounding } from "./memory-text.ts";
 import { handLibcOrder, lettersOf } from "./libc-order-fixture.ts";
 import { libcKey } from "../src/duck/libc-order.ts";
-import { catalogDdl } from "../src/api/postgres/catalog.ts";
+import { catalogDdl, catalogViews } from "../src/api/postgres/catalog.ts";
 import { planDuck } from "../src/duck/plan.ts";
 import { parseSql } from "../src/api/postgres/parser.ts";
 import { mayOrderText } from "../src/api/postgres/translate.ts";
@@ -498,6 +498,40 @@ test("a statement over a copied table is answered by DuckDB with Postgres's colu
   } finally { await c.end(); }
 });
 
+test("issue 981: a WITH query named like the table it reads reads the table inside its own body, by Postgres's rules, in every place a name is read", async () => {
+  // A WITH query is seen by the query that declares it, the queries inside that one and the WITH queries after it,
+  // never by its own body, unless the WITH is RECURSIVE. Before the fix the first statement counted 0 (the listener
+  // took it for a statement of no table, which the empty catalog answered) and the join failed XX000 "Maximum call
+  // stack size exceeded" (the rewrite followed the WITH query into itself).
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      // a count, and a join
+      ["WITH orders AS (SELECT * FROM orders WHERE status = 'paid') SELECT count(*) FROM orders", "ordered"],
+      ["WITH orders AS (SELECT * FROM orders WHERE status = 'paid') SELECT count(*), count(i.total) FROM orders LEFT JOIN sales.invoices i ON i.id = orders.id", "ordered"],
+      ["WITH orders AS (SELECT * FROM orders WHERE status = 'paid') SELECT o.id, i.total FROM orders o LEFT JOIN sales.invoices i ON i.id = o.id ORDER BY o.id DESC LIMIT 1", "ordered"],
+      // a column qualified by the name, TABLE, and a WITH query of a column list
+      ["WITH orders AS (SELECT id, status FROM orders WHERE status = 'paid') SELECT orders.id, orders.status FROM orders ORDER BY 1", "ordered"],
+      ["WITH orders AS (SELECT id, status FROM orders WHERE status = 'paid') TABLE orders ORDER BY id", "ordered"],
+      ["WITH orders(n, s) AS (SELECT id, status FROM orders WHERE status = 'paid') SELECT count(*), sum(n), max(s) FROM orders", "ordered"],
+      // a later WITH query reads an earlier one of a table's name; an earlier one reads the table a later one is named as
+      ["WITH orders AS (SELECT * FROM orders WHERE status = 'paid'), accounts AS (SELECT * FROM orders WHERE id > 1) SELECT (SELECT count(*) FROM accounts) AS a, (SELECT count(*) FROM orders) AS o", "ordered"],
+      ["WITH a AS (SELECT * FROM orders), orders AS (SELECT * FROM a WHERE status = 'paid') SELECT (SELECT count(*) FROM a) AS a, (SELECT count(*) FROM orders) AS o", "ordered"],
+      // WITH RECURSIVE: the WITH query sees itself, and the table is read by its schema
+      ["WITH RECURSIVE orders AS (SELECT 1 AS id UNION ALL SELECT id + 1 FROM orders WHERE id < 5) SELECT count(*), sum(id) FROM orders", "ordered"],
+      ["WITH RECURSIVE orders AS (SELECT 1 AS id UNION ALL SELECT id + 1 FROM orders WHERE id < 5) SELECT (SELECT count(*) FROM public.orders) AS whole, count(*) AS part FROM orders", "ordered"],
+      ["WITH RECURSIVE r AS (SELECT min(id) AS id FROM orders UNION ALL SELECT r.id + 1 FROM r JOIN orders o ON o.id = r.id + 1) SELECT count(*), sum(id) FROM r", "ordered"],
+      // inside a subquery, beside the table read outside it; in a set operation's arm, beside the table in the other
+      ["SELECT (SELECT count(*) FROM orders) AS whole, (WITH orders AS (SELECT * FROM orders WHERE status = 'paid') SELECT count(*) FROM orders) AS paid", "ordered"],
+      ["SELECT count(*) FROM orders WHERE id IN (WITH orders AS (SELECT * FROM orders WHERE status = 'pending') SELECT id FROM orders)", "ordered"],
+      ["(WITH orders AS (SELECT * FROM orders WHERE status = 'paid') SELECT count(*) FROM orders) UNION ALL SELECT count(*) FROM orders", "ordered"],
+      // the body reads the table by its schema, and the statement reads both
+      ["WITH orders AS (SELECT * FROM public.orders WHERE status = 'paid') SELECT count(*) FROM orders", "ordered"],
+      ["WITH orders AS (SELECT * FROM orders WHERE status = 'paid') SELECT count(*) FROM orders, public.orders p WHERE p.id = orders.id", "ordered"],
+    ]), []);
+  } finally { await c.end(); }
+});
+
 test("a result column is Postgres's type: a sum of an integer is DuckDB's HUGEINT, sent as Postgres's bigint", async () => {
   const c = await client();
   try {
@@ -611,6 +645,9 @@ test("a table ADDED and not yet served is refused with where its copy is, never 
     assert.match(await hint("SELECT * FROM public.customers"), /^public\.customers is added and being synced \(its rows are being read\): it is served once its first sync commits/);
     copies = [state({ phase: "waiting" })];
     assert.match(await hint("SELECT * FROM customers"), /^public\.customers is added and waits its turn to be synced: it is served once its first sync commits; mason wait waits for it/);
+    // its first sync waits for an open transaction on the database (issue 1066): a wait, said so, never a failure
+    copies = [state({ phase: "waiting", syncWaits: { why: "its sync waits for transaction 1234 to end. …", checkedAt: "2026-11-15T10:00:00.000Z" } })];
+    assert.match(await hint("SELECT * FROM customers"), /^public\.customers is added, and its first sync waits for an open transaction on the database to end \(mason status says which\): it is served once its first sync commits; mason wait waits for it/);
     copies = [state({ phase: "failed", error: "permission denied for table customers (tried again after 14:05 UTC (failure 1 in a row), …)" })];
     assert.equal(await hint("SELECT * FROM customers"),
       "public.customers is added, but its first sync failed: permission denied for table customers (tried again after 14:05 UTC (failure 1 in a row), …); mason logs says more");
@@ -9175,4 +9212,147 @@ test("collation resolver: two libc collations in one session, each by its own or
     assert.deepEqual((await answer(c, "SELECT 'a' < 'B', 'B' < 'a'")).rows, [["t", "f"]]);
     assert.equal(reads, 1, "the second collation's order is read once, then held");
   } finally { await c.end(); await a.close(); }
+});
+
+// ISSUE 982: TABLESAMPLE was refused only because the allowlist lacked its node, so wherever the allowlist was off (the
+// oracle, scripts/duck-repro.ts) or would come to list it, it reached the engine, which reads `SYSTEM (100)` as 100 rows:
+// 100 of 400 where Postgres answers 400. The class: a construct refused by nothing but its absence from the allowlist,
+// which answers every form once one is verified. The decision: one reader, Postgres's analysis (its TABLESAMPLECLAUSE),
+// refuses every sample by name before the rewrite, wherever the table is read, and a percent or seed Postgres rejects
+// when the sample runs is Postgres's own error.
+test("issue 982: every TABLESAMPLE is refused by name, wherever the table is read, and a percent Postgres rejects is Postgres's error", async () => {
+  const catalogDb = new PGlite();
+  try {
+    await catalogDb.waitReady;
+    const sampled: PgSchema = { database: "app", tables: [{ name: "sampled", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "v", type: "text" }] }],
+      views: [{ schema: "public", name: "sampled_half", definition: " SELECT id, v FROM public.sampled TABLESAMPLE BERNOULLI (50);" },
+        { schema: "public", name: "sampled_all", definition: " SELECT id, v FROM public.sampled;" }] };
+    for (const s of [...catalogDdl(sampled), ...catalogViews(sampled)]) await catalogDb.exec(s);
+    const catalog = (b: Uint8Array): Promise<Uint8Array> => catalogDb.execProtocolRaw(b);
+    // the allowlist off, as the oracle and scripts/duck-repro.ts plan: nothing but the refusal stands between the
+    // statement and the engine
+    const plan = async (sql: string) => planDuck({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Parameters<typeof planDuck>[0]["stmt"],
+      base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collations: CollationResolver.of({ kind: "bytes" }), verified: null });
+    const outcome = async (sql: string): Promise<string> => {
+      try { await plan(sql); return "answered"; }
+      catch (e) { return e instanceof StatementError ? `${e.fields.code} ${e.gap ?? ""} ${e.fields.message}` : `thrown ${String(e)}`; }
+    };
+    const refused = (sql: string, got: string): void => assert.match(got, /^0A000 tablesample Mason cannot answer TABLESAMPLE/, sql);
+    const forms: string[] = [];
+    for (const method of ["SYSTEM", "BERNOULLI"]) for (const percent of ["0", "50", "100"]) for (const seed of ["", " REPEATABLE (7)"]) {
+      forms.push(`SELECT count(*) FROM sampled TABLESAMPLE ${method} (${percent})${seed}`);
+    }
+    forms.push(
+      "select count(*) from public.sampled as s tablesample system(100)",
+      "SELECT count(*) FROM sampled TABLESAMPLE pg_catalog.bernoulli (100)",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM ($1)",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (100) REPEATABLE ($1)",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (50 + 50)",
+      "SELECT count(*) FROM sampled TABLESAMPLE BERNOULLI ('100')",
+      "SELECT count(*) FROM sampled TABLESAMPLE BERNOULLI (100::float8) REPEATABLE (length('abc'))",
+      "SELECT count(*) FROM (SELECT * FROM sampled TABLESAMPLE SYSTEM (100)) s",
+      "WITH s AS (SELECT * FROM sampled TABLESAMPLE BERNOULLI (100)) SELECT count(*) FROM s",
+      "SELECT count(*) FROM sampled a JOIN sampled b TABLESAMPLE SYSTEM (100) ON a.id = b.id",
+      "SELECT count(*) FROM sampled a LEFT JOIN LATERAL (SELECT * FROM sampled b TABLESAMPLE SYSTEM (100) WHERE b.id = a.id) l ON true",
+      "SELECT id, (SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (100)) FROM sampled",
+      "SELECT id FROM sampled WHERE EXISTS (SELECT 1 FROM sampled TABLESAMPLE BERNOULLI (100))",
+      "SELECT id FROM sampled UNION ALL SELECT id FROM sampled TABLESAMPLE SYSTEM (100)",
+      "SELECT count(*) FROM sampled_half",
+      "SELECT count(*) FROM sampled_all a JOIN sampled_half h USING (id)",
+      // arguments that are no literal, whatever Postgres would make of them: never worked out, never run (an operator, a
+      // function, a column of the query around them, a subquery, a cast of a cast, a literal no float4 holds)
+      "SELECT count(*) FROM sampled a, LATERAL (SELECT * FROM sampled TABLESAMPLE SYSTEM (a.id * 50)) s",
+      "SELECT (SELECT count(*) FROM sampled TABLESAMPLE BERNOULLI (100) REPEATABLE (a.id)) FROM sampled a",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM ((SELECT max(id) * 50 FROM sampled))",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (1 / 0)",
+      "SELECT count(*) FROM (SELECT * FROM sampled TABLESAMPLE SYSTEM (100 + 1)) s",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (abs(-200))",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (200::float8::float4)",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (200::int)",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (1e40)",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (200) REPEATABLE (1e400)",
+      // two samples that would raise apart: which raises is the plan's
+      "SELECT count(*) FROM sampled a TABLESAMPLE SYSTEM (200), sampled b TABLESAMPLE SYSTEM (NULL)",
+      // a literal in range, however it is written
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (100.0000001)",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (' 1e2 ')",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM ('100'::numeric) REPEATABLE ('-Infinity'::float8)",
+      "SELECT count(*) FROM sampled TABLESAMPLE BERNOULLI (-0.0) REPEATABLE ('NaN')",
+    );
+    for (const sql of forms) refused(sql, await outcome(sql));
+    // what Postgres itself rejects is its error, word for word: at its analysis (an unknown method, two arguments, a view
+    // sampled, a literal no float4 reads) and, worked out from the literal, as the sample starts (a percent past 100,
+    // NaN or NULL, a NULL seed), the same here as the catalog Postgres's own run of the statement over its table of no rows
+    for (const sql of [
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (200)",
+      "SELECT count(*) FROM sampled TABLESAMPLE BERNOULLI (-1)",
+      "SELECT count(*) FROM sampled TABLESAMPLE BERNOULLI (100.001)",
+      "SELECT count(*) FROM sampled TABLESAMPLE BERNOULLI ('NaN')",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM ('  -Inf ')",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM ('NaN'::numeric)",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (200::float8) REPEATABLE (7)",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (NULL)",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (NULL::float8) REPEATABLE (NULL)",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (50) REPEATABLE (NULL)",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (200) REPEATABLE (NULL)",
+      "SELECT count(*) FROM sampled a TABLESAMPLE SYSTEM (200), sampled b TABLESAMPLE BERNOULLI (300)",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM ('abc')",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM ('1e39')",
+      "SELECT count(*) FROM sampled TABLESAMPLE SYSTEM (50, 50)",
+      "SELECT count(*) FROM sampled TABLESAMPLE system_rows (10)",
+      "SELECT count(*) FROM sampled_all TABLESAMPLE SYSTEM (100)",
+    ]) {
+      const postgres = await catalogDb.query(sql).then(() => "answered", (e: Error & { code?: string }) => `${e.code} ${e.message}`);
+      assert.notEqual(postgres, "answered", sql);
+      assert.equal((await outcome(sql)).replace(/^(\w+) {2}/, "$1 "), postgres, sql);
+    }
+  } finally { await catalogDb.close(); }
+  // on the wire, with the allowlist on: the refusal names its entry before the allowlist names the node, in the simple
+  // and the extended protocol, and the session goes on
+  const c = await client();
+  try {
+    for (const [sql, values] of [["SELECT count(*) FROM big TABLESAMPLE SYSTEM (100)", undefined], ["SELECT count(*) FROM big TABLESAMPLE BERNOULLI ($1) REPEATABLE ($2)", [100, 7]]] as const) {
+      await assert.rejects(c.query(sql, values === undefined ? undefined : [...values]), (e: pg.DatabaseError) => e.code === "0A000" && /^Mason gap tablesample\b/.test(e.detail ?? "") && /WHERE id % 10 = 0/.test(e.hint ?? ""), sql);
+    }
+    await assert.rejects(c.query("SELECT count(*) FROM big TABLESAMPLE SYSTEM (200)"), (e: pg.DatabaseError) => e.code === "2202H" && e.message === "sample percentage must be between 0 and 100");
+    assert.deepEqual((await answer(c, "SELECT count(*) FROM big")).rows, [["150000"]]);
+  } finally { await c.end(); }
+});
+
+// THE REVIEW OF PR 1092: a sample's arguments were run in the catalog Postgres to find Postgres's error, as its superuser,
+// on the one connection every session shares, before the allowlist. So a function in them ran there: a set_config
+// reached through ts_rewrite set a parameter for every session until the catalog restarted, pg_read_file read the server's
+// files into the error, lo_from_bytea left large objects, pg_advisory_lock a lock, pg_sleep held the catalog. The class:
+// a statement's own expression run where the session's role and transaction do not hold. The decision: nothing of a
+// statement runs in the catalog; Postgres's error is worked out from a literal alone, and anything else is the gap.
+test("the review of PR 1092: a TABLESAMPLE's arguments never run in the catalog Postgres: each is refused by name, and the catalog is as it was", async () => {
+  const c = await client();
+  const other = await client();
+  try {
+    const state = async (): Promise<unknown[][]> => [
+      ...(await answer(other, "SELECT NULL = NULL AS x")).rows,
+      ...(await answer(other, "SHOW transform_null_equals")).rows,
+      ...(await answer(other, "SHOW IntervalStyle")).rows,
+      ...(await answer(other, "SELECT count(*) FROM pg_catalog.pg_largeobject_metadata")).rows,
+      ...(await answer(other, "SELECT count(*) FROM pg_catalog.pg_locks WHERE locktype = 'advisory'")).rows,
+    ];
+    const before = await state();
+    assert.deepEqual(before, [[null], ["off"], ["postgres"], ["0"], ["0"]]);
+    const setting = (name: string, value: string): string =>
+      `SELECT count(*) FROM big TABLESAMPLE SYSTEM (length(ts_rewrite('a'::tsquery, 'select ''a''::tsquery, ''b''::tsquery from (select set_config(''${name}'', ''${value}'', false)) s')::text) + 40)`;
+    for (const sql of [
+      setting("transform_null_equals", "on"),
+      setting("IntervalStyle", "sql_standard"),
+      "SELECT count(*) FROM big TABLESAMPLE SYSTEM (current_user::text::float4)",
+      "SELECT count(*) FROM big TABLESAMPLE SYSTEM (pg_read_file('postgresql.auto.conf')::float4)",
+      "SELECT count(*) FROM big TABLESAMPLE SYSTEM (lo_from_bytea(0, 'hello')::text::float4 * 0 + 50)",
+      "SELECT count(*) FROM big TABLESAMPLE BERNOULLI (50) REPEATABLE (pg_advisory_lock(42)::text::float4)",
+      "SELECT count(*) FROM big TABLESAMPLE SYSTEM (length(pg_sleep(3)::text) * 0 + 50)",
+    ]) {
+      const started = performance.now();
+      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /^Mason gap tablesample\b/.test(e.detail ?? "") && !/postgres|hello/.test(e.message), sql);
+      assert.ok(performance.now() - started < 2_500, `${sql}: answered at once, nothing run`);
+    }
+    assert.deepEqual(await state(), before, "the catalog every session shares is as it was");
+  } finally { await c.end(); await other.end(); }
 });

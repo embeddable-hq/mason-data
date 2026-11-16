@@ -14,6 +14,7 @@ import { MASON_SCHEMA } from "../src/duck/store.ts";
 import { stopParser } from "../src/api/postgres/parser.ts";
 import { BUILD_BOUND_MS, built, COUNTS, refusedAt, served, withWorld } from "./duck-generated-world.ts";
 import { scheduled } from "./duck-generated-ledger.ts";
+import { readsByName } from "../src/duck/generated-plan.ts";
 
 after(() => stopParser());
 
@@ -197,5 +198,58 @@ test("two files rewritten in one round into a chain the other way round are no c
     await w.sync.generated.review();
     assert.deepEqual([w.status("public.a").refusals, w.status("public.b").refusals], [[], []]);
     assert.ok(!w.logged.some((l) => /reads itself/.test(l)), w.logged.join("\n"));
+  });
+});
+
+// ------------------------------------------------------------- a WITH query named like a table it reads (issue 1096)
+
+// The tables a definition's SQL names follow Postgres's scoping of WITH names (src/duck/cte-names.ts `cteReads`). A WITH
+// query that is not RECURSIVE sees neither itself nor a later one, so such a name in its own body is the table.
+
+test("issue 1096: a WITH query named like the table it reads lists that table", async () => {
+  assert.deepEqual(await readsByName("WITH events AS (SELECT * FROM events WHERE status = 'ok') SELECT count(*) FROM events"), ["public.events"]);
+});
+
+test("issue 1096: a later WITH query reads an earlier one, and an earlier one reads the table of a later one's name", async () => {
+  assert.deepEqual(await readsByName("WITH counts AS (SELECT tenant_id FROM counts), top AS (SELECT * FROM counts) SELECT * FROM top"), ["public.counts"]);
+  assert.deepEqual(await readsByName("WITH early AS (SELECT * FROM late), late AS (SELECT 1 AS one) SELECT * FROM early, late"), ["public.late"]);
+});
+
+test("issue 1096: a WITH RECURSIVE query sees itself, so its own name in its body is no table", async () => {
+  assert.deepEqual(await readsByName("WITH RECURSIVE counts AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM counts WHERE n < 3) SELECT n FROM counts"), []);
+  assert.deepEqual(await readsByName("WITH RECURSIVE r AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM r WHERE n < 3) SELECT n FROM r, (WITH counts AS (SELECT * FROM counts) SELECT count(*) FROM counts) c"), ["public.counts"]);
+});
+
+test("issue 1096: a schema-qualified name in a WITH query's body is the table, whatever the WITH query is named", async () => {
+  assert.deepEqual(await readsByName("WITH events AS (SELECT * FROM public.events WHERE status = 'ok') SELECT count(*) FROM events"), ["public.events"]);
+  assert.deepEqual(await readsByName("WITH counts AS (SELECT * FROM public.counts), totals AS (SELECT * FROM totals) SELECT * FROM counts, totals"), ["public.counts", "public.totals"]);
+});
+
+test("issue 1096: a WITH query in a UNION arm is that arm's alone", async () => {
+  assert.deepEqual(await readsByName("SELECT count(*) FROM events UNION ALL (WITH counts AS (SELECT * FROM counts) SELECT count(*) FROM counts)"), ["public.counts", "public.events"]);
+  assert.deepEqual(await readsByName("(WITH counts AS (SELECT 1 AS n) SELECT n FROM counts) UNION ALL SELECT tenant_id FROM counts"), ["public.counts"]);
+});
+
+test("issue 1096: a cycle through a WITH query named like a generated table is refused by name", async () => {
+  await withWorld({ a: scheduled("WITH b AS (SELECT * FROM b) SELECT * FROM b"), b: scheduled("SELECT * FROM a") }, async (w) => {
+    refusedAt((await w.until((s) => s.state === "refused", "public.a")).refusals, "sql", /^it reads itself through other generated tables: public\.a -> public\.b -> public\.a$/);
+    refusedAt((await w.until((s) => s.state === "refused", "public.b")).refusals, "sql", /^it reads itself through other generated tables: public\.b -> public\.a -> public\.b$/);
+  });
+});
+
+test("issue 1096: a table whose WITH query is named like its base is behind after a change to that base, and built again", async () => {
+  await withWorld({ paid: scheduled("WITH events AS (SELECT * FROM events WHERE status = 'ok') SELECT count(*) AS n FROM events"),
+    wide: scheduled("WITH counts AS (SELECT * FROM counts WHERE requests > 1) SELECT count(*) AS n FROM counts"), counts: COUNTS }, async (w) => {
+    await w.until(served(w.logged), "public.paid");
+    await w.until(served(w.logged), "public.wide");
+    assert.deepEqual([await ask(w, "SELECT n FROM paid"), await ask(w, "SELECT n FROM wide")], [[["2"]], [["2"]]]);
+    await w.store.writer.run("INSERT INTO public.events VALUES (7, 3, 'query', 'ok', '7', '2026-01-03 00:00:00+00', NULL, 1, NULL), (8, 3, 'load', 'ok', '8', NULL, NULL, 1, NULL)");
+    w.sync.generated.changed("public.events");
+    await new Promise((r) => setTimeout(r, 20));
+    assert.ok(w.status("public.paid").behindSeconds > 0, JSON.stringify(w.status("public.paid")));
+    assert.ok(w.status("public.wide").behindSeconds > 0, JSON.stringify(w.status("public.wide")));
+    await w.sync.generated.run("public.paid");
+    await w.sync.generated.run("public.wide");
+    assert.deepEqual([await ask(w, "SELECT n FROM paid"), await ask(w, "SELECT n FROM wide")], [[["4"]], [["3"]]]);
   });
 });

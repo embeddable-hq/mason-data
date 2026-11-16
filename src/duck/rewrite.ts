@@ -35,6 +35,7 @@ import { pathIndex, PG_SESSION_SEPARATOR, SESSION_VARIABLE, SETTINGS_VARIABLE, T
 import { cellsOf, evaluateText, mapCells, numericLiteral, programJson, type NumericProgram } from "../lib/pg-numeric.ts";
 import { analysedQueries, caseTwins, FIRST_USER_OID, implicitTimetzCasts, joinsUsing, setOperationOutputs, type Grouping, type Keys, type QueryOutputs, type TreeValue, type Typed } from "./pgtree.ts";
 import { evaluated, keysBound, type Unbound } from "./constant-key.ts";
+import { cteNamesApart } from "./cte-names.ts";
 import { canonicalRead, EQUAL_STEPS, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, MARKED_FUNCTIONS, markedError, ORDER_STEPS, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
 import { JSONB_KEY_FUNCTIONS } from "./jsonb-order.ts";
 import { strftimeTemplate } from "./to-char.ts";
@@ -593,6 +594,8 @@ class Rewriter {
 
   /** every CTE the statement declares, by name, from the queries walked so far (a subquery may read an outer one's) */
   private readonly ctes = new Map<string, AstNode>();
+  /** a CTE's column list (`WITH q(a, b) AS …`), by its query: the names its columns are read by outside it */
+  private readonly cteColumns = new WeakMap<AstNode, string[]>();
 
   /** What Postgres made of this raw node: its entry at the node's offset, of a kind the raw kind is analysed into. */
   typed(n: AstNode): Typed | null {
@@ -1055,9 +1058,11 @@ class Rewriter {
     while (q.op !== undefined && q.op !== "SETOP_NONE" && q.larg !== undefined) q = q.larg as Body;
     const targets = (q.targetList ?? []) as AstNode[];
     if (targets.some((x) => hasStar(bodyOf(x).val))) throw new Unrewritable("a row of a subquery that selects * is not supported by Mason", "name the subquery's columns", "row-value");
-    return targets.map((x) => {
+    // (a CTE's column list names its columns outside it: `WITH q(a, b) AS (SELECT id, tenant …) SELECT q FROM q`)
+    const listed = this.cteColumns.get(source[0]!.query);
+    return targets.map((x, i) => {
       const val = bodyOf(x).val as AstNode;
-      const name = bodyOf(x).name ?? figureColname(val);
+      const name = listed?.[i] ?? bodyOf(x).name ?? figureColname(val);
       const typed = this.typed(val);
       return { name, value: this.typedRef([alias, name], typed?.type ?? TEXT, typed?.typmod ?? -1, typed?.collation ?? 0), type: typed?.type ?? null };
     });
@@ -1127,7 +1132,11 @@ class Rewriter {
   // ---------------------------------------------------------------------------------------- SELECT
 
   private select(b: Body): AstNode | null {
-    for (const c of (b.withClause?.ctes ?? []) as AstNode[]) if (isNode(c) && typeof bodyOf(c).ctename === "string" && isNode(bodyOf(c).ctequery)) this.ctes.set(bodyOf(c).ctename, bodyOf(c).ctequery as AstNode);
+    for (const c of (b.withClause?.ctes ?? []) as AstNode[]) {
+      if (!isNode(c) || typeof bodyOf(c).ctename !== "string" || !isNode(bodyOf(c).ctequery)) continue;
+      this.ctes.set(bodyOf(c).ctename, bodyOf(c).ctequery as AstNode);
+      if (Array.isArray(bodyOf(c).aliascolnames)) this.cteColumns.set(bodyOf(c).ctequery as AstNode, names(bodyOf(c).aliascolnames));
+    }
     // a window's ORDER BY key in a grouped SELECT is read per group (`overGroups`): its query, for the key's rule
     const targets = (b.targetList ?? []) as AstNode[];
     if ((Array.isArray(b.groupClause) && b.groupClause.length > 0) || b.havingClause !== undefined || targets.some((t) => this.hasAggregate(bodyOf(t).val))) {
@@ -8501,6 +8510,8 @@ export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(
     throw new Unrewritable("a JOIN … USING or a NATURAL JOIN on a jsonb column is not supported by Mason (Postgres equates jsonb by its own rules)", "JOIN … ON a.j = b.j", "jsonb-compare");
   }
   const own = JSON.parse(JSON.stringify(stmt)) as AstNode;
+  // (before anything reads a name: a WITH query named as anything else the statement reads is renamed apart, issue 981)
+  cteNamesApart(own);
   // (the hidden cells' name: one the statement's own text never begins a name with, `cellPrefix`)
   const written = JSON.stringify(stmt).toLowerCase();
   for (let n = 0; written.includes(r.cellPrefix); n++) r.cellPrefix = `__mason_cell${n}_`;

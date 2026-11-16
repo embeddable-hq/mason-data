@@ -47,14 +47,17 @@ async function facts(url: string): Promise<SourceFacts> {
 test("the catalog reads each table's size without indexes, its TOAST's, and each column's width and out-of-line storage — a partitioned table's over its leaves, a table never analysed with no width; the estimate holds against a real sync", { skip }, async () => {
   const url = urlOf(db);
   psql(adminUrl!, `CREATE DATABASE ${db}`);
-  psql(url, `CREATE TABLE orders (id bigint PRIMARY KEY, customer_id int, email text, status text, total numeric(12,2), created_at timestamptz, meta jsonb, doc text);
+  // Autovacuum is off on every table whose size the test compares (issue 1098). Its first vacuum after the bulk insert
+  // creates the table's visibility map, and then its TOAST's, a page each. pg_table_size counts both. When it ran
+  // between Mason's read and the test's, the two sizes differed by a page. A TOAST table takes its table's setting.
+  psql(url, `CREATE TABLE orders (id bigint PRIMARY KEY, customer_id int, email text, status text, total numeric(12,2), created_at timestamptz, meta jsonb, doc text) WITH (autovacuum_enabled = false);
     ALTER TABLE orders ALTER COLUMN doc SET STORAGE EXTERNAL;
     INSERT INTO orders SELECT g, g % 2000, 'user' || (g % 2000) || '@example.com', (ARRAY['new','paid','shipped'])[1 + g % 3], round((g % 5000)::numeric / 7, 2),
       timestamptz '2026-01-01' + g * interval '1 minute', jsonb_build_object('source', (ARRAY['web','app'])[1 + g % 2]),
       CASE WHEN g % 50 = 0 THEN repeat(md5(g::text), 100) END FROM generate_series(1, 60000) g;
     CREATE TABLE ticks (id bigint, at date NOT NULL, v int, PRIMARY KEY (id, at)) PARTITION BY RANGE (at);
-    CREATE TABLE ticks_a PARTITION OF ticks FOR VALUES FROM ('2026-01-01') TO ('2026-02-01');
-    CREATE TABLE ticks_b PARTITION OF ticks FOR VALUES FROM ('2026-02-01') TO ('2026-03-01');
+    CREATE TABLE ticks_a PARTITION OF ticks FOR VALUES FROM ('2026-01-01') TO ('2026-02-01') WITH (autovacuum_enabled = false);
+    CREATE TABLE ticks_b PARTITION OF ticks FOR VALUES FROM ('2026-02-01') TO ('2026-03-01') WITH (autovacuum_enabled = false);
     INSERT INTO ticks SELECT g, date '2026-01-01' + (g % 59), g FROM generate_series(1, 20000) g;
     ANALYZE orders; ANALYZE ticks;
     CREATE TABLE fresh (id bigint PRIMARY KEY, note text); INSERT INTO fresh VALUES (1, 'a')`);
