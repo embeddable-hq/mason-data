@@ -36,9 +36,10 @@ import { cellsOf, evaluateText, mapCells, numericLiteral, programJson, type Nume
 import { analysedQueries, caseTwins, FIRST_USER_OID, implicitTimetzCasts, joinsUsing, setOperationOutputs, type Grouping, type Keys, type QueryOutputs, type TreeValue, type Typed } from "./pgtree.ts";
 import { evaluated, keysBound, type Unbound } from "./constant-key.ts";
 import { cteNamesApart } from "./cte-names.ts";
+import { OWN_PREFIX, ownPrefix } from "./own-names.ts";
 import { canonicalRead, EQUAL_STEPS, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, MARKED_FUNCTIONS, markedError, ORDER_STEPS, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
 import { JSONB_KEY_FUNCTIONS } from "./jsonb-order.ts";
-import { strftimeTemplate } from "./to-char.ts";
+import { nativeTemplate, type NativeInt, type NativePiece } from "./to-char.ts";
 import { jsonbText, parseJson, storedPairs, type Json } from "./jsonb.ts";
 import { atTimeZoneOf, isUtc, UTC_NAMES } from "../lib/timezone.ts";
 import type { CaseMapping, DuckCollation, StatementCollations } from "./collation.ts";
@@ -312,7 +313,11 @@ class Rewriter {
   /** THE NAME OF THE HIDDEN CELLS an exact numeric rides on (`exactColumns`, `carry`), a prefix and their place: one no
    *  name the statement writes begins with (issue 239: a user's `__mason_cell_0` was read as a cell, its quotient called
    *  exact, and its double printed). The engine binds a name without regard to case, so neither does the choice */
-  cellPrefix = "__mason_cell_";
+  cellPrefix = `${OWN_PREFIX}cell_`;
+  /** THE PREFIX OF EVERY NAME THE REWRITE INVENTS for the statement (src/duck/own-names.ts): a column, an alias, a WITH
+   *  query or a lambda's parameter of its own begins with it, and no name the statement can reach holds it in any case
+   *  (issue 1024: a table's column `__mason_rid` was read as the row number a top N over a join read rows by) */
+  own = OWN_PREFIX;
   /** the catalog's user types by OID (`citext`), for the few the rewrite knows (src/duck/plan.ts reads pg_type) */
   private readonly userTypes: ReadonlyMap<number, string>;
   /** every type holding a citext anywhere in its structure, by the catalog's OID (src/duck/plan.ts `CITEXT_HELD`) */
@@ -424,7 +429,7 @@ class Rewriter {
     // a row marked since the path was counted exact is never read as its value: it raises (kept-route.ts markedError)
     if (ready.exact) return caseWhen([[op("=", column(), recompute()), markedRaise(MARKED_FUNCTIONS.value, column(), markedError(read, false))]], value);
     // (a copied table's column, checked above: a jsonb's text is the copy's canonical one)
-    return caseWhen([[or([isNull(column()), op("=", column(), recompute())]), jsonGet(this.cp, l, steps, either, canonical, asText, canonical)]], value);
+    return caseWhen([[or([isNull(column()), op("=", column(), recompute())]), jsonGet(this.cp, l, steps, either, canonical, asText, canonical, this.own)]], value);
   }
 
   /**
@@ -436,7 +441,7 @@ class Rewriter {
    * value, so its read checks every object on the way as a json column's does (a review finding).
    */
   private jsonRead(base: AstNode, steps: AstNode, either: boolean, canonical: boolean, asText: boolean): AstNode {
-    return this.keptRead(base, steps, either, canonical, asText) ?? jsonGet(this.cp, base, steps, either, canonical, asText, canonical && this.copiedColumn(base));
+    return this.keptRead(base, steps, either, canonical, asText) ?? jsonGet(this.cp, base, steps, either, canonical, asText, canonical && this.copiedColumn(base), this.own);
   }
 
   /** `l <name> r`, a json read (`->`, `->>`, `#>`, `#>>`, `a0` json or jsonb), as the document it reads and its steps:
@@ -478,7 +483,7 @@ class Rewriter {
     const doc = (): AstNode => this.cp(arg);
     // the keys read ONCE (every json_* call parses the document again); an empty list is an empty object, a NULL
     // document or a non-object, told apart on those rows alone
-    return bound(fn("json_keys", [doc()]), "__mason_k", (k) => {
+    return bound(fn("json_keys", [doc()]), `${this.own}k`, (k) => {
       const some = op(">", fn("len", [k()]), intConst(0));
       return caseWhen([
         [canonical ? some : and([some, not(fn("contains", [doc(), strConst("\\u")]))]), k()],
@@ -548,7 +553,7 @@ class Rewriter {
     const canonical = jsonbText(written);
     // the rows the native read cannot decide go to the function with the template as jsonb holds it (its last value of
     // a key written twice)
-    return nativeContains(this.cp, doc, parseJson(canonical), fn("__mason_jsonb_contains", [jsonArg(doc), strConst(canonical)]));
+    return nativeContains(this.cp, doc, parseJson(canonical), fn("__mason_jsonb_contains", [jsonArg(doc), strConst(canonical)]), this.own);
   }
 
   private isCitext(oid: number | null): boolean { return oid !== null && this.userTypes.get(oid) === "citext"; }
@@ -929,7 +934,7 @@ class Rewriter {
         const rows = k === "RangeSubselect" && isNode(b.subquery) ? bodyOf(b.subquery).valuesLists as AstNode[] | undefined : undefined;
         if (Array.isArray(rows) && rows.length > 0 && alias?.colnames === undefined) {
           const width = (bodyOf(rows[0]!).items as unknown[]).length;
-          b.alias = { ...(alias ?? {}), aliasname: alias?.aliasname ?? "__mason_values", colnames: Array.from({ length: width }, (_, i) => S(`column${i + 1}`)) };
+          b.alias = { ...(alias ?? {}), aliasname: alias?.aliasname ?? `${this.own}values`, colnames: Array.from({ length: width }, (_, i) => S(`column${i + 1}`)) };
         }
         return null;
       }
@@ -1662,10 +1667,10 @@ class Rewriter {
         continue;
       }
       const target = bodyOf(targets[out.target]!);
-      const ref: AstNode = { ColumnRef: { fields: [S(String(target.name ?? `__mason_sort_${n}`))] } };
+      const ref: AstNode = { ColumnRef: { fields: [S(String(target.name ?? `${this.own}sort_${n}`))] } };
       typeAs(ref, out);
       if (this.sortsAsStored(ref)) continue;
-      if (target.name === undefined) target.name = `__mason_sort_${n}`;
+      if (target.name === undefined) target.name = `${this.own}sort_${n}`;
       sb.node = ref;
     }
   }
@@ -1855,7 +1860,7 @@ class Rewriter {
       : this.keysBound(nodes, this.analysedQuery(targets)?.keys, "sorted", targets);
     // (a set operation's columns are typed as Postgres resolved them, never as its first SELECT's)
     const resolved = setOperation ? this.setOperationColumns(b) : null;
-    const COLUMN = (i: number): string => `__mason_c${i + 1}`;
+    const COLUMN = (i: number): string => `${this.own}c${i + 1}`;
     const hidden: AstNode[] = [];
     const window: AstNode[] = [];
     sorts.forEach((s, i) => {
@@ -1895,11 +1900,11 @@ class Rewriter {
       }
       if (exactOrder !== null) {
         hidden.push(exactOrder);
-        column = `__mason_ties_k${hidden.length}`;
+        column = `${this.own}ties_k${hidden.length}`;
       } else if (out !== null) column = COLUMN(out.at);
       else {
         hidden.push(this.clone(value));
-        column = `__mason_ties_k${hidden.length}`;
+        column = `${this.own}ties_k${hidden.length}`;
       }
       const read: AstNode = { ColumnRef: { fields: [S(column)] } };
       if (exactOrder !== null) { /* bytes, untyped: no rule rebuilds the key */ }
@@ -1921,12 +1926,12 @@ class Rewriter {
     b.limitOption = "LIMIT_OPTION_DEFAULT";
     // the cells after the columns, where the exact programs read them
     const cells = Array.from({ length: cellCount }, (_c, j) => `${this.cellPrefix}${j}`);
-    if (hidden.length > 0) b.targetList = [...(b.targetList as AstNode[]), ...hidden.map((h, j) => ({ ResTarget: { name: `__mason_ties_k${j + 1}`, val: h } }))];
-    const columns = [...outputs.map((o) => COLUMN(o.at)), ...cells, ...hidden.map((_h, j) => `__mason_ties_k${j + 1}`)];
+    if (hidden.length > 0) b.targetList = [...(b.targetList as AstNode[]), ...hidden.map((h, j) => ({ ResTarget: { name: `${this.own}ties_k${j + 1}`, val: h } }))];
+    const columns = [...outputs.map((o) => COLUMN(o.at)), ...cells, ...hidden.map((_h, j) => `${this.own}ties_k${j + 1}`)];
     const plain = (body: Body): AstNode => ({ SelectStmt: { ...body, limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE" } });
     const read = (...f: string[]): AstNode => ({ ColumnRef: { fields: f.map(S) } });
     const target = (val: AstNode, name?: string): AstNode => ({ ResTarget: { ...(name !== undefined ? { name } : {}), val } });
-    const W = "__mason_ties_w", RANK = "__mason_ties_rank", ROW = "__mason_ties_row", TIES = "__mason_ties", BOUND = "__mason_ties_bound";
+    const W = `${this.own}ties_w`, RANK = `${this.own}ties_rank`, ROW = `${this.own}ties_row`, TIES = `${this.own}ties`, BOUND = `${this.own}ties_bound`;
     const ranked = plain({
       targetList: [
         ...outputs.map((o) => target(read(COLUMN(o.at)))),
@@ -1934,7 +1939,7 @@ class Rewriter {
         target({ FuncCall: { funcname: [S("rank")], over: { name: W, frameOptions: 1058 }, funcformat: "COERCE_EXPLICIT_CALL" } }, RANK),
         target({ FuncCall: { funcname: [S("row_number")], over: { name: W, frameOptions: 1058 }, funcformat: "COERCE_EXPLICIT_CALL" } }, ROW),
       ],
-      fromClause: [{ RangeSubselect: { subquery: { SelectStmt: b }, alias: { aliasname: "__mason_ties_in", colnames: columns.map(S) } } }],
+      fromClause: [{ RangeSubselect: { subquery: { SelectStmt: b }, alias: { aliasname: `${this.own}ties_in`, colnames: columns.map(S) } } }],
       windowClause: [{ WindowDef: { name: W, ...(window.length > 0 ? { orderClause: window } : {}), frameOptions: 1058 } }],
     });
     // the count and the offset, each read once (as Postgres's executor reads them), as bigints
@@ -2426,7 +2431,7 @@ class Rewriter {
     // decided from what the item exposes, as it is written: its query (through a `*`, a WITH query's) holds the cells
     if (this.exposedCells(found.query) < exact.cells.length) return this.uncarried(found, "Mason cannot carry its exact digits out of it");
     // a subquery with no name (Postgres 16) is given one, so its cells can be read
-    if (found.name === null && bodyOf(found.item).alias === undefined) bodyOf(found.item).alias = { aliasname: `__mason_from${this.named++}` };
+    if (found.name === null && bodyOf(found.item).alias === undefined) bodyOf(found.item).alias = { aliasname: `${this.own}from${this.named++}` };
     return { program: exact.program, text: exact.text, owner: found.name ?? String((bodyOf(found.item).alias as Body).aliasname), convs: exact.cells };
   }
 
@@ -2492,7 +2497,7 @@ class Rewriter {
       const aliasNames = ((b.alias?.colnames ?? []) as AstNode[]).map((n) => String(bodyOf(n).sval));
       if (kindOf(item) === "RangeSubselect" && isNode(b.subquery)) {
         // (a name `carry` gave it is none of Postgres's)
-        const name = b.alias?.aliasname === undefined || String(b.alias.aliasname).startsWith("__mason_from") ? null : String(b.alias.aliasname);
+        const name = b.alias?.aliasname === undefined || String(b.alias.aliasname).startsWith(`${this.own}from`) ? null : String(b.alias.aliasname);
         candidates.push({ item, query: b.subquery, name, colnames: aliasNames, recursive: false, cte: null });
       } else if (kindOf(item) === "RangeVar" && b.schemaname === undefined) {
         const cte = cteIn(frames, String(b.relname));
@@ -2652,7 +2657,7 @@ class Rewriter {
     // (each aggregate made here is typed as the call it answers: an aggregate, which a GROUP BY's any_value leaves be)
     const aggregate = (x: AstNode): AstNode => { this.typedLike.set(bodyOf(x), { FuncCall: b }); return x; };
     if (name === "percentile_disc") return second(aggregate({ FuncCall: { ...b, agg_order: [{ SortBy: { ...sort, node: pair } }] } }));
-    const each = (): AstNode => ({ ColumnRef: { fields: [S("__mason_e")] } });
+    const each = (): AstNode => ({ ColumnRef: { fields: [S(`${this.own}e`)] } });
     const listed = aggregate(fn("list", [pair], b.agg_filter === undefined ? {} : { agg_filter: this.clone(b.agg_filter as AstNode) }));
     const modal = aggregate({ FuncCall: { ...b, args: [k()], agg_order: [{ SortBy: { ...sort, node: k() } }], agg_within_group: undefined } });
     return second(fn("list_extract", [fn("list_filter", [listed, op("->", each(), op("=", fn("struct_extract", [each(), intConst(1)]), modal))]), intConst(1)]));
@@ -4166,7 +4171,7 @@ class Rewriter {
     const left = this.duckExact(l) ? cast(l, ["varchar"]) : this.exactText(l);
     if (left === null) return null;
     const f = equating ? "__mason_numeric_key" : "__mason_numeric_order";
-    const e = (): AstNode => ({ ColumnRef: { fields: [S("__mason_e")] } });
+    const e = (): AstNode => ({ ColumnRef: { fields: [S(`${this.own}e`)] } });
     // (a parameter of the rewrite's own, never the statement's node: that one's rule, `param`, refuses a numeric[])
     const param = (): AstNode => ({ ParamRef: { number: Number(bodyOf(p).number) } });
     const elements = fn("from_json", [cast(param(), ["varchar"]), strConst('["VARCHAR"]')]);
@@ -4198,7 +4203,7 @@ class Rewriter {
     // Postgres's cross-type operators (timestamptz_eq_timestamp, date_lt_timestamptz …) read the narrower side as the
     // wider one, a timestamp or a date at the session's zone: the engine's cast of it, as a scalar's (`typeCast`)
     if (RANK[left]! < RANK[element]!) { b.lexpr = cast(l, [NAME[element]!]); return; }
-    const e = (): AstNode => ({ ColumnRef: { fields: [S("__mason_t")] } });
+    const e = (): AstNode => ({ ColumnRef: { fields: [S(`${this.own}t`)] } });
     b.rexpr = fn("list_transform", [r, op("->", e(), cast(e(), [NAME[left]!]))]);
   }
 
@@ -4788,7 +4793,7 @@ class Rewriter {
     // (Postgres compares a jsonb's strings under DEFAULT_COLLATION_OID, whatever the column's: the database's)
     const c = this.collations.database;
     if (c.kind !== "icu") return fn(JSONB_KEY_FUNCTIONS[c.kind].key, [e]);
-    const each = (): AstNode => ({ ColumnRef: { fields: [S("__mason_s")] } });
+    const each = (): AstNode => ({ ColumnRef: { fields: [S(`${this.own}s`)] } });
     const f = JSONB_KEY_FUNCTIONS.icu;
     const keys = fn("list_transform", [fn(f.strings, [this.clone(e)]), op("->", each(), fn("icu_sort_key", [each(), strConst(c.name)]))]);
     return fn(f.key, [e, keys]);
@@ -5138,7 +5143,7 @@ class Rewriter {
    */
   private rowOrdered(name: string, ls: AstNode[], rs: AstNode[]): AstNode {
     const less = name === "<" || name === "<=" ? "<" : ">";
-    const param = `__mason_r${this.sublinkOutputs++}`;
+    const param = `${this.own}r${this.sublinkOutputs++}`;
     // each operand read once through the ROW, but a constant (a literal, a cast of one, a parameter), placed where it is
     // compared so the engine casts it to the other side's type as it does any comparison's (`(u, id) > ('…', 0)`)
     const read: AstNode[] = [];
@@ -5286,7 +5291,7 @@ class Rewriter {
     const less = name === "<" || name === "<=" ? "<" : ">";
     const listed = { SubLink: { subLinkType: "EXPR_SUBLINK", subselect: wrap([fn("list", [row(refs.map((r, i) => side(r, i, 1)))])]) } };
     // (a lambda's parameter, the rewrite's own name: never the cells' prefix, which a GROUP BY reads per group)
-    const param = `__mason_r${this.sublinkOutputs++}`;
+    const param = `${this.own}r${this.sublinkOutputs++}`;
     const arms: Array<[AstNode, AstNode]> = [];
     const left = (i: number): AstNode => side(this.clone(lefts[i]!), i, 0);
     const right = (i: number): AstNode => fn("struct_extract", [{ ColumnRef: { fields: [S(param)] } }, intConst(i + 1)]);
@@ -6282,7 +6287,7 @@ class Rewriter {
       // an array of fractions answers an array of keys: the overload Postgres chose, read from its analysis of the
       // call (a float8[] fraction), never from the answer's element type, which is whatever text type the key is
       if (this.typed({ FuncCall: b })?.directArgs?.[0]?.type === FLOAT8_ARRAY) {
-        const each = (): AstNode => ({ ColumnRef: { fields: [S("__mason_k")] } });
+        const each = (): AstNode => ({ ColumnRef: { fields: [S(`${this.own}k`)] } });
         return fn("list_transform", [keyed, op("->", each(), value(each()))]);
       }
       return value(keyed);
@@ -6666,7 +6671,7 @@ class Rewriter {
     }
     // a time[] value as a timetz[]: each element by the same rule (an element's NULL stays NULL)
     if (t !== null && t.type === TIMETZ_ARRAY && from === TIME_ARRAY) {
-      const each = (): AstNode => ({ ColumnRef: { fields: [S("__mason_t")] } });
+      const each = (): AstNode => ({ ColumnRef: { fields: [S(`${this.own}t`)] } });
       return fn("list_transform", [arg, op("->", each(), this.timeAsTimetz(each()))]);
     }
     // to an enum (or an array of one): a label, a text read by Postgres's rules, or the enum it already is
@@ -7300,7 +7305,7 @@ class Rewriter {
     if (kindOf(arg) === "ColumnRef" || this.readWhole.has(b)) return { JoinExpr: { ...rest, jointype: "JOIN_INNER" } };
     const reads = this.rowReads(arg);
     if (reads === null || (reads < 2 && name !== "unnest")) return { JoinExpr: { ...rest, jointype: "JOIN_INNER" } };
-    const alias = `__mason_arg${++this.steps}`;
+    const alias = `${this.own}arg${++this.steps}`;
     const sub: Body = { targetList: [{ ResTarget: { name: alias, val: arg } }], op: "SETOP_NONE" };
     this.done.add(sub);
     this.stepArg.set(r, { ColumnRef: { fields: [S(alias), S(alias)] } });
@@ -7464,7 +7469,7 @@ class Rewriter {
         const list = args[0]!;
         const column = colnames[0] ?? aliasName ?? name;
         const never = (l: () => AstNode): AstNode => caseWhen([[op(">", fn("len", [l()]), intConst(0)), l()]], arrayOf([nullConst()]));
-        const each = (): AstNode => ({ ColumnRef: { fields: [S("__mason_l")] } });
+        const each = (): AstNode => ({ ColumnRef: { fields: [S(`${this.own}l`)] } });
         const once = kindOf(list) === "ColumnRef" ? never(() => this.clone(list))
           : { A_Indirection: { arg: fn("list_transform", [fn("list_value", [list]), op("->", each(), never(each))]), indirection: [{ A_Indices: { uidx: intConst(1) } }] } };
         return listLateral([{ name: column, list: once }], aliasName ?? name, this.done);
@@ -7872,7 +7877,7 @@ function overlaps(copy: Copy, a1: AstNode, b1: AstNode, a2: AstNode, b2: AstNode
  * text DuckDB writes as Postgres does (jsonValueRead); a json column's `->` is the document as written, the function's.
  * tests/duck-wire.test.ts "a ->> of a column is DuckDB's own read" holds the answers and counts the hops.
  */
-function jsonGet(copy: Copy, j: AstNode, steps: AstNode, either: boolean, canonical: boolean, asText: boolean, keysOnce: boolean): AstNode {
+function jsonGet(copy: Copy, j: AstNode, steps: AstNode, either: boolean, canonical: boolean, asText: boolean, keysOnce: boolean, own: string): AstNode {
   const call = fn("__mason_json_get", [jsonArg(copy(j)), steps, boolConst(either), boolConst(canonical), boolConst(asText)]);
   if (kindOf(j) !== "ColumnRef") return call;
   const keys = stepKeys(steps, either);
@@ -7880,7 +7885,7 @@ function jsonGet(copy: Copy, j: AstNode, steps: AstNode, either: boolean, canoni
   const path = duckJsonPath(keys);
   if (path === null) return call;
   // `->` (the value's own text): only where the text holds each key once (a copied jsonb), read by ONE extraction
-  if (!asText) return keysOnce ? jsonValueRead(copy, j, path, call) : call;
+  if (!asText) return keysOnce ? jsonValueRead(copy, j, path, call, own) : call;
   const pointer = jsonPointer;
   const type = (): AstNode => fn("json_type", [copy(j), strConst(path)]);
   // each object on the way holds every key once (json_keys of an array or a scalar is empty, of a missing path NULL:
@@ -7956,8 +7961,8 @@ function bound(x: AstNode, name: string, body: (v: () => AstNode) => AstNode): A
  * NULL document is SQL NULL. The rest — a number DuckDB types DOUBLE (`1.50` reads `1.5`), an object or an array
  * (DuckDB writes them without spaces) — is the function's, the CASE's ELSE, which DuckDB runs on those rows alone.
  */
-function jsonValueRead(copy: Copy, j: AstNode, path: string, call: AstNode): AstNode {
-  return bound(fn("json_extract", [copy(j), strConst(path)]), "__mason_v", (v) => {
+function jsonValueRead(copy: Copy, j: AstNode, path: string, call: AstNode, own: string): AstNode {
+  return bound(fn("json_extract", [copy(j), strConst(path)]), `${own}v`, (v) => {
     const type = (): AstNode => fn("json_type", [v()]);
     const text = (): AstNode => cast(v(), ["varchar"]);
     return caseWhen([
@@ -8006,13 +8011,13 @@ function templateLeaves(t: Json, keys: string[] = []): TemplateLeaf[] | null {
  * an undecided leaf (and none unequal) the function's, the CASE's ELSE. A NULL document is NULL (the operator is strict).
  * Null where the template is not such an object: the caller keeps the function.
  */
-function nativeContains(copy: Copy, doc: AstNode, template: Json, call: AstNode): AstNode | null {
+function nativeContains(copy: Copy, doc: AstNode, template: Json, call: AstNode, own: string): AstNode | null {
   if (template.t !== "obj") return null;
   const leaves = templateLeaves(template);
   if (leaves === null) return null;
   const paths = leaves.map((l) => duckJsonPath(l.keys));
   if (paths.some((p) => p === null)) return null;
-  return bound(fn("json_extract", [copy(doc), arrayOf(paths.map((p) => strConst(p!)))]), "__mason_x", (x) => {
+  return bound(fn("json_extract", [copy(doc), arrayOf(paths.map((p) => strConst(p!)))]), `${own}x`, (x) => {
     const at = (i: number) => (): AstNode => ({ A_Indirection: { arg: x(), indirection: [{ A_Indices: { uidx: intConst(i + 1) } }] } });
     const decided = leaves.map((l, i) => leafTest(at(i), l.want));
     const known = (t: AstNode): AstNode => ({ CoalesceExpr: { args: [t, boolConst(false)] } });
@@ -8456,6 +8461,95 @@ function translateTemplate(fmt: string, forParse: boolean): string {
   return out;
 }
 
+/** an integer of a time the engine reads in the session's zone (src/duck/to-char.ts `NativeInt`), for a year 1 to 9999 AD */
+function nativeInt(of: NativeInt, x: () => AstNode): AstNode {
+  const part = (p: string): AstNode => fn("date_part", [strConst(p), x()]);
+  const mod = (a: AstNode, n: number): AstNode => op("%", a, intConst(n));
+  // `//` is DuckDB's division of integers (its `/` is a double's)
+  const div = (a: AstNode, n: number): AstNode => op("//", a, intConst(n));
+  const plus = (a: AstNode, n: number): AstNode => op("+", a, intConst(n));
+  switch (of) {
+    case "year": return part("year");
+    case "year3": return mod(part("year"), 1000);
+    case "year2": return mod(part("year"), 100);
+    case "year1": return mod(part("year"), 10);
+    case "isoyear": return part("isoyear");
+    case "isoyear3": return mod(part("isoyear"), 1000);
+    case "isoyear2": return mod(part("isoyear"), 100);
+    case "isoyear1": return mod(part("isoyear"), 10);
+    case "month": return part("month");
+    case "day": return part("day");
+    case "doy": return part("doy");
+    case "isoyday": return op("+", op("*", plus(part("week"), -1), intConst(7)), part("isodow"));
+    case "dow": return plus(part("dow"), 1);
+    case "isodow": return part("isodow");
+    case "monthweek": return plus(div(plus(part("day"), -1), 7), 1);
+    case "yearweek": return plus(div(plus(part("doy"), -1), 7), 1);
+    case "isoweek": return part("week");
+    case "century": return div(plus(part("year"), 99), 100);
+    // the day's number from 4714 BC's 24 November: its date in the session's zone, from 1970's first
+    case "julian": return plus(fn("date_diff", [strConst("day"), cast(strConst("1970-01-01"), ["date"]), cast(x(), ["date"])]), 2440588);
+    case "quarter": return part("quarter");
+    case "hour": return part("hour");
+    case "hour12": return plus(mod(plus(part("hour"), 11), 12), 1);
+    case "minute": return part("minute");
+    case "second": return part("second");
+    case "daysecond": return op("+", op("+", op("*", part("hour"), intConst(3600)), op("*", part("minute"), intConst(60))), part("second"));
+    default: return of satisfies never;
+  }
+}
+
+/** the text of a template's pieces (src/duck/to-char.ts `nativeTemplate`), each read from `x()`: a run of strftime's
+ *  specifiers and literal text is one strftime call (a literal's `%` doubled), every other piece its own expression,
+ *  joined by `||` */
+export function nativeText(pieces: readonly NativePiece[], x: () => AstNode): AstNode {
+  const parts: AstNode[] = [];
+  let run = "", specs = false, text = "";
+  const flush = (): void => {
+    if (run !== "") parts.push(specs ? fn("strftime", [x(), strConst(run)]) : strConst(text));
+    run = ""; specs = false; text = "";
+  };
+  const padded = (s: AstNode, pad: number): AstNode => pad === 0 ? s : fn("rpad", [s, intConst(pad), strConst(" ")]);
+  for (const p of pieces) {
+    switch (p.kind) {
+      case "text": run += p.text.replace(/%/g, "%%"); text += p.text; continue;
+      case "spec": run += p.spec; specs = true; continue;
+      default: break;
+    }
+    flush();
+    switch (p.kind) {
+      case "number": {
+        const v = nativeInt(p.of, x);
+        parts.push(p.width < 2 ? cast(v, ["varchar"]) : fn("printf", [strConst(`%0${p.width}d`), v]));
+        break;
+      }
+      case "ordinal": {
+        const last = (n: number): AstNode => op("%", nativeInt(p.of, x), intConst(n));
+        const suffix = (s: string): AstNode => strConst(p.upper ? s.toUpperCase() : s);
+        parts.push(caseWhen([[and([op(">=", last(100), intConst(11)), op("<=", last(100), intConst(13))]), suffix("th")],
+          [op("=", last(10), intConst(1)), suffix("st")], [op("=", last(10), intConst(2)), suffix("nd")], [op("=", last(10), intConst(3)), suffix("rd")]], suffix("th")));
+        break;
+      }
+      case "name": {
+        const name = fn("strftime", [x(), strConst(p.spec)]);
+        parts.push(padded(p.letters === "as" ? name : fn(p.letters, [name]), p.pad));
+        break;
+      }
+      case "meridiem": parts.push(caseWhen([[op("<", nativeInt("hour", x), intConst(12)), strConst(p.am)]], strConst(p.pm))); break;
+      case "roman": {
+        const r = fn("split_part", [strConst("I,II,III,IV,V,VI,VII,VIII,IX,X,XI,XII"), strConst(","), nativeInt("month", x)]);
+        parts.push(padded(p.lower ? fn("lower", [r]) : r, p.pad));
+        break;
+      }
+      case "fraction": parts.push(fn("substr", [fn("strftime", [x(), strConst("%f")]), intConst(1), intConst(p.digits)])); break;
+      case "thousands": parts.push(fn("printf", [strConst("%d,%03d"), op("//", nativeInt("year", x), intConst(1000)), op("%", nativeInt("year", x), intConst(1000))])); break;
+      default: return p satisfies never;
+    }
+  }
+  flush();
+  return parts.length === 1 ? parts[0]! : concat(...parts);
+}
+
 /** to_char of a time or a number, by Postgres's template rules (src/duck/to-char.ts): the value's text, the format's */
 function toChar(args: AstNode[], type: number | null, clone: (n: AstNode) => AstNode): AstNode {
   if (args.length !== 2) throw new Unrewritable("to_char() takes a value and a format", "write to_char(value, 'format')", { postgres: "42883" });
@@ -8463,18 +8557,19 @@ function toChar(args: AstNode[], type: number | null, clone: (n: AstNode) => Ast
     const fmt = constString(args[1]);
     // (the value is read by the guard and by strftime: a volatile one, `ts + random() * interval '1 day'`, would be two
     // values where Postgres reads one, so it is the function's, read once)
-    const spec = fmt === null || callsVolatile(args[0]) ? null : strftimeTemplate(fmt, type === DATE);
+    const pieces = fmt === null || callsVolatile(args[0]) ? null : nativeTemplate(fmt, type === DATE);
     const called = (x: AstNode, f: AstNode): AstNode => fn("__mason_to_char_time", [cast(x, ["varchar"]), cast(f, ["varchar"])]);
-    if (spec === null) return called(args[0]!, args[1]!);
-    // A FORMAT STRFTIME WRITES AS POSTGRES DOES (issue 464: the function a row, a grouped month was x8-18 of Postgres):
-    // DuckDB's own strftime of the value, in the session's zone as the function's text of it is, wherever the year is
-    // 1 to 9999 AD in any zone (two days inside either end); infinity, BC and a year past 9999 stay the function's
+    if (pieces === null) return called(args[0]!, args[1]!);
+    // A TEMPLATE THE ENGINE WRITES AS POSTGRES DOES (issue 464: the function a row, a grouped month was x8-18 of
+    // Postgres, a quarter or a padded month's name x8): DuckDB's own strftime and date_part of the value, in the
+    // session's zone as the function's text of it is, wherever the year is 1 to 9999 AD in any zone (two days inside
+    // either end); infinity, BC and a year past 9999 stay the function's
     const duckType = type === DATE ? "date" : type === TIMESTAMP ? "timestamp" : "timestamptz";
     const bound = (day: string): AstNode => cast(strConst(type === DATE ? day : type === TIMESTAMP ? `${day} 00:00:00` : `${day} 00:00:00+00`), [duckType]);
     const x = args[0]!;
     return caseWhen([
       [isNull(clone(x)), nullConst()],
-      [and([op(">=", clone(x), bound("0001-01-03")), op("<", clone(x), bound("9999-12-29"))]), fn("strftime", [clone(x), strConst(spec)])],
+      [and([op(">=", clone(x), bound("0001-01-03")), op("<", clone(x), bound("9999-12-29"))]), nativeText(pieces, () => clone(x))],
     ], called(x, args[1]!));
   }
   if (type !== null && (INTEGERS.has(type) || FLOATS.has(type) || type === NUMERIC)) return fn("__mason_to_char_number", [cast(args[0]!, ["varchar"]), cast(args[1]!, ["varchar"])]);
@@ -8590,6 +8685,10 @@ export interface RewriteOptions {
   boundPaths?: ReadonlyMap<number, string>;
   /** the plain numerics whose copy holds each value's own scale (src/duck/scale-column.ts, src/duck/plan.ts `scaleLookup`) */
   scales?: ScaleLookup | null;
+  /** the prefix of every name the rewrite invents (src/duck/own-names.ts `ownPrefix`): src/duck/plan.ts chooses it, and
+   *  hands the same to the late select list and the libc bounds; by default it is chosen here, from the statement and
+   *  its analysis */
+  own?: string;
 }
 
 /** THE HIDDEN SCALE COLUMN OF A PLAIN NUMERIC (src/duck/scale-column.ts) a VAR reads, by the catalog's OIDs
@@ -8601,7 +8700,7 @@ export interface ScaleLookup {
 }
 
 export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(), citextHeld = new Set(), typeNames = new Map(), rowTypes = new Map(), timeZone = "UTC", dateStyle = "ISO, MDY", enums = { labels: new Map(), arrays: new Map() }, kept = null,
-  wireBound = false, keyCounts = new Set(), boundPaths = new Map(), scales = null }: RewriteOptions):
+  wireBound = false, keyCounts = new Set(), boundPaths = new Map(), scales = null, own: prefix = ownPrefix([stmt, analysis.tree]) }: RewriteOptions):
   { tree: AstNode; withTies: boolean; exact: ExactColumn[]; clock: { parse?: number; exec?: number }; jsonReads: JsonRead[]; unboundedLateral: boolean; pathParams: number[]; wholeNumericArrays: number[] } {
   const r = new Rewriter(analysis, base, collations, userTypes, rowTypes, timeZone, dateStyle, enums, kept, keyCounts, citextHeld, typeNames);
   r.boundPaths = boundPaths;
@@ -8609,12 +8708,13 @@ export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(
   if (joinsUsing(analysis.tree, new Set([JSONB, JSONB_ARRAY]))) {
     throw new Unrewritable("a JOIN … USING or a NATURAL JOIN on a jsonb column is not supported by Mason (Postgres equates jsonb by its own rules)", "JOIN … ON a.j = b.j", "jsonb-compare");
   }
+  // (every name the rewrite invents begins with the statement's own prefix, src/duck/own-names.ts: the hidden cells'
+  // too, issue 239, whose prefix no name the statement writes begins with)
+  r.own = prefix;
+  r.cellPrefix = `${prefix}cell_`;
   const own = JSON.parse(JSON.stringify(stmt)) as AstNode;
   // (before anything reads a name: a WITH query named as anything else the statement reads is renamed apart, issue 981)
-  cteNamesApart(own);
-  // (the hidden cells' name: one the statement's own text never begins a name with, `cellPrefix`)
-  const written = JSON.stringify(stmt).toLowerCase();
-  for (let n = 0; written.includes(r.cellPrefix); n++) r.cellPrefix = `__mason_cell${n}_`;
+  cteNamesApart(own, prefix);
   volatileWindows(own);
   r.adopt(own);
   nameTargets(own);

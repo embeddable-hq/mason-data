@@ -11,6 +11,7 @@ paths:
   - "src/duck/late.ts"
   - "src/duck/libc-bound.ts"
   - "src/duck/libc-order.ts"
+  - "src/duck/own-names.ts"
   - "src/duck/pg-eval-worker.ts"
   - "src/duck/pg-eval.ts"
   - "src/duck/pgtree.ts"
@@ -59,6 +60,17 @@ paths:
   each reader resolved names by rules of its own. Each read a WITH query's own body `FROM t` as the WITH query, where
   Postgres reads the table (a count of 0, and XX000 from a pass-through followed into itself), and `hideKept` read a
   name a set operation's arm's own WITH binds as the table of that name.
+- **Every name Mason invents for a statement begins with ONE prefix, chosen for that statement** (`ownPrefix`,
+  src/duck/own-names.ts, issue 1024): `__mason_`, else `__mason<n>_` for the first n that no string of the statement's
+  parse tree or of Postgres's analysis holds, in any case. The analysis names every column of every table read, so a
+  column only a `*` or a whole row reaches counts too. src/duck/plan.ts chooses it and hands it to the rewrite (the
+  cells, FETCH … WITH TIES, a lambda's parameter, a list function's step, an alias, `cteNamesApart`), to src/duck/late.ts
+  and to src/duck/libc-bound.ts; src/duck/pgtree.ts renames case twins apart by the analysed tree's own
+  (`analysedPrefix`), and a generated table reads the plan's cells by its plan's (`DuckPlan.own`). A role's filtered
+  reads' own names are left out of the test (`Walls.written`). A function keeps its `__mason_` name. A new invented
+  name takes the prefix, never a literal `__mason_`. Why: a table's column `__mason_rid` answered NULLs under a top N
+  over a LEFT JOIN, a jsonb column `__mason_v` was read as a lambda's parameter, and a table `__mason_late` as the kept
+  rows. `tests/duck-own-names.test.ts`, the oracle's `issue 1024:` statements. ("The names Mason invents")
 - **A rewrite the deparser cannot spell is a refusal, never a different statement**: the rewritten tree is deparsed,
   parsed again and compared node for node (`treeDifference`). ("How a statement is answered")
 - **No DuckDB macro**: with the `postgres` extension loaded, a macro with a lambda or calling a macro
@@ -122,16 +134,22 @@ paths:
     UNION, an IN, a CASE or a comparison it was cast to a type that rounds the other's decimals, and a product of it
     passed 38 places where Postgres answers. `tests/duck-wire.test.ts` "issues 464, 465", the plan fixture's BINS, the
     oracle's `bin:` statements over `bins`;
-  - **a to_char of a time in a format DuckDB's strftime writes as Postgres does is `strftime`** (`strftimeTemplate`,
-    src/duck/to-char.ts; `toChar`, issue 464: the function a row, a grouped month was ×8–18 of Postgres over 4.5 M
-    rows): the template read as the function reads it, and taken only when every pattern is one strftime writes alike
-    (YYYY MM DD DDD IYYY IW Mon Dy FMMonth FMDay HH24 MI SS MS US, a date's without the time of day) and the format is
-    a constant; anything else (Q, a padded name, FM on a number, TH, TM, another case, a parameter, a template that
-    writes nothing, which DuckDB refuses as it binds, and a volatile value, which the guard would read twice) is the function's.
-    The value is read in the session's zone by DuckDB's calendar, as the function's text of it was, and only for a
-    year 1 to 9999 AD in any zone (a CASE: NULL is NULL, ±infinity, BC and a year past 9999 the function's).
-    `tests/duck-functions.test.ts` holds each taken template to the function, `tests/duck-wire.test.ts` "issue 464"
-    the wire in three zones, the plan fixture's `issue 464` and the oracle's `issue 464: to_char` statements;
+  - **a to_char of a time in a template the engine writes as Postgres does is the engine's own text**
+    (`nativeTemplate`, src/duck/to-char.ts; `toChar`, `nativeText`, src/duck/rewrite.ts; issue 464: the function a
+    row, a grouped month was ×8–18 of Postgres over 4.5 M rows, a quarter or a padded month's name ×8–9 over a million):
+    the template read as the function reads it, each pattern a piece (strftime's specifiers and literal text as one
+    strftime call, a number Postgres pads that strftime does not from `date_part` through `printf`, a name in another
+    case or padded to nine through `upper`, `lower` and `rpad`, TH as the number's ordinal, a meridiem by the hour, an
+    era as AD, a Roman month by `split_part`), joined by `||`, and taken only when every pattern is one the pieces write
+    and the format is a constant. What stays the function's: TM, FX, a zone's TZ, TZH, TZM and OF, SP, TH on anything
+    but a whole number or Y,YYY, FM before a literal, a backslash, a date's pattern of the time of day (a date is a
+    zone's midnight, which a day of daylight saving may not have), a parameter, a template that writes nothing (DuckDB
+    refuses an empty format as it binds), and a volatile value, which the guard would read twice. The value is read in
+    the session's zone by DuckDB's calendar, as the function's text of it was, and only for a year 1 to 9999 AD in any
+    zone (a CASE: NULL is NULL, ±infinity, BC and a year past 9999 the function's). `tests/duck-functions.test.ts` holds
+    each taken template's SQL to the function over times at their edges, `tests/duck-wire.test.ts` "issue 464" the
+    wire to Postgres in three zones, `tests/duck-plans.test.ts` "issue 464: to_char of …" the rows the function is
+    handed over the shop (none), and the oracle's `issue 464: to_char` statements;
   - **a mode() of a text or varchar under a libc order keys each distinct value once** (`modeKeyedOnce`, issue 464: the
     libc key's function a row, a status by tenant was ×6 of Postgres over a million rows): its ORDER BY is
     `(SELECT __mason_libc_key_or_null(x, collate)) NULLS FIRST, x`, a scalar subquery of the value, which the engine
@@ -455,7 +473,7 @@ paths:
   sum, avg or window sum adds the program's text (`summed`); a cast to text, varchar, float8 or an integer reads the
   program's text (`typeCast`); a `*` beside a program is written out (`starsWrittenForExact`) so its cells ride. Each
   asks `duckExact` first, so a DECIMAL column, an integer or a sum of one keeps its native plan with no `__mason_*`
-  call. The hidden cells are named by `cellPrefix`, which no name the statement writes begins with.
+  call. The hidden cells are named by `cellPrefix`, the statement's own prefix and `cell_` (src/duck/own-names.ts).
   `tests/duck-wire.test.ts` "exact path: …". Round 2 (issue 358) adds: a set operation's ORDER BY, LIMIT and WITH TIES
   key each output by its record (`recordOrderKey`, `setOperationExactKeys`); a VALUES or nested arm is typed by
   Postgres's analysis and wrapped to the one cell count (`exactArms`, `armWrapped`); a numeric column whose arms write

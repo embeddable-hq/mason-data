@@ -14,6 +14,7 @@
  */
 
 import { constantExpression } from "./constant-key.ts";
+import { analysedPrefix } from "./own-names.ts";
 
 export type TreeValue = TreeNode | TreeValue[] | string | null;
 export interface TreeNode { readonly _node: string; readonly [field: string]: TreeValue }
@@ -397,6 +398,7 @@ const argsOf = (n: TreeNode): TreeValue[] => {
  */
 export function typesByLocation(tree: TreeValue): Map<number, Typed[]> {
   const out = new Map<number, Typed[]>();
+  const infix = analysedPrefix(tree);
   // the arguments Postgres wrapped in its implicit time→timetz cast (`Typed.implicitTimetz`)
   const asTimetz = new WeakSet<TreeNode>();
   // the char(n) arguments Postgres wrapped in its implicit cast to text or varchar (`Typed.implicitText`)
@@ -425,7 +427,7 @@ export function typesByLocation(tree: TreeValue): Map<number, Typed[]> {
     const trimmed = implicitTextArg(v);
     if (trimmed !== null) asText.set(trimmed, exprType(v)!.type);
     if (loc !== null && loc >= 0 && t !== null) {
-      const typed = typedOf(v, t, rtables);
+      const typed = typedOf(v, t, rtables, infix);
       if (asTimetz.has(v)) typed.implicitTimetz = true;
       const text = asText.get(v);
       if (text !== undefined) typed.implicitText = text;
@@ -437,7 +439,7 @@ export function typesByLocation(tree: TreeValue): Map<number, Typed[]> {
     const test = v._node === "SUBLINK" && isNode(v.testexpr ?? null) ? v.testexpr as TreeNode : null;
     const at = num(v.location);
     if (test !== null && test._node === "ROWCOMPAREEXPR" && at !== null && at >= 0) {
-      const typed = typedOf(test, { type: BOOL, typmod: -1 }, rtables);
+      const typed = typedOf(test, { type: BOOL, typmod: -1 }, rtables, infix);
       const list = out.get(at);
       if (list) list.push(typed); else out.set(at, [typed]);
     }
@@ -509,7 +511,7 @@ export function implicitTimetzCasts(tree: TreeValue): number {
 }
 
 /** one expression of a query whose range tables are `rtables`, innermost last, as `Typed` says it */
-function typedOf(v: TreeNode, t: { type: number; typmod: number }, rtables: TreeNode[][]): Typed {
+function typedOf(v: TreeNode, t: { type: number; typmod: number }, rtables: TreeNode[][], infix: string): Typed {
   const raw = v._node === "AGGREF" || v._node === "WINDOWFUNC"
     ? argsOf(v).map((a) => isNode(a) && a._node === "TARGETENTRY" ? a.expr ?? null : a)
     : argsOf(v);
@@ -523,7 +525,7 @@ function typedOf(v: TreeNode, t: { type: number; typmod: number }, rtables: Tree
     levelsUp: v._node === "VAR" ? num(v.varlevelsup ?? null) : null,
     datum: v._node === "CONST" && v.constisnull !== "true" ? datumBytes(v.constvalue) : null,
     qualifier: v._node === "VAR" ? qualifierOf(v, rtables) : null,
-    renamed: v._node === "VAR" ? renamedOf(v, rtables) : null,
+    renamed: v._node === "VAR" ? renamedOf(v, rtables, infix) : null,
   };
   if (constantExpression(v)) typed.constant = true;
   // a row comparison compares each column under its own collation (RowCompareExpr's inputcollids)
@@ -697,7 +699,7 @@ export function analysedQueries(tree: TreeValue): { byOffset: Map<number, QueryO
         return isNode(eref) ? strings(eref.colnames).slice(0, num(rte.joinmergedcols ?? null) ?? 0) : [];
       });
       const outputs: QueryOutputs = {
-        columns: exprs.map((e) => { const t = isNode(e) && e._node === "VAR" ? exprType(e) : null; return t === null ? null : typedOf(e as TreeNode, t, [rtable]); }),
+        columns: exprs.map((e) => { const t = isNode(e) && e._node === "VAR" ? exprType(e) : null; return t === null ? null : typedOf(e as TreeNode, t, [rtable], analysedPrefix(tree)); }),
         widths,
         joins,
         keys: keysOf(v.targetList, v.sortClause, v.distinctClause, rtable, v.windowClause),
@@ -778,7 +780,7 @@ export function setOperationOutputs(tree: TreeValue): Array<{ arms: number[][]; 
         const e = t.expr ?? null;
         const type = isNode(e) ? exprType(e) : null;
         if (!isNode(e) || type === null) return null;
-        const { relation: _r, column: _c, functionColumn: _f, ...own } = typedOf(e, type, [rtable.filter(isNode)]);
+        const { relation: _r, column: _c, functionColumn: _f, ...own } = typedOf(e, type, [rtable.filter(isNode)], analysedPrefix(tree));
         return { ...own, qualifier: null, renamed: null };
       });
       found.push({ arms, limits: limitOffsets(v), columns, armTypes });
@@ -860,21 +862,23 @@ function qualifierOf(v: TreeNode, rtables: TreeNode[][]): string | null {
   return clash || outer ? alias : null;
 }
 
-/** a FROM item's columns with each one that has a twin in another case renamed `<name>__mason_<n>`; null when none has */
-function twinNames(rte: TreeNode): string[] | null {
+/** a FROM item's columns with each one that has a twin in another case renamed `<name>__mason_<n>`; null when none has.
+ *  The infix is the analysed tree's own prefix (src/duck/own-names.ts `analysedPrefix`), which no column it names holds
+ *  in any case, so a renamed column is none of theirs (issue 1024) */
+function twinNames(rte: TreeNode, infix: string): string[] | null {
   if (num(rte.rtekind ?? null) === RTE_JOIN || num(rte.rtekind ?? null) === 0 || !isNode(rte.eref ?? null)) return null;
   const cols = strings((rte.eref as TreeNode).colnames);
   const lower = cols.map((c) => c.toLowerCase());
   const twin = (i: number): boolean => lower.some((l, j) => j !== i && l === lower[i] && cols[j] !== cols[i]);
-  return cols.some((_, i) => twin(i)) ? cols.map((c, i) => twin(i) ? `${c}__mason_${i + 1}` : c) : null;
+  return cols.some((_, i) => twin(i)) ? cols.map((c, i) => twin(i) ? `${c}${infix}${i + 1}` : c) : null;
 }
 
 /** Typed.renamed */
-function renamedOf(v: TreeNode, rtables: TreeNode[][]): string | null {
+function renamedOf(v: TreeNode, rtables: TreeNode[][], infix: string): string | null {
   const up = num(v.varlevelsup ?? null) ?? 0, varno = num(v.varno ?? null), attno = num(v.varattno ?? null);
   const rte = varno === null ? undefined : rtables[rtables.length - 1 - up]?.[varno - 1];
   if (rte === undefined || attno === null || attno < 1) return null;
-  const names = twinNames(rte);
+  const names = twinNames(rte, infix);
   const own = isNode(rte.eref ?? null) ? strings((rte.eref as TreeNode).colnames)[attno - 1] : undefined;
   return names !== null && names[attno - 1] !== own ? names[attno - 1] ?? null : null;
 }
@@ -883,11 +887,12 @@ function renamedOf(v: TreeNode, rtables: TreeNode[][]): string | null {
  *  query calls it: its columns as DuckDB is to name them (twinNames), every reference renamed alike (Typed.renamed) */
 export function caseTwins(tree: TreeValue): Map<string, string[]> {
   const out = new Map<string, string[]>();
+  const infix = analysedPrefix(tree);
   const visit = (v: TreeValue): void => {
     if (Array.isArray(v)) { for (const x of v) visit(x); return; }
     if (!isNode(v)) return;
     if (v._node === "RANGETBLENTRY" && isNode(v.eref ?? null)) {
-      const names = twinNames(v);
+      const names = twinNames(v, infix);
       const alias = (v.eref as TreeNode).aliasname;
       if (names !== null && typeof alias === "string") out.set(alias, names);
     }
