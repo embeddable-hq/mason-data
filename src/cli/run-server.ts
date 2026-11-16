@@ -54,6 +54,7 @@ import { projectWriteState } from "./project.ts";
 import { addEntry, plannedEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type PollMeasure, type RemoveResult } from "./source-edit.ts";
 import { shortageOf, shortageWarning, syncedEstimate, type DiskRoom, type DiskShortage } from "../duck/disk-fit.ts";
 import { notAddedRefusal, PollRefused, type CopyState, type DiskStatus, type PolledTable, type StreamedAnswer, type StreamStatus } from "../duck/sync.ts";
+import type { StoredFacts } from "../duck/reread.ts";
 import { SyncsByHand, type SyncByHand } from "./sync-by-hand.ts";
 import { agoText, DEFAULT_SYNC, parseSync, syncText, type TableSync } from "../lib/table-sync.ts";
 import type { LogBuffer } from "../lib/log-buffer.ts";
@@ -209,7 +210,11 @@ export interface RunContext {
     /** the JSON paths stored as columns of the copies, and how far each is (src/duck/kept.ts): mason status */
     jsonPaths?: () => KeptPathStatus[];
     /** the generated tables (src/duck/generated.ts): mason status's `generatedTables` */
-    generated?: () => GeneratedStatus[] };
+    generated?: () => GeneratedStatus[];
+    /** what the synced data holds of each table, as a start reads it, and the tables added with their columns (src/duck/
+     *  reread.ts `StoredFacts`, `Sync.storedFacts`): `/api/state?storage=1`, which `mason upgrade --check` reads. Absent:
+     *  a run that does not say */
+    storage?: () => Promise<StoredFacts> };
 }
 
 /** the request log's shapes (src/duck/requests.ts), as mason status reads them */
@@ -980,7 +985,10 @@ export function createRunServer(ctx: RunContext): http.Server {
           // ?fresh=1 (mason add, before it checks its tables): the database as it is now, waited for
           const fresh = url.searchParams.get("fresh") === "1";
           if (fresh && !await readNow(ctx, req, res)) return;
-          sendJson(res, 200, await state(ctx, url.searchParams.get("columns") === "1", !fresh));
+          const body = await state(ctx, url.searchParams.get("columns") === "1", !fresh) as Record<string, unknown>;
+          // ?storage=1 (mason upgrade --check): what the synced data holds of each table, as a start reads it (src/duck/
+          // reread.ts). Asked alone, never by the page's poll: it reads the engine's catalog of every synced table
+          sendJson(res, 200, url.searchParams.get("storage") === "1" && ctx.duck.storage !== undefined ? { ...body, storage: await ctx.duck.storage() } : body);
         } else if (method === "GET" && /^\/api\/tables\/[^/]+\/columns$/.test(url.pathname)) {
           // one table's columns, read when the page's Columns… form opens (never with the state, polled every 2 s)
           let table: string;
