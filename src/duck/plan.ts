@@ -19,6 +19,7 @@ import { expandViews, MAX_VIEW_DEPTH, viewRefused } from "./views.ts";
 import { selectListAfterLimit } from "./late.ts";
 import { libcBounded } from "./libc-bound.ts";
 import { pgTyplen } from "./types.ts";
+import { sampleRefusal } from "./tablesample.ts";
 import type { CopyState } from "./sync.ts";
 import { giveTurns, datumText, masonCalls, rewrite, treeDifference, Unrewritable, type EnumTypes, type RowColumn } from "./rewrite.ts";
 import type { CollationResolver, StatementCollations } from "./collation.ts";
@@ -536,6 +537,9 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
       return { ...inner, ...(reads !== undefined ? { reads } : {}), rowFilters };
     }
   }
+  // a TABLESAMPLE: after the role's refusals (a filtered table's is the role's), before the rewrite and the allowlist
+  const sample = sampleRefusal(analysis.tree, stmt, text);
+  if (sample !== null) throw sample;
   // the catalog's own OIDs for the types a database made (citext, an enum): the rewrite knows a few by name. The wire
   // sends the analysis's OID as it is, the catalog's, never the source's (issue 861): a client that looks it up in pg_type
   // or sends it back as a parameter's type reads the type itself
