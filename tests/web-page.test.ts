@@ -997,7 +997,7 @@ test("a read-only page (pageReadOnly): no page writes a control that sends a cha
 test("a read-only page: no add, create or write link anywhere — Queries' empty log's Create a user included; the Overview and Usage say why; unset, all as before", async () => {
   const why = "the web page is read-only here (MASON_UI_READ_ONLY=1)";
   // what leads to adding or creating something: a button-styled link to the page that does it, or its words
-  const LEADS = [/Create a user/, /Add a table/, /Add a user/, /Temporary cloud login/, /<a class="btn[^"]*" href="#users"/, /<a class="btn[^"]*" href="#tables[^"]*"/, /Cancel stops one/];
+  const LEADS = [/Create a user/, /Add a table/, /Add a user/, /Temporary cloud tunnel/, /<a class="btn[^"]*" href="#users"/, /<a class="btn[^"]*" href="#tables[^"]*"/, /Cancel stops one/];
   const open = await pageByPage(CATALOG_STATE);
   const shown = await pageByPage({ ...CATALOG_STATE, pageReadOnly: why });
   for (const lead of LEADS) assert.ok(!lead.test(shown.all), `read-only: ${lead}`);
@@ -1035,8 +1035,8 @@ test("a read-only page: each renderer alone writes no control that changes anyth
   const renderRunning = fn<[unknown, unknown, unknown, number, unknown], string>("renderRunning");
   assert.ok(!renderRunning(running, null, null, Date.now(), why).includes("data-ask-cancel"));
   assert.ok(renderRunning(running, null, null, Date.now(), null).includes("data-ask-cancel"));
-  assert.equal(fn<[unknown], string>("renderSharePane")(ro), "", "Temporary cloud login: absent on a read-only page");
-  assert.match(fn<[unknown], string>("renderSharePane")(CATALOG_STATE), /data-share-open/, "unset: Open a cloud login is there");
+  assert.equal(fn<[unknown], string>("renderSharePane")(ro), "", "Temporary cloud tunnel: absent on a read-only page");
+  assert.match(fn<[unknown], string>("renderSharePane")(CATALOG_STATE), /data-share-open/, "unset: Open a cloud tunnel is there");
   const { renderChecklist: checklist } = await import(path.join(WEB, "pages", "status.js") as string) as { renderChecklist: (s: unknown, u: unknown) => string };
   const nobody = { queries: { week: { completed: 0 } } };
   const fresh = { ...NONE, pageReadOnly: why };
@@ -2231,13 +2231,13 @@ test("a read-only page that still manages its users (pageReadOnlyAllow: [users])
   assert.equal(renderAddUser({ ...CATALOG_STATE, pageReadOnlyAllow: ["users"] }), renderAddUser(CATALOG_STATE));
 });
 
-test("a read-only page that still changes its tables and its users (pageReadOnlyAllow: [tables, users]): both pages' controls; the Overview says nothing is refused; Cancel and Temporary cloud login still absent (issue 813)", async () => {
+test("a read-only page that still changes its tables and its users (pageReadOnlyAllow: [tables, users]): both pages' controls; the Overview says nothing is refused; Cancel and Temporary cloud tunnel still absent (issue 813)", async () => {
   const why = "the web page is read-only here (MASON_UI_READ_ONLY=1)";
   const shown = await pageByPage({ ...CATALOG_STATE, pageReadOnly: why, pageReadOnlyAllow: ["tables", "users"] });
   for (const control of ["data-add-table", "data-sync-table", "data-remove-table", 'id="add-user"', "data-from=", "data-disable="]) assert.ok(shown.all.includes(control), control);
   // the run refuses /api/share on any read-only page, whatever it still allows: no Share box
   for (const control of ["data-ask-cancel", "data-share-open"]) assert.ok(!shown.all.includes(control), control);
-  assert.ok(!/Temporary cloud login|data-add-kind/.test(shown.all), "no temporary cloud login, no segments");
+  assert.ok(!/Temporary cloud tunnel|data-add-kind/.test(shown.all), "no temporary cloud tunnel, no segments");
   assert.ok(!textOf(shown.overview).includes("from this page"), "the Overview refuses nothing it offers");
   assert.ok(textOf(shown.byPage.get("usage")!).includes(`Queries are not cancelled from this page: ${why}.`));
   assert.ok(!/are not added/.test(textOf(shown.all)), "Tables and Users say nothing is refused");
@@ -4468,7 +4468,7 @@ test("Tables and Users: the sections are a page head, the cards' part and a tool
   // the users first, right under the title (their read-only line is renderUsers' own); then the form, the password just
   // shown beside it, Connect: a card that appears moves nothing above it
   const order = ["users-h", "users", "add-box", "add-kinds", "add-user-box", "add-share-box", "action", "added", "users-connect", "users-mcp"].map((id) => users.indexOf(`id="${id}"`));
-  assert.ok(order.every((i, n) => i >= 0 && (n === 0 || i > order[n - 1]!)), "the title, the users, the box (its segments, the form, the temporary cloud login), its failure, the card, Connect a Postgres client or BI tool, then Connect an MCP client");
+  assert.ok(order.every((i, n) => i >= 0 && (n === 0 || i > order[n - 1]!)), "the title, the users, the box (its segments, the form, the temporary cloud tunnel), its failure, the card, Connect a Postgres client or BI tool, then Connect an MCP client");
   assert.match(users, /<\/div>\s*<div id="users"><\/div>\s*<!--[^>]*-->\s*<div id="add-box" class="add-box"><div id="add-kinds"><\/div><div class="add-panes"><div id="add-user-box"><\/div><div id="add-share-box"><\/div><\/div><\/div>/, "the users list right under the page's head, then the box");
 });
 
@@ -6769,13 +6769,16 @@ test("only the clock moved: the ages are set where they are, the part not writte
   assert.equal(shown[0]!.innerHTML, "7s ago", "the age moved where it is");
 });
 
-// ------------------------------------------------------------------ Temporary cloud login (the page's mason share, the add box's second kind)
+// ------------------------------------------------------------------ Temporary cloud tunnel (the page's mason share, the add box's second kind)
 
 const SHARE_AT = "2026-11-01T10:00:00.000Z";
 const SHARE_NOW = Date.parse("2026-11-01T10:05:00.000Z");
 const PASSWORD = `mason_share_${"ab".repeat(24)}`;
 const SHARE_URL = `postgres://share_a1b2c3:${PASSWORD}@relay.example:41234/shop?sslmode=require`;
-const listed = { user: "share_a1b2c3", from: "page", role: null, reads: "every synced table", openedAt: SHARE_AT, via: "pinggy", host: "relay.example", port: 41234, endsAt: "2026-11-01T11:00:00.000Z", state: "up" };
+const listed = { user: "share_a1b2c3", from: "page", role: null, reads: "every synced table", openedAt: SHARE_AT, via: "pinggy", host: "relay.example", port: 41234, database: "shop", sslmode: "require", endsAt: "2026-11-01T11:00:00.000Z", state: "up" };
+/** A clock time as the page says when a tunnel ends: this machine's own time zone and locale, as the browser's. */
+const clockAt = (iso: string): string => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+const ENDS = `Online · ends in 55 min , at ${clockAt("2026-11-01T11:00:00.000Z")}`;
 const sharing = (shares: unknown[], o: Record<string, unknown> = {}) => ({ ...RUNNING, share: shares.length ? { port: 40001, fingerprint: "AA", sessions: 0, refusedLogins: 0, droppedConnections: 0, shares } : null, shareEnded: null, ...o });
 const shareModel = (o: Record<string, unknown> = {}) => ({ phase: "none", role: null, opened: null, ended: null, failure: null, ...o });
 const ONE_ANSWER = { body: { choices: [], role: null, reads: "every synced table" }, failure: null };
@@ -6784,24 +6787,24 @@ const TWO_ROLES = { body: { choices: [{ role: "sales", reads: "1 synced table: o
 const sharePane = (s: unknown, m: unknown, choices: unknown = ONE_ANSWER) => fn<[unknown, unknown, unknown], string>("renderSharePane")(s, m, choices);
 const shareCard = (s: unknown, m: unknown) => fn<[unknown, unknown, number], string>("renderShareCard")(s, m, SHARE_NOW);
 const shareOnce = (s: unknown, m: unknown) => fn<[unknown, unknown, number], Record<string, string>>("renderShareOnce")(s, m, SHARE_NOW);
-const PANE_WORDS = "For a tool in the cloud that can't reach this machine. Opens a public address with a login of its own, until you stop it. Opening one can take up to 30 s.";
+const PANE_WORDS = "For a tool in the cloud that can't reach this machine. Opens an address reachable online, protected by a login and password of its own, until you stop it. It usually opens in a few seconds.";
 
-test("Temporary cloud login: the add box's segments, its pane in each state, its one-time dialog once opened and its card in each — none, opening, open, open after a reload, ended, refused, served, read-only — as they WROTE them", () => {
-  // the segments: New user and Temporary cloud login, the one chosen pressed
+test("Temporary cloud tunnel: the add box's segments, its pane in each state, its one-time dialog once opened and its card in each — none, opening, open, open after a reload, ended, refused, served, read-only — as they WROTE them", () => {
+  // the segments: New user and Temporary cloud tunnel, the one chosen pressed
   const kinds = fn<[string], string>("renderAddKinds");
-  assert.equal(kinds("user"), `<div class="range add-kinds" role="group" aria-label="What to create"><button type="button" data-add-kind="user" aria-pressed="true">New user</button><button type="button" data-add-kind="share" aria-pressed="false">Temporary cloud login</button></div>`);
+  assert.equal(kinds("user"), `<div class="range add-kinds" role="group" aria-label="What to create"><button type="button" data-add-kind="user" aria-pressed="true">New user</button><button type="button" data-add-kind="share" aria-pressed="false">Temporary cloud tunnel</button></div>`);
   assert.match(kinds("share"), /data-add-kind="user" aria-pressed="false">New user<\/button><button type="button" data-add-kind="share" aria-pressed="true">/);
-  // the pane: two sentences, then Open a cloud login; a Role only where more than one is offered
+  // the pane: two sentences, then Open a cloud tunnel; a Role only where more than one is offered
   const none = sharePane(sharing([]), shareModel());
-  assert.equal(textOf(none), `${PANE_WORDS} Open a cloud login`);
-  assert.match(none, /<button type="button" id="share-open" class="primary" data-share-open="" data-room="Open a cloud login" data-room2="Opening…">Open a cloud login<\/button>/, "enabled, in the room of Opening… too");
+  assert.equal(textOf(none), `${PANE_WORDS} Open a cloud tunnel`);
+  assert.match(none, /<button type="button" id="share-open" class="primary" data-share-open="" data-room="Open a cloud tunnel" data-room2="Opening…">Open a cloud tunnel<\/button>/, "enabled, in the room of Opening… too");
   assert.doesNotMatch(none + sharePane(sharing([]), shareModel(), ONE_ROLE), /<select/, "none or one role: no role to choose");
   const two = sharePane(sharing([]), shareModel(), TWO_ROLES);
   assert.match(two, /<label for="share-role">Role<\/label> <select id="share-role"><option value="sales" selected>sales: 1 synced table: orders \(default\)<\/option><option value="ops">ops: every synced table<\/option><\/select><\/span> <button[^>]*data-share-open/, "the roles beside the button, the file's default first chosen");
   assert.match(sharePane(sharing([]), shareModel({ role: "ops" }), TWO_ROLES), /<option value="ops" selected>/, "the role chosen stays chosen across a rewrite");
   const unread = sharePane(sharing([]), shareModel(), null);
-  assert.equal(textOf(unread), `${PANE_WORDS} Open a cloud login Reading the roles…`);
-  assert.match(unread, /data-share-open="" data-room="Open a cloud login" data-room2="Opening…" disabled>Open a cloud login/, "no button before the roles are read");
+  assert.equal(textOf(unread), `${PANE_WORDS} Open a cloud tunnel Reading the roles…`);
+  assert.match(unread, /data-share-open="" data-room="Open a cloud tunnel" data-room2="Opening…" disabled>Open a cloud tunnel/, "no button before the roles are read");
   const rolesFailure = { code: "refused", message: "no role of mason/roles.yml can be shared: the rows of each depend on an attribute, and a share's login has no attributes" };
   const noRole = sharePane(sharing([]), shareModel(), { body: undefined, failure: rolesFailure });
   assert.ok(noRole.includes(fn<[unknown], string>("renderFailure")(rolesFailure)), "the roles refused: the run's Failure");
@@ -6810,57 +6813,64 @@ test("Temporary cloud login: the add box's segments, its pane in each state, its
   // words the same
   const opening = sharePane(sharing([]), shareModel({ phase: "opening" }));
   assert.equal(textOf(opening), `${PANE_WORDS} Opening…`);
-  assert.match(opening, /data-room="Open a cloud login" data-room2="Opening…" aria-busy="true" disabled>Opening…<\/button>/);
+  assert.match(opening, /data-room="Open a cloud tunnel" data-room2="Opening…" aria-busy="true" disabled>Opening…<\/button>/);
   const held = sharePane(sharing([listed]), shareModel({ phase: "open" }));
-  assert.equal(textOf(held), `${PANE_WORDS} Open a cloud login`);
-  assert.match(held, /title="One is open: stop it to open another" disabled>Open a cloud login/);
+  assert.equal(textOf(held), `${PANE_WORDS} Open a cloud tunnel`);
+  assert.match(held, /title="One is open: stop it to open another" disabled>Open a cloud tunnel/);
   // nothing before anything was asked, nor while it opens (its button says so): nothing under the box comes and goes
   assert.equal(shareCard(sharing([]), shareModel()), "");
   assert.equal(shareCard(sharing([]), shareModel({ phase: "opening" })), "");
 
-  // just opened: the one-time dialog's parts, titled Temporary cloud login — URL, Login and Password, what it reads, one line
-  const opened = { url: SHARE_URL, user: "share_a1b2c3", password: PASSWORD, database: "shop", host: "relay.example", port: 41234, role: null, reads: "every synced table", openedAt: SHARE_AT };
+  // just opened: the one-time dialog's parts, titled Temporary cloud tunnel — URL, Login and Password, what it reads, one line
+  const opened = { url: SHARE_URL, user: "share_a1b2c3", password: PASSWORD, database: "shop", sslmode: "require", host: "relay.example", port: 41234, role: null, reads: "every synced table", openedAt: SHARE_AT, endsAt: listed.endsAt };
   const parts = shareOnce(sharing([listed]), shareModel({ phase: "open", opened }));
   assert.deepEqual(Object.keys(parts), ["once-head", "once-status", "once-foot"]);
   const once = onceHtml(parts);
-  assert.match(once, /^<p class="once-title" id="once-title">Temporary cloud login<\/p><dl class="facts">/);
+  assert.match(once, /^<p class="once-title" id="once-title">Temporary cloud tunnel<\/p><dl class="facts">/);
   for (const [id, v] of [["share-url", SHARE_URL], ["share-password", PASSWORD]]) {
     assert.ok(once.includes(`<code id="${id}">${v}</code> <button type="button" class="small" data-copy="${id}"`), `${id} with its Copy`);
   }
   assert.match(once, /<dt>Login<\/dt><dd>share_a1b2c3<\/dd>/, "the login its name, as a new user's User is");
   assert.match(once, /data-copy="share-password"[^>]*>Copy<\/button> <span class="badge warn">Shown once<\/span><\/span><\/dd>/, "Shown once beside the password's Copy");
-  assert.equal(textOf(once), `Temporary cloud login URL ${SHARE_URL} Copy Login share_a1b2c3 Password ${PASSWORD} Copy Shown once Public for 5 min : every synced table ` +
+  assert.equal(textOf(once), `Temporary cloud tunnel URL ${SHARE_URL} Copy Login share_a1b2c3 Password ${PASSWORD} Copy Shown once ${ENDS} · reads every synced table ` +
     "The password is only shown once and is not saved. This login is its own, and stops working when it ends.");
-  assert.match(textOf(onceHtml(shareOnce(sharing([{ ...listed, role: "sales", reads: "1 synced table: orders" }]), shareModel({ phase: "open", opened })))), /Public for 5 min , as the role sales: 1 synced table: orders/);
-  assert.match(textOf(onceHtml(shareOnce(sharing([]), shareModel({ phase: "open", opened })))), /Public for 5 min : every synced table/, "before the state lists it: from the answer that opened it");
+  assert.match(textOf(onceHtml(shareOnce(sharing([{ ...listed, role: "sales", reads: "1 synced table: orders" }]), shareModel({ phase: "open", opened })))), / · reads as the role sales: 1 synced table: orders The password/);
+  assert.ok(textOf(onceHtml(shareOnce(sharing([]), shareModel({ phase: "open", opened })))).includes(`${ENDS} · reads every synced table`), "before the state lists it: from the answer that opened it");
+  assert.ok(textOf(onceHtml(shareOnce(sharing([]), shareModel({ phase: "open", opened: { ...opened, endsAt: null } })))).includes("Online until you stop it · reads every synced table"), "no end: until stopped, in the dialog too");
   // none: before anything was asked, while it opens, after a reload (no answer), once ended or refused
   for (const m of [shareModel(), shareModel({ phase: "opening" }), shareModel({ phase: "open" }), shareModel({ phase: "ended", ended: { user: "share_a1b2c3", why: "x" } }), shareModel({ phase: "refused", failure: { code: "x", message: "y" } })]) {
     assert.equal(onceHtml(shareOnce(sharing([listed]), m)), "", `no dialog in phase ${m.phase}`);
   }
 
-  // open: the card, its password never in it (the dialog's alone) — its host, port and login, what it reads, Stop
+  // open: the card, its password never in it (the dialog's alone) — Host, Port, Database, SSL mode (in the Connect box's
+  // order, each with Copy) and Login; that it is online and until when, what it reads, Stop (issue 1117)
   for (const m of [shareModel({ phase: "open", opened }), shareModel()]) {
     const card = shareCard(sharing([listed]), m);
-    assert.match(card, /^<div class="user-added share-added" role="status"><p class="added-title">Temporary cloud login<\/p><dl class="facts">/);
+    assert.match(card, /^<div class="user-added share-added" role="status"><p class="added-title">Temporary cloud tunnel<\/p><dl class="facts">/);
     assert.ok(!card.includes(PASSWORD) && !card.includes("share-password") && !card.includes("share-url"), "the password is nowhere in the card, the dialog open or not, after a reload too");
-    assert.equal(textOf(card).replace(/ at .+? \(in /, " at HH:MM (in "), "Temporary cloud login Host relay.example Copy Port 41234 Copy Login share_a1b2c3 Public for 5 min : every synced table " +
-      "The password was shown once, when it opened, and is not saved. For a new one, press Stop, then Open a cloud login. " +
-      "Live until you stop it. A free one ends sooner, within about an hour, at HH:MM (in about 55 minutes). Then open a new one for a new address and password. It also ends within two minutes of closing this page. Stop");
+    assert.equal(textOf(card), "Temporary cloud tunnel Host relay.example Copy Port 41234 Copy Database shop Copy SSL mode require Copy Login share_a1b2c3 " +
+      `${ENDS} · reads every synced table ` +
+      "The password was shown once, when it opened, and is not saved. For a new one, press Stop, then Open a cloud tunnel. " +
+      "It also ends within two minutes of closing this page. Stop");
+    assert.match(card, /<dl class="facts"><dt>Host<\/dt><dd><span class="copyrow"><code id="share-host">relay\.example<\/code> [^]*<dt>Port<\/dt><dd><span class="copyrow"><code id="share-port">41234<\/code> [^]*<dt>Database<\/dt><dd><span class="copyrow"><code id="share-database">shop<\/code> <button type="button" class="small" data-copy="share-database"[^]*<dt>SSL mode<\/dt><dd><span class="copyrow"><code id="share-sslmode">require<\/code> <button type="button" class="small" data-copy="share-sslmode"[^]*<dt>Login<\/dt><dd>share_a1b2c3<\/dd><\/dl>/, "the rows in the Connect box's order, the database and SSL mode each with Copy");
+    assert.match(card, /<span class="badge warn">Online<\/span> · <time data-tick datetime="2026-11-01T11:00:00\.000Z">ends in 55 min<\/time>, at /, "the time left a ticking time, beside the Online badge");
     assert.match(card, /<button type="button" id="share-stop" class="danger" data-share-stop="share_a1b2c3" data-room="Stop" data-room2="Stopping…">Stop<\/button><\/div>$/, "Stop, where the focus goes once the dialog closes");
   }
-  assert.match(textOf(shareCard(sharing([{ ...listed, endsAt: null }]), shareModel({ phase: "open", opened }))), /Live until you stop it\. It also ends within two minutes of closing this page\./, "one with no end: until stopped");
-  assert.match(textOf(shareCard(sharing([{ ...listed, role: "sales", reads: "1 synced table: orders" }]), shareModel({ phase: "open" }))), /Public for 5 min , as the role sales: 1 synced table: orders/);
+  const endless = shareCard(sharing([{ ...listed, endsAt: null }]), shareModel({ phase: "open", opened }));
+  assert.match(textOf(endless), / Login share_a1b2c3 Online until you stop it · reads every synced table The password was shown once, .* It also ends within two minutes of closing this page\. Stop$/, "one with no end: until stopped");
+  assert.doesNotMatch(endless, /<time/, "no end: no timer");
+  assert.match(textOf(shareCard(sharing([{ ...listed, role: "sales", reads: "1 synced table: orders" }]), shareModel({ phase: "open" }))), /Online · ends in 55 min , at .+ · reads as the role sales: 1 synced table: orders The password/);
 
-  // ended and refused: popovers, with Dismiss — how it ended beside the add box, a refusal beside Open a cloud login —
+  // ended and refused: popovers, with Dismiss — how it ended beside the add box, a refusal beside Open a cloud tunnel —
   // so nothing under the box comes and goes (issue 1033)
   const ended = shareCard(sharing([]), shareModel({ phase: "ended", ended: { user: "share_a1b2c3", why: "its tunnel closed (ssh exited 255)" } }));
   assert.match(ended, /^<div class="pop said" data-anchor="add-box" role="status">/);
-  assert.equal(textOf(ended), "The temporary cloud login ended: its tunnel closed (ssh exited 255). Its address and password no longer work. Dismiss");
+  assert.equal(textOf(ended), "The temporary cloud tunnel ended: its tunnel closed (ssh exited 255). Its address and password no longer work. Dismiss");
   assert.equal(textOf(shareCard(sharing([]), shareModel({ phase: "ended", ended: { user: "share_a1b2c3", why: "you stopped it on this page" } }))),
-    "The temporary cloud login ended: you stopped it on this page. Its address and password no longer work. Dismiss");
+    "The temporary cloud tunnel ended: you stopped it on this page. Its address and password no longer work. Dismiss");
   const failure = { code: "not_found", message: "ssh is not on this machine", fix: "install the OpenSSH client", next: [{ command: "mason doctor", what: "checks this machine" }] };
   const refused = shareCard(sharing([]), shareModel({ phase: "refused", failure }));
-  assert.match(refused, /^<div class="pop said" data-anchor="share-open" role="status">/, "a refusal beside Open a cloud login");
+  assert.match(refused, /^<div class="pop said" data-anchor="share-open" role="status">/, "a refusal beside Open a cloud tunnel");
   assert.ok(refused.includes(fn<[unknown], string>("renderFailure")(failure)), "the CLI's Failure, rendered by renderFailure");
 
   for (const m of [shareModel(), shareModel({ phase: "open", opened })]) {
@@ -6872,7 +6882,57 @@ test("Temporary cloud login: the add box's segments, its pane in each state, its
   for (const html of [none, two, once, shareCard(sharing([listed]), shareModel()), refused]) assert.doesNotMatch(textOf(html), /pinggy|bore\b|duck|\buser\b|Share over the internet/i);
 });
 
-test("Temporary cloud login over a fake run: Open a cloud login opens it confirmed with the role chosen, beaten on a timer of its own, its end said and its password dropped; Stop", async () => {
+test("Temporary cloud tunnel: it counts down to its end, in the card and the dialog alike, clamped at its end; with no end it says until you stop it, with no timer (issue 1117)", () => {
+  const END = Date.parse(listed.endsAt);
+  const opened = { url: SHARE_URL, user: "share_a1b2c3", password: PASSWORD, database: "shop", sslmode: "require", host: "relay.example", port: 41234, role: null, reads: "every synced table", openedAt: SHARE_AT, endsAt: listed.endsAt };
+  const card = (now: number, s: unknown = sharing([listed])) => fn<[unknown, unknown, number], string>("renderShareCard")(s, shareModel({ phase: "open" }), now);
+  const dialog = (now: number, o: unknown = opened) => fn<[unknown, unknown, number], Record<string, string>>("renderShareOnce")(sharing([]), shareModel({ phase: "open", opened: o }), now)["once-status"]!;
+  const left = (html: string) => /<time data-tick datetime="2026-11-01T11:00:00\.000Z">([^<]*)<\/time>/.exec(html)?.[1];
+  // the time left, as the commands say a span (`duration`): minutes, then seconds under a minute and a half; once the end
+  // has passed and the state has not yet seen the tunnel go, "ending now", never a zero or a negative
+  for (const [now, says] of [[END - 60 * 60_000, "ends in 60 min"], [END - 55 * 60_000, "ends in 55 min"], [END - 2 * 60_000, "ends in 2 min"], [END - 61_000, "ends in 61 s"],
+    [END - 400, "ends in 1 s"], [END, "ending now"], [END + 45_000, "ending now"]] as const) {
+    assert.equal(left(card(now)), says, `the card at ${new Date(now).toISOString()}`);
+    assert.equal(left(dialog(now)), says, `the dialog at ${new Date(now).toISOString()}`);
+  }
+  assert.equal(textOf(dialog(END + 45_000)), `Online · ending now , at ${clockAt(listed.endsAt)} · reads every synced table`);
+  // only the time left moves with the clock: the shell sets its text in place (app.js TICK), so no row moves
+  const steady = (h: string) => h.replace(/(<time data-tick[^>]*>)[^<]*(<\/time>)/g, "$1$2");
+  for (const at of [END - 61_000, END, END + 45_000]) {
+    assert.equal(steady(card(at)), steady(card(SHARE_NOW)), "the card: only the time left changed");
+    assert.equal(steady(dialog(at)), steady(dialog(SHARE_NOW)), "the dialog: only the time left changed");
+  }
+  // no end (a tunnel whose client says none): until you stop it, no timer, the same at every time
+  const endless = sharing([{ ...listed, endsAt: null }]);
+  assert.equal(textOf(card(SHARE_NOW, endless)).match(/Online[^·]*· reads every synced table/)?.[0], "Online until you stop it · reads every synced table");
+  assert.equal(card(SHARE_NOW + 3_600_000, endless), card(SHARE_NOW, endless), "nothing in it moves with the clock");
+  assert.equal(textOf(dialog(SHARE_NOW, { ...opened, endsAt: null })), "Online until you stop it · reads every synced table");
+});
+
+test("in the browser: the Temporary cloud tunnel's time left ticks where it is, the card not written again, and ends at ending now (issue 1117)", async (t) => {
+  // the page's clock is the global Date (`new Date()` in `start`), held by the test; the beats' timer held too
+  t.mock.timers.enable({ apis: ["Date", "setInterval"], now: SHARE_NOW });
+  const run = fakeRun();
+  run.answers.set("GET api/state", answer(sharing([listed])));
+  run.answers.set("GET api/share/choices", answer(ONE_ANSWER.body));
+  run.answers.set("POST api/share/share_a1b2c3/beat", answer({ ok: true }));
+  const { el, tick, settle } = fakeBrowser(run, "#users");
+  await settle();
+  const added = el("added") as unknown as { writes: number; html: string; querySelectorAll?: (s: string) => { innerHTML: string }[] };
+  assert.match(textOf(added.html), new RegExp(`^Temporary cloud tunnel Host relay\\.example Copy Port 41234 Copy Database shop Copy SSL mode require Copy Login share_a1b2c3 Online · ends in 55 min , at ${clockAt(listed.endsAt)} · reads every synced table `));
+  const shown = [{ innerHTML: /<time data-tick [^>]*>([^<]*)</.exec(added.html)![1]! }];
+  added.querySelectorAll = (sel: string) => sel === "time[data-tick]" ? shown : [];
+  const writes = added.writes;
+  const END = Date.parse(listed.endsAt);
+  for (const [at, says] of [[END - 30 * 60_000, "ends in 30 min"], [END - 30_000, "ends in 30 s"], [END + 2_000, "ending now"]] as const) {
+    t.mock.timers.setTime(at);
+    tick(); await settle();
+    assert.equal(shown[0]!.innerHTML, says, `the time left at ${new Date(at).toISOString()}`);
+    assert.equal(added.writes, writes, "the card not written again: nothing in it moved");
+  }
+});
+
+test("Temporary cloud tunnel over a fake run: Open a cloud tunnel opens it confirmed with the role chosen, beaten on a timer of its own, its end said and its password dropped; Stop", async () => {
   const asked: Array<[string, string | undefined, unknown]> = [];
   let state: unknown = sharing([]);
   const answers: Record<string, unknown> = {
@@ -6956,7 +7016,7 @@ test("Temporary cloud login over a fake run: Open a cloud login opens it confirm
   assert.deepEqual([fifth.once(), fifth.m.phase], [null, "ended"]);
 });
 
-test("in the browser: Open a cloud login opens the one-time dialog (its Copy focused, Escape refused, polls leaving it as it is); I have copied it closes it, the live card left with Stop focused and no password on the page", async () => {
+test("in the browser: Open a cloud tunnel opens the one-time dialog (its Copy focused, Escape refused, polls leaving it as it is); I have copied it closes it, the live card left with Stop focused and no password on the page", async () => {
   const run = fakeRun();
   let state: unknown = sharing([]);
   run.answers.set("GET api/state", () => new Response(JSON.stringify(state), { status: 200 }));
@@ -6972,9 +7032,9 @@ test("in the browser: Open a cloud login opens the one-time dialog (its Copy foc
   await click({ shareOpen: "" });
   const once = el("once");
   assert.deepEqual([once.open, once.shown], [true, 1], "opened as a modal");
-  assert.match(el("once-head").html, /^<p class="once-title" id="once-title">Temporary cloud login<\/p>/);
+  assert.match(el("once-head").html, /^<p class="once-title" id="once-title">Temporary cloud tunnel<\/p>/);
   assert.ok(el("once-head").html.includes(PASSWORD));
-  assert.match(textOf(el("once-status").html), /^Public for .* : every synced table$/);
+  assert.match(textOf(el("once-status").html), /^Online · .* · reads every synced table$/);
   assert.match(textOf(el("once-foot").html), /^The password is only shown once and is not saved\./);
   assert.equal(d.focused, "once [data-copy]");
   assert.ok(!el("added").html.includes(PASSWORD), "the card under the box never holds it");
@@ -6986,11 +7046,11 @@ test("in the browser: Open a cloud login opens the one-time dialog (its Copy foc
   await click({ dismissOnce: "" });
   assert.equal(once.open, false, "closed by its button");
   assert.equal(d.focused, "share-stop", "the focus on the live card's Stop");
-  assert.match(textOf(el("added").html), /^Temporary cloud login Host relay\.example Copy Port 41234 Copy Login share_a1b2c3 .* The password was shown once, when it opened, and is not saved\..* Stop$/);
+  assert.match(textOf(el("added").html), /^Temporary cloud tunnel Host relay\.example Copy Port 41234 Copy Database shop Copy SSL mode require Copy Login share_a1b2c3 .* The password was shown once, when it opened, and is not saved\..* Stop$/);
   assert.ok(["added", "once-head", "once-status", "once-foot", "add-share-box"].every((id) => !el(id).html.includes(PASSWORD)), "the password nowhere on the page");
 });
 
-test("the Users page over a fake run: the add box offers New user and Temporary cloud login, a choice rewriting neither pane; its card where New user added is; never in the users list; Connect points to it; a served run has the plain form", async () => {
+test("the Users page over a fake run: the add box offers New user and Temporary cloud tunnel, a choice rewriting neither pane; its card where New user added is; never in the users list; Connect points to it; a served run has the plain form", async () => {
   const run = fakeRun();
   let state: unknown = RUNNING;
   run.answers.set("GET api/state", () => new Response(JSON.stringify(state), { status: 200 }));
@@ -7002,8 +7062,8 @@ test("the Users page over a fake run: the add box offers New user and Temporary 
   const before = app.view();
   assert.match(before["add-kinds"]!, /data-add-kind="user" aria-pressed="true">New user/);
   assert.match(before["add-user-box"]!, /^<form id="add-user" autocomplete="off">/, "in the box, the form is no card of its own");
-  assert.match(textOf(before["add-share-box"]!), /^For a tool in the cloud .* Role sales: 1 synced table: orders \(default\) ops: every synced table Open a cloud login$/);
-  assert.match(textOf(before["users-connect"]!), /A tool in the cloud that can't reach this machine: choose Temporary cloud login in the box above\.$/);
+  assert.match(textOf(before["add-share-box"]!), /^For a tool in the cloud .* Role sales: 1 synced table: orders \(default\) ops: every synced table Open a cloud tunnel$/);
+  assert.match(textOf(before["users-connect"]!), /A tool in the cloud that can't reach this machine: choose Temporary cloud tunnel in the box above\.$/);
   assert.doesNotMatch(before["users-connect"]!, /data-share/, "no box in Connect");
   const page = app.pages.get("users")!;
   assert.equal(page.arrive(), "user-name");
@@ -7023,14 +7083,14 @@ test("the Users page over a fake run: the add box offers New user and Temporary 
   state = sharing([{ ...listed, role: "ops" }]);
   app.markStale(); await app.poll();
   const open = app.view();
-  assert.match(open["once-head"]!, /<p class="once-title" id="once-title">Temporary cloud login<\/p>/);
+  assert.match(open["once-head"]!, /<p class="once-title" id="once-title">Temporary cloud tunnel<\/p>/);
   assert.ok(open["once-head"]!.includes(PASSWORD));
   // no MCP section: it is for a tool in the cloud, which runs no command on a computer of its own (issue 1114)
   assert.doesNotMatch(onceHtml(open), /MCP|MASON_URL|once-mcp/);
-  assert.match(open.added!, /<p class="added-title">Temporary cloud login<\/p>/);
+  assert.match(open.added!, /<p class="added-title">Temporary cloud tunnel<\/p>/);
   assert.ok(!open.added!.includes(PASSWORD), "never in the card");
   assert.ok(!open.users!.includes("share_a1b2c3"), "not a user");
-  assert.match(open["add-share-box"]!, /disabled>Open a cloud login/, "one at a time");
+  assert.match(open["add-share-box"]!, /disabled>Open a cloud tunnel/, "one at a time");
   const served = fakeRun();
   served.answers.set("GET api/state", answer({ ...RUNNING, served: true }));
   const sapp = fn<[unknown], App>("createApp")(served.fetch);
@@ -7041,7 +7101,7 @@ test("the Users page over a fake run: the add box offers New user and Temporary 
   assert.equal(sv["add-kinds"], "", "no segments");
   assert.equal(sv["add-share-box"], "");
   assert.match(sv["add-user-box"]!, /^<form id="add-user" class="formcard"/, "the plain add form, its own card");
-  assert.doesNotMatch(Object.values(sv).join(""), /Temporary cloud login|data-share/);
+  assert.doesNotMatch(Object.values(sv).join(""), /Temporary cloud tunnel|data-share/);
 });
 
 // ------------------------------------------------------------------ the host's views and card (issue 814)

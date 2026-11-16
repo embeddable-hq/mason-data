@@ -53,6 +53,16 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   ChatGPT and claude.ai can't connect this way yet.
   - When you add a user, its dialog has the same two in a closed section, "Connect an MCP client", with the user's
     password in them. Like the password, they are shown only once.
+- **On the web page's Users page, "Temporary cloud login" is now "Temporary cloud tunnel".** Its button is now "Open a
+  cloud tunnel". `mason share` is unchanged.
+  - Its card now shows the Database and the SSL mode, each with a Copy button, in the order of the Connect box: Host,
+    Port, Database, SSL mode, Login. A BI tool's form asks for both. The SSL mode is always `require`, and a tool
+    that connects without SSL is refused. Before, they were only in the URL in the dialog shown once.
+  - It now counts down to its end: "Online · ends in 59 min, at 18:55". The dialog shown once counts down too. A
+    tunnel with no end says "Online until you stop it". Before, it counted up: "Public for 53 s".
+  - It says it usually opens in a few seconds. Before, it said that opening one can take up to 30 s. Mason still
+    gives up after 30 s, and says so.
+- **`mason status --json` now gives each open share's `database` and `sslmode`**, beside its host and port.
 
 ## What was wrong and is now right
 

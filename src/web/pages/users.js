@@ -3,7 +3,7 @@
  * POST /api/users/<name>/from, /disable and /enable, DELETE /api/users/<name>. An added user's password lives in this page's memory while its one-time dialog is open, never in
  * storage, a URL or a log line.
  */
-import { actId, badge, button, code, copyable, copyBlock, copyClick, details, duration, empty, esc, json, pop, renderFailure, ROOMS, serverHostNote, spanText, status, utcMinute, readOnlyLine, usersReadOnly, sendButton, failurePop, listTable } from "../shared.js";
+import { actId, badge, button, code, copyable, copyBlock, copyClick, details, duration, empty, esc, json, pop, renderFailure, ROOMS, serverHostNote, status, utcMinute, readOnlyLine, usersReadOnly, sendButton, failurePop, listTable } from "../shared.js";
 import { VIEW_HASHES } from "../routes.js";
 
 /** The users as the page reads them: with each one's last use (`mason user list` asks the same), then every 30 s. */
@@ -183,7 +183,7 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
  * prints): the host, port, database and sslmode — what a BI tool's form asks for, each with Copy — then the URL with
  * `<user>:<password>` as placeholders. No psql line (issue 874): the URL is the same thing, pasted after `psql`. None of it is a user's: a row carries what is (its name, its
  * state), and a user's password is copied only from the card shown once when it is added (`renderAdded`). "" when the
- * run did not say. `shareTip`: where the page may open a temporary cloud login (`shareable`), a tip pointing to it in
+ * run did not say. `shareTip`: where the page may open a cloud tunnel (`shareable`), a tip pointing to it in
  * the add box, for a tool that can't reach this machine.
  */
 export function renderUsersConnect(pg, served = false, shareTip = false) {
@@ -194,7 +194,7 @@ export function renderUsersConnect(pg, served = false, shareTip = false) {
     `<dl class="facts">${rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${copyable(id, v)}</dd>`).join("")}</dl>` +
     serverHostNote(pg, served) +
     `<p class="tip"><span>Put a user's name and password in place of ${code("<user>")} and ${code("<password>")}. The password is shown only once, when you add the user. If it's lost, remove the user and add it again.</span></p>` +
-    (shareTip ? `<p class="tip">A tool in the cloud that can't reach this machine: choose Temporary cloud login in the box above.</p>` : "") + `</div>`;
+    (shareTip ? `<p class="tip">A tool in the cloud that can't reach this machine: choose Temporary cloud tunnel in the box above.</p>` : "") + `</div>`;
 }
 
 /** The npm package an MCP client runs `mason mcp` from, on its own computer (cli/package.json `name`). */
@@ -236,7 +236,7 @@ export function renderUsersMcp(pg, served = false, version = null) {
     `<p class="tip">The web versions of ChatGPT and claude.ai can't connect this way yet.</p></div>`;
 }
 
-// ------------------------------------------------------------------ Temporary cloud login (mason share, from the page)
+// ------------------------------------------------------------------ Temporary cloud tunnel (mason share, from the page)
 
 /** The page's share before anything was asked: what the share's renderers and the page's model start from. */
 export const NO_SHARE = Object.freeze({ phase: "none", role: null, opened: null, ended: null, failure: null, stopFailure: null });
@@ -248,18 +248,12 @@ export const pageShareOf = (s) => s?.share?.shares?.find((x) => x.from === "page
  *  (`served`: its run refuses `/api/share`) and never on a read-only page (`pageReadOnly`, whatever it still allows). */
 export const shareable = (s) => s !== undefined && s !== null && s.served !== true && (s.pageReadOnly ?? null) === null;
 
-/** How a temporary cloud login ends, beside "Live until you stop it": a free one's hour, and the page closing (its
- *  beats stop). */
-const endsLine = (endsAt, now) => (endsAt === null || endsAt === undefined ? ""
-  : ` A free one ends sooner, within about an hour, at ${new Date(endsAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} (in about ${Math.max(0, Math.round((Date.parse(endsAt) - now) / 60_000))} minutes). Then open a new one for a new address and password.`) +
-  " It also ends within two minutes of closing this page.";
-
 /** The two things the add box creates, its segments' words. */
-const KINDS = [["user", "New user"], ["share", "Temporary cloud login"]];
+const KINDS = [["user", "New user"], ["share", "Temporary cloud tunnel"]];
 
 /**
  * WHAT THE ADD BOX CREATES: two segments on the box, a segmented control as the time range's — "New user" (the add
- * form) and "Temporary cloud login" (`mason share`, from the page) — each a button, the one chosen pressed. Written only
+ * form) and "Temporary cloud tunnel" (`mason share`, from the page) — each a button, the one chosen pressed. Written only
  * where the page may open a share (`shareable`); elsewhere the box is the plain add form. The choice is the page's own
  * (`m.addKind`), never the hash: it is a form's, not a view's. The stylesheet shows the pane chosen and keeps the
  * other's place, unseen (both in one grid cell), so the box keeps the height of the taller and nothing below moves.
@@ -270,10 +264,10 @@ export function renderAddKinds(kind = "user") {
 }
 
 /**
- * THE TEMPORARY CLOUD LOGIN'S PANE in the add box (src/cli/page-share.ts; `mason share`'s, from the page): what it is
- * for, in two sentences, then a Role choice where the roles a share may read as (`choices`: the read of
- * `/api/share/choices`, undefined before it) are more than one, and "Open a cloud login" — the click is the person's
- * yes to a public address, said above it. Written the same in every phase but while one opens or is open, when the
+ * THE TEMPORARY CLOUD TUNNEL'S PANE in the add box (src/cli/page-share.ts; `mason share`'s, from the page): what it is
+ * for, in two sentences, and how long it usually takes to open (`OPENS_IN`), then a Role choice where the roles a share may read as (`choices`: the read of
+ * `/api/share/choices`, undefined before it) are more than one, and "Open a cloud tunnel" — the click is the person's
+ * yes to an address reachable online, said above it. Written the same in every phase but while one opens or is open, when the
  * button is held, disabled (one at a time); what it opened, how it ended or why it was refused is the card's
  * (`renderShareCard`), where a user just added is shown. The roles unread: the button disabled, "Reading the roles…" beside
  * it; refused (a roles file that cannot be read, no role a share may read as): the run's Failure. "" where the page may
@@ -288,22 +282,48 @@ export function renderSharePane(s, m = NO_SHARE, choices = undefined) {
   const opening = m.phase === "opening";
   const busy = opening || (pageShareOf(s) !== null && m.phase !== "ended");
   const title = list === null ? "" : opening ? "" : busy ? "One is open: stop it to open another" : "";
-  // Open a cloud login → Opening… in the room of both, while it opens (up to 30 s, said in the tip, which never changes)
-  return `<div class="share-pane"><p class="tip">For a tool in the cloud that can't reach this machine. Opens a public address with a login of its own, until you stop it. Opening one can take up to 30 s.</p>` +
-    failure + `<p class="share-ask">${role}${sendButton("Open a cloud login", "Opening…", { shareOpen: "" }, "primary", { id: "share-open", busy: opening, disabled: list === null || busy, title })}` +
+  // Open a cloud tunnel → Opening… in the room of both, while it opens (how long it usually takes is said in the tip,
+  // which never changes; the run gives up after 30 s, src/cli/page-share.ts TIMEOUT_MS, and says so)
+  return `<div class="share-pane"><p class="tip">For a tool in the cloud that can't reach this machine. Opens an address reachable online, protected by a login and password of its own, until you stop it. ${OPENS_IN}</p>` +
+    failure + `<p class="share-ask">${role}${sendButton("Open a cloud tunnel", "Opening…", { shareOpen: "" }, "primary", { id: "share-open", busy: opening, disabled: list === null || busy, title })}` +
     `${list === null && !failure ? ` <span class="dim">Reading the roles…</span>` : ""}</p></div>`;
 }
 
-/** How long a share has been public, as the role it reads as, and what it reads (`open`: as `/api/state` lists it, or
- *  the answer that opened it). */
-const publicLine = (open, now) => `<p class="added-seen">${badge("Public", "warn")} for <time data-tick datetime="${esc(open.openedAt)}">${esc(spanText((now - Date.parse(open.openedAt)) / 1000))}</time>` +
-  `${open.role !== null && open.role !== undefined ? `, as the role ${esc(open.role)}` : ""}: ${esc(open.reads)}</p>`;
+/** How long a cloud tunnel usually takes to open, in the pane's tip. Not measured on the real route yet, so it says
+ *  no number; the limit is the run's (30 s, src/cli/page-share.ts TIMEOUT_MS), said in its refusal when it is met. */
+export const OPENS_IN = "It usually opens in a few seconds.";
+
+/** What is left of a cloud tunnel, as it counts down to `endsAt` (the tunnel's end, ISO 8601): "ends in 59 min", by
+ *  `duration`; "ending now" once the end has passed and the run has not yet seen it go (it ends the share as its
+ *  tunnel's client exits, and the next read of the state says so), never a negative or a zero. */
+export const endsInText = (endsAt, now) => {
+  const left = (Date.parse(endsAt) - now) / 1000;
+  return left > 0 ? `ends in ${duration(left)}` : "ending now";
+};
+
+/** The clock time a cloud tunnel ends at, in this browser's time zone: `18:55`. */
+const clockAt = (iso) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
 /**
- * A TEMPORARY CLOUD LOGIN JUST OPENED, as the parts of the one-time dialog (`renderAdded`'s, index.html `#once`), while
- * the answer that opened it is in the page's memory (`m.opened`, until its "I have copied it"): titled "Temporary cloud
- * login", URL, Login and Password, the URL and the Password each with Copy, "Shown once" beside the password's Copy —
- * the login its own, never a user's; what it reads and for how long; and that the password is only shown once and is
+ * THAT IT IS ONLINE, AND UNTIL WHEN (issue 1117), then what it reads (`open`: as `/api/state` lists it, or the answer
+ * that opened it). With an end (a free tunnel's hour, `endsAt`): "Online · ends in 59 min, at 18:55", the time left a
+ * `<time data-tick>`, so it counts down at every write as an age counts up (src/web/app.js `TICK`: only its text is
+ * set, nothing moves). With none: "Online until you stop it", with no timer.
+ */
+const onlineLine = (open, now) => {
+  const ends = open.endsAt === null || open.endsAt === undefined ? null : open.endsAt;
+  const when = ends === null ? " until you stop it"
+    : ` · <time data-tick datetime="${esc(ends)}">${esc(endsInText(ends, now))}</time>, at ${esc(clockAt(ends))}`;
+  const reads = open.role !== null && open.role !== undefined ? `as the role ${esc(open.role)}: ${esc(open.reads)}` : esc(open.reads);
+  return `<p class="added-seen">${badge("Online", "warn")}${when} · reads ${reads}</p>`;
+};
+
+/**
+ * A TEMPORARY CLOUD TUNNEL JUST OPENED, as the parts of the one-time dialog (`renderAdded`'s, index.html `#once`), while
+ * the answer that opened it is in the page's memory (`m.opened`, until its "I have copied it"): titled "Temporary cloud tunnel",
+ * URL, Login and Password, the URL and the Password each with Copy, "Shown once" beside the password's Copy —
+ * the login its own, never a user's; that it is online and until when (`onlineLine`, counting down as the card's
+ * does), and what it reads; and that the password is only shown once and is
  * not saved. NO_ONCE otherwise, and where the page may not open one (`shareable`).
  */
 export function renderShareOnce(s, m = NO_SHARE, now = Date.now()) {
@@ -311,42 +331,46 @@ export function renderShareOnce(s, m = NO_SHARE, now = Date.now()) {
   const listed = pageShareOf(s);
   const open = listed !== null && listed.user === m.opened.user ? listed : m.opened;
   return {
-    "once-head": `<p class="once-title" id="once-title">Temporary cloud login</p>` +
+    "once-head": `<p class="once-title" id="once-title">Temporary cloud tunnel</p>` +
       onceFacts([["URL", m.opened.url, "share-url"], ["Login", m.opened.user, null], ["Password", m.opened.password, "share-password"]], "share-password"),
-    "once-status": publicLine(open, now),
+    "once-status": onlineLine(open, now),
     "once-foot": `<p class="tip">The password is only shown once and is not saved. This login is its own, and stops working when it ends.</p>`,
   };
 }
 
 /**
- * THE TEMPORARY CLOUD LOGIN, once asked: a card in the place and style "New user added" had (`.user-added`), under the
- * add box, titled "Temporary cloud login" on its top edge. While it opens: that it is opening. Open: its host, port and
- * login, and that the password was shown once (it is the one-time dialog's, `renderShareOnce`, and never this card's);
- * then what it reads and for how long, "Live until you stop it" with when a free one ends and that it ends when this
- * page closes, and Stop (`DELETE /api/share/<user>`, `#share-stop`: where the focus goes once the dialog closes).
- * Ended: how, from the run's `shareEnded` or the page's Stop; refused: the run's Failure. "" before anything was
- * asked, and where the page may not open one (`shareable`).
+ * THE TEMPORARY CLOUD TUNNEL, once asked: a card in the place and style "New user added" had (`.user-added`), under the
+ * add box, titled "Temporary cloud tunnel" on its top edge. While it opens: that it is opening. Open: what a BI tool's form asks
+ * for, in the order of the "Connect a Postgres client or BI tool" box — Host, Port, Database and SSL mode, each with
+ * Copy (`/api/state` `share.shares[]`: the share's database and `require`, issue 1117), then the Login — and that the
+ * password was shown once (it is the one-time dialog's, `renderShareOnce`, and never this card's); then that it is
+ * online and until when (`onlineLine`: counting down to a free one's end, or until you stop it) and what it reads,
+ * that it also ends when this page closes, and Stop (`DELETE /api/share/<user>`, `#share-stop`: where the focus goes
+ * once the dialog closes). Ended: how, from the run's `shareEnded` or the page's Stop; refused: the run's Failure. ""
+ * before anything was asked, and where the page may not open one (`shareable`).
  */
 export function renderShareCard(s, m = NO_SHARE, now = Date.now()) {
   if (!shareable(s)) return "";
-  const head = `<p class="added-title">Temporary cloud login</p>`;
+  const head = `<p class="added-title">Temporary cloud tunnel</p>`;
   const open = pageShareOf(s);
   if (open !== null && m.phase !== "ended") {
-    const rows = [["Host", open.host ?? "opening…", "share-host"], ["Port", open.port === null || open.port === undefined ? "…" : String(open.port), "share-port"], ["Login", open.user, null]];
+    const rows = [["Host", open.host ?? "opening…", "share-host"], ["Port", open.port === null || open.port === undefined ? "…" : String(open.port), "share-port"],
+      ["Database", open.database, "share-database"], ["SSL mode", open.sslmode, "share-sslmode"], ["Login", open.user, null]];
     return `<div class="user-added share-added" role="status">${head}` +
       `<dl class="facts">${rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${id === null ? esc(v) : copyable(id, v)}</dd>`).join("")}</dl>` +
-      publicLine(open, now) +
-      `<p class="tip">The password was shown once, when it opened, and is not saved. For a new one, press Stop, then Open a cloud login.</p>` +
-      `<p class="tip">Live until you stop it.${esc(endsLine(open.endsAt, now))}</p>` +
+      onlineLine(open, now) +
+      `<p class="tip">The password was shown once, when it opened, and is not saved. For a new one, press Stop, then Open a cloud tunnel.</p>` +
+      // the page's beats hold it (src/cli/page-share.ts BOUND_MS): the page closed, they stop
+      `<p class="tip">It also ends within two minutes of closing this page.</p>` +
       `${sendButton("Stop", "Stopping…", { shareStop: open.user }, "danger", { id: "share-stop", busy: m.stopping === true })}</div>` +
-      // A STOP REFUSED (issue 1033): said beside Stop, with what still stands — the login is open, and public — until
-      // dismissed, a Stop sent again, or the login seen ended
+      // A STOP REFUSED (issue 1033): said beside Stop, with what still stands — the tunnel is open, and online — until
+      // dismissed, a Stop sent again, or the tunnel seen ended
       (m.stopFailure ? failurePop("share-stop", m.stopFailure, { dismissShare: "" },
-        `<p class="headline">Stop failed. The temporary cloud login is still open, and its address and password still work.</p>`) : "");
+        `<p class="headline">Stop failed. The temporary cloud tunnel is still open, and its address and password still work.</p>`) : "");
   }
   // WHILE IT OPENS, ITS BUTTON SAYS SO (Opening…); A REFUSAL OR ITS END IS A POPOVER: nothing under the add box comes
   // and goes, so the Connect panel never moves
-  if (m.phase === "ended" && m.ended !== null) return pop("add-box", `<p class="headline">The temporary cloud login ended: ${esc(m.ended.why)}. Its address and password no longer work.</p>` +
+  if (m.phase === "ended" && m.ended !== null) return pop("add-box", `<p class="headline">The temporary cloud tunnel ended: ${esc(m.ended.why)}. Its address and password no longer work.</p>` +
     `<p class="pop-actions">${button("Dismiss", { dismissShare: "", popClose: "" }, "small")}</p>`);
   if (m.phase === "refused" && m.failure !== null) return failurePop("share-open", m.failure, { dismissShare: "" });
   return "";
@@ -359,8 +383,8 @@ const chosenRole = (m, list) => list.some((c) => c.role === m.role) ? m.role : l
 const BEAT_MS = 15_000;
 
 /**
- * THE PAGE'S SIDE OF A TEMPORARY CLOUD LOGIN (src/cli/page-share.ts has why each choice): open (the click on Open a
- * cloud login is the yes), BEAT while it is open — on a timer of its own, which runs while the tab is hidden (the poll
+ * THE PAGE'S SIDE OF A TEMPORARY CLOUD TUNNEL (src/cli/page-share.ts has why each choice): open (the click on Open a
+ * cloud tunnel is the yes), BEAT while it is open — on a timer of its own, which runs while the tab is hidden (the poll
  * does not: the person is in their tool's tab, pasting) —, Stop. The password is in `m.opened` alone, the page's memory, until its
  * one-time dialog is closed (`dismissOnce`), and is
  * dropped the moment the share is seen ended. `ctx.timers` is a test's clock; a browser's own otherwise.
@@ -386,7 +410,7 @@ export function createShare(ctx) {
   const roles = () => { const c = ctx.read(SHARE_CHOICES)?.body?.choices; return Array.isArray(c) ? c : null; };
   const actions = {
     shareRole(role) { if (roles()?.some((c) => c.role === role)) m.role = role; },
-    /** Open a cloud login: the click is the person's yes to a public address (the pane's sentence is what they read first; no question follows); the run opens the share (confirmed), and its one answer carries the password */
+    /** Open a cloud tunnel: the click is the person's yes to an address reachable online (the pane's sentence is what they read first; no question follows); the run opens the share (confirmed), and its one answer carries the password */
     async shareOpen() {
       const list = roles();
       if (list === null || m.phase === "opening") return;
@@ -591,9 +615,9 @@ export const page = {
     // addSent: what the last Add a user sent ({ name, role, from }), the form written with it while it is sent and once it
     // is refused; fromSent: what a From… sent ({ name, from }), its form written with it while it is sent
     const m = { actionFailure: null, added: null, addedVersion: null, addedSeen: false, confirming: null, refused: null, held: null, show: "active", addKind: "user", addSent: null, fromSent: null };
-    // addKind: what the add box creates, "user" (New user) or "share" (Temporary cloud login): the box's own choice
+    // addKind: what the add box creates, "user" (New user) or "share" (Temporary cloud tunnel): the box's own choice
     const users = () => ctx.read(USERS)?.body ?? null;
-    // the temporary cloud login, the add box's second kind: its own model, beats and actions
+    // the cloud tunnel, the add box's second kind: its own model, beats and actions
     const share = createShare(ctx);
     m.share = share.m;
     const actions = {
@@ -715,7 +739,7 @@ export const page = {
         return {
           // the roles file's state is the run's (/api/state roles): a file that cannot be read refuses every user held to it
           users: u ? renderUsers(u, m.confirming, h !== null ? h.now : ctx.now().getTime(), m.refused, state?.roles ?? null, usersReadOnly(state), m.show, { sending: ctx.sending, fromSent: m.fromSent }) : "",
-          // the add box: what it creates where the page may open a temporary cloud login (else the plain form), each
+          // the add box: what it creates where the page may open a cloud tunnel (else the plain form), each
           // kind's pane a part of its own, so a choice of kind rewrites neither (a name being typed stays)
           "add-kinds": offer ? renderAddKinds(m.addKind) : "",
           "add-user-box": renderAddUser(s, offer, { busy: ctx.sending("user-add"), sent: m.addSent }),
@@ -723,9 +747,9 @@ export const page = {
           "users-connect": renderUsersConnect(s?.postgres, s?.served === true, offer),
           // how an MCP client connects, from the same facts, under it
           "users-mcp": renderUsersMcp(s?.postgres, s?.served === true, s?.engine?.version ?? null),
-          // a user just added, or a cloud login just opened: the one-time dialog's parts (the shell opens it while `once()` names it)
+          // a user just added, or a cloud tunnel just opened: the one-time dialog's parts (the shell opens it while `once()` names it)
           ...(m.added ? renderAdded(m.added, { connected: m.addedSeen, version: m.addedVersion }) : renderShareOnce(s, share.m, ctx.now().getTime())),
-          // what the box made, under it: a temporary cloud login
+          // what the box made, under it: a cloud tunnel
           added: renderShareCard(s, { ...share.m, stopping: ctx.sending("share-stop") }, ctx.now().getTime()),
           // Add a user refused: a popover beside its button, with Dismiss, which moves nothing under the form
           action: m.actionFailure ? failurePop("add-user-submit", m.actionFailure, { dismissAddFailure: "" }) : "",
@@ -753,7 +777,7 @@ export const page = {
         if (d.dismissAddFailure !== undefined) return actions.dismissAddFailure() ?? true;
         return copyClick(d, button, { doc, win });
       },
-      /** Escape with no question open: a refusal beside a user, beside Add a user, or what is said of the cloud login
+      /** Escape with no question open: a refusal beside a user, beside Add a user, or what is said of the cloud tunnel
        *  goes, as its Dismiss does (null: none is shown) */
       dismiss() {
         if (m.refused !== null) { actions.dismissRefused(); return true; }

@@ -152,7 +152,7 @@ named `mason`. To move a tool that reads your Postgres, change its host, port an
 
 A user's password lasts until you remove the user. `mason share` is for trying Mason with a cloud BI tool, on data
 you may send through a free tunnel service. It is encrypted, but the tool does not verify the certificate, and it
-lasts about an hour. The web page's Users page offers it as Temporary cloud login. To keep a dashboard running,
+lasts about an hour. The web page's Users page offers it as Temporary cloud tunnel. To keep a dashboard running,
 [run Mason on a server](#run-it-on-a-server).
 
 [`docs/POSTGRES-API.md`](docs/POSTGRES-API.md) explains how tools connect and which SQL Mason answers.

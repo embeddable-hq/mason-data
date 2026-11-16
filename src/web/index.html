@@ -72,8 +72,8 @@
   <section id="page-users" aria-labelledby="users-h" hidden>
     <div class="page-head"><h2 id="users-h">Users</h2><p class="desc">Create and manage users that you can connect to tools and services.</p></div>
     <div id="users"></div>
-    <!-- the add box is the page's (src/web/pages/users.js): what it creates (renderAddKinds, only where a temporary public
-         login may be opened), the add form (renderAddUser: none on a read-only page) and the temporary cloud login's pane
+    <!-- the add box is the page's (src/web/pages/users.js): what it creates (renderAddKinds, only where a cloud
+         tunnel may be opened), the add form (renderAddUser: none on a read-only page) and the cloud tunnel's pane
          (renderSharePane), the two panes in one place so the box keeps the height of the taller -->
     <div id="add-box" class="add-box"><div id="add-kinds"></div><div class="add-panes"><div id="add-user-box"></div><div id="add-share-box"></div></div></div>
     <div id="action"></div>
@@ -111,7 +111,7 @@
   </section>
 </main>
 </div>
-<!-- THE ONE-TIME DIALOG (src/web/app.js `once`): a password shown once — a user just added, a temporary cloud login just
+<!-- THE ONE-TIME DIALOG (src/web/app.js `once`): a password shown once — a user just added, a cloud tunnel just
      opened — as a modal over the page, its parts written by the page that holds it (src/web/pages/users.js). It closes
      only by its button: never by Escape nor a click outside it, since the password is kept nowhere once it closes -->
 <dialog id="once" class="once" aria-labelledby="once-title" closedby="none">
