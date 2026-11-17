@@ -35,14 +35,15 @@ const say = (m: string): void => { process.stderr.write(`${m}\n`); };
 
 export const LOGIN: CommandSpec = {
   name: "login",
-  summary: "sign this machine in to a hosted Mason service, by a code you approve in your browser",
+  summary: "sign this machine in to Mason Cloud, by a code you approve in your browser",
   usage: `usage: mason login [--json]
 
-  Signs this machine in to a hosted Mason service: it prints a page and a code, opens the page in your browser
-  when it runs in a terminal, and waits while you sign in there and approve the code (until the code expires, as
-  the service says; Ctrl-C stops it). It then says who is signed in and their organisations, and keeps the login in
-  ~/.config/mason/credentials.json ($XDG_CONFIG_HOME/mason/ when that is set), readable by you alone, never in a
-  project. Signing in again replaces this machine's login to that service, and revokes the one it replaces.
+  Signs this machine in to Mason Cloud (${DEFAULT_SERVICE_URL}), or the service MASON_CLOUD_URL names: it prints
+  a page and a code, opens the page in your browser when it runs in a terminal, and waits while you sign in there
+  and approve the code (until the code expires, as the service says; Ctrl-C stops it). It then says who is signed
+  in and their organisations, and keeps the login in ~/.config/mason/credentials.json ($XDG_CONFIG_HOME/mason/ when
+  that is set), readable by you alone, never in a project. Signing in again replaces this machine's login to that
+  service, and revokes the one it replaces.
 
     mason login
     MASON_CLOUD_URL=http://127.0.0.1:8080 mason login     a service on this machine
@@ -66,10 +67,10 @@ export const LOGIN: CommandSpec = {
 
 export const LOGOUT: CommandSpec = {
   name: "logout",
-  summary: "sign this machine out of a hosted Mason service: its login revoked and removed",
+  summary: "sign this machine out of Mason Cloud: its login revoked and removed",
   usage: `usage: mason logout [--json]
 
-  Signs this machine out of the hosted Mason service (MASON_CLOUD_URL, else ${DEFAULT_SERVICE_URL}): it revokes
+  Signs this machine out of Mason Cloud (${DEFAULT_SERVICE_URL}), or the service MASON_CLOUD_URL names: it revokes
   the login on the service, then removes it from ~/.config/mason/credentials.json. When the service cannot be
   reached the login is still removed here, and it says the login was NOT revoked and how to revoke it: sign in to
   the service's web app and revoke it there. Logins to other services stay.
