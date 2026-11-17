@@ -693,7 +693,8 @@ export async function mainCold(argv: string[], at: { lockFile?: string; procRoot
   const release = (): void => {
     if (released) return;
     released = true;
-    removeQuietly(["rm", "-f", ownerId], log);
+    // -v: the image's anonymous volume, which docker create made for it
+    removeQuietly(["rm", "-f", "-v", ownerId], log);
     releaseLock();
   };
   process.on("exit", release);
@@ -1005,8 +1006,8 @@ function takeOwner(image: string, me: string, procRoot: string): string {
       throw new Usage(`a cold run may be in progress: ${OWNER_CONTAINER} says process ${held.owner === "" ? "unknown" : ownerPid(held.owner)} holds ${PG_CONTAINER}. Wait for it to end`);
     }
     // its run ended without removing it: removed by the id read, never by its name, which a run making it now may hold
-    const rm = spawnSync("docker", ["rm", "-f", held.id], { encoding: "utf8" });
-    if (rm.status !== 0 && !/no such/i.test(rm.stderr)) throw new Usage(`docker rm -f ${held.id} (${OWNER_CONTAINER}, an ended run's): ${rm.stderr.trim()}`);
+    const rm = spawnSync("docker", ["rm", "-f", "-v", held.id], { encoding: "utf8" });
+    if (rm.status !== 0 && !/no such/i.test(rm.stderr)) throw new Usage(`docker rm -f -v ${held.id} (${OWNER_CONTAINER}, an ended run's): ${rm.stderr.trim()}`);
   }
   throw new Usage(`another cold run took ${OWNER_CONTAINER} as this one did: wait for it to end`);
 }

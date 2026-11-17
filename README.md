@@ -302,24 +302,24 @@ Mason and Postgres answered the same 3 queries over the same rows. The primary k
 
 | query | rows | clients | Postgres (s) | Mason (s) | Mason is |
 |---|---:|---:|---:|---:|---|
-| Count by status, every order | 1 M | 1 | 1.21 | 0.066 | 18× faster |
-|  | 1 M | 10 | 1.24 | 0.21 | 5.8× faster |
-|  | 10 M | 1 | 21.2 | 0.23 | 90× faster |
-|  | 10 M | 10 | 21.7 | 0.97 | 22× faster |
+| Count by status, every order | 1 M | 1 | 1.21 | 0.0658 | 18× faster |
+|  | 1 M | 10 | 1.24 | 0.211 | 5.8× faster |
+|  | 10 M | 1 | 21.2 | 0.234 | 90× faster |
+|  | 10 M | 10 | 21.7 | 0.967 | 22× faster |
 |  | 100 M | 1 | 216 | 4.07 | 53× faster |
 |  | 100 M | 10 | 710 | 8.45 | 84× faster |
-| Revenue by month, orders joined to customers | 1 M | 1 | 1.98 | 0.15 | 13× faster |
-|  | 1 M | 10 | 3.61 | 0.54 | 6.7× faster |
-|  | 10 M | 1 | 24.0 | 0.98 | 25× faster |
+| Revenue by month, orders joined to customers | 1 M | 1 | 1.98 | 0.154 | 13× faster |
+|  | 1 M | 10 | 3.61 | 0.542 | 6.7× faster |
+|  | 10 M | 1 | 24.0 | 0.979 | 25× faster |
 |  | 10 M | 10 | 43.9 | 3.73 | 12× faster |
 |  | 100 M | 1 | 335 | 17.9 | 19× faster |
 |  | 100 M | 10 | 2036 | 669 | 3.0× faster |
-| One order by its primary key | 1 M | 1 | 0.033 | 0.13 | 4.0× slower |
-|  | 1 M | 10 | 0.037 | 0.20 | 5.5× slower |
-|  | 10 M | 1 | 0.035 | 0.76 | 22× slower |
-|  | 10 M | 10 | 0.038 | 0.82 | 22× slower |
-|  | 100 M | 1 | 0.021 | 13.2 | 620× slower |
-|  | 100 M | 10 | 0.025 | 13.5 | 530× slower |
+| One order by its primary key | 1 M | 1 | 0.0328 | 0.133 | 4.0× slower |
+|  | 1 M | 10 | 0.0368 | 0.203 | 5.5× slower |
+|  | 10 M | 1 | 0.0348 | 0.757 | 22× slower |
+|  | 10 M | 10 | 0.0383 | 0.824 | 22× slower |
+|  | 100 M | 1 | 0.0213 | 13.2 | 620× slower |
+|  | 100 M | 10 | 0.0255 | 13.5 | 530× slower |
 
 Mason is for scans and aggregates. A lookup through an index is faster on Postgres ([docs/DESIGN.md](docs/DESIGN.md) "Heap order, no index"). Cold times on Postgres depend on the disk's throughput. Each engine had 4 CPUs, 8 GiB of memory and no swap, on a disk of EBS gp3, 125 MB/s, 3000 IOPS. It was measured on m7g.xlarge, 4 vCPU, 16 GiB RAM, against PostgreSQL 18.7 and Mason 0.23.0, on 2026-11-17. [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md) has every run and how it was measured.
 <!-- END GENERATED -->
