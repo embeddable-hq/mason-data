@@ -16,7 +16,8 @@ import { reach } from "./state.ts";
 import { callRun, RunUnreachable } from "./control.ts";
 import { clientLink, connectionUrl, listenerTips, psqlLine, type PostgresLink } from "./pg-url.ts";
 import { isLoopback } from "../api/postgres/plain.ts";
-import { changeUsers, isActive, isDisabled, keyFingerprint, newUserId, readUsers, underKey, userPassword, userRanges, USER_NAME_RE, USER_NAME_RULE, USERS_FILE, type MasonUser } from "../duck/users.ts";
+import { changeUsers, checkPassword, isActive, isDisabled, isUserPassword, keyFingerprint, newUserId, readUsers, underKey, userPassword, userRanges, USER_NAME_RE, USER_NAME_RULE, USERS_FILE, type CheckAnswer, type MasonUser } from "../duck/users.ts";
+import { readHidden, readPiped, type SecretInput, type SecretRead } from "./secret-input.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { out as styleOut, type Style } from "./style.ts";
 import { NO_ROLES, type RoleGrants, type RolesLive } from "../duck/grants.ts";
@@ -41,6 +42,7 @@ export const USER: CommandSpec & { needs: "project" } = {
        mason user disable <name> [--replica <org>/<name>] [--json]
        mason user enable <name> [--replica <org>/<name>] [--json]
        mason user remove <name> [--replica <org>/<name>] [--json]
+       mason user check <name> [--json]   (the password on stdin)
 
   A user of this project's Postgres API: a name and a password, as a BI tool's datasource form asks for them
   (Metabase, Grafana, Superset, Power BI) or an app's DATABASE_URL carries them. Its password does not expire:
@@ -60,6 +62,7 @@ export const USER: CommandSpec & { needs: "project" } = {
     mason user disable metabase                metabase connects no more, until mason user enable metabase
     mason user enable metabase                 metabase connects again, with the same password
     mason user remove metabase                 metabase connects no more
+    mason user check metabase < password.txt   whether that is metabase's password: ok, wrong, disabled or removed
     docker compose exec mason mason user add grafana   beside mason serve, in its data folder
     mason user add metabase --replica acme/shop          a user of a replica on a hosted Mason service
 
@@ -120,6 +123,15 @@ export const USER: CommandSpec & { needs: "project" } = {
   mason user from <name> <range> … replaces a user's ranges, and mason user from <name> --any removes them; the sessions
   it holds from an address outside its new ranges end at their next statement.
 
+  mason user check <name> says whether a password is the user's, as the Postgres API would judge it but never by
+  the address: ok (its password), wrong, disabled (its password, but the user is disabled) or removed (the password
+  of a user of that name that was removed, an old one of a user removed and added again included), with the user's
+  id where it is one of its. It is for an operator's own sign-in page in front of Mason. The password is read from
+  stdin (at a terminal, asked for and not shown), never from the command line, and is never printed or logged. It
+  answers wrong as often as it is asked: a page in front of it must limit attempts (by the browser's address and by
+  the user name). Exit 0 ok, 3 wrong, 4 disabled, 5 removed; 1 or 2 when it could not tell (said). It reads this
+  project's users alone (no --replica).
+
   --replica <org>/<name> manages the users of a replica on a hosted Mason service instead of this project's (else
   MASON_REPLICA, said on stderr when it chose; each part lower case letters, digits and -): the same subcommands,
   --role, --set and --from, the same output and --json, which names the replica in its headline and its replica key,
@@ -142,11 +154,14 @@ export const USER: CommandSpec & { needs: "project" } = {
     (null when unknown) }; disable { disabled: { name, id, addedAt, disabledAt }, already (it was disabled
     before) }; enable { enabled: { name, id, addedAt }, already (it was not disabled) }; from { changed: { name, id,
     addedAt, from (its ranges now; null: any address) }, already (they were these before) }; remove { removedUser: { name,
-    id, addedAt, removedAt }, removed (the same, kept until 1.0) }; next. With --replica (or MASON_REPLICA) every answer also has replica ("<org>/<name>":
+    id, addedAt, removedAt }, removed (the same, kept until 1.0) }; check { user (the name), answer (ok, wrong, disabled
+    or removed), id (the user's id: the live one's for ok and disabled, the removed one's for removed; null for wrong) }; next. With --replica (or MASON_REPLICA) every answer also has replica ("<org>/<name>":
     the replica it acted on), and a project's never does
 `,
   options: { json: { type: "boolean", default: false }, role: { type: "string" }, set: { type: "string", multiple: true }, from: { type: "string", multiple: true }, any: { type: "boolean", default: false }, replica: { type: "string" } },
-  json: ["replica", "user", "id", "addedAt", "password", "url", "psql", "host", "port", "database", "sslmode", "role", "attributes", "roleFrom", "readsNothing", "users", "disabled", "enabled", "already", "removedUser", "removed", "from", "changed", "lastUsedNote", "urlNote", "requestLogDays", "next"],
+  // mason user check: an exit code an answer (CHECK_EXIT)
+  answers: { 3: "mason user check: wrong (not the user's password)", 4: "mason user check: disabled (its password, the user disabled)", 5: "mason user check: removed (the password of a user of that name that was removed)" },
+  json: ["replica", "user", "answer", "id", "addedAt", "password", "url", "psql", "host", "port", "database", "sslmode", "role", "attributes", "roleFrom", "readsNothing", "users", "disabled", "enabled", "already", "removedUser", "removed", "from", "changed", "lastUsedNote", "urlNote", "requestLogDays", "next"],
 };
 
 
@@ -374,7 +389,7 @@ export const disableEffect = (name: string): string =>
 export const disabledText = (disabledAt: string): string => `Disabled ${stamp(disabledAt)} UTC`;
 
 /** Why `name` is not one `mason user <verb>` takes (a usage failure), or null. */
-export function userNameProblem(verb: "add" | "remove" | "disable" | "enable" | "from", name: string | undefined): string | null {
+export function userNameProblem(verb: "add" | "remove" | "disable" | "enable" | "from" | "check", name: string | undefined): string | null {
   if (name === undefined) return `mason user ${verb} <name>: which user`;
   if (!USER_NAME_RE.test(name)) return `${JSON.stringify(name)} is not a user name: ${USER_NAME_RULE}`;
   return null;
@@ -723,9 +738,12 @@ export async function user(argv: string[]): Promise<number> {
   const json = f.values.json === true;
   const usage = (message: string): number => failed("user", { message, code: "usage", usage: USER.usage }, { json });
   const [verb, name, ...rest] = f.positionals;
-  const VERBS = ["add", "list", "from", "disable", "enable", "remove"];
-  if (verb === undefined) return usage("add, list, from, disable, enable or remove: mason user add <name> makes a user");
-  if (!VERBS.includes(verb)) return usage(`there is no mason user ${verb}: add, list, from, disable, enable or remove${didYouMean(verb, VERBS)}`);
+  const VERBS = ["add", "list", "from", "disable", "enable", "remove", "check"];
+  if (verb === undefined) return usage("add, list, from, disable, enable, remove or check: mason user add <name> makes a user");
+  if (!VERBS.includes(verb)) return usage(`there is no mason user ${verb}: add, list, from, disable, enable, remove or check${didYouMean(verb, VERBS)}`);
+  // a word after check's name may be a password, and so may the name itself: refused without repeating it
+  if (verb === "check" && name !== undefined && isUserPassword(name)) return usage("mason user check <name>: that word has a password's shape, not repeated here — the name goes on the command line, the password on stdin alone (a password on the command line is in the shell's history and ps: change it)");
+  if (verb === "check" && rest.length) return usage(`mason user check takes one name, and the password on stdin alone: ${rest.length} more word${rest.length === 1 ? "" : "s"} on the command line, not repeated here (a password there is in the shell's history and ps: change it)`);
   if (verb === "list" ? name !== undefined : verb !== "from" && rest.length) return usage(`mason user ${verb} takes ${verb === "list" ? "no name" : "one name"}: ${[name, ...rest].filter(Boolean).join(" ")} is too many`);
   // the address ranges: --from on add, the positionals of from (or its --any); each read by the one grammar, a wrong one a
   // wrong line before anything is read, written or sent
@@ -743,14 +761,15 @@ export async function user(argv: string[]): Promise<number> {
   if (sets.length > 0 && verb !== "add") return usage(`--set goes with mason user add: mason user add <name> --role <role> --set ${sets[0]!}`);
   for (const arg of sets) { const s = setOf(arg); if (typeof s === "string") return usage(s); }
   if (verb !== "list") {
-    const problem = userNameProblem(verb as "add" | "remove" | "disable" | "enable" | "from", name);
+    const problem = userNameProblem(verb as "add" | "remove" | "disable" | "enable" | "from" | "check", name);
     if (problem !== null) return usage(problem);
   }
   const ranges = given === null ? null : rangesToSet(given, `mason user ${verb} ${name!}`);
   if (ranges !== null && "message" in ranges) return failed("user", { ...ranges, usage: USER.usage }, { json });
   // A REPLICA ON A HOSTED MASON SERVICE (--replica, else MASON_REPLICA): its users, asked of the service with the same
   // request the run's /api/users takes, printed by the renderers above; nothing of a project here is read or written
-  const replica = replicaOf(typeof f.values.replica === "string" ? f.values.replica : undefined, USER.usage);
+  if (verb === "check" && typeof f.values.replica === "string") return usage("mason user check reads this project's users alone: run it beside the Mason whose users it checks, without --replica");
+  const replica = verb === "check" ? null : replicaOf(typeof f.values.replica === "string" ? f.values.replica : undefined, USER.usage);
   if (replica !== null && "message" in replica) return failed("user", replica, { json });
   if (replica !== null) {
     const named = role === undefined ? null : roleNameProblem(role);
@@ -793,6 +812,8 @@ export async function user(argv: string[]): Promise<number> {
     out(listText(project.config.name, { users, lastUsedNote, urlNote, requestLogDays }, roles, next));
     return 0;
   }
+
+  if (verb === "check") return checkCommand(file, apiKey, name!, json);
 
   if (verb === "from") {
     const r = setUserFrom(file, name!, ranges?.from ?? null);
@@ -853,4 +874,55 @@ export async function user(argv: string[]): Promise<number> {
   const listener = run?.postgresListener ?? null;
   out(addedReport(r, { roles, listener, link, next, share: sharePoints(project.config.served === true, link, listener) }));
   return 0;
+}
+
+// ------------------------------------------------------------------ mason user check
+
+/** What `mason user check` exits with, an answer each (a failure to tell is 1, or 2 for a wrong line, as every command's). */
+export const CHECK_EXIT: Readonly<Record<CheckAnswer, number>> = { ok: 0, wrong: 3, disabled: 4, removed: 5 };
+/** the longest password read: a user's is 56 characters */
+const CHECK_MAX = 1024;
+/** how long a pipe may stay open and silent */
+export const CHECK_STDIN_MS = 30_000;
+
+/** The password, from a person (asked, not shown) or the pipe (whole): never the command line. What went wrong is said by
+ *  kind, never by value. */
+export async function checkSecret(name: string, input: SecretInput = process.stdin, output: { write(s: string): unknown } = process.stderr,
+  stdinMs = CHECK_STDIN_MS): Promise<{ password: string } | Failure> {
+  const tty = input.isTTY === true;
+  const again = `mason user check ${name} < password.txt`;
+  let read: SecretRead;
+  try { read = tty ? await readHidden(input, output, `${name}'s password (not shown; Ctrl-C cancels): `, CHECK_MAX) : await readPiped(input, CHECK_MAX, stdinMs); }
+  catch (e) { return { message: `the password could not be ${tty ? "read at the prompt" : "read from stdin"}`, code: "failed", why: (e as Error).message, fix: `run it again: ${again}` }; }
+  if ("value" in read) return { password: read.value };
+  const why: Record<typeof read.none, string> = {
+    cancelled: tty ? "Ctrl-C, or the input ended, at the prompt" : "stdin ended", empty: tty ? "an empty line cancels the prompt" : "stdin was empty",
+    too_long: `more than ${CHECK_MAX} bytes: no user's password is that long`, lines: "stdin holds more than one line: the password is one line",
+    timeout: `nothing arrived on stdin within ${Math.round(stdinMs / 1000)} s`, closed: "the terminal closed while the password was typed",
+  };
+  return { message: "no password was read, so nothing was checked", code: "usage", why: why[read.none],
+    fix: `give the password on stdin, one line: ${again} (at a terminal it is asked for); never on the command line` };
+}
+
+/** Each answer's headline, for a person. */
+const CHECK_SAID: Readonly<Record<CheckAnswer, (name: string) => string>> = {
+  ok: (n) => `That is ${n}'s password`,
+  wrong: (n) => `That is not ${n}'s password`,
+  disabled: (n) => `That is ${n}'s password, and ${n} is disabled: it does not connect until mason user enable ${n}`,
+  removed: (n) => `That was the password of ${n}, which was removed: it connects no more`,
+};
+
+async function checkCommand(file: string, apiKey: string, name: string, json: boolean): Promise<number> {
+  const secret = await checkSecret(name);
+  if ("message" in secret) return failed("user", { ...secret, usage: USER.usage }, { json });
+  const list = readUsers(file);
+  if ("problem" in list) {
+    return failed("user", { message: `the list of users cannot be read, so nothing was checked: ${list.problem}`, code: "failed",
+      fix: `${file} is the list (mason user writes it): repair it` }, { json });
+  }
+  const r = checkPassword(list.users, apiKey, name, secret.password);
+  const next: NextStep[] = r.answer === "disabled" ? [[`mason user enable ${name}`, "it connects again, with the same password"]] : [["mason user list", "the users, each with its id"]];
+  if (json) out(jsonText(USER, { user: name, answer: r.answer, id: r.id }, next));
+  else out(reportText({ headline: CHECK_SAID[r.answer](name), details: [["answer", r.answer], ["id", r.id ?? "-"]], next }));
+  return CHECK_EXIT[r.answer];
 }

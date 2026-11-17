@@ -1980,3 +1980,65 @@ test("mason sync: a poll's updated count is said as an estimate, ~N updated; add
   // --json: the plain number, and the declared shape says a poll's updated may count rows read again
   assert.match(cli.SYNC_USAGE.replace(/\s+/g, " "), /updated \(an estimate: it may count rows the poll read again, shown as ~N updated\)/);
 });
+
+test("mason user check <name>: the password on stdin, answered ok, wrong, disabled or removed with the user's id and an exit code each, as a person and with --json; nothing secret on the line or in the output", async () => {
+  // src/cli/user.ts checkCommand, src/duck/users.ts checkPassword; a stopped project: it needs the project, never the run
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mason-user-check-")));
+  try {
+    fs.mkdirSync(path.join(root, "mason", "sources"), { recursive: true });
+    fs.mkdirSync(path.join(root, ".mason"), { mode: 0o700 });
+    fs.writeFileSync(path.join(root, ".mason", "config.json"), JSON.stringify({ name: "shop", folder: "mason", remote: false, apiKey: "k".repeat(48), sourceServer: null, running: null, lastRun: null }), { mode: 0o600 });
+    fs.writeFileSync(path.join(root, "mason", "sources", "shop.yml"), "kind: postgres\nurl: postgres://mason:x@127.0.0.1:1/shop\ndatabase: shop\ntables: {}\n");
+    const run = (argv: string[], stdin?: string) => runMason(root, argv, matrixEnv(), 60_000, undefined, stdin);
+    const added = JSON.parse((await run(["user", "add", "metabase", "--json"])).stdout) as { id: string; password: string };
+    assert.match(added.id, /^[0-9a-f]{16}$/);
+    // the id is in the list, with --json and for a person, so an operator checks that a name still has the same id
+    const listed = JSON.parse((await run(["user", "list", "--json"])).stdout) as { users: Array<{ name: string; id: string }> };
+    assert.deepEqual(listed.users.map((x) => [x.name, x.id]), [["metabase", added.id]]);
+    assert.match((await run(["user", "list"])).stdout, new RegExp(`metabase +id ${added.id} · added `));
+    const check = async (stdin: string | undefined, json = true): Promise<Answer> => run(["user", "check", "metabase", ...(json ? ["--json"] : [])], stdin);
+    const secretFree = (a: Answer): void => { assert.ok(!`${a.stdout}${a.stderr}`.includes(added.password.slice(-32)), `the password reached the output:\n${a.stdout}${a.stderr}`); };
+
+    const ok = await check(`${added.password}\n`);
+    assert.equal(ok.code, 0, ok.stderr);
+    assert.deepEqual(JSON.parse(ok.stdout), { user: "metabase", answer: "ok", id: added.id, next: [{ command: "mason user list", what: "the users, each with its id" }] });
+    secretFree(ok);
+    const person = await check(added.password, false);
+    assert.equal(person.code, 0);
+    assert.equal(person.stdout, `That is metabase's password\n  answer   ok\n  id       ${added.id}\n\nNext:\n  mason user list                               the users, each with its id\n`);
+    secretFree(person);
+
+    const wrong = await check(`mason_${added.id}_${"0".repeat(32)}\n`);
+    assert.equal(wrong.code, 3);
+    assert.deepEqual(JSON.parse(wrong.stdout).answer, "wrong");
+    assert.equal(JSON.parse(wrong.stdout).id, null);
+
+    assert.equal((await run(["user", "disable", "metabase"])).code, 0);
+    const disabled = await check(added.password);
+    assert.equal(disabled.code, 4);
+    assert.deepEqual(JSON.parse(disabled.stdout), { user: "metabase", answer: "disabled", id: added.id, next: [{ command: "mason user enable metabase", what: "it connects again, with the same password" }] });
+    assert.equal((await run(["user", "enable", "metabase"])).code, 0);
+
+    assert.equal((await run(["user", "remove", "metabase"])).code, 0);
+    const again = JSON.parse((await run(["user", "add", "metabase", "--json"])).stdout) as { id: string; password: string };
+    const removed = await check(added.password);
+    assert.equal(removed.code, 5);
+    assert.deepEqual([JSON.parse(removed.stdout).answer, JSON.parse(removed.stdout).id], ["removed", added.id], "the old password: the old id");
+    const now = await check(again.password);
+    assert.deepEqual([now.code, JSON.parse(now.stdout).answer, JSON.parse(now.stdout).id], [0, "ok", again.id]);
+
+    // no password on stdin: a wrong line, nothing checked; a password on the command line refused without repeating it
+    const none = await check(undefined);
+    assert.equal(none.code, 2);
+    assert.equal(JSON.parse(none.stdout).error.message, "no password was read, so nothing was checked");
+    for (const argv of [["user", "check", "metabase", again.password, "--json"], ["user", "check", again.password, "--json"]]) {
+      const a = await run(argv, "");
+      assert.equal(a.code, 2, argv.join(" "));
+      assert.ok(!`${a.stdout}${a.stderr}`.includes(again.password.slice(-32)), `${argv.join(" ")}: the password repeated`);
+    }
+    // a replica's users are not checked here
+    assert.equal((await run(["user", "check", "metabase", "--replica", "acme/shop", "--json"], again.password)).code, 2);
+    // the user's own help says the exit codes
+    assert.match((await run(["user", "--help"])).stdout, /Exit 0 ok, 3 wrong, 4 disabled, 5 removed/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});

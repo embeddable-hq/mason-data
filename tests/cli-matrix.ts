@@ -69,7 +69,8 @@ export const MATRIX_ARGS: Readonly<Record<string, readonly string[]>> = {
  * form of each is its command's line above; a line a state runs is a process, and the matrix is the suite's slowest).
  */
 export const MATRIX_MORE: Readonly<Record<string, ReadonlyArray<readonly string[]>>> = {
-  user: [["disable", "no_such_user"], ["enable", "no_such_user"], ["from", "no_such_user", "10.0.0.0/8"]],
+  // check reads the password from stdin, which the matrix closes: below the project the state's answer, else a wrong line
+  user: [["disable", "no_such_user"], ["enable", "no_such_user"], ["from", "no_such_user", "10.0.0.0/8"], ["check", "no_such_user"]],
   logs: [["--events"], ["--running"], ["--requests"]],
   // a generated table named: below a run the state's answer, with one no such table
   wait: [["no_such_table", "--timeout", "1"]],

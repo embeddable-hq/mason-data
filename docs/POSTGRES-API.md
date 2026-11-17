@@ -24,6 +24,7 @@ mason user from looker 198.51.100.0/24 2001:db8::/32   # its address ranges repl
 mason user disable metabase                         # kept: its logins refused (28000) until mason user enable metabase
 mason user enable metabase                          # it connects again, with the same password
 mason user remove metabase                          # its next connection is refused; its sessions end at their next statement
+mason user check metabase --json < password.txt     # is that metabase's password? ok, wrong, disabled or removed, with its id
 docker compose exec mason mason user add grafana    # beside mason serve, in its data folder
 ```
 
@@ -70,6 +71,20 @@ to connect with; `mason user list` says the users (name, id, when added); `mason
 - **Rotating the API key removes every user at once** (`apiKey` in `.mason/config.json`, `MASON_API_KEY` under
   `mason serve`): no password verifies under the new key, the refusal says the key was rotated, and `mason user list`
   marks each as not connecting. Remove and add each again for new passwords.
+- **A user's id is stable**: 16 hex digits made at `mason user add`, kept in `.mason/users.json`, and shown by `mason
+  user list` (and `--json`). It is the user's for as long as it lives: disabling and enabling keep it, and a name removed
+  and added again gets a new one, so a name that still has the same id is the same user. It is no secret (the password's
+  secret part is its MAC).
+- **`mason user check <name>` says whether a password is the user's**, for an operator's own sign-in page in front of
+  Mason (`--json`: `{ user, answer, id }`): `ok` (its password; the live user's id), `wrong` (no id), `disabled` (its
+  password, the user disabled; its id) or `removed` (the password of a user of that name that was removed — an old one
+  of a user removed and added again included —, with that removed user's id); exit 0, 3, 4 and 5. It judges the password
+  as the listener does (the MAC compared in constant time) but never the address. The password is read from stdin (at a
+  terminal, asked for and not shown), never from the command line — a word there with a password's shape is refused
+  without being repeated — and is never printed or logged. **A sign-in page in front of it must limit attempts**:
+  `check` answers `wrong` as often as it is asked, so the page counts failures by the browser's address, by the replica
+  and by the user name, and slows or refuses past a few (a user's password is 128 random bits, but a page that lets
+  anyone ask without a limit is a free oracle for whatever a person typed).
 - **A name is one user**: adding an existing name is refused, with the way out (remove it, then add it: a new
   password; or add another name and remove the old one once the tool uses it). The password is never kept, so it
   cannot be printed again: a lost one is a remove and an add.

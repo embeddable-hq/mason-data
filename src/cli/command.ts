@@ -166,6 +166,9 @@ export interface CommandSpec {
    *  wrong line, a refusal, a crash — is said on stderr, `--json` on the line or not: one JSON object on stdout would
    *  be a frame the client cannot read */
   stdout?: "protocol";
+  /** exit codes of its own beyond EXIT_CODES' (0, 1, 2, 124), each an ANSWER, never a failure: `mason user check`'s
+   *  wrong, disabled and removed (3, 4, 5). Its spec as data lists them in `exitCodes`, its usage says each */
+  answers?: Readonly<Record<number, string>>;
 }
 
 export interface Command extends CommandSpec { run: (argv: string[]) => Promise<number> }
@@ -252,7 +255,8 @@ const timesOut = (name: string): boolean => new RegExp(`\\bmason ${name}\\b`).te
  *   json                   the top-level keys of its --json answer, next included; null when it takes no --json
  *   needs                  "files", "project", "run" or null (what it needs to do its work)
  *   stdout                 "protocol" when its stdout is a protocol's (mason mcp), else null
- *   exitCodes              [{ code, meaning }]: 0, 1 and 2 for every command, 124 for one that can run out of time
+ *   exitCodes              [{ code, meaning }]: 0, 1 and 2 for every command, 124 for one that can run out of time,
+ *                          and a command's own answers beyond them (`answers`: mason user check's 3, 4, 5)
  */
 export interface SpecJson {
   name: string;
@@ -276,7 +280,8 @@ export function specJson(spec: CommandSpec): SpecJson {
     const value = d.type === "string" ? (forms.map((f) => placeholder.exec(f)?.[1]).find((v) => v !== undefined) ?? placeholder.exec(spec.usage)?.[1] ?? null) : null;
     return { name: `--${name}`, short: d.short ? `-${d.short}` : null, type: d.type, multiple: d.multiple === true, default: d.default ?? null, value };
   });
-  const exitCodes = Object.entries(EXIT_CODES).filter(([code]) => code !== "124" || timesOut(spec.name)).map(([code, meaning]) => ({ code: Number(code), meaning }));
+  const exitCodes = [...Object.entries(EXIT_CODES).filter(([code]) => code !== "124" || timesOut(spec.name)), ...Object.entries(spec.answers ?? {})]
+    .map(([code, meaning]) => ({ code: Number(code), meaning }));
   return { name: spec.name, summary: spec.summary, usage: spec.usage, forms: forms.map((f) => ({ synopsis: f, positionals: positionalsOf(f, spec.name) })), options,
     json: spec.json ? [...spec.json] : null, needs: spec.needs ?? null, stdout: spec.stdout ?? null, exitCodes };
 }
