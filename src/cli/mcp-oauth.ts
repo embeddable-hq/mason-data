@@ -15,8 +15,10 @@
  *     request (src/cli/mcp-http.ts), so a user removed and added again — a new id — is not the old token's.
  *
  * FAIL CLOSED: keys that cannot be fetched or read: every token is refused (503 "could not tell"), never let through.
- * The keys are cached (KEYS_TTL_MS), at most MAX_KEYS, and fetched again for a `kid` they do not hold at most once every
- * REFRESH_MIN_MS, so a stream of tokens with made-up kids costs the issuer one request a minute. Every answer of the JWKS
+ * The keys are cached for at most KEYS_TTL_MS (5 minutes; a shorter `Cache-Control: max-age` honoured), so a key the
+ * issuer removed is refused within it, and never used past it: no grace. At most MAX_KEYS. ONE fetch at a time, and at
+ * most one every REFRESH_MIN_MS whatever asks — keys past their life, a `kid` they lack — backing off to BACKOFF_MAX_MS
+ * while fetches fail, so a stream of tokens, made-up kids or none valid, costs the issuer one request a minute at most. Every answer of the JWKS
  * URL is untrusted: no redirect followed, bounded in size and time. A TOKEN NEVER REACHES a log line, an error or an
  * answer: what is said of one is what is wrong with it.
  *
@@ -60,16 +62,26 @@ export const RESOURCE_METADATA_PATH = "/.well-known/oauth-protected-resource";
 const CLAIM_RE = /^[A-Za-z0-9_.:/-]{1,128}$/;
 const MAX_URL = 2048;
 
-/** An address a setting names: https, or http to this machine alone; no user, password, query or fragment. */
+/**
+ * An address a setting names: https, or http to this machine alone; no user, password, query or fragment. What is
+ * wrong is said in words that NEVER QUOTE THE VALUE (as `readPublicUrl` of MASON_PG_PUBLIC_URL, src/cli/pg-public-url.ts):
+ * a URL pasted with a password, a key in its query or a token in its fragment — or a value that is no URL at all —
+ * must not reach the start's report, which is the platform's log. A user or a password is masked as MASON_CLOUD_URL's
+ * is (`https://****@host`), and nothing past the host is ever said; the secret is refused before the scheme is read.
+ */
 function addressProblem(setting: string, value: string): string | URL {
-  const quoted = `${setting}=${JSON.stringify(value.length > 200 ? `${value.slice(0, 200)}…` : value)}`;
-  if (value.length > MAX_URL) return `${quoted} is ${value.length} characters: at most ${MAX_URL}`;
+  const shape = "https://<host>/<path>";
+  if (value.length > MAX_URL) return `${setting} is set to ${value.length} characters: an address is at most ${MAX_URL} (${shape})`;
   let u: URL;
-  try { u = new URL(value); } catch { return `${quoted} is not a URL: https://<host>/<path>`; }
+  try { u = new URL(value); } catch { return `${setting} is set to what is not a URL: ${shape}`; }
+  // what may be said of it: the scheme and the host of a web address alone (`user:password` with no `//` reads as a
+  // scheme and a path, so another scheme is never said)
+  const web = u.protocol === "https:" || u.protocol === "http:";
+  if (u.username !== "" || u.password !== "") return `${setting} carries a user or a password${web ? ` (${u.protocol}//****@${u.host})` : ""}: an address alone, ${shape}`;
+  if (u.search !== "" || u.hash !== "" || value.includes("?") || value.includes("#")) return `${setting} carries a query or a fragment${web ? ` (${u.protocol}//${u.host}/…)` : ""}: an address alone, ${shape}`;
   const host = u.hostname.replace(/^\[|\]$/g, "");
-  if (u.protocol !== "https:" && !(u.protocol === "http:" && isLoopback(host))) return `${quoted}: https:// (http:// only to this machine, for a test)`;
-  if (u.username !== "" || u.password !== "") return `${quoted} carries a user or a password: an address alone`;
-  if (u.search !== "" || u.hash !== "" || value.includes("?") || value.includes("#")) return `${quoted} carries a query or a fragment: an address alone`;
+  if (u.protocol === "http:" && !isLoopback(host)) return `${setting} is http://${u.host}/…: https:// (http:// only to this machine, for a test)`;
+  if (!web) return `${setting} is not an https:// address: ${shape}`;
   return u;
 }
 
@@ -130,10 +142,15 @@ export function resourceMetadataUrl(s: McpSettings): string {
 export const CLOCK_SKEW_S = 60;
 /** a bearer token past this many characters is refused unread */
 export const MAX_TOKEN = 16_384;
-/** how long the issuer's keys are used before they are fetched again */
-export const KEYS_TTL_MS = 3_600_000;
-/** a `kid` the keys lack fetches them again at most this often */
+/** the longest the issuer's keys are used before they are fetched again — a shorter `Cache-Control: max-age` of the
+ *  JWKS answer is honoured, never a longer one — so a key the issuer removed is refused within this. Past it the keys
+ *  are not used at all until a fetch succeeds: no grace, a fetch that fails refuses every token (503) */
+export const KEYS_TTL_MS = 300_000;
+/** the keys are fetched at most this often, whatever asks (keys past their life, a `kid` they lack): one fetch at a
+ *  time, and the next one no sooner — the floor of a `max-age` too */
 export const REFRESH_MIN_MS = 60_000;
+/** while fetches fail, the wait before the next doubles from REFRESH_MIN_MS up to this */
+export const BACKOFF_MAX_MS = 600_000;
 /** the most keys kept of the issuer's set */
 export const MAX_KEYS = 100;
 /** an answer of the issuer's past this many bytes is refused */
@@ -156,7 +173,15 @@ export type TokenCheck = { user: string; id: string } | { status: 401 | 503; rea
 /** what fetching takes: the global fetch, or a test's */
 export type Fetcher = (url: string, init: { redirect: "manual"; signal: AbortSignal; headers: Record<string, string> }) => Promise<Response>;
 
-interface Keys { byKid: Map<string, crypto.KeyObject & { jwk: Record<string, unknown> }>; at: number }
+interface Keys { byKid: Map<string, crypto.KeyObject & { jwk: Record<string, unknown> }>; at: number; until: number }
+
+/** The life `Cache-Control` gives an answer, in ms: `max-age`'s, 0 for `no-store` / `no-cache`, null when it says none. */
+export function cacheLife(header: string | null): number | null {
+  if (header === null) return null;
+  if (/(?:^|,)\s*no-(?:store|cache)\b/i.test(header)) return 0;
+  const m = /(?:^|,)\s*max-age\s*=\s*"?(\d{1,10})"?\s*(?:,|$)/i.exec(header);
+  return m === null ? null : Number(m[1]) * 1000;
+}
 
 const b64url = /^[A-Za-z0-9_-]+$/;
 
@@ -179,8 +204,10 @@ export class Issuer {
   private readonly log: (line: string) => void;
   private keys: Keys | null = null;
   private fetching: Promise<Keys | string> | null = null;
-  /** when the keys were last asked for (successfully or not): the rate a `kid` they lack may ask again */
-  private askedAt = -Infinity;
+  /** when the next fetch may start: REFRESH_MIN_MS after the last one, longer while they fail (`failures`) */
+  private nextFetchAt = -Infinity;
+  /** fetches failed in a row */
+  private failures = 0;
   private lastProblem: string | null = null;
 
   constructor(settings: McpSettings, o: { fetch?: Fetcher; now?: () => number; log: (line: string) => void }) {
@@ -213,7 +240,7 @@ export class Issuer {
     let keys = await this.current();
     if (typeof keys === "string") return { status: 503, reason: keys };
     let key = keys.byKid.get(header.kid);
-    if (key === undefined && this.now() - this.askedAt >= REFRESH_MIN_MS) {
+    if (key === undefined && this.now() >= this.nextFetchAt) {
       keys = await this.refresh();
       if (typeof keys === "string") return { status: 503, reason: keys };
       key = keys.byKid.get(header.kid);
@@ -258,22 +285,33 @@ export class Issuer {
     return { user: named, id };
   }
 
-  /** the keys to judge by: cached, else (past KEYS_TTL_MS, or none yet) fetched */
+  /** the keys to judge by: cached within their life, else fetched — or, a fetch not due yet, why there are none */
   private async current(): Promise<Keys | string> {
-    if (this.keys !== null && this.now() - this.keys.at < KEYS_TTL_MS) return this.keys;
+    if (this.keys !== null && this.now() < this.keys.until) return this.keys;
+    // fail closed: keys past their life are never used again, whatever a fetch does
+    this.keys = null;
     return this.refresh();
   }
 
+  /** ONE fetch at a time, and none before `nextFetchAt`: a stream of tokens, valid or not, costs the issuer one request
+   *  per REFRESH_MIN_MS at most (more apart while fetches fail); what a fetch not made answers is the keys or the problem
+   *  as they stand */
   private refresh(): Promise<Keys | string> {
     if (this.fetching !== null) return this.fetching;
-    this.askedAt = this.now();
+    if (this.now() < this.nextFetchAt) return Promise.resolve(this.keys ?? this.lastProblem ?? "its keys are not fetched yet");
     this.fetching = this.fetchKeys().then((k) => {
       if (typeof k === "string") {
-        // fail closed: keys that cannot be fetched again are not used past their time
-        this.keys = null;
+        this.failures++;
+        this.nextFetchAt = this.now() + Math.min(REFRESH_MIN_MS * 2 ** (this.failures - 1), BACKOFF_MAX_MS);
+        // fail closed: keys that cannot be fetched again are not used past their life (current drops them then); the
+        // ones still within it keep judging until it ends
         if (k !== this.lastProblem) this.log(`[mcp] the authorization server's keys could not be read, so every token is refused: ${k}`);
         this.lastProblem = k;
+        return this.keys !== null && this.now() < this.keys.until ? this.keys : k;
       } else {
+        this.failures = 0;
+        // from the moment the keys were read, so their life (never under REFRESH_MIN_MS) never ends before a fetch is due
+        this.nextFetchAt = k.at + REFRESH_MIN_MS;
         if (this.lastProblem !== null) this.log(`[mcp] the authorization server's keys are read again (${k.byKid.size})`);
         this.lastProblem = null;
         this.keys = k;
@@ -286,8 +324,9 @@ export class Issuer {
   /** The issuer's key set, at the JWKS URL set: every answer untrusted. */
   private async fetchKeys(): Promise<Keys | string> {
     const at = this.settings.jwks;
-    const set = await this.getJson(at);
-    if (typeof set === "string") return `its keys (${at}, MASON_MCP_JWKS_URL): ${set}`;
+    const got = await this.getJson(at);
+    if (typeof got === "string") return `its keys (${at}, MASON_MCP_JWKS_URL): ${got}`;
+    const { value: set, cacheControl } = got;
     const list = set.keys;
     if (!Array.isArray(list)) return `its keys (${this.settings.jwks}) are not a JWK set ({ "keys": [...] })`;
     const byKid = new Map<string, crypto.KeyObject & { jwk: Record<string, unknown> }>();
@@ -305,11 +344,14 @@ export class Issuer {
       byKid.set(jwk.kid, Object.assign(key, { jwk: { ...pub, ...(typeof jwk.alg === "string" ? { alg: jwk.alg } : {}) } }));
     }
     if (byKid.size === 0) return `its keys (${this.settings.jwks}) hold no signing key Mason can read (RSA of 2048 bits or more, EC, or Ed25519 / Ed448, each with a kid)`;
-    return { byKid, at: this.now() };
+    // the answer's own life when shorter than KEYS_TTL_MS, never under REFRESH_MIN_MS (no fetch is made sooner anyway)
+    const life = Math.max(REFRESH_MIN_MS, Math.min(KEYS_TTL_MS, cacheLife(cacheControl) ?? KEYS_TTL_MS));
+    const fetchedAt = this.now();
+    return { byKid, at: fetchedAt, until: fetchedAt + life };
   }
 
   /** One GET of a JSON object: no redirect followed, at most MAX_ANSWER bytes, within FETCH_MS; why not, as text. */
-  private async getJson(url: string): Promise<Record<string, unknown> | string> {
+  private async getJson(url: string): Promise<{ value: Record<string, unknown>; cacheControl: string | null } | string> {
     let res: Response;
     try { res = await this.fetcher(url, { redirect: "manual", signal: AbortSignal.timeout(FETCH_MS), headers: { accept: "application/json" } }); }
     catch (e) { return `could not be fetched (${(e as Error).name === "TimeoutError" ? `no answer in ${FETCH_MS / 1000} s` : (e as Error).message})`; }
@@ -327,6 +369,6 @@ export class Issuer {
     let v: unknown;
     try { v = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { return "answered what is not JSON"; }
     if (typeof v !== "object" || v === null || Array.isArray(v)) return "answered what is not a JSON object";
-    return v as Record<string, unknown>;
+    return { value: v as Record<string, unknown>, cacheControl: res.headers.get("cache-control") };
   }
 }

@@ -6,5 +6,7 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   (MCP revisions 2025-11-25 and 2026-07-28), each request as the `mason user` its token names by name and id
   (`MASON_MCP_USER_CLAIM`, `MASON_MCP_USER_ID_CLAIM`), looked up every time. A user's address ranges still apply, on the
   peer's address or — from a relay `MASON_MCP_PROXY_FROM` names — the last `X-Forwarded-For` entry it appended; the Users
-  page offers Claude's published ranges as a choice. Off loopback, `MASON_MCP_PLAIN=1` says TLS is terminated in front.
+  page offers Claude's and ChatGPT's published ranges as a choice (a user now takes up to 1,000 ranges). Off loopback,
+  `MASON_MCP_PLAIN=1` says TLS is terminated in front. The health port now takes a request's headers within 10 s and its
+  body within 30 s, closes idle connections after 5 s and holds at most 1,024 connections.
   Nothing changes until you set them (docs/POSTGRES-API.md "From a hosted agent: MCP over HTTPS").

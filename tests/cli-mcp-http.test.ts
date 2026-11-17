@@ -22,6 +22,7 @@ import assert from "node:assert/strict";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as http from "node:http";
+import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -109,14 +110,17 @@ function add(name: string, o: { from?: string[] } = {}): void {
 interface Mounted { endpoint: McpEndpoint; server: http.Server; base: string; logged: string[] }
 const mounted: Mounted[] = [];
 
-async function mount(env: Record<string, string>): Promise<Mounted> {
+/** the endpoint's own bounds and clock, and the health port's limits, where a test names them */
+interface MountOptions { now?: () => number; limits?: { sessions?: number; userSessions?: number; requests?: number }; health?: Record<string, number> }
+
+async function mount(env: Record<string, string>, o: MountOptions = {}): Promise<Mounted> {
   assert.ok(httpModule !== null && oauthModule !== null, "src/cli/mcp-http.ts and src/cli/mcp-oauth.ts: the endpoint");
   const s = oauthModule.mcpSettings({ MASON_MCP_URL: PUBLIC, MASON_MCP_ISSUER: ISSUER, MASON_MCP_JWKS_URL: JWKS, ...env }, "127.0.0.1");
   assert.ok(s !== null && !("problems" in s), JSON.stringify(s, (_k, v: unknown) => typeof v === "bigint" ? String(v) : v));
   const logged: string[] = [];
-  const endpoint = httpModule.mcpEndpoint(s, { log: (l) => logged.push(l) });
+  const endpoint = httpModule.mcpEndpoint(s, { log: (l) => logged.push(l), ...(o.now !== undefined ? { now: o.now } : {}), ...(o.limits !== undefined ? { limits: o.limits } : {}) });
   await endpoint.attach({ listener: api, users, database: "shop" });
-  const server = (healthServer as unknown as (...a: unknown[]) => http.Server)(() => ({ phase: "starting" }), Date.now(), (l: string) => logged.push(l), undefined, endpoint);
+  const server = (healthServer as unknown as (...a: unknown[]) => http.Server)(() => ({ phase: "starting" }), Date.now(), (l: string) => logged.push(l), undefined, endpoint, ...(o.health !== undefined ? [o.health] : []));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const m = { endpoint, server, base: `http://127.0.0.1:${(server.address() as { port: number }).port}`, logged };
   mounted.push(m);
@@ -377,6 +381,10 @@ test("a user's ranges are judged on the client: the peer, or a named proxy's LAS
   assert.equal((forged.body!.error as { message: string }).message, "the mason user limited may not connect from 203.0.113.7, outside its address ranges");
   // the same request with the forged entry last is the relay's own word: inside
   assert.equal((await post(relayed, INIT(), { token: valid, headers: { "x-forwarded-for": "203.0.113.7, 10.9.9.9" } })).status, 200);
+  // the forms a relay writes: a port beside the address, and v4-mapped (a dual-stack listener): the client inside
+  for (const xff of ["10.9.9.9:51234", "::ffff:10.9.9.9", "[::ffff:10.9.9.9]:443"]) {
+    assert.equal((await post(relayed, INIT(), { token: valid, headers: { "x-forwarded-for": xff } })).status, 200, xff);
+  }
   // a named relay that says nothing, or something that is no address: refused, never the peer let in
   for (const headers of [{}, { "x-forwarded-for": "10.1.2.3, unknown" }, { "x-forwarded-for": "10.0.0.0/8" }]) {
     const a = await post(relayed, INIT(), { token: valid, headers });
@@ -464,6 +472,115 @@ test("the issuer's keys cannot be read: every token is refused 503, never let th
   assert.equal(keyFetches, fetched, "made-up kids fetch the keys again at most once a minute");
 });
 
+/** a query that runs until it is cancelled or its timeout_ms ends it (150,000 rows joined to themselves) */
+const longQuery = (marker: number, timeoutMs = 120_000) => ({ name: "query", arguments: { sql: `SELECT count(*) FROM events a, events b WHERE (a.id::bigint * b.id) % 7 = ${marker % 7} AND ${marker} > 0`, timeout_ms: timeoutMs } });
+
+test("sessions are bounded per user and in all: a user over its bound loses its own oldest idle session, or is refused 429 when each runs a request; at the bound in all a new session is refused 503 with Retry-After, never made by ending another user's session in use — one unused past EVICTABLE_IDLE_MS makes way", async () => {
+  assert.ok(httpModule !== null, "src/cli/mcp-http.ts");
+  assert.equal(httpModule.MAX_USER_SESSIONS > 0 && httpModule.MAX_USER_SESSIONS < httpModule.MAX_SESSIONS, true);
+  if (idOf.other === undefined) add("other");
+  let clock = Date.now();
+  const m = await mount({}, { now: () => clock, limits: { sessions: 3, userSessions: 2 } });
+  const far = { exp: nowS() + 86_400 };
+  const a = jwt(claims("analyst", far)), o = jwt(claims("other", far));
+  const ping = async (token: string, sid: string): Promise<number> => (await post(m, { jsonrpc: "2.0", id: ids++, method: "ping" }, { token, session: sid })).status;
+  // a user's own bound: its third session ends its own oldest idle one, no one else's
+  const s1 = await session(m, a);
+  clock += 1_000;
+  const s2 = await session(m, a);
+  clock += 1_000;
+  const o1 = await session(m, o);
+  clock += 1_000;
+  const s3 = await session(m, a);
+  assert.deepEqual([await ping(a, s1), await ping(a, s2), await ping(a, s3), await ping(o, o1)], [404, 200, 200, 200]);
+  assert.ok(m.logged.some((l) => /made way for a new session of its user/.test(l)), m.logged.join("\n"));
+  // each of the user's sessions running a request: a new one is refused 429, neither ended
+  const long2 = post(m, { jsonrpc: "2.0", id: 7001, method: "tools/call", params: longQuery(7001) }, { token: a, session: s2 });
+  const long3 = post(m, { jsonrpc: "2.0", id: 7002, method: "tools/call", params: longQuery(7002) }, { token: a, session: s3 });
+  await sleep(500);
+  const busy = await post(m, INIT(), { token: a });
+  assert.equal(busy.status, 429, JSON.stringify(busy.body));
+  assert.equal((busy.body!.error as { code: string }).code, "too_many_sessions");
+  assert.ok(busy.headers.get("retry-after") !== null);
+  // the bound in all (3: s2, s3, o1), every session used within EVICTABLE_IDLE_MS: another user's new session is 503
+  // with Retry-After, and nobody's is ended — the two running ones above least of all
+  const full = await post(m, INIT(), { token: o });
+  assert.equal(full.status, 503, JSON.stringify(full.body));
+  assert.equal((full.body!.error as { code: string }).code, "too_many_sessions");
+  assert.ok(Number(full.headers.get("retry-after")) > 0);
+  assert.equal(await ping(o, o1), 200);
+  // past EVICTABLE_IDLE_MS unused (o1, idle; s2 and s3 still run their requests): o1 makes way, never a running one
+  clock += httpModule.EVICTABLE_IDLE_MS;
+  const o2 = await post(m, INIT(), { token: o });
+  assert.equal(o2.status, 200, JSON.stringify(o2.body));
+  assert.equal(await ping(o, o1), 404);
+  for (const [id, sid] of [[7001, s2], [7002, s3]] as const) {
+    assert.equal((await post(m, { jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: id, reason: "done" } }, { token: a, session: sid })).status, 202);
+  }
+  assert.deepEqual([(await long2).status, (await long3).status], [202, 202], "the running requests were never ended by another's session");
+  assert.deepEqual([await ping(a, s2), await ping(a, s3)], [200, 200]);
+});
+
+test("the health port's limits: a tool call longer than its request timeout is answered whole; a body or headers sent too slowly are cut; past MAX_REQUESTS /mcp is 503 and /healthz still answers; the connection cap holds and /healthz answers once silent connections are closed", async () => {
+  const serveModule = await import("../src/cli/serve.ts") as unknown as { HEALTH_LIMITS?: Record<string, number> };
+  assert.ok(serveModule.HEALTH_LIMITS !== undefined, "serve.ts HEALTH_LIMITS");
+  assert.deepEqual(serveModule.HEALTH_LIMITS, { headersMs: 10_000, requestMs: 30_000, keepAliveMs: 5_000, maxConnections: 1024, checkEveryMs: 1_000 });
+  assert.ok(httpModule !== null && httpModule.MAX_REQUESTS < serveModule.HEALTH_LIMITS.maxConnections!, "/mcp's clients alone never fill the port");
+  // the defaults reach the server mason serve listens with
+  const plain = (healthServer as unknown as (...a: unknown[]) => http.Server)(() => ({ phase: "starting" }), Date.now(), () => undefined);
+  assert.deepEqual([plain.headersTimeout, plain.requestTimeout, plain.keepAliveTimeout, plain.maxConnections], [10_000, 30_000, 5_000, 1024]);
+  plain.close();
+  const health = { headersMs: 1_000, requestMs: 1_500, keepAliveMs: 1_000, maxConnections: 6, checkEveryMs: 200 };
+  const m = await mount({}, { health, limits: { requests: 2 } });
+  const token = jwt(claims("analyst"));
+  const sid = await session(m, token);
+  const port = Number(new URL(m.base).port);
+  // a query that runs 3 s, twice the request timeout: answered whole (its timeout_ms the statement's own 57014)
+  const t0 = Date.now();
+  const slow = await post(m, { jsonrpc: "2.0", id: ids++, method: "tools/call", params: longQuery(7101, 3_000) }, { token, session: sid });
+  assert.ok(Date.now() - t0 >= 2_900, `ran ${Date.now() - t0} ms`);
+  assert.equal(slow.status, 200, JSON.stringify(slow.body));
+  assert.match(JSON.stringify(slow.body), /57014|timeout/i);
+  // a body that never ends, and headers that never end: the connection answered 408 or closed within the limits
+  const cut = (head: string): Promise<{ ms: number; said: string }> => new Promise((resolve) => {
+    const started = Date.now();
+    let said = "";
+    const c = net.connect(port, "127.0.0.1", () => c.write(head));
+    c.on("data", (d) => { said += String(d); });
+    c.on("close", () => resolve({ ms: Date.now() - started, said }));
+    c.on("error", () => undefined);
+  });
+  const body = await cut(`POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{"jsonrpc"`);
+  assert.ok(body.ms < 4_000, `a body sent too slowly held ${body.ms} ms`);
+  const headers = await cut("POST /mcp HTTP/1.1\r\nHost: x\r\n");
+  assert.ok(headers.ms < 4_000, `headers sent too slowly held ${headers.ms} ms`);
+  // /mcp at its bound (2 running): the next is 503, and /healthz answers beside them
+  const running = [7201, 7202].map((id) => post(m, { jsonrpc: "2.0", id, method: "tools/call", params: longQuery(id) }, { token, session: sid }));
+  await sleep(500);
+  const over = await post(m, { jsonrpc: "2.0", id: ids++, method: "ping" }, { token, session: sid });
+  assert.equal(over.status, 503);
+  assert.equal((over.body!.error as { code: string }).code, "busy");
+  assert.equal((await fetch(`${m.base}/healthz`)).status, 503, "/healthz answers (503: the test's run is starting)");
+  // a cancellation is no request: it gets through at the bound, and stops what holds it there
+  const t2 = Date.now();
+  for (const id of [7201, 7202]) assert.equal((await post(m, { jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: id } }, { token, session: sid })).status, 202);
+  assert.deepEqual((await Promise.all(running)).map((r) => r.status), [202, 202]);
+  assert.ok(Date.now() - t2 < 10_000, "cancelled at the bound");
+  // the connection cap: silent connections fill it; past it a connection is closed at once; within headersMs they are
+  // cut, and /healthz answers again
+  await sleep(1_500);
+  const silent = await Promise.all(Array.from({ length: health.maxConnections }, () => new Promise<net.Socket>((resolve) => { const c = net.connect(port, "127.0.0.1", () => resolve(c)); c.on("error", () => undefined); })));
+  await sleep(100);
+  const refusedNow = await fetch(`${m.base}/healthz`).then((r) => r.status, () => "closed");
+  assert.equal(refusedNow, "closed", "past the cap a connection is closed");
+  let answered: number | string = "closed";
+  const t1 = Date.now();
+  while (answered === "closed" && Date.now() - t1 < 5_000) { await sleep(250); answered = await fetch(`${m.base}/healthz`).then((r) => r.status, () => "closed"); }
+  assert.equal(answered, 503, "/healthz answered once the silent connections were cut");
+  assert.ok(Date.now() - t1 < 4_000);
+  for (const c of silent) c.destroy();
+});
+
 test("mason serve with MASON_MCP_URL, MASON_MCP_ISSUER and MASON_MCP_JWKS_URL: /mcp on its health port runs a query as the token's user; mason status and mason logs --requests name it", { timeout: 400_000 }, async () => {
   const { spawn } = await import("node:child_process");
   const { DemoSource } = await import("../src/demo/source.ts");
@@ -511,7 +628,7 @@ test("mason serve with MASON_MCP_URL, MASON_MCP_ISSUER and MASON_MCP_JWKS_URL: /
     assert.deepEqual(q.structured.rows, [["t"]], q.text);
     const status = JSON.parse((await runMason(data, ["status", "--json"], env)).stdout) as { mcp: unknown; addressPresets: Array<{ id: string; ranges: string[] }> };
     assert.deepEqual(status.mcp, { url: PUBLIC, issuer: ISSUER });
-    assert.deepEqual(status.addressPresets.map((p) => p.id), ["claude"]);
+    assert.deepEqual(status.addressPresets.map((p) => p.id), ["claude", "openai"]);
     const said = await runMason(data, ["status"], env);
     assert.match(said.stdout, /\n  MCP +https:\/\/mason\.example\.test\/mcp  \(for a hosted agent, signed in by http:\/\/127\.0\.0\.1:\d+\)\n/);
     // the request log is written a few seconds after the statement (its flush)

@@ -44,14 +44,27 @@ export const disabledText = (disabledAt) => `Disabled ${stamp(disabledAt)} UTC`;
  *  ranges, or any address. */
 export const rangesText = (from) => from === null || from === undefined ? "any address" : from.join(", ");
 
-/** Where a user connects from, in its row: "from anywhere", or "from" its ranges (`rangesText`). */
-export const fromText = (from) => from === null || from === undefined ? "from anywhere" : `from ${rangesText(from)}`;
+/** The hosted agents' published ranges the run lists (`/api/state` `addressPresets`), none when it says none. */
+export const presetsOf = (state) => Array.isArray(state?.addressPresets) ? state.addressPresets : [];
+
+/** The company whose published ranges a user's are, exactly (`presets`: `/api/state` `addressPresets`), or undefined. */
+export const presetOf = (from, presets = []) => Array.isArray(from)
+  ? presets.find((p) => p.ranges.length === from.length && p.ranges.every((r, i) => r === from[i])) : undefined;
+
+/** Where a user connects from, in its row: "from anywhere", "from" a company's addresses when its ranges are exactly the
+ *  ones that company publishes (a list of some 300 is a choice, never a wall of CIDRs), or "from" its ranges (`rangesText`). */
+export const fromText = (from, presets = []) => {
+  if (from === null || from === undefined) return "from anywhere";
+  const p = presetOf(from, presets);
+  return p !== undefined ? `from ${p.label}'s addresses (${from.length} ${from.length === 1 ? "range" : "ranges"})` : `from ${rangesText(from)}`;
+};
 
 /**
  * THE "CONNECTS FROM" CHOICE, as `mason user add --help` says it: a dropdown, anywhere (no --from, the default: no
  * `from` is sent) or only these addresses (--from <range>, a comma list as `--from a,b` takes it), the address box
  * beside it; or a hosted agent's company (`presets`: `/api/state` `addressPresets`, src/cli/address-presets.ts), which sends
- * the ranges it publishes for its connectors (its option's value carries them, so the choice is read from the form alone),
+ * the ranges it publishes for its connectors (its option's value names it, `preset:<id>`, and `rangesOf` sends its ranges:
+ * a company's list may be some 300, never written into the page twice nor into the box),
  * chosen when a user's ranges are exactly a company's. The box is shown only while "only these addresses" is chosen, and its place is kept while "anywhere" is
  * (the stylesheet hides it by `visibility`, never `display`), so nothing in the form moves when the choice changes.
  * `id`: the form's own, so two forms on the page never share an input's id; `from`: the ranges it opens with (null:
@@ -59,11 +72,11 @@ export const fromText = (from) => from === null || from === undefined ? "from an
  * grammar, the server's).
  */
 export function connectsChoice(id, from = null, presets = []) {
-  const chosen = Array.isArray(from) ? presets.find((p) => p.ranges.length === from.length && p.ranges.every((r, i) => r === from[i])) : undefined;
+  const chosen = presetOf(from, presets);
   const only = Array.isArray(from) && chosen === undefined;
   return `<span class="connects"><label for="${esc(id)}-connects">Connects from</label> ` +
     `<select id="${esc(id)}-connects" name="connects"><option value="any"${only ? "" : " selected"}>anywhere</option><option value="only"${only ? " selected" : ""}>only these addresses</option>` +
-    presets.map((p) => `<option value="preset:${esc(p.ranges.join(","))}"${p === chosen ? " selected" : ""}>${esc(p.label)}</option>`).join("") + `</select>` +
+    presets.map((p) => `<option value="preset:${esc(p.id)}"${p === chosen ? " selected" : ""}>${esc(p.label)}</option>`).join("") + `</select>` +
     ` <span class="ranges"><label class="sr" for="${esc(id)}-from">Address ranges, comma-separated</label>` +
     `<input id="${esc(id)}-from" name="from" spellcheck="false" autocapitalize="off" placeholder="e.g. 192.0.2.0/24, 2001:db8::/32" value="${esc(only ? from.join(", ") : "")}"></span></span>`;
 }
@@ -71,12 +84,13 @@ export function connectsChoice(id, from = null, presets = []) {
 /**
  * What a "Connects from" choice sends (`elements`: the form's): null for from anywhere — the add form sends no `from`
  * then, the change `{ from: null }` (mason user from --any) — else the ranges typed, split at each comma and trimmed, an
- * empty one dropped: `--from a,b`'s list. Nothing more is judged here; none typed is sent as none, for the run to refuse.
+ * empty one dropped: `--from a,b`'s list; or a company's published ranges (`preset:<id>`, from `presets`, the run's
+ * `addressPresets`: one the run no longer lists is sent as no range, for the run to refuse). Nothing more is judged
+ * here; none typed is sent as none, for the run to refuse.
  */
-export function rangesOf(elements) {
+export function rangesOf(elements, presets = []) {
   const choice = String(elements?.connects?.value ?? "any");
-  // a company's published ranges, as its option carries them
-  if (choice.startsWith("preset:")) return choice.slice("preset:".length).split(",").filter((r) => r !== "");
+  if (choice.startsWith("preset:")) return [...(presets.find((p) => p.id === choice.slice("preset:".length))?.ranges ?? [])];
   if (choice !== "only") return null;
   return String(elements.from?.value ?? "").split(",").map((r) => r.trim()).filter((r) => r !== "");
 }
@@ -174,8 +188,8 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
       // address), as the user's id is under its name — so a row stays two lines, a Disable moves no row, and the table
       // keeps its width: no column of its own. Cut by the column, its whole the title; where the page may change it, the
       // line is its From…, asked in a popover beside the row's actions
-      `${!active ? "" : readOnly !== null ? `<span class="from-line" title="${esc(fromText(u.from))}">${esc(fromText(u.from))}</span>`
-        : button(fromText(u.from), asking === "from" ? {} : { from: u.name }, "from-line", { disabled: asking === "from", expanded: asking === "from", title: `${fromText(u.from)}: change where ${u.name} connects from` })}</td>` +
+      `${!active ? "" : readOnly !== null ? `<span class="from-line" title="${esc(fromText(u.from, presets))}">${esc(fromText(u.from, presets))}</span>`
+        : button(fromText(u.from, presets), asking === "from" ? {} : { from: u.name }, "from-line", { disabled: asking === "from", expanded: asking === "from", title: `${fromText(u.from, presets)}: change where ${u.name} connects from` })}</td>` +
       `<td>${!active ? status("unknown", `Removed ${stamp(u.removedAt)} UTC`) : disabled ? status("warn", disabledText(u.disabledAt)) : status("ok", "Active")}` +
       `${active && !disabled && !u.live ? ` <span class="warn">can't connect: the API key changed after it was added</span>` : ""}</td>` +
       `<td class="mono">${esc(stamp(u.addedAt))} UTC</td><td class="num">${lastCell}</td>` +
@@ -520,7 +534,7 @@ export function renderAddUser(state, inBox = false, { busy = false, sent = null 
   // the form is the same whatever writes it; none once a user is added
   return `<form id="add-user"${inBox ? "" : ` class="formcard"`} autocomplete="off"><span class="name-field"><label for="user-name">Name</label> ` +
     `<input id="user-name" name="name" required placeholder="e.g. metabase" spellcheck="false" autocapitalize="off"${sent?.name ? ` value="${esc(sent.name)}"` : ""}></span>` +
-    roleChoice(state.roles, sent?.role ?? "") + connectsChoice("add-user", sent?.from ?? null, Array.isArray(state.addressPresets) ? state.addressPresets : []) +
+    roleChoice(state.roles, sent?.role ?? "") + connectsChoice("add-user", sent?.from ?? null, presetsOf(state)) +
     // Add a user → Adding… in the room of both; its refusal a popover beside it (`renderAddUser`'s page: `action`)
     `${sendButton("Add a user", "Adding…", {}, "primary", { id: "add-user-submit", busy, submit: true })}${ROLES_LINE}</form>`;
 }
@@ -756,7 +770,7 @@ export const page = {
         const offer = shareable(s) && renderAddUser(s) !== "";
         return {
           // the roles file's state is the run's (/api/state roles): a file that cannot be read refuses every user held to it
-          users: u ? renderUsers(u, m.confirming, h !== null ? h.now : ctx.now().getTime(), m.refused, state?.roles ?? null, usersReadOnly(state), m.show, { sending: ctx.sending, fromSent: m.fromSent, presets: Array.isArray(state?.addressPresets) ? state.addressPresets : [] }) : "",
+          users: u ? renderUsers(u, m.confirming, h !== null ? h.now : ctx.now().getTime(), m.refused, state?.roles ?? null, usersReadOnly(state), m.show, { sending: ctx.sending, fromSent: m.fromSent, presets: presetsOf(state) }) : "",
           // the add box: what it creates where the page may open a cloud tunnel (else the plain form), each
           // kind's pane a part of its own, so a choice of kind rewrites neither (a name being typed stays)
           "add-kinds": offer ? renderAddKinds(m.addKind) : "",
@@ -774,10 +788,10 @@ export const page = {
         };
       },
       submit(form) {
-        if (form.id === "user-from") return actions.changeFrom(form.elements.user.value, rangesOf(form.elements));
+        if (form.id === "user-from") return actions.changeFrom(form.elements.user.value, rangesOf(form.elements, presetsOf(ctx.read(STATE)?.body)));
         if (form.id !== "add-user") return null;
         const input = form.elements.name;
-        return actions.addUser(input.value.trim(), form.elements.role?.value ?? "", rangesOf(form.elements)).then((ok) => { if (ok) input.value = ""; });
+        return actions.addUser(input.value.trim(), form.elements.role?.value ?? "", rangesOf(form.elements, presetsOf(ctx.read(STATE)?.body))).then((ok) => { if (ok) input.value = ""; });
       },
       input: (target) => share.input(target),
       click(d, button, { doc, win }) {

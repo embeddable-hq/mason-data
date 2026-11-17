@@ -92,7 +92,7 @@ export function userRanges(list: readonly string[]): { from: string[]; ranges: R
 }
 
 /** The most address ranges one user takes (all input is untrusted: a bound). */
-export const MAX_RANGES = 100;
+export const MAX_RANGES = 1000;
 
 /** Whether a user may connect from `address` (`Session.clientAddr`): any address when it has no ranges; with ranges, one
  *  in them, and never an address that could not be read (null), nor any when its ranges cannot be read (fail closed). */

@@ -523,10 +523,22 @@ export async function metricsBody(state: ServePhase, startedAt: number, now = Da
   return metricsText({ version: version(), run: { ...run, uptimeSeconds: uptimeSeconds(startedAt, now) } });
 }
 
+/**
+ * THE HEALTH PORT'S LIMITS, now that it serves /mcp to whoever reaches it (docs/DESIGN.md "An MCP server over HTTPS"):
+ * a request's headers within `headersMs` and its whole BODY within `requestMs` — Node's `requestTimeout` times the
+ * request alone, never the answer, so a tool call whose query runs for minutes is answered whole (its JSON is written
+ * once the query ends; nothing times the wait); an idle keep-alive connection closed after `keepAliveMs`; at most
+ * `maxConnections` connections, a connection past it closed at once. /mcp itself runs at most MAX_REQUESTS
+ * (src/cli/mcp-http.ts) at a time, far under the cap, so its clients alone never fill it and /healthz is answered beside
+ * them; connections that send nothing are closed within `headersMs`, so a flood must keep opening them to hold the cap.
+ */
+export const HEALTH_LIMITS = { headersMs: 10_000, requestMs: 30_000, keepAliveMs: 5_000, maxConnections: 1024, checkEveryMs: 1_000 } as const;
+
 /** The health server: GET /healthz and GET /metrics, and the MCP endpoint's paths when it is on (src/cli/mcp-http.ts),
- *  nothing else. `log` says a scrape whose numbers could not be read. */
-export function healthServer(state: () => ServePhase, startedAt: number, log: (line: string) => void = say, page: PageServed = NO_PAGE_SERVED, mcp: McpEndpoint | null = null): http.Server {
-  return http.createServer((req, res) => {
+ *  nothing else, under HEALTH_LIMITS. `log` says a scrape whose numbers could not be read. */
+export function healthServer(state: () => ServePhase, startedAt: number, log: (line: string) => void = say, page: PageServed = NO_PAGE_SERVED, mcp: McpEndpoint | null = null,
+  limits: { [K in keyof typeof HEALTH_LIMITS]: number } = HEALTH_LIMITS): http.Server {
+  const server = http.createServer({ headersTimeout: limits.headersMs, requestTimeout: limits.requestMs, keepAliveTimeout: limits.keepAliveMs, connectionsCheckingInterval: limits.checkEveryMs }, (req, res) => {
     if (mcp !== null && mcp.handle(req, res)) return;
     const url = new URL(req.url ?? "/", "http://health");
     if (url.pathname !== "/healthz" && url.pathname !== "/metrics") { res.writeHead(404, { "content-type": "text/plain" }).end("GET /healthz or GET /metrics\n"); return; }
@@ -551,6 +563,8 @@ export function healthServer(state: () => ServePhase, startedAt: number, log: (l
     const h = healthBody(state(), startedAt, Date.now(), page);
     res.writeHead(h.status, { "content-type": "application/json", "cache-control": "no-store" }).end(`${JSON.stringify(h.body)}\n`);
   });
+  server.maxConnections = limits.maxConnections;
+  return server;
 }
 
 const say = (m: string): void => { process.stdout.write(`${m}\n`); };

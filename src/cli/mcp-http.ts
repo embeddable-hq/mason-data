@@ -24,14 +24,16 @@
  *     listener judges the user, its role, its limits and its ranges at login and before every statement, and the
  *     request log names the user, `mason-mcp/<client>` and the client's address. No other process logs in there.
  *   - A SESSION is bound to the user and id whose token opened it: another's token naming it is told it does not exist.
- *     At most MAX_SESSIONS, each ended after IDLE_MS unused (the oldest making way).
+ *     At most MAX_USER_SESSIONS a user (its own oldest idle making way) and MAX_SESSIONS in all (one unused past
+ *     EVICTABLE_IDLE_MS making way, else refused: a session in use is never ended for another user's), each ended
+ *     after IDLE_MS unused.
  *
  * Nothing the endpoint says or logs carries a token. A refusal's words are said in the log with the client's address.
  */
 import * as crypto from "node:crypto";
 import type * as http from "node:http";
 import { PgConnection } from "../cdc/pg-wire.ts";
-import { cidrOf, shownAddress } from "../lib/cidr.ts";
+import { shownAddress } from "../lib/cidr.ts";
 import { proxyHeaderFor, proxyNames, type ProxyFrom } from "../api/postgres/proxy.ts";
 import { ADDRESS_NOT_ALLOWED, ApiError, USER_DISABLED } from "../api/error.ts";
 import type { PgApiServer, ShareSocket } from "../api/postgres/server.ts";
@@ -39,10 +41,21 @@ import { USER_REMOVED, type LiveUsers } from "../duck/users.ts";
 import { McpServer } from "./mcp.ts";
 import { Issuer, MCP_PATH, MCP_PROXY_SETTING, RESOURCE_METADATA_PATH, resourceMetadata, resourceMetadataUrl, type Fetcher, type McpSettings } from "./mcp-oauth.ts";
 
-/** the most MCP sessions open at once */
+/** the most MCP sessions open at once, every user's together: past it a new session is refused (503), never made by
+ *  ending another user's session that is in use */
 export const MAX_SESSIONS = 1000;
+/** the most MCP sessions one user (by name and id) holds at once: past it the user's own oldest idle session makes way,
+ *  or, every one of them running a request, the new one is refused (429) — one user never ends another's */
+export const MAX_USER_SESSIONS = 32;
 /** a session unused this long is ended */
 export const IDLE_MS = 3_600_000;
+/** at MAX_SESSIONS, a session unused this long, running nothing, may make way for another user's new one: it is
+ *  abandoned in all but name (a client that still holds it opens a new one at its 404) */
+export const EVICTABLE_IDLE_MS = 600_000;
+/** the most /mcp JSON-RPC requests answered at once, every user's together: past it 503 with Retry-After (a notification
+ *  — a cancellation — and a DELETE are never held to it). Far under the health port's connection cap (serve.ts
+ *  HEALTH_LIMITS), so /mcp's running requests alone never hold every connection /healthz needs */
+export const MAX_REQUESTS = 256;
 /** the largest message body read */
 export const MAX_BODY = 1024 * 1024;
 /** the revision with no session: each POST stands alone */
@@ -74,7 +87,7 @@ export interface McpEndpoint {
 /** Who a request is: the token's user and id, and the client's address (`clientOf`). */
 interface Who { user: string; id: string; address: string }
 
-interface Session { id: string; user: string; userId: string; server: McpServer; usedAt: number; address: string }
+interface Session { id: string; user: string; userId: string; server: McpServer; usedAt: number; address: string; running: number }
 
 /**
  * THE CLIENT'S ADDRESS OF A REQUEST: the peer's, or behind a proxy `proxyFrom` names the LAST entry of its
@@ -89,10 +102,24 @@ export function clientOf(peerRaw: string | undefined, forwarded: string | string
   const header = Array.isArray(forwarded) ? forwarded.join(",") : forwarded;
   const last = header?.split(",").pop()?.trim() ?? "";
   if (last === "") return { refused: `the proxy ${peer} (${MCP_PROXY_SETTING}) sent no X-Forwarded-For: it must append the client's address to every request` };
-  const c = cidrOf(last);
-  if ("problem" in c || c.prefix !== (c.family === 4 ? 32 : 128)) return { refused: `the last X-Forwarded-For entry the proxy ${peer} (${MCP_PROXY_SETTING}) sent is not one address` };
-  const shown = shownAddress(last);
-  return shown === null ? { refused: `the last X-Forwarded-For entry the proxy ${peer} sent is not one address` } : { address: shown };
+  const shown = forwardedAddress(last);
+  return shown === null ? { refused: `the last X-Forwarded-For entry the proxy ${peer} (${MCP_PROXY_SETTING}) sent is not one address` } : { address: shown };
+}
+
+/**
+ * One X-Forwarded-For entry as the one address it names, as Mason shows one (`shownAddress`: a v4-mapped IPv6 address,
+ * `::ffff:203.0.113.7`, IS that IPv4 client — nginx on a dual-stack `[::]` listener writes it so), or null. A port a relay
+ * writes beside it is dropped: `203.0.113.7:51234`, and IPv6 in brackets, `[2001:db8::1]:443` (or `[2001:db8::1]`
+ * alone). A bare IPv6 address is read whole (`2001:db8::1:443` is an address, never one with a port). Anything that is
+ * not one address — a CIDR, a name, `unknown`, a zone, a leading zero, a port past 65535 — is null.
+ */
+export function forwardedAddress(entry: string): string | null {
+  const port = (p: string | undefined): boolean => p === undefined || (/^\d{1,5}$/.test(p) && Number(p) <= 65_535);
+  const bracketed = /^\[([^\]]+)\](?::([^:]*))?$/.exec(entry);
+  if (bracketed !== null) return port(bracketed[2]) && bracketed[1]!.includes(":") ? shownAddress(bracketed[1]) : null;
+  const v4 = /^(\d+\.\d+\.\d+\.\d+):([^:]*)$/.exec(entry);
+  if (v4 !== null) return port(v4[2]) ? shownAddress(v4[1]) : null;
+  return shownAddress(entry);
 }
 
 /** A refusal's body, in the CLI's failure words: what is wrong, the way out. */
@@ -104,7 +131,10 @@ const quoted = (s: string): string => s.replace(/[^\x20-\x7e]|["\\]/g, "'");
 /** A JSON-RPC message's method and whether it is a request (an id with a method), for what is read before it is handled. */
 const methodOf = (m: unknown): string | null => typeof m === "object" && m !== null && typeof (m as { method?: unknown }).method === "string" ? (m as { method: string }).method : null;
 
-export function mcpEndpoint(settings: McpSettings, o: { log: (line: string) => void; fetch?: Fetcher; now?: () => number }): McpEndpoint {
+export function mcpEndpoint(settings: McpSettings, o: { log: (line: string) => void; fetch?: Fetcher; now?: () => number;
+  /** the bounds, MAX_SESSIONS, MAX_USER_SESSIONS and MAX_REQUESTS unless a test names smaller */
+  limits?: { sessions?: number; userSessions?: number; requests?: number } }): McpEndpoint {
+  const maxSessions = o.limits?.sessions ?? MAX_SESSIONS, maxUserSessions = o.limits?.userSessions ?? MAX_USER_SESSIONS, maxRequests = o.limits?.requests ?? MAX_REQUESTS;
   const log = o.log;
   const now = o.now ?? Date.now;
   const issuer = new Issuer(settings, { log, ...(o.fetch !== undefined ? { fetch: o.fetch } : {}), now });
@@ -121,6 +151,8 @@ export function mcpEndpoint(settings: McpSettings, o: { log: (line: string) => v
   const secretHash = crypto.createHash("sha256").update(secret).digest();
   let run: (McpRun & { door: ShareSocket }) | null = null;
   let closed = false;
+  /** /mcp requests being answered now (MAX_REQUESTS) */
+  let inFlight = 0;
 
   const send = (res: http.ServerResponse, status: number, headers: Record<string, string>, text?: string): void => {
     res.writeHead(status, { "cache-control": "no-store", ...(text !== undefined ? { "content-type": "application/json" } : {}), ...headers }).end(text);
@@ -208,14 +240,32 @@ export function mcpEndpoint(settings: McpSettings, o: { log: (line: string) => v
     s.server.cancelAll(`ended: ${why}`);
   }
 
-  function newSession(who: Who): Session {
-    // the oldest idle makes way at the bound; a session unused past IDLE_MS ends
+  /** the least recently used of `of` that runs no request and was unused at least `idleMs`, or undefined */
+  const oldestIdle = (of: Iterable<Session>, idleMs: number): Session | undefined =>
+    [...of].filter((s) => s.running === 0 && now() - s.usedAt >= idleMs).sort((a, b) => a.usedAt - b.usedAt)[0];
+
+  /**
+   * A new session for `who`, or why not. A session unused past IDLE_MS ends. The user's own bound first: at
+   * MAX_USER_SESSIONS its own oldest session running nothing makes way, else it is refused (429). Then everyone's: at
+   * MAX_SESSIONS the oldest session unused past EVICTABLE_IDLE_MS and running nothing makes way, whoever's, else it is
+   * refused (503): a session in use is never ended for another user's.
+   */
+  function newSession(who: Who): Session | { status: 429 | 503; message: string; fix: string } {
     for (const s of [...sessions.values()]) if (now() - s.usedAt > IDLE_MS) endSession(s, "idle");
-    if (sessions.size >= MAX_SESSIONS) {
-      const oldest = [...sessions.values()].sort((a, b) => a.usedAt - b.usedAt)[0]!;
-      endSession(oldest, "made way for a new session");
+    const own = [...sessions.values()].filter((s) => s.user === who.user && s.userId === who.id);
+    if (own.length >= maxUserSessions) {
+      const mine = oldestIdle(own, 0);
+      if (mine === undefined) return { status: 429, message: `the mason user ${who.user} holds ${own.length} MCP sessions, each running a request: at most ${maxUserSessions}`, fix: "end one (DELETE /mcp with its Mcp-Session-Id), or wait for one to answer" };
+      endSession(mine, "made way for a new session of its user");
+      log(`[mcp] ${mine.user}: its oldest idle session ended: it made way for a new session of its user (at most ${maxUserSessions})`);
     }
-    const s: Session = { id: crypto.randomBytes(24).toString("base64url"), user: who.user, userId: who.id, server: null as unknown as McpServer, usedAt: now(), address: who.address };
+    if (sessions.size >= maxSessions) {
+      const idle = oldestIdle(sessions.values(), EVICTABLE_IDLE_MS);
+      if (idle === undefined) return { status: 503, message: `this Mason holds ${sessions.size} MCP sessions in use, its most`, fix: "try again shortly, or use MCP-Protocol-Version: 2026-07-28, which opens no session" };
+      endSession(idle, `made way for a new session: unused ${Math.round(EVICTABLE_IDLE_MS / 60_000)} minutes or more`);
+      log(`[mcp] ${idle.user}: a session unused ${Math.round(EVICTABLE_IDLE_MS / 60_000)} minutes or more ended: it made way for a new session (at most ${maxSessions} in all)`);
+    }
+    const s: Session = { id: crypto.randomBytes(24).toString("base64url"), user: who.user, userId: who.id, server: null as unknown as McpServer, usedAt: now(), address: who.address, running: 0 };
     s.server = new McpServer({ connect: connectAs(() => ({ user: s.user, id: s.userId, address: s.address })), where: "this Mason" }, (l) => log(`[mcp] ${who.user}: ${l}`), HTTP_VERSIONS);
     sessions.set(s.id, s);
     return s;
@@ -250,7 +300,8 @@ export function mcpEndpoint(settings: McpSettings, o: { log: (line: string) => v
     finally { set.delete(server); if (set.size === 0) standing.delete(key); }
   }
 
-  async function serveMcp(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  /** `slot.held`: this request counts against MAX_REQUESTS (a JSON-RPC request, read and authorized), freed when it ends */
+  async function serveMcp(req: http.IncomingMessage, res: http.ServerResponse, slot: { held: boolean }): Promise<void> {
     const who = await authorize(req, res);
     if (who === null) return;
     if (run === null || closed) { send(res, 503, { "retry-after": "5" }, body("starting", "Mason is not answering yet", "try again once mason serve's /healthz says ready")); return; }
@@ -289,10 +340,27 @@ export function mcpEndpoint(settings: McpSettings, o: { log: (line: string) => v
       send(res, 200, headers, JSON.stringify(answer));
     };
     if (init !== undefined && messages.length !== 1) { send(res, 400, {}, body("initialize", "initialize is sent alone", "POST initialize by itself")); return; }
+    // the bound on what runs at once counts requests alone: a cancellation, a notification or a DELETE always gets
+    // through, or a client at the bound could not stop what holds it there
+    if (requests) {
+      if (inFlight >= maxRequests) {
+        send(res, 503, { "retry-after": "5" }, body("busy", `this Mason answers ${maxRequests} MCP requests at once, its most`, "try again shortly"));
+        return;
+      }
+      inFlight++;
+      slot.held = true;
+    }
     if (version === STATELESS_VERSION && session === undefined) { reply(await standalone(who, text, messages, req)); return; }
     let s: Session;
-    if (init !== undefined) s = newSession(who);
-    else if (typeof sid !== "string") {
+    if (init !== undefined) {
+      const made = newSession(who);
+      if (!("id" in made)) {
+        log(`[mcp] refused a new session of ${who.user} from ${who.address}: ${made.message}`);
+        send(res, made.status, { "retry-after": "30" }, body("too_many_sessions", made.message, made.fix));
+        return;
+      }
+      s = made;
+    } else if (typeof sid !== "string") {
       send(res, 400, {}, body("no_session", `no Mcp-Session-Id: under ${HTTP_VERSIONS[0]} a request belongs to the session initialize opened`,
         `initialize first, and send the Mcp-Session-Id it answered with (or MCP-Protocol-Version: ${STATELESS_VERSION}, which has no session)`));
       return;
@@ -302,7 +370,10 @@ export function mcpEndpoint(settings: McpSettings, o: { log: (line: string) => v
     } else s = session;
     s.usedAt = now();
     s.address = who.address;
-    const answer = await s.server.handle(text);
+    s.running++;
+    let answer: unknown;
+    try { answer = await s.server.handle(text); }
+    finally { s.running--; s.usedAt = now(); }
     if (init !== undefined && (typeof answer !== "object" || answer === null || !("result" in answer))) endSession(s, "its initialize failed");
     reply(answer, sessions.has(s.id) ? { "mcp-session-id": s.id } : {});
   }
@@ -318,11 +389,12 @@ export function mcpEndpoint(settings: McpSettings, o: { log: (line: string) => v
         return true;
       }
       if (p !== MCP_PATH) return false;
-      serveMcp(req, res).catch((e: unknown) => {
+      const slot = { held: false };
+      serveMcp(req, res, slot).catch((e: unknown) => {
         log(`[mcp] a request failed: ${(e as Error).message}`);
         if (!res.headersSent) send(res, 500, {}, body("failed", "the request failed", "mason serve's log says why"));
         else res.destroy();
-      });
+      }).finally(() => { if (slot.held) inFlight--; });
       return true;
     },
     async attach(r) {

@@ -77,11 +77,12 @@ test("the MCP endpoint's settings: off unless set; a partial one, junk, an addre
     [{ MASON_MCP_PLAIN: "2" }, /MASON_MCP_PLAIN="2": 1, or 0/],
     [{ MASON_MCP_USER_CLAIM: "a b", MASON_MCP_PLAIN: "1" }, /MASON_MCP_USER_CLAIM="a b" is not a claim's name/],
     [{ MASON_MCP_USER_ID_CLAIM: "mason_user", MASON_MCP_PLAIN: "1" }, /MASON_MCP_USER_ID_CLAIM and MASON_MCP_USER_CLAIM both name mason_user/],
-    [{ MASON_MCP_URL: "http://mason.example.test/mcp", MASON_MCP_PLAIN: "1" }, /MASON_MCP_URL="http:\/\/mason\.example\.test\/mcp": https:\/\//],
-    [{ MASON_MCP_JWKS_URL: "http://auth.example.test/jwks", MASON_MCP_PLAIN: "1" }, /MASON_MCP_JWKS_URL="http:\/\/auth\.example\.test\/jwks": https:\/\//],
-    [{ MASON_MCP_ISSUER: "https://u:p@auth.example.test", MASON_MCP_PLAIN: "1" }, /MASON_MCP_ISSUER=.* carries a user or a password/],
-    [{ MASON_MCP_URL: "https://mason.example.test/mcp?x=1", MASON_MCP_PLAIN: "1" }, /carries a query or a fragment/],
-    [{ MASON_MCP_ISSUER: "not a url", MASON_MCP_PLAIN: "1" }, /MASON_MCP_ISSUER="not a url" is not a URL/],
+    [{ MASON_MCP_URL: "http://mason.example.test/mcp", MASON_MCP_PLAIN: "1" }, /MASON_MCP_URL is http:\/\/mason\.example\.test\/…: https:\/\//],
+    [{ MASON_MCP_JWKS_URL: "http://auth.example.test/jwks", MASON_MCP_PLAIN: "1" }, /MASON_MCP_JWKS_URL is http:\/\/auth\.example\.test\/…: https:\/\//],
+    // a secret in the value is never repeated (the test below holds every part of it): the user and password masked
+    [{ MASON_MCP_ISSUER: "https://u:p@auth.example.test", MASON_MCP_PLAIN: "1" }, /MASON_MCP_ISSUER carries a user or a password \(https:\/\/\*\*\*\*@auth\.example\.test\): an address alone/],
+    [{ MASON_MCP_URL: "https://mason.example.test/mcp?x=1", MASON_MCP_PLAIN: "1" }, /MASON_MCP_URL carries a query or a fragment \(https:\/\/mason\.example\.test\/…\): an address alone/],
+    [{ MASON_MCP_ISSUER: "not a url", MASON_MCP_PLAIN: "1" }, /MASON_MCP_ISSUER is set to what is not a URL: https:\/\/<host>\/<path>/],
     // read as MASON_PG_PROXY_FROM is: never every address, and an entry that is none refused
     [{ MASON_MCP_PROXY_FROM: "0.0.0.0/0", MASON_MCP_PLAIN: "1" }, /MASON_MCP_PROXY_FROM="0\.0\.0\.0\/0": .*names every address/],
     [{ MASON_MCP_PROXY_FROM: "relay.internal", MASON_MCP_PLAIN: "1" }, /MASON_MCP_PROXY_FROM="relay\.internal": .*is not an address or a CIDR/],
@@ -110,6 +111,64 @@ test("the MCP endpoint's settings: off unless set; a partial one, junk, an addre
   }
   assert.match(usage, /\(default mason_user\)/);
   assert.match(usage, /\(default mason_user_id\)/);
+});
+
+/** Every part of `secret` `out` repeats: each run of 5 of its characters, so a cut, a prefix or a slice is caught too. */
+const leaked = (out: string, secret: string): string[] => {
+  const found: string[] = [];
+  for (let i = 0; i + 5 <= secret.length; i++) if (out.includes(secret.slice(i, i + 5))) found.push(secret.slice(i, i + 5));
+  return found;
+};
+
+test("a MASON_MCP_* address that carries a secret (a user, a password, a query, a fragment) or is no URL at all is refused without repeating any part of the value", () => {
+  const base = { DATABASE_URL: URL_, MASON_API_KEY: KEY, MASON_MCP_PLAIN: "1" };
+  const on = { MASON_MCP_URL: "https://mason.example.test/mcp", MASON_MCP_ISSUER: "https://auth.example.test", MASON_MCP_JWKS_URL: "https://auth.example.test/jwks.json" };
+  const USER = "svcQz7Wk", PASSWORD = "Sup3rS3cretIssuerPw", KEY_ = "JWKS-KEY-0123456789", FRAGMENT = "tokFrag9XkLm2";
+  const shapes: Array<[string, (u: string) => string, string[], RegExp]> = [
+    ["a user and a password", (u) => u.replace("https://", `https://${USER}:${PASSWORD}@`), [USER, PASSWORD], /carries a user or a password \(https:\/\/\*{4}@[a-z.]+\)/],
+    ["a user alone", (u) => u.replace("https://", `https://${PASSWORD}@`), [PASSWORD], /carries a user or a password \(https:\/\/\*{4}@[a-z.]+\)/],
+    ["a query", (u) => `${u}?api_key=${KEY_}`, [KEY_], /carries a query or a fragment \(https:\/\/[a-z.]+\/…\)/],
+    ["a fragment", (u) => `${u}#${FRAGMENT}`, [FRAGMENT], /carries a query or a fragment \(https:\/\/[a-z.]+\/…\)/],
+    // a user and a password on an http:// address off this machine: the secret is refused before the scheme is said
+    ["http with a password", (u) => u.replace("https://", `http://${USER}:${PASSWORD}@`), [USER, PASSWORD], /carries a user or a password \(http:\/\/\*{4}@[a-z.]+\)/],
+    ["no URL at all", () => `${PASSWORD} ${USER}`, [USER, PASSWORD], /is set to what is not a URL/],
+    // `user:password` with no `//` parses as a scheme and a path: neither is said
+    ["a user and a password alone", () => `${USER}:${PASSWORD}`, [USER, PASSWORD], /is not an https:\/\/ address/],
+    ["another scheme with a password", (u) => u.replace("https://", `${USER}://x:${PASSWORD}@`), [USER, PASSWORD], /carries a user or a password: an address alone/],
+    ["a URL that does not parse", () => `https://${USER}:${PASSWORD}@auth.example.test:${KEY_}/x`, [USER, PASSWORD, KEY_], /is set to what is not a URL/],
+    ["too long", (u) => `${u}/${PASSWORD}`.padEnd(3000, "x"), [PASSWORD], /is set to 30\d\d characters: an address is at most 2048/],
+  ];
+  for (const setting of ["MASON_MCP_URL", "MASON_MCP_ISSUER", "MASON_MCP_JWKS_URL"] as const) {
+    for (const [shape, make, secrets, said] of shapes) {
+      const r = serveSettings({ ...base, ...on, [setting]: make(on[setting]) }, "/srv");
+      assert.ok("message" in r, `${setting}, ${shape}`);
+      assert.match(r.message, new RegExp(`${setting} ${said.source}`), `${setting}, ${shape}: ${r.message}`);
+      for (const secret of secrets) assert.deepEqual(leaked(`${r.message}\n${r.fix ?? ""}`, secret), [], `${setting}, ${shape}: ${r.message}`);
+    }
+  }
+});
+
+test("mason serve refused for a MASON_MCP_* secret says no part of it, as a person and with --json, on stdout, stderr or a log", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-serve-mcp-secret-"));
+  try {
+    const PASSWORD = "Sup3rS3cretIssuerPw", KEY_ = "JWKS-KEY-0123456789", URL_PASSWORD = "UrlPw4Hq8Zt";
+    const env = { PATH: process.env.PATH ?? "", HOME: dir, DATABASE_URL: URL_, MASON_API_KEY: KEY, MASON_DATA: path.join(dir, "data"), MASON_PROJECT: path.join(dir, "project"),
+      MASON_HEALTH_HOST: "127.0.0.1", MASON_MCP_URL: `https://svcQz7Wk:${URL_PASSWORD}@mason.example.test/mcp`,
+      MASON_MCP_ISSUER: `https://svc:${PASSWORD}@auth.example.test`, MASON_MCP_JWKS_URL: `https://auth.example.test/jwks?api_key=${KEY_}` };
+    fs.mkdirSync(env.MASON_DATA);
+    for (const args of [[], ["--json"]]) {
+      const r = spawnSync(process.execPath, [MAIN, "serve", ...args], { cwd: dir, env, encoding: "utf8", timeout: 60_000 });
+      assert.equal(r.status, 1, r.stdout + r.stderr);
+      const out = `${r.stdout}\n${r.stderr}`;
+      assert.match(out, /MASON_MCP_URL carries a user or a password[^;]*; MASON_MCP_ISSUER carries a user or a password[^;]*; MASON_MCP_JWKS_URL carries a query or a fragment/, out);
+      if (args.length) assert.equal(JSON.parse(r.stdout).error.code, "bad_config");
+      for (const secret of [PASSWORD, KEY_, URL_PASSWORD, "svcQz7Wk"]) assert.deepEqual(leaked(out, secret), [], `${args.join(" ")}: ${out}`);
+    }
+    // nothing written where a log would be: the settings are refused before anything opens
+    const files = (d: string): string[] => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => e.isDirectory() ? files(path.join(d, e.name)) : [path.join(d, e.name)]);
+    for (const f of files(dir)) for (const secret of [PASSWORD, KEY_, URL_PASSWORD]) assert.deepEqual(leaked(fs.readFileSync(f, "utf8"), secret), [], f);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("the config: new on an empty volume, resumed over what the runs recorded; a developer's project and a renamed copy refused", () => {

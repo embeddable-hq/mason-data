@@ -2455,12 +2455,20 @@ together, or the start is refused naming what is missing. The owner's spec (2026
   of it alone: a token for this and another resource is one the other could replay here), and the base of the 401's
   `WWW-Authenticate: Bearer resource_metadata="…"`. A token whose audience is the address Mason sees is refused.
 - **The token**: a JWT whose `iss` is `MASON_MCP_ISSUER` exactly, signed by a key of the JWK set at `MASON_MCP_JWKS_URL`
-  (configured, never discovered: one URL the operator names, read once an hour and for an unknown `kid` at most once a
-  minute, at most 100 keys). An asymmetric `alg` alone (RS*, PS*, ES*, EdDSA; never `none` nor HS*, which a public key
+  (configured, never discovered: one URL the operator names, at most 100 keys). An asymmetric `alg` alone (RS*, PS*, ES*, EdDSA; never `none` nor HS*, which a public key
   could forge), the `kid` a key published for signatures, of the alg's own type, `crit` refused, `exp` required, `nbf` /
   `iat` within 60 s of skew. Node's `crypto` verifies (no dependency). **Fail closed**: keys that cannot be fetched or
   read (no answer, a redirect — never followed —, too large, not JSON) refuse every token with 503. Mason issues no
   token and runs no sign-in page.
+- **The keys' cache, and what a fetch costs the issuer** (the review of PR 1125, 2026-11-17). Keys are used for at most
+  **5 minutes** (`KEYS_TTL_MS`), less when the JWKS answer's `Cache-Control: max-age` says less (`no-store` / `no-cache`
+  read as 0), never more, and never under a minute: **a key the issuer removes is refused within 5 minutes**. Past their
+  life they are never used again — **no grace period**: a fetch that fails then refuses every token (503) until one
+  succeeds, as fail closed asks (a grace would let a key the issuer revoked during an outage keep signing). Fetches are
+  **single-flight and at most one a minute** (`REFRESH_MIN_MS`), whatever asks — keys past their life, a `kid` they lack
+  — so a burst of tokens, valid or not, costs the issuer one request a minute; **while fetches fail the wait doubles**,
+  1, 2, 4, 8 minutes, **bounded at 10** (`BACKOFF_MAX_MS`), and every token meanwhile is 503 without a fetch. Before,
+  a key was trusted for an hour after its removal, and 53 requests against a failing JWKS made 28 fetches.
 - **The user, looked up at every request.** One claim names the `mason user` (`MASON_MCP_USER_CLAIM`, default
   `mason_user`), another holds its id (`MASON_MCP_USER_ID_CLAIM`, default `mason_user_id`): the 16 hex digits `mason user
   add` made and `mason user list` shows (`mason user check` answers it too, for the operator's sign-in page). The users
@@ -2472,7 +2480,12 @@ together, or the start is refused naming what is missing. The owner's spec (2026
   `MASON_PG_PROXY_FROM`'s own reader (never every address). From a peer it names, the client is the **last entry of
   `X-Forwarded-For`** — the one that peer appended; every entry before it came to the relay from the client, which can
   write anything there. From any other peer the header is ignored and the peer is judged. A named relay's request without
-  the header, or with a last entry that is not one address, is refused (400): it could not tell. `X-Forwarded-For` rather
+  the header, or with a last entry that is not one address, is refused (400): it could not tell. **The entry is read in
+  the forms relays write** (`forwardedAddress`, the review of PR 1125): a port beside it (`203.0.113.7:51234`,
+  `[2001:db8::1]:443`) is dropped, and a v4-mapped address (`::ffff:203.0.113.7`, nginx on a dual-stack `[::]` listener)
+  is the IPv4 client, as the relay's own peer address is when the setting is matched (`shownAddress`); a bare IPv6 address
+  is read whole, never as one with a port, and anything else that is not one address (a CIDR, a name, `unknown`, a zone,
+  a leading zero) is still 400. `X-Forwarded-For` rather
   than `Forwarded` (RFC 7239): it is what relays and load balancers append by default (nginx, HAProxy, cloud load
   balancers), where `Forwarded` is rarely sent, and the rule — the trusted peer's own entry, the last — is the same for
   both. A user's "connects from" ranges are judged on that address by the endpoint and, through the PROXY header the
@@ -2480,14 +2493,21 @@ together, or the start is refused naming what is missing. The owner's spec (2026
   bypasses the check (an earlier draft's `MASON_MCP_FROM=token` is gone), and nothing here changes the Postgres API's.
 - **Presets for a hosted agent's addresses**: the Users page's Connects from offers "Claude (Anthropic)", the outbound
   ranges Anthropic publishes for MCP tool calls (https://platform.claude.com/docs/en/api/ip-addresses, "Outbound IP
-  addresses"), so a user held to them connects through this endpoint from Claude alone (`src/cli/address-presets.ts`,
-  `/api/state` `addressPresets`). **They ship with the release; Mason never fetches them at run time** (a vendor's page
+  addresses"), and "ChatGPT (OpenAI)", the file OpenAI's page of IP egress ranges
+  (https://developers.openai.com/api/docs/guides/ip-addresses, "Outbound IP addresses": "ChatGPT integrations —
+  Plugins, connectors, GPT Actions, and agentic commerce") names for them, https://openai.com/chatgpt-connectors.json
+  (289 ranges, its `creationTime` 2026-11-06; `chatgpt-actions.json` beside it is GPT Actions' alone and not used), so a
+  user held to them connects through this endpoint from that agent alone (`src/cli/address-presets.ts`, `/api/state`
+  `addressPresets`). The ranges are written as a user's ranges are kept (one address without its `/32`), so a user given a
+  company's list is shown as that company's ("from ChatGPT (OpenAI)'s addresses (289 ranges)"), the choice names the
+  company (`preset:<id>`), never a wall of CIDRs in the box, and a user takes up to 1,000 ranges (`MAX_RANGES`, 100
+  before, which OpenAI's list did not fit). **They ship with the release; Mason never fetches them at run time** (a vendor's page
   changing under a run would change who connects without anyone deciding it). **How they stay up to date**:
-  `scripts/connector-ranges.ts` reads each source again and says what drifted (exit 1; 3 when a source could not be read:
-  never "no drift"), and `--write` updates the module, so a change is a reviewed pull request and a release note. The
+  `scripts/connector-ranges.ts` reads each source again — a page's CIDRs under its heading, or a JSON file's
+  `prefixes` (`ipv4Prefix` and `ipv6Prefix`) — and says what drifted (exit 1; 3 when a source could not be read or holds
+  what is not a range: never "no drift"), and `--write` updates the module, so a change is a reviewed pull request and a release note. The
   proposal is a weekly scheduled CI job running it, which opens an issue on drift (not added: a process change is the
-  owner's). "ChatGPT (OpenAI)" is not offered yet: OpenAI's pages could not be read from where this was built, and a
-  range is never guessed.
+  owner's).
 - **The same session code**: an MCP session is `mason mcp`'s `McpServer` (src/cli/mcp.ts), its messages handed to it
   whole; only how it reaches the Postgres API differs (`McpLink`). Its connections go to the run's own listener through a
   door of their own (`openLocal`, src/api/postgres/server.ts): on loopback, every connection beginning with a PROXY v2
@@ -2497,8 +2517,25 @@ together, or the start is refused naming what is missing. The owner's spec (2026
 - **Nothing off loopback in clear**: the health port is plain HTTP, so with `MASON_HEALTH_HOST` off loopback (its default
   is 0.0.0.0) the endpoint is refused unless `MASON_MCP_PLAIN=1` says TLS is terminated in front (a relay, a proxy), as
   `MASON_PG_PLAIN` says it of the Postgres API. A token never reaches a log line, an error or an answer.
-- **Bounds**: a message at most 1 MiB, a token 16 KiB, 1,000 sessions (the oldest idle making way), a session ended after
-  an hour unused, and a session bound to its user and id (another's token naming it is told it does not exist).
+- **Bounds**: a message at most 1 MiB, a token 16 KiB, a session ended after an hour unused, and a session bound to its
+  user and id (another's token naming it is told it does not exist).
+- **Sessions: one user never ends another's** (the review of PR 1125). At most **32 sessions a user**
+  (`MAX_USER_SESSIONS`): past it the user's own least recently used session that runs nothing makes way, or, each of
+  them running a request, the new one is refused 429. At most **1,000 in all** (`MAX_SESSIONS`): past it a session
+  **unused for 10 minutes** (`EVICTABLE_IDLE_MS`) and running nothing makes way, whoever's — abandoned in all but name;
+  its client meets a 404 and initializes again — else the new session is refused **503 with Retry-After**, never made
+  by ending a session in use. Before, the oldest session made way whatever it was doing, so one user opening sessions
+  ended everyone else's.
+- **The health port's limits**, now that it answers whoever reaches /mcp (`HEALTH_LIMITS`, src/cli/serve.ts; not
+  settings): a request's headers within **10 s**, its body within **30 s**, an idle keep-alive connection closed after
+  **5 s**, at most **1,024 connections** (one past it is closed at once), and at most **256 JSON-RPC requests running**
+  on /mcp (`MAX_REQUESTS`: past it 503 with Retry-After; a cancellation and a DELETE are never held to it, or a client at
+  the bound could not stop what holds it there). Node's `requestTimeout` times the request alone, never the answer, and
+  an answer is written once its query ends, so **a tool call that runs for minutes is answered whole** (the test runs one
+  twice the request timeout). **/healthz under the cap**: /mcp's running requests alone stay far under the connection
+  cap, so a platform's health check is answered beside them; connections that send nothing are closed within 10 s, so
+  only a flood that keeps opening connections faster than that can hold the cap, and while it does a health check can be
+  refused — that is not guaranteed against, and a platform that health-checks the port should allow for a retry.
 
 **Left out.** `Origin` is not checked (MCP asks it of a server against DNS rebinding, which reaches a server that trusts
 the network or a cookie; this one trusts only a bearer token sent in a header). No server-sent events: every answer is

@@ -509,12 +509,22 @@ MASON_MCP_PLAIN=1                                     # TLS is terminated in fro
 - **A user's "connects from" ranges apply, judged on the real client.** Without `MASON_MCP_PROXY_FROM` every request's
   address is its peer's. With it, a request from one of the named addresses is judged on the **last entry of its
   `X-Forwarded-For`** — the one the relay appended; the relay must append the client's address to every request (nginx:
-  `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for`), and a request it sends without one is refused. Entries
-  before the last came from the client and are never believed, and a header from any other peer is ignored. A hosted
-  agent's requests come from its company's servers: the Users page's Connects from offers each company's published
-  ranges ("Claude (Anthropic)"), so a user held to them connects from that agent alone.
+  `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for`), and a request it sends without one is refused. The entry
+  may carry a port (`203.0.113.7:51234`, `[2001:db8::1]:443`) or be v4-mapped (`::ffff:203.0.113.7`, a dual-stack
+  listener): it is read as the one address it names. Entries before the last came from the client and are never
+  believed, and a header from any other peer is ignored. A hosted agent's requests come from its company's servers: the
+  Users page's Connects from offers each company's published ranges ("Claude (Anthropic)", from
+  https://platform.claude.com/docs/en/api/ip-addresses; "ChatGPT (OpenAI)", the file
+  https://openai.com/chatgpt-connectors.json that https://developers.openai.com/api/docs/guides/ip-addresses names for
+  ChatGPT's connectors), so a user held to them connects from that agent alone. The lists ship with each release.
 - **TLS**: the health port is plain HTTP. Off loopback the start is refused unless `MASON_MCP_PLAIN=1` says TLS is
   terminated in front of it, so a bearer token never crosses a network in clear.
+- **Bounds**: the authorization server's keys are kept at most 5 minutes (less under its `Cache-Control: max-age`), so a
+  key it removes is refused within 5 minutes, and fetched at most once a minute, backing off to 10 minutes while the
+  fetch fails (every token 503 meanwhile). A user holds at most 32 sessions and the endpoint 1,000 (a new one past that is
+  503 with `Retry-After`, never made by ending a session in use). The health port takes a request's headers within 10 s
+  and its body within 30 s, closes an idle connection after 5 s, holds at most 1,024 connections and runs at most 256 MCP
+  requests at once; a tool call's own time is not limited by these (docs/DESIGN.md "An MCP server over HTTPS").
 
 ## What a tool sees
 

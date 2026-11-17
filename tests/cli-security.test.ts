@@ -342,7 +342,102 @@ test("the issuer's keys are untrusted: a redirect not followed, an answer too la
     assert.deepEqual([...new Set(asked)], [JWKS_AT], `${what}: the JWKS URL set, and nothing else, asked`);
   }
   const plain = mcpSettings({ MASON_MCP_URL: RESOURCE, MASON_MCP_ISSUER: ISSUER, MASON_MCP_JWKS_URL: "http://auth.example.test/jwks" }, "127.0.0.1");
-  assert.ok(plain !== null && "problems" in plain && /MASON_MCP_JWKS_URL="http:\/\/auth\.example\.test\/jwks": https:\/\//.test(plain.problems.join("; ")));
+  assert.ok(plain !== null && "problems" in plain && /MASON_MCP_JWKS_URL is http:\/\/auth\.example\.test\/…: https:\/\//.test(plain.problems.join("; ")));
+});
+
+/** An issuer on a clock the test moves, its JWKS answer the test's (`answer`), counting its fetches; each fetch takes
+ *  `slowMs` (real time) so concurrent checks overlap it. */
+function clockedIssuer(answer: () => Response, slowMs = 0): { issuer: Issuer; fetches: () => number; tick: (ms: number) => void } {
+  assert.ok(oauth !== null, "src/cli/mcp-oauth.ts");
+  const s = mcpSettings({ MASON_MCP_URL: RESOURCE, MASON_MCP_ISSUER: ISSUER, MASON_MCP_JWKS_URL: JWKS_AT }, "127.0.0.1");
+  assert.ok(s !== null && !("problems" in s));
+  let at = Date.now(), n = 0;
+  const issuer = new oauth.Issuer(s, { log: () => undefined, now: () => at, fetch: async () => {
+    n++;
+    if (slowMs > 0) await new Promise((r) => setTimeout(r, slowMs));
+    return answer();
+  } });
+  return { issuer, fetches: () => n, tick: (ms) => { at += ms; } };
+}
+/** a token that stays within its exp however far the test's clock moves */
+const lasting = (kid = "r1"): string => bearer({ alg: "RS256", kid }, valid({ exp: Math.floor(Date.now() / 1000) + 86_400 }), rsaKey.privateKey);
+const MIN = 60_000;
+const statusOf = (r: { status: number } | { user: string }): number => "status" in r ? r.status : 200;
+
+test("the issuer's keys are fetched ONE at a time and at most once a minute whatever asks — a JWKS that fails backs off, bounded, and refuses every token 503 meanwhile; a burst of tokens with made-up kids is one fetch a minute", async () => {
+  assert.ok(oauth !== null, "src/cli/mcp-oauth.ts");
+  // the JWKS failing: 53 tokens, valid or not, then a concurrent burst: ONE fetch; every one 503, never let through
+  let up = false;
+  const down = clockedIssuer(() => up ? json({ keys: [jwk(rsaKey.publicKey, "r1", { use: "sig" })] })() : new Response("", { status: 500 }), 20);
+  for (let i = 0; i < 53; i++) {
+    const r = await down.issuer.check(i % 2 ? lasting() : lasting(`made-up-${i}`));
+    assert.ok("status" in r && r.status === 503, `${i}: ${JSON.stringify(r)}`);
+  }
+  const burst = await Promise.all(Array.from({ length: 30 }, (_, i) => down.issuer.check(lasting(`burst-${i}`))));
+  assert.ok(burst.every((r) => "status" in r && r.status === 503));
+  assert.equal(down.fetches(), 1, "53 requests and a burst of 30, one fetch");
+  // the next fetch a minute on; failing again, two minutes after that, then four… never past BACKOFF_MAX_MS
+  const waits: number[] = [];
+  for (let k = 0; k < 8; k++) {
+    const before = down.fetches();
+    let waited = 0;
+    while (down.fetches() === before) {
+      down.tick(10_000); waited += 10_000;
+      assert.ok(waited <= oauth.BACKOFF_MAX_MS, `fetch ${k + 2} waited past the bound`);
+      for (let i = 0; i < 5; i++) assert.equal(statusOf(await down.issuer.check(lasting())), 503);
+    }
+    assert.equal(down.fetches(), before + 1, "one fetch per wait, whatever the requests between");
+    waits.push(waited);
+  }
+  assert.deepEqual(waits.slice(0, 4), [MIN, 2 * MIN, 4 * MIN, 8 * MIN]);
+  assert.ok(waits.every((w) => w <= oauth.BACKOFF_MAX_MS) && waits.at(-1) === oauth.BACKOFF_MAX_MS, waits.join(", "));
+  // back up: at its next fetch the keys judge again
+  up = true;
+  down.tick(oauth.BACKOFF_MAX_MS);
+  assert.deepEqual(await down.issuer.check(lasting()), { user: "analyst", id: "0123456789abcdef" });
+
+  // healthy keys, a stream of made-up kids: one fetch a minute, single-flight under a burst
+  const ok = clockedIssuer(json({ keys: [jwk(rsaKey.publicKey, "r1", { use: "sig" })] }), 20);
+  assert.ok("user" in await ok.issuer.check(lasting()));
+  assert.equal(ok.fetches(), 1);
+  for (let i = 0; i < 50; i++) assert.equal(statusOf(await ok.issuer.check(lasting(`made-up-${i}`))), 401);
+  assert.equal(ok.fetches(), 1, "within the minute: no fetch for a made-up kid");
+  ok.tick(MIN);
+  const many = await Promise.all(Array.from({ length: 40 }, (_, i) => ok.issuer.check(lasting(`again-${i}`))));
+  assert.ok(many.every((r) => "status" in r && r.status === 401));
+  assert.equal(ok.fetches(), 2, "a burst past the minute: one fetch");
+});
+
+test("a key the issuer removes is refused within KEYS_TTL_MS (5 minutes), sooner under a shorter Cache-Control max-age, never later under a longer; keys past their life are never used again: a failed fetch then refuses (503)", async () => {
+  assert.ok(oauth !== null, "src/cli/mcp-oauth.ts");
+  assert.ok(oauth.KEYS_TTL_MS <= 5 * MIN, "a removal takes effect within a few minutes");
+  const both = { keys: [jwk(rsaKey.publicKey, "r1", { use: "sig" }), jwk(edKey.publicKey, "ed")] };
+  const edOnly = { keys: [jwk(edKey.publicKey, "ed")] };
+  for (const [what, cacheControl, life] of [["no Cache-Control", null, oauth.KEYS_TTL_MS], ["max-age=90", "public, max-age=90", 90_000],
+    ["max-age=86400, capped", "max-age=86400", oauth.KEYS_TTL_MS], ["max-age=5, floored at a minute", "max-age=5", MIN], ["no-store", "no-store", MIN]] as const) {
+    let published: unknown = both;
+    const at = clockedIssuer(() => new Response(JSON.stringify(published), { status: 200, headers: cacheControl === null ? {} : { "cache-control": cacheControl } }));
+    assert.ok("user" in await at.issuer.check(lasting()), what);
+    // the issuer drops r1: still accepted from the cache until its life ends, refused once it has
+    published = edOnly;
+    at.tick(life - 1_000);
+    assert.ok("user" in await at.issuer.check(lasting()), `${what}: within its life`);
+    at.tick(1_000);
+    const after = await at.issuer.check(lasting());
+    assert.ok("status" in after && after.status === 401, `${what}: ${JSON.stringify(after)}`);
+    assert.match((after as { reason: string }).reason, /none of the issuer's published keys/);
+  }
+  // past their life the keys are not trusted on a failure: 503, never the old key accepted
+  let failing = false;
+  const f = clockedIssuer(() => failing ? new Response("", { status: 503 }) : json(both)());
+  assert.ok("user" in await f.issuer.check(lasting()));
+  failing = true;
+  f.tick(oauth.KEYS_TTL_MS);
+  for (let i = 0; i < 3; i++) {
+    const r = await f.issuer.check(lasting());
+    assert.ok("status" in r && r.status === 503, JSON.stringify(r));
+  }
+  assert.equal(f.fetches(), 2, "one fetch after the life ended, then the back-off");
 });
 
 test("the MCP endpoint's client address: a named proxy's LAST X-Forwarded-For entry alone; an entry the client forged in front of it, and a header from a peer not named, never believed", () => {
@@ -359,8 +454,21 @@ test("the MCP endpoint's client address: a named proxy's LAST X-Forwarded-For en
   assert.deepEqual(clientOf("10.0.0.1", ["10.9.9.9", "198.51.100.4"], relay), { address: "198.51.100.4" }, "the header sent twice: the last line's last entry");
   assert.deepEqual(clientOf("::ffff:10.0.0.1", "  198.51.100.4  ", relay), { address: "198.51.100.4" });
   assert.deepEqual(clientOf("2001:db8::1", "2001:db8:7::9", relay), { address: "2001:db8:7::9" });
-  // a named relay that does not say, or says what is no address: refused, never the relay itself let in
-  for (const header of [undefined, "", "10.1.2.3, ", "unknown", "10.0.0.0/8", "10.1.2.3:443", "[2001:db8::9]"]) {
+  // the forms relays write (issue 1115's review): a port beside the address, IPv6 in brackets with or without one, and
+  // a v4-mapped address (nginx on a dual-stack [::] listener) — the one address each names, as Mason shows it
+  for (const [header, address] of [["203.0.113.7:51234", "203.0.113.7"], ["[2001:db8::1]:443", "2001:db8::1"], ["[2001:DB8::1]", "2001:db8::1"],
+    ["::ffff:203.0.113.7", "203.0.113.7"], ["[::ffff:203.0.113.7]:8080", "203.0.113.7"], ["10.9.9.9, 203.0.113.7:51234", "203.0.113.7"],
+    ["2001:db8::1:443", "2001:db8::1:443"]] as const) {
+    assert.deepEqual(clientOf("10.0.0.1", header, relay), { address }, header);
+  }
+  // still the LAST entry alone: a port-carrying entry the client wrote in front is never read
+  assert.deepEqual(clientOf("10.0.0.1", "10.1.2.3:443, 198.51.100.4", relay), { address: "198.51.100.4" });
+  // the relay itself, seen as v4-mapped (a dual-stack listener) or with its v6 spelt another way: named, its entry read
+  assert.deepEqual(clientOf("::ffff:10.0.0.1", "203.0.113.7:51234", relay), { address: "203.0.113.7" });
+  assert.deepEqual(clientOf("2001:0db8:0:0:0:0:0:1", "[::ffff:198.51.100.4]:1", relay), { address: "198.51.100.4" });
+  // a named relay that does not say, or says what is not one address: refused, never the relay itself let in
+  for (const header of [undefined, "", "10.1.2.3, ", "unknown", "10.0.0.0/8", "10.1.2.3:", "10.1.2.3:99999", "10.1.2.3:x", "[10.1.2.3]:443", "[2001:db8::9]:", "[2001:db8::9]:70000",
+    "[2001:db8::9", "010.1.2.3", "10.1.2.3:443:1", "relay.example.test", "relay.example.test:443", "fe80::1%eth0", "[fe80::1%25eth0]:443", "[2001:db8::/32]"]) {
     assert.ok("refused" in clientOf("10.0.0.1", header, relay), String(header));
   }
   assert.ok("refused" in clientOf(undefined, undefined, null), "a peer that cannot be read");
