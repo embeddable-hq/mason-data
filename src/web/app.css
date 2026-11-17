@@ -754,6 +754,9 @@ form.formcard input { width: 18em; }
 /* Connect an MCP client: what each client is given, a line of prose over its block of code */
 .connect .mcp-for { margin: 0 0 var(--space-2); }
 .connect .copyblock + .mcp-for { margin-top: var(--space-4); }
+.connect .tip + .mcp-for { margin-top: var(--space-4); }
+.connect .mcp-steps { margin: var(--space-2) 0; padding-left: var(--space-5); }
+.connect .mcp-steps li { margin: var(--space-1) 0; }
 /* a block of code with its Copy (copyBlock): its lines as they are, scrolled inside its own box, never the page */
 .copyblock { display: flex; align-items: flex-start; gap: var(--space-2); max-width: 100%; min-width: 0; }
 .copyblock pre { flex: 1 1 auto; min-width: 0; margin: 0; overflow-x: auto; white-space: pre; padding: var(--space-2) var(--space-3);

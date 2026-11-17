@@ -5915,6 +5915,25 @@ test("Users: Connect an MCP client (issue 1114) — Claude Code's line and the J
   assert.equal(codeOf(ph, "users-mcp-claude-code"), `claude mcp add mason --env MASON_URL="${pub.shown}" -- npx -y @mason-data/cli@0.22.0 mcp`);
 });
 
+test("Users: mason serve's MCP endpoint on (issue 1115) — its public address with Copy, and how to add it as a hosted agent's custom connector; the old 'can\'t connect' tip gone", async () => {
+  const usersPage = await import(path.join(WEB, "pages", "users.js") as string) as Record<string, unknown>;
+  const renderUsersMcp = usersPage.renderUsersMcp as (pg: unknown, served?: boolean, version?: unknown, mcp?: unknown) => string;
+  const pg = { url: "postgresql://127.0.0.1:5433/shop", host: "127.0.0.1", port: 5433, database: "shop", shown: "postgres://<user>:<password>@127.0.0.1:5433/shop" };
+  const mcp = { url: "https://mason.example.test/mcp", issuer: "https://auth.example.test", from: "client" };
+  const html = renderUsersMcp(pg, true, "0.22.0", mcp);
+  assert.match(html, /<code id="users-mcp-url">https:\/\/mason\.example\.test\/mcp<\/code>/);
+  assert.match(html, /data-copy="users-mcp-url"/);
+  const text = textOf(html);
+  assert.ok(text.includes("claude.ai, ChatGPT and other hosted agents: add this address as a custom connector."), text);
+  assert.ok(text.includes("In the agent's settings, add a custom connector and paste the URL (in claude.ai: Settings, then Connectors, then Add custom connector)."), text);
+  assert.ok(text.includes("Connect, and sign in when the agent asks. You sign in at https://auth.example.test , and the agent's queries run as the Mason user your sign-in names."), text);
+  assert.ok(text.includes("A user limited to some addresses can't connect this way unless the agent's servers are among them."), text);
+  assert.doesNotMatch(text, /can't connect this way yet/);
+  // MASON_MCP_FROM=token: no word of address ranges; off (null): the box as before
+  assert.doesNotMatch(textOf(renderUsersMcp(pg, true, "0.22.0", { ...mcp, from: "token" })), /limited to some addresses/);
+  assert.match(textOf(renderUsersMcp(pg, true, "0.22.0", null)), /can't connect this way yet/);
+});
+
 test("New user added: a closed Connect an MCP client under the URL — the box's two lines with the user's own URL, each Shown once with its Copy, and why the JSON keeps the password out of the shell's history (issue 1114)", async () => {
   const usersPage = await import(path.join(WEB, "pages", "users.js") as string) as Record<string, unknown>;
   const renderUsersMcp = usersPage.renderUsersMcp as (pg: unknown, served?: boolean, version?: unknown) => string;

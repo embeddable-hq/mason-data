@@ -127,3 +127,24 @@ export function parseProxyFrom(value: string | undefined): ProxyFrom | null | { 
   if (every.length) return { problem: `${setting}: its entries together name ${every.join(" and ")}, so any client could claim to be any other: name the proxy's own addresses` };
   return { entries, ranges };
 }
+
+/**
+ * A PROXY v2 header naming `address` as the client (port 0 at both ends: no port is read), for a connection Mason makes
+ * itself on a client's behalf, to a door that believes one from this process alone (`openLocal`, server.ts: `mason
+ * serve`'s MCP endpoint, src/cli/mcp-http.ts). Null for an address that is not one address.
+ */
+export function proxyHeaderFor(address: string): Buffer | null {
+  const c = cidrOf(address);
+  if ("problem" in c || c.prefix !== (c.family === 4 ? 32 : 128)) return null;
+  const v4 = c.family === 4;
+  const body = Buffer.alloc(v4 ? 12 : 36);
+  // the source, then the destination (loopback: never read), then the two ports, 0
+  Buffer.from(c.bytes).copy(body, 0);
+  if (v4) Buffer.from([127, 0, 0, 1]).copy(body, 4); else body[31] = 1;
+  const head = Buffer.alloc(16);
+  PROXY_V2_SIGNATURE.copy(head, 0);
+  head[12] = 0x21;   // version 2, PROXY
+  head[13] = v4 ? 0x11 : 0x21;
+  head.writeUInt16BE(body.length, 14);
+  return Buffer.concat([head, body]);
+}

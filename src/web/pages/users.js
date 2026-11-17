@@ -223,9 +223,10 @@ export function mcpSnippets(url, version) {
  * `postgres`, the URL with `<user>:<password>`, and `engine.version`): Claude Code's line, and the JSON for Claude
  * Desktop, Cursor and other clients, each with Copy. The client runs `mason mcp` on its own computer through npx, so
  * that computer needs Node. Shown where that box is, with the same note on a server. "" when the run
- * did not say where a tool connects.
+ * did not say where a tool connects. `mcp`: mason serve's MCP endpoint (`/api/state` `mcp`, issue 1115), whose
+ * address a hosted agent takes as a custom connector, with the steps; null when it is off.
  */
-export function renderUsersMcp(pg, served = false, version = null) {
+export function renderUsersMcp(pg, served = false, version = null, mcp = null) {
   if (!pg || typeof pg.shown !== "string") return "";
   const s = mcpSnippets(pg.shown, version);
   return `<div class="connect connect-mcp"><p class="connect-title">Connect an MCP client</p>` +
@@ -233,7 +234,17 @@ export function renderUsersMcp(pg, served = false, version = null) {
     `<p class="mcp-for">Claude Desktop, Cursor and other clients: add this to the client's MCP settings.</p>${copyBlock("users-mcp-json", s.json)}` +
     serverHostNote(pg, served) +
     `<p class="tip"><span>Put a user's name and password in place of ${code("<user>")} and ${code("<password>")}. The client's computer needs Node ${esc(MCP_NODE)} or later.</span></p>` +
-    `<p class="tip">The web versions of ChatGPT and claude.ai can't connect this way yet.</p></div>`;
+    (mcp && typeof mcp.url === "string" ? renderHostedMcp(mcp)
+      : `<p class="tip">The web versions of ChatGPT and claude.ai can't connect this way yet.</p>`) + `</div>`;
+}
+
+/** A hosted agent's way in (issue 1115): the MCP endpoint's address with Copy, and how to add it as a custom connector. */
+export function renderHostedMcp(mcp) {
+  return `<p class="mcp-for">claude.ai, ChatGPT and other hosted agents: add this address as a custom connector.</p>` +
+    `<dl class="facts"><dt>URL</dt><dd>${copyable("users-mcp-url", mcp.url)}</dd></dl>` +
+    `<ol class="mcp-steps"><li>In the agent's settings, add a custom connector and paste the URL (in claude.ai: Settings, then Connectors, then Add custom connector).</li>` +
+    `<li>Connect, and sign in when the agent asks. You sign in at ${code(mcp.issuer)}, and the agent's queries run as the Mason user your sign-in names.</li></ol>` +
+    (mcp.from === "token" ? "" : `<p class="tip">A user limited to some addresses can't connect this way unless the agent's servers are among them.</p>`);
 }
 
 // ------------------------------------------------------------------ Temporary cloud tunnel (mason share, from the page)
@@ -746,7 +757,7 @@ export const page = {
           "add-share-box": offer ? renderSharePane(s, share.m, ctx.read(SHARE_CHOICES)) : "",
           "users-connect": renderUsersConnect(s?.postgres, s?.served === true, offer),
           // how an MCP client connects, from the same facts, under it
-          "users-mcp": renderUsersMcp(s?.postgres, s?.served === true, s?.engine?.version ?? null),
+          "users-mcp": renderUsersMcp(s?.postgres, s?.served === true, s?.engine?.version ?? null, s?.mcp ?? null),
           // a user just added, or a cloud tunnel just opened: the one-time dialog's parts (the shell opens it while `once()` names it)
           ...(m.added ? renderAdded(m.added, { connected: m.addedSeen, version: m.addedVersion }) : renderShareOnce(s, share.m, ctx.now().getTime())),
           // what the box made, under it: a cloud tunnel

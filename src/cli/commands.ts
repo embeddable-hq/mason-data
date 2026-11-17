@@ -190,6 +190,9 @@ export interface RunState {
   /** the Unix socket the page is served on too (mason serve with MASON_UI_SOCKET), or null: src/cli/run-server.ts
    *  runState; a run from before it has none */
   pageSocket?: string | null;
+  /** mason serve's MCP endpoint (MASON_MCP_URL, src/cli/mcp-http.ts): its public address, the authorization server and
+   *  how a user's address ranges apply — or null when it is off: src/cli/run-server.ts runState; a run from before it has none */
+  mcp?: { url: string; issuer: string; from: "client" | "token" } | null;
   /** the roles file (mason/roles.yml, src/cli/roles.ts) as the listener reads it now: the roles by name, and what is
    *  wrong with it (every statement of a user with a role is refused while there is); absent from a run before roles */
   roles?: { file: string | null; roles: string[]; problem: string | null; default: string | null; all?: string[];
@@ -590,7 +593,9 @@ const STATUS_USAGE = `usage: mason status [--json]
     the page's sidebar, mason serve with MASON_UI_ACCOUNT — or null), pageDeployDocs (the URL the page's Tables page
     links to for changing a deployed project: mason serve's MASON_UI_DEPLOY_DOCS_URL, else the README's section), pageCard (the path, relative to
     the page's address, its Overview reads the host's card from: mason serve with MASON_UI_OVERVIEW_CARD — or null), pageSocket (the Unix socket the
-    page is served on too: mason serve with MASON_UI_SOCKET — or null), next }.
+    page is served on too: mason serve with MASON_UI_SOCKET — or null), mcp ({ url, issuer, from }: mason serve's MCP endpoint
+    for a hosted agent, its public address (MASON_MCP_URL), its authorization server (MASON_MCP_ISSUER) and how a user's
+    address ranges apply to it, client or token (MASON_MCP_FROM) — or null when it is off), next }.
     Each table's kept is how it is kept current now (absent for a table the sync does not hold):
     { by: poll, sync: { mode: off } or { mode: poll, every (30s), seconds } (its entry's sync:, else the file's,
     else off), syncedAt (its last whole read or poll), nextAt (when its next poll is due; null: off, or not polled
@@ -632,7 +637,7 @@ export const STATUS: CommandSpec & { needs: "project" } = {
   usage: STATUS_USAGE,
   options: { json: { type: "boolean" } },
   json: ["running", "pid", "postgres", "source", "warnings", "folder", "project", "tables", "totals", "engine", "disk", "sessions", "stream", "jsonPaths", "generatedTables", "queries", "slowQueries", "refusedQueries",
-    "refusedTotal", "unsupported", "recentErrors", "readiness", "ui", "served", "sourcesReadOnly", "sourcesReadOnlyKind", "pageReadOnly", "pageReadOnlyAllow", "pageBack", "pageNav", "pageAccount", "pageDeployDocs", "pageCard", "pageSocket",
+    "refusedTotal", "unsupported", "recentErrors", "readiness", "ui", "served", "sourcesReadOnly", "sourcesReadOnlyKind", "pageReadOnly", "pageReadOnlyAllow", "pageBack", "pageNav", "pageAccount", "pageDeployDocs", "pageCard", "pageSocket", "mcp",
     "users", "roles", "share", "shareEnded", "lastRun", "lastStop", "hung", "next"],
 };
 
@@ -712,6 +717,8 @@ export async function status(argv: string[]): Promise<number> {
       // the web page (mason ui), without its one-time token: mason ui prints the URL that carries it, and opens it
       ...(s.ui === true ? [["Web UI", (s.served === true ? "from your machine: mason ui --ssh <user@server>" : `${run.control.url}/  (mason ui opens it)`) +
         (typeof s.pageSocket === "string" ? `; on this machine, the Unix socket ${s.pageSocket} too` : "")] as [string, string]] : []),
+      // mason serve's MCP endpoint for a hosted agent (src/cli/mcp-http.ts): its address and who signs a client in
+      ...(s.mcp ? [["MCP", `${s.mcp.url}  (signed in by ${s.mcp.issuer}; ${s.mcp.from === "token" ? "a valid token replaces a user's address ranges (MASON_MCP_FROM=token)" : "a user's address ranges judged on the client's address"})`] as [string, string]] : []),
       // the roles file as the listener reads it now (mason user add --role): its roles, or what is wrong with it
       ...(s.roles && s.roles.file !== null
         ? [["Roles", s.roles.problem !== null ? st.red(`${s.roles.problem} (every statement of a user with a role is refused until it is fixed)`)

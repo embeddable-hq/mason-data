@@ -239,7 +239,10 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   clients**' MCP settings (`npx` as the command, `MASON_URL` in `env`), pretty-printed, each in a block with **Copy**;
   that a user's name and password go in place of `<user>` and `<password>` and the client's computer needs Node 22.13
   or later (cli/package.json `engines`, held equal by a test); and that the web versions of ChatGPT and claude.ai can't
-  connect this way yet. The URL is in the server's environment, never on its command line (`mason mcp` reads
+  connect this way yet — unless `mason serve`'s MCP endpoint is on (`/api/state` `mcp`, issue 1115): then its public
+  address (`MASON_MCP_URL`) with **Copy**, and the short steps to add it as a hosted agent's custom connector (paste
+  the URL; sign in at the issuer, whose user the queries run as), and, under `MASON_MCP_FROM=client`, that a user
+  limited to some addresses can't connect this way unless the agent's servers are among them. The URL is in the server's environment, never on its command line (`mason mcp` reads
   `MASON_URL`). The package is pinned to the run's version where it is a release npm has (`0.22.0`: the package's, or
   a release image's), so the client runs the same Mason as the server; a checkout's `dev` or an image of main's
   `main-<sha>` leaves it unpinned. It is shown wherever the box above is (a served run and a read-only page too), with

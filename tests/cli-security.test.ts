@@ -1,15 +1,19 @@
 /**
  * `mason start`'s local pages' guard (src/cli/security.ts): every refusal a request from another site, a
  * DNS-rebinding page or a stale tab meets, and the one way in — the run's token, traded for a cookie. And a source's URL
- * in a shape no mask recognises is never repeated, by any command that reads it (issue 541).
+ * in a shape no mask recognises is never repeated, by any command that reads it (issue 541). And `mason serve`'s MCP
+ * endpoint's check of a bearer token (src/cli/mcp-oauth.ts, issue 1115): every way a forged or confused token is told
+ * from the issuer's, and every answer of the issuer held untrusted — failing closed when it cannot tell.
  */
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { matrixEnv, runMason, type Answer } from "./cli-matrix.ts";
 import * as security from "../src/cli/security.ts";
+import { Issuer, mcpSettings } from "../src/cli/mcp-oauth.ts";
 import { cookieName, cookieOf, guard, newToken, newTunnel, sameSecret, setCookieHeader, SECURITY_HEADERS, TICKET_MS, type GuardRequest } from "../src/cli/security.ts";
 
 const token = newToken();
@@ -242,4 +246,91 @@ test("a source URL in any shape never repeats its password: every command that r
       }
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   }));
+});
+
+
+// ------------------------------------------------------------------ mason serve's MCP endpoint: the bearer token
+
+const ISSUER = "https://auth.example.test";
+const RESOURCE = "https://mason.example.test/mcp";
+const rsaKey = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+const weakKey = crypto.generateKeyPairSync("rsa", { modulusLength: 1024 });
+const edKey = crypto.generateKeyPairSync("ed25519");
+const jwk = (k: crypto.KeyObject, kid: string, more: Record<string, unknown> = {}): Record<string, unknown> => ({ ...k.export({ format: "jwk" }), kid, ...more });
+
+/** a token: its header and claims, signed as the header's alg says, by `key` */
+function bearer(header: Record<string, unknown>, claims: Record<string, unknown>, key: crypto.KeyObject | Buffer | null): string {
+  const b = (v: unknown): string => Buffer.from(JSON.stringify(v)).toString("base64url");
+  const signed = `${b(header)}.${b(claims)}`;
+  const alg = String(header.alg);
+  const sig = key === null ? Buffer.alloc(0) : Buffer.isBuffer(key) ? crypto.createHmac("sha256", key).update(signed).digest()
+    : alg === "EdDSA" ? crypto.sign(null, Buffer.from(signed), key) : crypto.sign("sha256", Buffer.from(signed), key);
+  return `${signed}.${sig.toString("base64url")}`;
+}
+const valid = (more: Record<string, unknown> = {}): Record<string, unknown> => ({ iss: ISSUER, aud: RESOURCE, sub: "analyst", exp: Math.floor(Date.now() / 1000) + 600, ...more });
+
+/** an issuer whose answers are a test's, by URL; what was asked, in order */
+function issuerOf(answers: Record<string, () => Response>, asked: string[] = []): InstanceType<typeof Issuer> {
+  const s = mcpSettings({ MASON_MCP_URL: RESOURCE, MASON_MCP_ISSUER: ISSUER }, "127.0.0.1");
+  assert.ok(s !== null && !("problems" in s));
+  return new Issuer(s, { log: () => undefined, fetch: async (url, init) => {
+    asked.push(url);
+    assert.equal(init.redirect, "manual", "a redirect is never followed");
+    const a = answers[url];
+    if (a === undefined) return new Response("", { status: 404 });
+    return a();
+  } });
+}
+const json = (v: unknown): () => Response => () => new Response(JSON.stringify(v), { status: 200, headers: { "content-type": "application/json" } });
+const META = `${ISSUER}/.well-known/oauth-authorization-server`;
+const KEYS = { [META]: json({ issuer: ISSUER, jwks_uri: `${ISSUER}/jwks` }),
+  [`${ISSUER}/jwks`]: json({ keys: [jwk(rsaKey.publicKey, "r1", { use: "sig" }), jwk(weakKey.publicKey, "weak"), jwk(edKey.publicKey, "ed"), jwk(rsaKey.publicKey, "enc", { use: "enc" })] }) };
+
+test("an MCP bearer token: the issuer's signature by its published key alone — never alg none, an HMAC keyed by the public key, a weak or an encryption key", async () => {
+  const issuer = issuerOf(KEYS);
+  assert.deepEqual(await issuer.check(bearer({ alg: "RS256", kid: "r1" }, valid(), rsaKey.privateKey)), { user: "analyst", subject: "analyst" });
+  assert.deepEqual(await issuer.check(bearer({ alg: "EdDSA", kid: "ed" }, valid(), edKey.privateKey)), { user: "analyst", subject: "analyst" });
+  const publicBytes = Buffer.from(rsaKey.publicKey.export({ format: "pem", type: "spki" }) as string);
+  const refused: Array<[string, string, RegExp]> = [
+    ["alg none", bearer({ alg: "none", kid: "r1" }, valid(), null), /never none nor HS/],
+    ["alg None", bearer({ alg: "None", kid: "r1" }, valid(), null), /never none nor HS/],
+    ["HS256 keyed by the published key", bearer({ alg: "HS256", kid: "r1" }, valid(), publicBytes), /never none nor HS/],
+    ["a 1024-bit RSA key", bearer({ alg: "RS256", kid: "weak" }, valid(), weakKey.privateKey), /none of the issuer's published keys/],
+    ["a key published for encryption", bearer({ alg: "RS256", kid: "enc" }, valid(), rsaKey.privateKey), /none of the issuer's published keys/],
+    ["EdDSA named on an RSA key", bearer({ alg: "EdDSA", kid: "r1" }, valid(), edKey.privateKey), /does not fit its key's type/],
+    ["a signature cut off", bearer({ alg: "RS256", kid: "r1" }, valid(), rsaKey.privateKey).replace(/\.[^.]+$/, "."), /no signature/],
+    ["an audience list without this endpoint", bearer({ alg: "RS256", kid: "r1" }, valid({ aud: ["https://other.example.test", `${RESOURCE}/`] }), rsaKey.privateKey), /audience/],
+    ["a user name of another grammar", bearer({ alg: "RS256", kid: "r1" }, valid({ sub: "Robert'); --" }), rsaKey.privateKey), /not a mason user's name/],
+    ["a JWE", "a.b.c.d.e", /encrypted/],
+    ["too long", "a".repeat(20_000), /at most/],
+  ];
+  for (const [what, t, re] of refused) {
+    const r = await issuer.check(t);
+    assert.ok("status" in r && r.status === 401, what);
+    assert.match(r.reason, re, what);
+    // what is said of a token never holds it, nor its signature
+    assert.ok(!r.reason.includes(t.slice(-16)), what);
+  }
+  // an audience list that names it is accepted
+  assert.ok("user" in await issuer.check(bearer({ alg: "RS256", kid: "r1" }, valid({ aud: ["https://other.example.test", RESOURCE] }), rsaKey.privateKey)));
+});
+
+test("the issuer's answers are untrusted: a redirect not followed, metadata naming another issuer, an answer too large or not JSON — every token refused 503, never let through", async () => {
+  const t = bearer({ alg: "RS256", kid: "r1" }, valid(), rsaKey.privateKey);
+  const cases: Array<[string, Record<string, () => Response>, RegExp]> = [
+    ["a redirect", { [META]: () => new Response("", { status: 302, headers: { location: "https://evil.example.test/" } }) }, /HTTP 302 \(a redirect, which Mason does not follow\)/],
+    ["another issuer", { [META]: json({ issuer: "https://evil.example.test", jwks_uri: "https://evil.example.test/jwks" }) }, /names another issuer/],
+    ["a jwks_uri in plain http", { [META]: json({ issuer: ISSUER, jwks_uri: "http://auth.example.test/jwks" }) }, /https/],
+    ["keys too large", { [META]: json({ issuer: ISSUER, jwks_uri: `${ISSUER}/jwks` }), [`${ISSUER}/jwks`]: () => new Response("x".repeat(600_000)) }, /more than/],
+    ["keys not JSON", { [META]: json({ issuer: ISSUER, jwks_uri: `${ISSUER}/jwks` }), [`${ISSUER}/jwks`]: () => new Response("<html>") }, /not JSON/],
+    ["no key Mason can read", { [META]: json({ issuer: ISSUER, jwks_uri: `${ISSUER}/jwks` }), [`${ISSUER}/jwks`]: json({ keys: [{ kty: "oct", k: "c2VjcmV0", kid: "r1" }] }) }, /no signing key/],
+    ["the issuer down", { [META]: () => { throw new TypeError("fetch failed"); } }, /could not be fetched/],
+  ];
+  for (const [what, answers, re] of cases) {
+    const asked: string[] = [];
+    const r = await issuerOf(answers, asked).check(t);
+    assert.ok("status" in r && r.status === 503, `${what}: ${JSON.stringify(r)}`);
+    assert.match(r.reason, re, what);
+    assert.ok(asked.every((u) => u.startsWith(ISSUER)), `${what}: nothing asked of another host: ${asked.join(", ")}`);
+  }
 });

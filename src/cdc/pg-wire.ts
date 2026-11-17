@@ -29,6 +29,10 @@ export interface PgConnectOptions {
   /** the session's text forms, sent at startup in place of the change reader's (ISO dates in UTC, round-trippable floats,
    *  ISO 8601 intervals): `mason mcp` sends none, so an agent reads the text Postgres's defaults print, as psql does */
   textForms?: ReadonlyArray<readonly [name: string, value: string]>;
+  /** bytes written first on every connection this opens (the session's and each CancelRequest's), before the SSL
+   *  negotiation: a PROXY protocol v2 header naming the client this connection is made for (`mason serve`'s MCP
+   *  endpoint, src/cli/mcp-http.ts, to the listener's own door that believes one: src/api/postgres/server.ts `openLocal`) */
+  proxyHeader?: Buffer;
 }
 
 /** A server ErrorResponse, with its SQLSTATE: callers branch on `code` (42P01, 42710, 55006 …). */
@@ -445,6 +449,7 @@ async function transport(o: PgConnectOptions, hold: (s: net.Socket | tls.TLSSock
     s.once("connect", () => resolve(s));
     s.once("error", (e) => reject(new Error(`connecting to ${o.host}:${o.port}: ${socketErrorText(e)}`)));
   });
+  if (o.proxyHeader !== undefined) raw.write(o.proxyHeader);
   let sock: net.Socket | tls.TLSSocket = raw;
   if (mode !== "disable" && mode !== "allow") {
     // SSLRequest: length 8, code 80877103; the server answers one byte, S or N

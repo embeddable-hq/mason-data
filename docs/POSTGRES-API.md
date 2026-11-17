@@ -477,6 +477,39 @@ names the agent. Its tools say over this wire what a bare SQL tool would leave a
   out), the fields this listener's ErrorResponse carries;
 - `explain` is this API's EXPLAIN, as text.
 
+### From a hosted agent: MCP over HTTPS
+
+`mason serve` serves the same tools to a hosted agent (claude.ai, ChatGPT, a team's agent platform) that cannot start
+a process: MCP's Streamable HTTP at `/mcp` on its health port (`MASON_HEALTH_PORT`), signed in by an OAuth
+authorization server the operator runs or rents. Mason issues no token and runs no sign-in page; it checks each
+bearer token against that server's published keys (docs/DESIGN.md "An MCP server over HTTPS").
+
+```bash
+MASON_MCP_URL=https://mason.example.com/mcp      # the address a client reaches, through the relay in front
+MASON_MCP_ISSUER=https://auth.example.com        # the authorization server, as its metadata names itself
+MASON_MCP_USER_CLAIM=sub                          # the token's claim that names the mason user (default sub)
+MASON_MCP_FROM=client                             # client (default) or token: how a user's address ranges apply
+MASON_MCP_PLAIN=1                                 # TLS is terminated in front (required off loopback)
+```
+
+- **The authorization server** must publish RFC 8414 or OpenID metadata naming the same issuer and a `jwks_uri`, and
+  issue signed JWT access tokens (RS256, PS256, ES256, EdDSA, …) whose `aud` is `MASON_MCP_URL` exactly — the resource a
+  client asks for (RFC 8707) — and whose user claim is a `mason user`'s name. An agent finds it from
+  `/.well-known/oauth-protected-resource` (also under `/mcp`), which a 401's `WWW-Authenticate` names.
+- **`MASON_MCP_URL` is the public address, never what Mason sees.** Behind a relay or proxy, set it to the address the
+  agent is given; the relay forwards `/mcp` and `/.well-known/oauth-protected-resource…` to the health port.
+- **Each request runs as the mapped user**: its role, row filters and limits, and the request log names it with
+  `application_name` `mason-mcp/<client>` and the client's address. A user that does not exist or is disabled is
+  refused (403) with the command that fixes it.
+- **A user's "connects from" ranges, plainly**: with `MASON_MCP_FROM=client` (the default) they are judged on the
+  address the HTTP request comes from. A hosted agent's requests come from its vendor's servers, and behind a relay
+  from the relay, so a user with ranges is refused unless those addresses are in them. `MASON_MCP_FROM=token` makes the
+  endpoint's own authorization replace the check: a request with a valid token for the user is served from any address;
+  a request without one is refused 401 as always. It changes nothing for the Postgres API, where the user's ranges still
+  hold.
+- **TLS**: the health port is plain HTTP. Off loopback the start is refused unless `MASON_MCP_PLAIN=1` says TLS is
+  terminated in front of it, so a bearer token never crosses a network in clear.
+
 ## What a tool sees
 
 - **Each synced table**, in the schema it has in the source (`public.orders` stays `public.orders`), with the columns

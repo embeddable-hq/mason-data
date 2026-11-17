@@ -2425,15 +2425,68 @@ exit codes, `mason help agent`). A tool error carrying the SQLSTATE and HINT is 
 instead of giving up; a `kept` line is what stops it presenting a copy over the poll's row limit as current. And every
 statement lands in the request log under the agent's name.
 
-**Not yet: the same server inside `mason serve`, over HTTPS.** A hosted agent (claude.ai, a team's agent platform)
-cannot spawn a process; it needs MCP's Streamable HTTP transport on the server. What that would take: a route on
-`mason serve` beside `/healthz` (its own port or path, TLS as the Postgres API's: `MASON_PG_TLS_CERT` or the operator's
-proxy), the same tools over the same session code, and authorization by MCP's OAuth 2.1 profile — Mason as the
-resource server, publishing its protected-resource metadata, the bearer token mapped to a `mason user` so the request
-log still names who asked — or, before an authorization server exists, a user's password as a bearer token for the
-clients that take a static header. The tool code would not change; the transport and the login would.
+**Over HTTPS, inside `mason serve`**: "An MCP server over HTTPS", below — the same session code, another transport and
+another login.
 
 **Where.** `src/cli/mcp.ts`, `src/cdc/pg-wire.ts` (`extended`, `cancel`); `tests/cli-mcp.test.ts`, `tests/pg-wire.test.ts`.
+
+### An MCP server over HTTPS (2026-11-17, issue 1115)
+
+**Decision.** `mason serve` serves `mason mcp`'s tools over MCP's Streamable HTTP transport, for a hosted agent
+(claude.ai, ChatGPT, a team's agent platform) that cannot start a process, with Mason as an OAuth 2.1 resource server
+(MCP's authorization profile). Off unless configured: `MASON_MCP_URL` and `MASON_MCP_ISSUER` together, or the start is
+refused naming what is missing.
+
+- **Where: `/mcp` on the port `mason serve` already listens on** (MASON_HEALTH_PORT, beside `/healthz`), not a port
+  of its own, so a relay in front forwards one port. `POST /mcp` takes one JSON-RPC message and answers it as JSON
+  (`Mcp-Session-Id` from `initialize` on), `DELETE /mcp` ends a session, `GET` is 405 (Mason sends nothing of its own).
+  The protected resource's metadata (RFC 9728) is at `/.well-known/oauth-protected-resource`, and at that path with the
+  public address's path after it (RFC 9728's insertion: `/.well-known/oauth-protected-resource/mcp`), on that port.
+- **The public address is a setting, never what Mason sees** (the owner, 2026-11-17). Replicas sit behind a relay, so
+  the address a client reaches is not the listen address, the Host header or X-Forwarded-*. `MASON_MCP_URL` (https, or
+  http to this machine for a test) is the resource the metadata publishes, the audience every token must name, and
+  the base of the 401's `WWW-Authenticate: Bearer resource_metadata="…"`. A token whose audience is the address Mason
+  sees, and not that one, is refused.
+- **The token**: a JWT signed by the operator's authorization server (`MASON_MCP_ISSUER`), checked by its published keys
+  — its metadata found by RFC 8414 / OpenID discovery, whose `issuer` must be the one set, its `jwks_uri` https; an
+  asymmetric `alg` alone (RS*, PS*, ES*, EdDSA; never `none` nor HS*, which a public key could forge), the `kid` one the
+  issuer publishes for signatures, of the key's own type, `crit` refused; `iss` exact, `aud` this endpoint's public
+  address, `exp` required and `nbf` / `iat` within 60 s of skew. Node's `crypto` verifies (no dependency). The keys are
+  cached for an hour, at most 100, and fetched again for an unknown `kid` at most once a minute. **Fail closed**: keys
+  that cannot be fetched (no answer, a redirect — never followed —, too large, not JSON, another issuer) refuse every
+  token with 503, never let one through. Mason issues no token and runs no sign-in page.
+- **The user**: the claim `MASON_MCP_USER_CLAIM` names (default `sub`) is a `mason user`'s name. One that does not
+  exist, is disabled or was added under another API key is refused 403 with the `mason user` command that fixes it
+  (the client holds a valid token of the operator's issuer, so it is told which; the Postgres API keeps a missing user
+  and a limited one alike for a stranger). Each statement runs as that user, under its role and limits, and the request
+  log names it, `application_name` `mason-mcp/<client>` and the client's address.
+- **The same session code**: an MCP session is `mason mcp`'s `McpServer` (src/cli/mcp.ts), its messages handed to it
+  whole; only how it reaches the Postgres API differs (`McpLink`). Its connections go to the run's own listener through
+  a door of their own (`openLocal`, src/api/postgres/server.ts): on loopback, every connection beginning with a PROXY v2
+  header naming the HTTP client, its password a secret this process alone holds — never a user's, so no other process
+  on the machine logs in there, whatever header it sends. So the listener judges the user, its role, its limits and its
+  ranges at login and before every statement as for any session, and a cancellation (`notifications/cancelled`, a POST
+  of its own) is a CancelRequest for its statement, as over stdio.
+- **A user's "connects from" ranges** (`MASON_MCP_FROM`): `client` (the default, the safe one) judges them on the HTTP
+  client's address — behind a relay, the relay's — so a limited user is refused unless the agent's servers are in its
+  ranges; `token` lets the endpoint's own authorization replace the check. **The bypass applies only to a request that
+  carries a valid token** (right issuer, audience, signature and expiry, mapped to an enabled user): one without is 401
+  before anything else is read (the owner, 2026-11-17). It is a property of the endpoint's door alone: the Postgres
+  API's listener, and every other route, judge ranges as before.
+- **Nothing off loopback in clear**: the health port is plain HTTP, so with `MASON_HEALTH_HOST` off loopback (its default
+  is 0.0.0.0) the endpoint is refused unless `MASON_MCP_PLAIN=1` says TLS is terminated in front (a relay, a proxy), as
+  `MASON_PG_PLAIN` says it of the Postgres API. A token never reaches a log line, an error or an answer.
+- **Bounds**: a message at most 1 MiB, a token 16 KiB, 1,000 sessions (the oldest idle making way), a session ended after
+  an hour unused, and a session bound to its user (another user's token naming it is told it does not exist).
+
+**Left out.** `Origin` is not checked (MCP asks it of a server against DNS rebinding, which reaches a server that trusts
+the network or a cookie; this one trusts only a bearer token sent in a header). No server-sent events: every answer is
+JSON, and Mason sends nothing of its own. Opaque (non-JWT) tokens and token introspection are not read.
+
+**Where.** `src/cli/mcp-http.ts` (the endpoint), `src/cli/mcp-oauth.ts` (the settings, the token), `src/cli/mcp.ts`
+(`McpServer`, `McpLink`), `src/api/postgres/server.ts` (`openLocal`), `src/api/postgres/proxy.ts` (`proxyHeaderFor`),
+`src/duck/users.ts` (`LiveUsers.vouched`), `src/cli/serve.ts`; `tests/cli-mcp-http.test.ts`, `tests/cli-security.test.ts`,
+`tests/serve.test.ts`.
 
 ### One OID for a type the source made: the catalog's (2026-11-12, issue 861)
 

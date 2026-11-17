@@ -333,7 +333,27 @@ export class LiveUsers {
    * token as the file has the user NOW — its role as `mason user add --role` wrote it, so a role given or taken
    * applies at the user's next statement, without a restart.
    */
-  recheck(token: PgToken, from: string | null = null): PgToken {
+  /**
+   * A user named by someone this process already believes, with no password (`mason serve`'s MCP endpoint, whose bearer
+   * token, verified by the operator's authorization server, names the user: src/cli/mcp-http.ts): the session's token,
+   * or why it is refused, as `login` refuses — no such user (or one removed), one added under another API key, an address
+   * outside its ranges, a disabled one. `ranges` false: the user's ranges are not judged (MASON_MCP_FROM=token, the
+   * endpoint's own authorization in their place, for its requests alone).
+   */
+  vouched(user: string, from: string | null, ranges: boolean): PgToken {
+    const now = this.now();
+    if ("problem" in now) throw refusal(503, `the list of users cannot be read, so no user can connect: ${now.problem}`, user);
+    const found = now.users.find((u) => u.name === user);
+    if (found === undefined) throw refusal(401, `no user "${user}": mason user add ${user} makes it`, user);
+    if (!underKey(found, this.apiKey)) throw refusal(401, `the API key was rotated since the user "${found.name}" was added, which removes every user: mason user remove ${found.name}, then mason user add ${found.name}`, user);
+    if (ranges && !this.inside(found.from === undefined ? null : this.ranges.get(found.id) ?? [], from)) {
+      throw refusal(401, `the user "${user}" may not connect from ${addressShown(from)}, outside its address ranges (mason user list shows them)`, user, ADDRESS_NOT_ALLOWED);
+    }
+    if (isDisabled(found)) throw refusal(401, disabledMessage(found.name), user, USER_DISABLED);
+    return { filters: [], subject: undefined, user: found.name, jti: found.id, ...(found.role !== undefined ? { role: found.role } : {}), ...attributesOf(found) };
+  }
+
+  recheck(token: PgToken, from: string | null = null, ranges = true): PgToken {
     if (token.user === undefined) return token;
     const now = this.now();
     if ("problem" in now) throw refusal(503, `the list of users cannot be read: ${now.problem}`, token.user);
@@ -341,7 +361,7 @@ export class LiveUsers {
     if (found === undefined) throw refusal(401, `the user "${token.user}" was removed`, token.user);
     if (isDisabled(found)) throw refusal(401, `the user "${token.user}" was disabled`, token.user, USER_DISABLED);
     // its ranges changed since it logged in: a session from outside them ends, as a new connection would be refused
-    if (!this.inside(found.from === undefined ? null : this.ranges.get(found.id) ?? [], from)) {
+    if (ranges && !this.inside(found.from === undefined ? null : this.ranges.get(found.id) ?? [], from)) {
       throw refusal(401, `the user "${token.user}" may not connect from ${addressShown(from)}: its address ranges are ${found.from!.join(", ")}`, token.user, ADDRESS_NOT_ALLOWED);
     }
     if (found.role === token.role && JSON.stringify(found.attributes ?? null) === JSON.stringify(token.attributes ?? null)) return token;
