@@ -758,6 +758,7 @@ test("--cold's options: the published run's defaults, and what it refuses", asyn
   const { parseColdArgs, memoryBytesOf, engineMemoryOf, SOURCES_FILE } = await coldModule();
   const machine = { cpus: 4, ramBytes: 15.4 * 2 ** 30, version: "0.23.0" };
   const o = parseColdArgs([], machine);
+  assert.equal(o.label, "a server", "no --label: words that name no machine, never its host name, which the renderer would publish");
   assert.deepEqual([o.sizes, o.clients, o.runs, o.cpus, o.memoryBytes, o.masonImage, o.postgresImage, o.settleSeconds, o.disk],
     [[1e6, 1e7, 1e8], [1, 10], 3, 4, 7 * 2 ** 30, "ghcr.io/embeddable-hq/mason-data:0.23.0", "postgres:18", 10, null]);
   const smoke = parseColdArgs(["--sizes", "100k", "--clients", "1,10", "--runs", "1", "--memory", "8GiB", "--settle", "0", "--disk", "EBS gp3, 125 MB/s, 3000 IOPS"], machine);
@@ -861,7 +862,8 @@ test("the published fixture is a run that ended, with every cell its mode measur
 
 /** A fake `docker` for a --cold run: every call recorded in $FAKE_DOCKER_LOG. The containers, volumes and networks named
  *  in $FAKE_EXISTING are there (another run's); $FAKE_OWNER is bench-pg's owner label; $FAKE_CGROUP the cgroup version
- *  (2); $FAKE_SLOW makes each call take a second; $FAKE_PS and $FAKE_INSPECT answer the warm mode's `ps -a` and
+ *  (2); bench-replica-owner, when there, names $FAKE_OWNER_HOLDER (and once removed by its id, a new one can be made);
+ *  $FAKE_SLOW makes each call take a second; $FAKE_PS and $FAKE_INSPECT answer the warm mode's `ps -a` and
  *  `inspect <id>`; $FAKE_DAEMON_DOWN makes every call fail as docker does with no daemon; $FAKE_FAIL_RUN makes `docker run -d`
  *  fail after it made the container (its --cidfile written), as a taken port does */
 const FAKE_DOCKER = `#!/bin/sh
@@ -874,7 +876,15 @@ if [ "$2" = inspect ] && { [ "$1" = container ] || [ "$1" = volume ] || [ "$1" =
 fi
 case "$1 $2" in
   "info --format") echo "\${FAKE_CGROUP:-2} /var/lib/docker" ;;
-  "inspect --format") echo "$FAKE_OWNER" ;;
+  "inspect --format") if [ "$4" = bench-replica-owner ]; then echo "owner-held-id $FAKE_OWNER_HOLDER"; else echo "$FAKE_OWNER"; fi ;;
+  "create --name")
+    if [ "$3" = bench-replica-owner ]; then
+      for n in $FAKE_EXISTING; do if [ "$n" = bench-replica-owner ] && [ ! -e "$FAKE_DOCKER_LOG.owner-removed" ]; then
+        echo 'Error response from daemon: Conflict. The container name "/bench-replica-owner" is already in use by container "owner-held-id".' >&2; exit 1
+      fi; done
+      echo owner-made-by-this-run
+    fi ;;
+  "rm -f") if [ "$3" = owner-held-id ]; then touch "$FAKE_DOCKER_LOG.owner-removed"; fi ;;
   "ps -a") echo "$FAKE_PS" ;;
   "inspect "*) echo "$FAKE_INSPECT" ;;
   "image inspect") echo sha256:fake ;;
@@ -1103,19 +1113,23 @@ test("--cold: a killed run's lock is taken over by one run alone, and released w
   });
 });
 
-/** the warm mode in a process of its own, `--reuse-postgres` with the fake docker first on PATH and its temp folder its
- *  own, holding `lock` as a cold run's lock when given */
+/** the warm mode in a process of its own, `--reuse-postgres` with the fake docker first on PATH, `lock` (when given)
+ *  as the cold mode's lock */
 const warmRun = (dir: string, bin: string) => (name: string, env: Record<string, string>, lock?: string): { out: string; docker: string[] } => {
-    const tmp = path.join(dir, name), log = path.join(dir, `${name}.docker`);
-    fs.mkdirSync(tmp);
-    if (lock !== undefined) fs.writeFileSync(path.join(tmp, "bench-replica-cold.lock"), lock);
-    const r = spawnSync(process.execPath, [path.join(ROOT, "scripts/bench-replica.ts"), "--reuse-postgres", "--memory", "8GiB", "--sizes", "100k", "--out", path.join(tmp, "x.json")],
-      { encoding: "utf8", timeout: 20_000, env: { ...process.env, ...env, TMPDIR: tmp, PATH: `${bin}${path.delimiter}${process.env.PATH}`, FAKE_DOCKER_LOG: log } });
-    return { out: `${r.stdout}${r.stderr}`, docker: fs.existsSync(log) ? fs.readFileSync(log, "utf8").split("\n").filter(Boolean) : [] };
+  const tmp = path.join(dir, name), log = path.join(dir, `${name}.docker`), lockFile = path.join(tmp, "bench-replica-cold.lock");
+  fs.mkdirSync(tmp);
+  if (lock !== undefined) fs.writeFileSync(lockFile, lock);
+  const module = pathToFileURL(path.join(ROOT, "scripts/bench-replica.ts")).href;
+  const child = `const { main, Usage } = await import(${JSON.stringify(module)});
+    try { process.exitCode = await main(JSON.parse(process.env.WARM_ARGS), { lockFile: process.env.WARM_LOCK }); } catch (e) { console.log("bench-replica: " + e.message); }`;
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", child], { encoding: "utf8", timeout: 20_000,
+    env: { ...process.env, ...env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, FAKE_DOCKER_LOG: log, WARM_LOCK: lockFile,
+      WARM_ARGS: JSON.stringify(["--reuse-postgres", "--memory", "8GiB", "--sizes", "100k", "--out", path.join(tmp, "x.json")]) } });
+  return { out: `${r.stdout}${r.stderr}`, docker: fs.existsSync(log) ? fs.readFileSync(log, "utf8").split("\n").filter(Boolean) : [] };
 };
 test("the warm mode refuses while a cold run holds its lock, before any docker call", async () => {
   const { ownerOf } = await coldModule();
-    await withTemp((dir) => {
+  await withTemp((dir) => {
     const bin = path.join(dir, "bin");
     fs.mkdirSync(bin);
     fs.writeFileSync(path.join(bin, "docker"), FAKE_DOCKER, { mode: 0o755 });
@@ -1161,6 +1175,51 @@ test("--reuse-postgres adopts only a Postgres whose run has ended: one a live ru
   });
 });
 
+test("--cold's lock is at one path whatever $TMPDIR says, so two runs in different environments see one lock", async () => {
+  const { lockFileOf } = await coldModule();
+  const was = process.env.TMPDIR;
+  try {
+    process.env.TMPDIR = "/somewhere/else";
+    assert.equal(lockFileOf(), "/tmp/bench-replica-cold.lock");
+  } finally { if (was === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = was; }
+});
+
+test("--reuse-postgres never adopts a Postgres another run adopted: the owner container names the run holding it, whatever lock that run took", () => withTemp((dir) => {
+  const ours = `boot:boot-of-the-test/pidns:pid:[4026531836]/pid:${process.pid}/start:777`;
+  // bench-pg left by a --keep-postgres run that ended (its label), adopted by a run in progress (this test's process)
+  // that took another lock (another $TMPDIR, or another /tmp)
+  const adopted = coldRunWithFakes(dir, "adopted", { FAKE_EXISTING: "bench-pg bench-replica bench-replica-owner",
+    FAKE_OWNER: ours.replace("start:777", "start:1"), FAKE_OWNER_HOLDER: ours }, ["--reuse-postgres"]);
+  assert.match(adopted.out, new RegExp(`REFUSED a cold run may be in progress: bench-replica-owner says process ${process.pid} holds bench-pg`), adopted.out);
+  untouched(adopted, "a Postgres another run adopted");
+  // an owner it cannot read: it may be alive, so refused too
+  const unread = coldRunWithFakes(dir, "unread-owner", { FAKE_EXISTING: "bench-pg bench-replica bench-replica-owner", FAKE_OWNER: "<no value>", FAKE_OWNER_HOLDER: "" });
+  assert.match(unread.out, /REFUSED a cold run may be in progress: bench-replica-owner says process unknown holds bench-pg/, unread.out);
+  untouched(unread, "an owner it cannot read");
+}));
+
+test("a cold run that adopts bench-pg holds it in Docker before the page cache is dropped, takes over a killed run's hold by its id, and gives it back", () => withTemp((dir) => {
+  const ended = `boot:boot-of-the-test/pidns:pid:[4026531836]/pid:${process.pid}/start:1`;
+  // bench-pg left by a run that ended; its limits are not this run's, so the run refuses once it has looked at it
+  const inspect = JSON.stringify([{ Config: { Env: ["POSTGRES_PASSWORD=x"] }, HostConfig: { Memory: 1, NanoCpus: 1e9, PortBindings: { "5432/tcp": [{ HostPort: "9" }] } },
+    NetworkSettings: { Networks: { "bench-replica": {} } }, State: { Running: true } }]);
+  const adopt = coldRunWithFakes(dir, "adopt", { FAKE_EXISTING: "bench-pg bench-replica", FAKE_OWNER: ended, FAKE_INSPECT: inspect }, ["--reuse-postgres"]);
+  assert.match(adopt.out, /REFUSED bench-pg has other limits than --cpus 1 --memory 8GiB/, adopt.out);
+  const made = acts(adopt.docker);
+  assert.match(made[0] ?? "", /^create --name bench-replica-owner --label mason-bench\.owner=boot:boot-of-the-test\/pidns:pid:\[4026531836\]\/pid:\d+\/start:555 postgres:18 true$/, "held before anything else");
+  assert.equal(made.at(-1), "rm -f owner-made-by-this-run", "given back by its id when the run ends");
+  assert.ok(!made.some((c) => /^(stop|restart|start|rm -f -v) /.test(c)), "bench-pg, adopted, is not stopped, started or removed");
+  assert.equal(adopt.sudo.length, 1);
+  // a killed run's owner container: removed by the id read, then made again for this run
+  const killed = coldRunWithFakes(dir, "killed-owner", { FAKE_EXISTING: "bench-pg bench-replica bench-replica-owner", FAKE_OWNER: ended, FAKE_OWNER_HOLDER: ended, FAKE_INSPECT: inspect }, ["--reuse-postgres"]);
+  assert.match(killed.out, /REFUSED bench-pg has other limits/, killed.out);
+  const k = acts(killed.docker);
+  assert.match(k[0] ?? "", /^create --name bench-replica-owner /);
+  assert.equal(k[1], "rm -f owner-held-id", "the ended run's, by its id");
+  assert.match(k[2] ?? "", /^create --name bench-replica-owner /);
+  assert.equal(k.at(-1), "rm -f owner-made-by-this-run");
+}));
+
 test("--cold's checks fail closed: docker that cannot answer, or cgroup v1, refuses before the page cache is dropped", () => withTemp((dir) => {
   const down = coldRunWithFakes(dir, "down", { FAKE_DAEMON_DOWN: "1" });
   assert.match(down.out, /REFUSED docker container inspect bench-mason could not tell whether it exists: Cannot connect to the Docker daemon/, down.out);
@@ -1174,10 +1233,11 @@ test("--cold: a run that fails removes only what it made, by the ids docker gave
   const failed = coldRunWithFakes(dir, "failed", { FAKE_EXISTING: "", FAKE_FAIL_RUN: "1" });
   assert.match(failed.out, /REFUSED docker run: docker: Error response from daemon: port is already allocated/, failed.out);
   const made = acts(failed.docker);
-  assert.equal(made[0], "network create bench-replica");
-  assert.match(made[1] ?? "", /^run -d --cidfile \S+postgres\.cid --label mason-bench\.owner=boot:boot-of-the-test\/pidns:pid:\[4026531836\]\/pid:\d+\/start:555 --name bench-pg /);
-  assert.deepEqual(made.slice(2), ["rm -f -v pg-made-not-started", "network rm net-made-by-this-run"],
-    "Postgres by its --cidfile and the network by its id; nothing by a name, which may be another run's");
+  assert.match(made[0] ?? "", /^create --name bench-replica-owner --label mason-bench\.owner=boot:boot-of-the-test\/pidns:pid:\[4026531836\]\/pid:\d+\/start:555 postgres:18 true$/);
+  assert.equal(made[1], "network create bench-replica");
+  assert.match(made[2] ?? "", /^run -d --cidfile \S+postgres\.cid --label mason-bench\.owner=boot:boot-of-the-test\/pidns:pid:\[4026531836\]\/pid:\d+\/start:555 --name bench-pg /);
+  assert.deepEqual(made.slice(3), ["rm -f -v pg-made-not-started", "network rm net-made-by-this-run", "rm -f owner-made-by-this-run"],
+    "Postgres by its --cidfile, the network and the owner by their ids; nothing by a name, which may be another run's");
   assert.equal(failed.sudo.length, 1, "the page cache dropped once, before the run began");
   assert.deepEqual(failed.left.filter((n) => n.startsWith("bench-cold-")), [], "the run's files removed");
 }));

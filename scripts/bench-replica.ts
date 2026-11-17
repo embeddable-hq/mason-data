@@ -817,11 +817,12 @@ function commit(): string {
 interface SizeCtx { rows: number; pgConn: pg.ClientConfig; masonConn: pg.ClientConfig; mason: MasonServed; workDir: string }
 type Engine = "postgres" | "mason";
 
-async function main(): Promise<number> {
-  const o = parseArgs(process.argv.slice(2));
+/** the warm mode; `at.lockFile` is the cold mode's lock, for a test */
+export async function main(argv: string[] = process.argv.slice(2), at: { lockFile?: string } = {}): Promise<number> {
+  const o = parseArgs(argv);
   const log = (l: string): void => { process.stdout.write(`${l}\n`); };
   // a cold run in progress: this run would load the machine it measures, and could take its Postgres's name
-  const coldRun = (await import("./bench-replica-cold.ts")).coldRunRefusal();
+  const coldRun = (await import("./bench-replica-cold.ts")).coldRunRefusal(at.lockFile);
   if (coldRun !== null) throw new Usage(coldRun);
   const { DEFAULT_MEMORY_LIMIT, DUCKDB_VERSION, machineMemoryBytes, memoryLimitBytes } = await import("../src/duck/store.ts");
   const { COPY_PARALLEL } = await import("../src/duck/sync.ts");

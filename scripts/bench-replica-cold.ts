@@ -47,8 +47,10 @@
  * never a command line or the log. Mason's project is copied into its container (`docker cp`), so the container's
  * user reads it wherever --work is.
  *
- * ANOTHER RUN IS NEVER TOUCHED. A cold run holds a lock (bench-replica-cold.lock in the temp folder: its boot, pid
- * namespace, pid and start tick, from /proc) from its start to its end. One whose holder may be alive refuses the run, and so does one
+ * ANOTHER RUN IS NEVER TOUCHED. A cold run holds a lock (/tmp/bench-replica-cold.lock, whatever $TMPDIR says: its
+ * boot, pid namespace, pid and start tick, from /proc) from its start to its end. Before it drops the page cache it
+ * also makes a container, bench-replica-owner, never started, labelled with the same owner: Docker allows one of a name,
+ * so it holds the bench's Postgres (one it made, or one it adopted) whatever /tmp it sees. One whose holder may be alive refuses the run, and so does one
  * it cannot check. A warm run refuses too while a cold run holds it. A bench-pg, bench-mason or bench-client container,
  * or a Mason volume of a size to be measured, that is already there is refused too, before anything else (the page
  * cache is not dropped either). --reuse-postgres adopts only a bench-pg whose owner (its label) has ended. A check
@@ -80,6 +82,13 @@ const PG_ALIAS = "pg";
 const BYTES_PER_ROW = 500;
 /** the label on the Postgres container a cold run made: the run that owns it (`ownerOf`) */
 const OWNER_LABEL = "mason-bench.owner";
+/**
+ * THE OWNER, IN DOCKER: a container never started, named for the run holding the bench's Postgres (its label), made by
+ * every cold run before it touches anything, and removed when it ends. Docker refuses a second container of a name, so
+ * two runs cannot both hold it, whatever /tmp or $TMPDIR each sees. A label on bench-pg itself cannot say a later run
+ * adopted it: Docker cannot change a container's labels.
+ */
+const OWNER_CONTAINER = "bench-replica-owner";
 /** how long an engine may take to answer after its restart, or Mason its first sync */
 const READY_TIMEOUT_MS = 30 * 60_000;
 
@@ -380,7 +389,7 @@ export function memoryBytesOf(s: string): number {
 export function parseColdArgs(argv: readonly string[], machine: { cpus: number; ramBytes: number; version: string }): ColdOptions {
   const o: ColdOptions = { sizes: [1e6, 1e7, 1e8], clients: [1, 10], runs: 3, cpus: machine.cpus, memoryBytes: Math.floor(machine.ramBytes / 2 / 2 ** 30) * 2 ** 30,
     masonImage: `ghcr.io/embeddable-hq/mason-data:${machine.version}`, postgresImage: "postgres:18", settleSeconds: 10, work: os.tmpdir(), reserveGb: 60,
-    label: os.hostname(), out: path.join(REPO, "tests/fixtures/bench-replica.json"), keepPostgres: false, reusePostgres: false, resume: false, disk: null };
+    label: "a server", out: path.join(REPO, "tests/fixtures/bench-replica.json"), keepPostgres: false, reusePostgres: false, resume: false, disk: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     const v = (): string => { const x = argv[++i]; if (x === undefined) throw new Usage(`${a} needs a value`); return x; };
@@ -504,8 +513,8 @@ export function ownerAlive(owner: string, procRoot = "/proc"): boolean {
 }
 const ownerPid = (owner: string): string => /\/pid:(\d+)\//.exec(owner)?.[1] ?? "unknown";
 
-/** where the cold mode's lock is: the OS temp folder ($TMPDIR, else /tmp) */
-export const lockFileOf = (): string => path.join(os.tmpdir(), "bench-replica-cold.lock");
+/** where the cold mode's lock is: one path whatever the environment says ($TMPDIR is not read), so every run sees one lock */
+export const lockFileOf = (): string => "/tmp/bench-replica-cold.lock";
 /** why a lock refuses a run, or null when its holder has ended: one starting, one in progress, or one it cannot read */
 function lockHolderRefusal(held: string, file: string, procRoot: string): string | null {
   if (held === "") return `a cold run is starting (its lock ${file} is being written): wait for it, or remove the lock if no run is starting`;
@@ -676,6 +685,18 @@ export async function mainCold(argv: string[], at: { lockFile?: string; procRoot
     releaseLock();
     throw new Usage(`--cold records what each engine reads from disk from its container's cgroup v2 io.stat, and Docker says cgroup version ${JSON.stringify(cgroupVersion)}: run it where Docker uses cgroup v2`);
   }
+  const ownerId = ((): string => {
+    try { return takeOwner(o.postgresImage, ownerOf(process.pid, procRoot), procRoot); } catch (e) { releaseLock(); throw e; }
+  })();
+  // the Docker owner first, then the lock: what the run holds, given back when it ends, however it ends
+  let released = false;
+  const release = (): void => {
+    if (released) return;
+    released = true;
+    removeQuietly(["rm", "-f", ownerId], log);
+    releaseLock();
+  };
+  process.on("exit", release);
   dropPageCache();
   const masonImageId = ensureImage(o.masonImage, log);
   ensureImage(o.postgresImage, log);
@@ -715,7 +736,7 @@ export async function mainCold(argv: string[], at: { lockFile?: string; procRoot
     }
     if (o.reusePostgres) log(`left ${PG_CONTAINER}, adopted with --reuse-postgres: docker rm -f -v ${PG_CONTAINER} removes it and its data`);
     fs.rmSync(dir, { recursive: true, force: true });
-    releaseLock();
+    release();
   };
   const onSignal = (code: number) => (): void => { log("interrupted: the fixture holds the sizes finished"); cleanup(); process.exit(code); };
   process.on("SIGINT", onSignal(130));
@@ -942,6 +963,13 @@ function refuseRunInProgress(o: ColdOptions, procRoot: string): void {
     if (exists("container", name)) throw new Usage(`a container named ${name} exists already: a cold run in progress, or one that was killed. Wait for it, or remove it (docker rm -f -v ${name}) if no run is in progress`);
   }
   const pgThere = exists("container", PG_CONTAINER);
+  // the run that holds the bench's Postgres now: one that made it, or one that adopted it, whatever lock it took
+  if (exists("container", OWNER_CONTAINER)) {
+    const held = ownerHeld();
+    if (held.owner === "" || ownerAlive(held.owner, procRoot)) {
+      throw new Usage(`a cold run may be in progress: ${OWNER_CONTAINER} says process ${held.owner === "" ? "unknown" : ownerPid(held.owner)} holds ${PG_CONTAINER}. Wait for it, or remove it (docker rm -f ${OWNER_CONTAINER}) if no run is in progress`);
+    }
+  }
   if (o.reusePostgres && !pgThere) throw new Usage(`--reuse-postgres: there is no container named ${PG_CONTAINER} (a run with --keep-postgres leaves one)`);
   if (o.reusePostgres) {
     // the run that made it: alive, it is using it (generating a size's data, or between sizes)
@@ -954,6 +982,33 @@ function refuseRunInProgress(o: ColdOptions, procRoot: string): void {
     const volume = `bench-mason-${rows}`;
     if (exists("volume", volume)) throw new Usage(`a volume named ${volume} exists already: a cold run in progress, or one that was killed. Wait for it, or remove it (docker volume rm ${volume}) if no run is in progress`);
   }
+}
+
+/** the owner container's id and the run it names */
+function ownerHeld(): { id: string; owner: string } {
+  const out = docker(["inspect", "--format", `{{.Id}} {{index .Config.Labels "${OWNER_LABEL}"}}`, OWNER_CONTAINER]);
+  const id = out.split(" ")[0] ?? "", owner = out.slice(id.length + 1).trim();
+  return { id, owner: owner === "<no value>" ? "" : owner };
+}
+/**
+ * This run made the owner container (`OWNER_CONTAINER`), labelled with `me`: its id. One a run that ended left (killed)
+ * is removed by its id and made again; if another run made one between, that run holds it, and this one refuses.
+ */
+function takeOwner(image: string, me: string, procRoot: string): string {
+  for (let tries = 0; tries < 2; tries++) {
+    const r = spawnSync("docker", ["create", "--name", OWNER_CONTAINER, "--label", `${OWNER_LABEL}=${me}`, image, "true"], { encoding: "utf8" });
+    if (r.error !== undefined) throw new Usage(`docker could not be run: ${r.error.message}`);
+    if (r.status === 0) return r.stdout.trim().split("\n").pop()!.trim();
+    if (!/already in use|conflict/i.test(r.stderr)) throw new Usage(`docker create ${OWNER_CONTAINER}: ${r.stderr.trim()}`);
+    const held = ownerHeld();
+    if (held.owner === "" || ownerAlive(held.owner, procRoot)) {
+      throw new Usage(`a cold run may be in progress: ${OWNER_CONTAINER} says process ${held.owner === "" ? "unknown" : ownerPid(held.owner)} holds ${PG_CONTAINER}. Wait for it to end`);
+    }
+    // its run ended without removing it: removed by the id read, never by its name, which a run making it now may hold
+    const rm = spawnSync("docker", ["rm", "-f", held.id], { encoding: "utf8" });
+    if (rm.status !== 0 && !/no such/i.test(rm.stderr)) throw new Usage(`docker rm -f ${held.id} (${OWNER_CONTAINER}, an ended run's): ${rm.stderr.trim()}`);
+  }
+  throw new Usage(`another cold run took ${OWNER_CONTAINER} as this one did: wait for it to end`);
 }
 
 /** what the container logged, both streams: the image logs to stdout, and a warning may go to stderr */
