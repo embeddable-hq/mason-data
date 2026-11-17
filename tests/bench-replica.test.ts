@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import type { Cell, Fixture, SweepVerdict } from "../scripts/bench-replica.ts";
 import type { ColdCell, ColdFixture, ColdRun } from "../scripts/bench-replica-cold.ts";
@@ -854,10 +854,12 @@ test("the published fixture is a run that ended, with every cell its mode measur
 
 /** A fake `docker` for a --cold run: every call recorded in $FAKE_DOCKER_LOG. The containers, volumes and networks named
  *  in $FAKE_EXISTING are there (another run's); $FAKE_OWNER is bench-pg's owner label; $FAKE_CGROUP the cgroup version
- *  (2); $FAKE_DAEMON_DOWN makes every call fail as docker does with no daemon; $FAKE_FAIL_RUN makes `docker run -d`
+ *  (2); $FAKE_SLOW makes each call take a second; $FAKE_PS and $FAKE_INSPECT answer the warm mode's `ps -a` and
+ *  `inspect <id>`; $FAKE_DAEMON_DOWN makes every call fail as docker does with no daemon; $FAKE_FAIL_RUN makes `docker run -d`
  *  fail after it made the container (its --cidfile written), as a taken port does */
 const FAKE_DOCKER = `#!/bin/sh
 echo "$*" >> "$FAKE_DOCKER_LOG"
+if [ -n "$FAKE_SLOW" ]; then sleep 1; fi
 if [ -n "$FAKE_DAEMON_DOWN" ]; then echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?" >&2; exit 1; fi
 if [ "$2" = inspect ] && { [ "$1" = container ] || [ "$1" = volume ] || [ "$1" = network ]; }; then
   for n in $FAKE_EXISTING; do if [ "$n" = "$3" ]; then echo "[]"; exit 0; fi; done
@@ -866,6 +868,8 @@ fi
 case "$1 $2" in
   "info --format") echo "\${FAKE_CGROUP:-2} /var/lib/docker" ;;
   "inspect --format") echo "$FAKE_OWNER" ;;
+  "ps -a") echo "$FAKE_PS" ;;
+  "inspect "*) echo "$FAKE_INSPECT" ;;
   "image inspect") echo sha256:fake ;;
   "run --rm") echo "fake 18.1" ;;
   "network create") echo net-made-by-this-run ;;
@@ -885,26 +889,67 @@ cat > /dev/null
 exit 0
 `;
 
-/** a --cold run in a process of its own, on a platform said to be Linux, with the fakes first on PATH and its lock in
- *  `lock`: what it said, every docker and sudo call, and the files it left in its --work */
-function coldRunWithFakes(dir: string, name: string, env: Record<string, string>, more: string[] = [], lock = path.join(dir, `${name}.lock`)): { out: string; docker: string[]; sudo: string[]; left: string[] } {
+/** a /proc/<pid>/stat whose 22nd field, the start in ticks since boot, is `start`; its name has a ") " in it, as a
+ *  process's name may */
+const fakeStat = (pid: number, start: number): string => `${pid} (node ) x) S ${Array.from({ length: 18 }, (_, i) => i + 1).join(" ")} ${start} 0 0\n`;
+/** a /proc of a test's own: the machine's boot id, the pid namespace, and this test's process (standing for a run in progress) started at
+ *  tick 777. A --cold run in a child adds its own stat, started at tick 555 (`coldRunSpec`). */
+function fakeProc(dir: string): string {
+  const proc = path.join(dir, "proc");
+  if (!fs.existsSync(proc)) {
+    fs.mkdirSync(path.join(proc, "sys/kernel/random"), { recursive: true });
+    fs.writeFileSync(path.join(proc, "sys/kernel/random/boot_id"), "boot-of-the-test\n");
+    fs.mkdirSync(path.join(proc, "self/ns"), { recursive: true });
+    fs.symlinkSync("pid:[4026531836]", path.join(proc, "self/ns/pid"));
+    fs.mkdirSync(path.join(proc, String(process.pid)));
+    fs.writeFileSync(path.join(proc, String(process.pid), "stat"), fakeStat(process.pid, 777));
+  }
+  return proc;
+}
+
+/** a --cold run in a process of its own, on a platform said to be Linux, with the fakes first on PATH, its lock in
+ *  `lock` and its /proc the test's (`fakeProc`): what it said, every docker and sudo call, and the files it left in its --work */
+function coldRunSpec(dir: string, name: string, env: Record<string, string>, more: string[], lock: string): { args: string[]; env: NodeJS.ProcessEnv; read: (out: string) => { out: string; docker: string[]; sudo: string[]; left: string[] } } {
   const bin = path.join(dir, "bin");
   if (!fs.existsSync(bin)) {
     fs.mkdirSync(bin);
     fs.writeFileSync(path.join(bin, "docker"), FAKE_DOCKER, { mode: 0o755 });
     fs.writeFileSync(path.join(bin, "sudo"), FAKE_SUDO, { mode: 0o755 });
   }
+  const proc = fakeProc(dir);
   const module = pathToFileURL(path.join(ROOT, "scripts/bench-replica-cold.ts")).href;
   const child = `Object.defineProperty(process, "platform", { value: "linux" });
+    const fs = await import("node:fs");
+    fs.mkdirSync(process.env.COLD_PROC + "/" + process.pid, { recursive: true });
+    fs.writeFileSync(process.env.COLD_PROC + "/" + process.pid + "/stat", process.pid + " (node) S " + Array(18).fill(0).join(" ") + " 555 0 0");
     const { mainCold } = await import(${JSON.stringify(module)});
-    try { await mainCold(JSON.parse(process.env.COLD_ARGS), { lockFile: process.env.COLD_LOCK }); console.log("RAN"); } catch (e) { console.log("REFUSED " + e.message); }`;
+    try { await mainCold(JSON.parse(process.env.COLD_ARGS), { lockFile: process.env.COLD_LOCK, procRoot: process.env.COLD_PROC }); console.log("RAN"); } catch (e) { console.log("REFUSED " + e.message); }`;
   const work = path.join(dir, name), dockerLog = path.join(dir, `${name}.docker`), sudoLog = path.join(dir, `${name}.sudo`);
   fs.mkdirSync(work);
-  const r = spawnSync(process.execPath, ["--input-type=module", "-e", child], { encoding: "utf8", timeout: 60_000,
-    env: { ...process.env, ...env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, FAKE_DOCKER_LOG: dockerLog, FAKE_SUDO_LOG: sudoLog, COLD_LOCK: lock,
-      COLD_ARGS: JSON.stringify(["--sizes", "100k", "--runs", "1", "--memory", "8GiB", "--cpus", "1", "--work", work, "--out", path.join(work, "x.json"), ...more]) } });
   const lines = (f: string): string[] => fs.existsSync(f) ? fs.readFileSync(f, "utf8").split("\n").filter(Boolean) : [];
-  return { out: `${r.stdout}${r.stderr}`, docker: lines(dockerLog), sudo: lines(sudoLog), left: fs.readdirSync(work) };
+  return {
+    args: ["--input-type=module", "-e", child],
+    env: { ...process.env, ...env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, FAKE_DOCKER_LOG: dockerLog, FAKE_SUDO_LOG: sudoLog, COLD_LOCK: lock, COLD_PROC: proc,
+      COLD_ARGS: JSON.stringify(["--sizes", "100k", "--runs", "1", "--memory", "8GiB", "--cpus", "1", "--work", work, "--out", path.join(work, "x.json"), ...more]) },
+    read: (out) => ({ out, docker: lines(dockerLog), sudo: lines(sudoLog), left: fs.readdirSync(work) }),
+  };
+}
+function coldRunWithFakes(dir: string, name: string, env: Record<string, string>, more: string[] = [], lock = path.join(dir, `${name}.lock`)): { out: string; docker: string[]; sudo: string[]; left: string[] } {
+  const spec = coldRunSpec(dir, name, env, more, lock);
+  const r = spawnSync(process.execPath, spec.args, { encoding: "utf8", timeout: 60_000, env: spec.env });
+  return spec.read(`${r.stdout}${r.stderr}`);
+}
+/** the same, without waiting: for runs started together */
+function coldRunStarted(dir: string, name: string, env: Record<string, string>, more: string[], lock: string): Promise<{ out: string; docker: string[]; sudo: string[]; left: string[] }> {
+  const spec = coldRunSpec(dir, name, env, more, lock);
+  return new Promise((resolve, reject) => {
+    const c = spawn(process.execPath, spec.args, { env: spec.env, stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    c.stdout.on("data", (d: Buffer) => { out += d.toString(); });
+    c.stderr.on("data", (d: Buffer) => { out += d.toString(); });
+    const timer = setTimeout(() => { c.kill("SIGKILL"); reject(new Error(`${name} did not end in 60 s: ${out}`)); }, 60_000);
+    c.on("close", () => { clearTimeout(timer); resolve(spec.read(out)); });
+  });
 }
 /** the docker calls that make, change or remove something */
 const acts = (calls: string[]): string[] => calls.filter((c) => /^(run -d|create|start|stop|restart|rm|network (create|rm)|volume (create|rm))\b/.test(c));
@@ -930,32 +975,134 @@ test("--cold never touches another run: its containers or a volume of a size to 
   }
 }));
 
-test("--cold: one cold run at a time; a live run's lock refuses before any docker call, a killed run's is taken over and released", async () => {
-  const { ownerOf } = await coldModule();
+test("a process is named by its boot, pid and start tick: a later process of the same pid, or another boot, is not it; what cannot be told is alive", async () => {
+  const { ownerOf, ownerAlive, startTicksOf } = await coldModule();
   await withTemp((dir) => {
-    // a run in progress holds the lock (this test's own process stands for it), whatever docker shows
-    const lock = path.join(dir, "held.lock");
-    fs.writeFileSync(lock, `${ownerOf(process.pid)}\n`);
-    const r = coldRunWithFakes(dir, "held", { FAKE_EXISTING: "" }, [], lock);
-    assert.match(r.out, new RegExp(`REFUSED a cold run is in progress \\(process ${process.pid}, started `), r.out);
-    assert.deepEqual(r.docker, [], "not one docker call");
-    untouched(r, "a live run's lock");
-    assert.equal(fs.readFileSync(lock, "utf8"), `${ownerOf(process.pid)}\n`, "the live run's lock is left as it was");
-    // a lock whose process ended (the same pid, started at another time): taken over, and released when the run ends
+    const proc = fakeProc(dir);
+    assert.equal(startTicksOf(fakeStat(42, 123456)), "123456", "the 22nd field, counted after the name's last \")\"");
+    assert.throws(() => startTicksOf("42 (node) S 1 2"), /a \/proc\/<pid>\/stat it cannot read/);
+    const me = ownerOf(process.pid, proc);
+    assert.equal(me, `boot:boot-of-the-test/pidns:pid:[4026531836]/pid:${process.pid}/start:777`);
+    assert.equal(ownerAlive(me, proc), true, "this process");
+    assert.equal(ownerAlive(me.replace("start:777", "start:776"), proc), false, "the same pid, started at another tick: a later process");
+    assert.equal(ownerAlive(me.replace("boot-of-the-test", "an-earlier-boot"), proc), false, "another boot");
+    const ended = spawnSync(process.execPath, ["-e", "console.log(process.pid)"], { encoding: "utf8" });
+    const endedOwner = `boot:boot-of-the-test/pidns:pid:[4026531836]/pid:${ended.stdout.trim()}/start:1`;
+    assert.equal(ownerAlive(endedOwner, proc), false, "no process of its pid");
+    assert.equal(ownerAlive(endedOwner.replace("4026531836", "4026532999"), proc), true, "a pid of another pid namespace, which this process cannot look up");
+    // what it cannot tell: an owner written by another version (as ps printed a time), a /proc it cannot read
+    assert.equal(ownerAlive(`${process.pid}@Mon Nov 17 10:53:45 2026`, proc), true, "an owner it cannot read");
+    assert.equal(ownerAlive(me, path.join(dir, "no-proc")), true, "no boot id to compare");
+    fs.rmSync(path.join(proc, String(process.pid), "stat"));
+    assert.equal(ownerAlive(me, proc), true, "a live pid whose start it cannot read");
+  });
+});
+
+test("--cold: one cold run at a time; a lock whose run is alive, or is being written, refuses before any docker call", () => withTemp((dir) => {
+  const ours = `boot:boot-of-the-test/pidns:pid:[4026531836]/pid:${process.pid}/start:777`;
+  // a run in progress holds the lock (this test's own process stands for it), whatever docker shows
+  const lock = path.join(dir, "held.lock");
+  fs.writeFileSync(lock, `${ours}\n`);
+  const r = coldRunWithFakes(dir, "held", { FAKE_EXISTING: "" }, [], lock);
+  assert.match(r.out, new RegExp(`REFUSED a cold run is in progress \\(process ${process.pid}; its lock `), r.out);
+  assert.deepEqual(r.docker, [], "not one docker call");
+  untouched(r, "a live run's lock");
+  assert.equal(fs.readFileSync(lock, "utf8"), `${ours}\n`, "the live run's lock is left as it was");
+  // a run that has made its lock and not yet written it: starting, not "an owner that is not one"
+  const starting = path.join(dir, "starting.lock");
+  fs.writeFileSync(starting, "");
+  const s = coldRunWithFakes(dir, "starting", { FAKE_EXISTING: "" }, [], starting);
+  assert.match(s.out, /REFUSED a cold run is starting \(its lock \S+ is being written\)/, s.out);
+  untouched(s, "a lock being written");
+  assert.ok(fs.existsSync(starting), "the starting run's lock is left");
+}));
+
+test("--cold: a run started under one time zone, and this one under another: the lock's time text is no proof that run ended, so it refuses", () => withTemp((dir) => {
+  // the lock as an earlier version wrote it (ps's text of its start, there in UTC); this run in New York
+  const zoned = path.join(dir, "zoned.lock");
+  const started = spawnSync("ps", ["-o", "lstart=", "-p", String(process.pid)], { encoding: "utf8", env: { ...process.env, TZ: "UTC" } }).stdout.trim();
+  assert.notEqual(started, "", "ps printed this process's start");
+  fs.writeFileSync(zoned, `${process.pid}@${started}\n`);
+  const z = coldRunWithFakes(dir, "zoned", { FAKE_EXISTING: "bench-pg", TZ: "America/New_York" }, [], zoned);
+  assert.match(z.out, /REFUSED a cold run may be in progress: its lock \S+ names "\d+@[^"]+", which this version cannot check/, z.out);
+  untouched(z, "a lock it cannot check");
+  assert.equal(fs.readFileSync(zoned, "utf8"), `${process.pid}@${started}\n`, "that run's lock is left as it was");
+}));
+
+test("--cold: a killed run's lock is taken over by one run alone, and released when that run ends", async () => {
+  const { ownerOf } = await coldModule();
+  await withTemp(async (dir) => {
+    const proc = fakeProc(dir);
+    // the owner a killed run left: this process's pid, started at another tick (in the form this version names it)
+    const live = ownerOf(process.pid, proc);
+    const killed = /start:777$/.test(live) ? live.replace(/start:777$/, "start:1") : `${process.pid}@Thu Jan  1 00:00:00 1970`;
     const dead = path.join(dir, "dead.lock");
-    fs.writeFileSync(dead, `${process.pid}@Thu Jan  1 00:00:00 1970\n`);
+    fs.writeFileSync(dead, `${killed}\n`);
     const d = coldRunWithFakes(dir, "dead", { FAKE_EXISTING: "bench-pg" }, [], dead);
     assert.match(d.out, /REFUSED a container named bench-pg exists already/, "past the lock, to the next check");
     assert.ok(!fs.existsSync(dead), "the lock released when the run ended");
+    // two runs started together against a killed run's lock: one gets past it, and the other refuses while it holds it
+    // (each docker call takes a second, so the first holds the lock for seconds)
+    for (let k = 0; k < 4; k++) {
+      const race = path.join(dir, `race-${k}.lock`);
+      fs.writeFileSync(race, `${killed}\n`);
+      const runs = await Promise.all(["a", "b"].map((w) => coldRunStarted(dir, `race-${k}-${w}`, { FAKE_EXISTING: "bench-pg", FAKE_SLOW: "1" }, [], race)));
+      const past = runs.filter((r) => /REFUSED a container named bench-pg exists already/.test(r.out));
+      assert.equal(past.length, 1, `try ${k}: exactly one run past the lock\n${runs.map((r) => r.out).join("\n")}`);
+      const other = runs.find((r) => !past.includes(r))!;
+      assert.match(other.out, /REFUSED (a cold run is in progress|a cold run is starting|another cold run is taking over the lock|another cold run took the lock)/, other.out);
+      assert.deepEqual(other.docker, [], `try ${k}: the run that refused made not one docker call`);
+      assert.ok(!fs.existsSync(race), `try ${k}: the lock released`);
+      assert.ok(!fs.existsSync(`${race}.takeover`), `try ${k}: no takeover lock left`);
+    }
+    assert.deepEqual(fs.readdirSync(dir).filter((n) => n.endsWith(".new")), [], "no lock left half made");
   });
 });
+
+/** the warm mode in a process of its own, `--reuse-postgres` with the fake docker first on PATH and its temp folder its
+ *  own, holding `lock` as a cold run's lock when given */
+const warmRun = (dir: string, bin: string) => (name: string, env: Record<string, string>, lock?: string): { out: string; docker: string[] } => {
+    const tmp = path.join(dir, name), log = path.join(dir, `${name}.docker`);
+    fs.mkdirSync(tmp);
+    if (lock !== undefined) fs.writeFileSync(path.join(tmp, "bench-replica-cold.lock"), lock);
+    const r = spawnSync(process.execPath, [path.join(ROOT, "scripts/bench-replica.ts"), "--reuse-postgres", "--memory", "8GiB", "--sizes", "100k", "--out", path.join(tmp, "x.json")],
+      { encoding: "utf8", timeout: 20_000, env: { ...process.env, ...env, TMPDIR: tmp, PATH: `${bin}${path.delimiter}${process.env.PATH}`, FAKE_DOCKER_LOG: log } });
+    return { out: `${r.stdout}${r.stderr}`, docker: fs.existsSync(log) ? fs.readFileSync(log, "utf8").split("\n").filter(Boolean) : [] };
+};
+test("the warm mode refuses while a cold run holds its lock, before any docker call", () => withTemp((dir) => {
+  const bin = path.join(dir, "bin");
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, "docker"), FAKE_DOCKER, { mode: 0o755 });
+  const warm = warmRun(dir, bin);
+  // a cold run in progress holds its lock: refused before any docker call
+  const locked = warm("locked", {}, `boot:a-boot/pidns:pid:[4026531836]/pid:${process.pid}/start:777\n`);
+  assert.match(locked.out, /bench-replica: a cold run is in progress \(process \d+; its lock /, locked.out);
+  assert.deepEqual(locked.docker, [], "not one docker call");
+}));
+
+test("the warm mode's --reuse-postgres never adopts a bench-pg a cold run made: refused before it is started, stopped or removed", () => withTemp((dir) => {
+  const bin = path.join(dir, "bin");
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, "docker"), FAKE_DOCKER, { mode: 0o755 });
+  const warm = warmRun(dir, bin);
+  // a bench-pg a cold run made (its owner label), with no lock to say so: refused before it is started, stopped or removed
+  const inspect = JSON.stringify([{ Config: { Env: ["POSTGRES_PASSWORD=x"], Image: "postgres:18", Labels: { "mason-bench.owner": `boot:a-boot/pidns:pid:[4026531836]/pid:${process.pid}/start:777` } },
+    HostConfig: { Memory: 8 * 2 ** 30, PortBindings: { "5432/tcp": [{ HostPort: "9" }] } }, State: { Running: true } }]);
+  const labelled = warm("labelled", { FAKE_PS: "cold-pg-id", FAKE_INSPECT: inspect });
+  assert.match(labelled.out, /bench-replica: --reuse-postgres: bench-pg \(cold-pg-id\) was made by a cold run \(--cold\), which may be measuring it now/, labelled.out);
+  assert.deepEqual(acts(labelled.docker), [], "nothing started, stopped or removed");
+}));
 
 test("--reuse-postgres adopts only a Postgres whose run has ended: one a live run owns (generating a size) is refused before any side effect", async () => {
   const { ownerOf } = await coldModule();
   await withTemp((dir) => {
-    const live = coldRunWithFakes(dir, "live", { FAKE_EXISTING: "bench-pg bench-replica", FAKE_OWNER: ownerOf(process.pid) }, ["--reuse-postgres"]);
-    assert.match(live.out, new RegExp(`REFUSED bench-pg belongs to a cold run in progress \\(process ${process.pid}\\)`), live.out);
+    const live = coldRunWithFakes(dir, "live", { FAKE_EXISTING: "bench-pg bench-replica", FAKE_OWNER: ownerOf(process.pid, fakeProc(dir)) }, ["--reuse-postgres"]);
+    assert.match(live.out, new RegExp(`REFUSED bench-pg belongs to a cold run that may be in progress \\(process ${process.pid}\\)`), live.out);
     untouched(live, "a Postgres a live run owns");
+    // an owner this version cannot check (an earlier version's, as ps printed a time): it may be alive, so refused
+    const unread = coldRunWithFakes(dir, "unread", { FAKE_EXISTING: "bench-pg bench-replica", FAKE_OWNER: `${process.pid}@Mon Nov 17 10:53:45 2026` }, ["--reuse-postgres"]);
+    assert.match(unread.out, /REFUSED bench-pg belongs to a cold run that may be in progress \(process unknown\)/, unread.out);
+    untouched(unread, "an owner it cannot check");
     const unlabelled = coldRunWithFakes(dir, "unlabelled", { FAKE_EXISTING: "bench-pg bench-replica", FAKE_OWNER: "<no value>" }, ["--reuse-postgres"]);
     assert.match(unlabelled.out, /REFUSED bench-pg is not one a --cold --keep-postgres run left \(it has no mason-bench\.owner label\)/, unlabelled.out);
     untouched(unlabelled, "a Postgres no cold run made");
@@ -979,7 +1126,7 @@ test("--cold: a run that fails removes only what it made, by the ids docker gave
   assert.match(failed.out, /REFUSED docker run: docker: Error response from daemon: port is already allocated/, failed.out);
   const made = acts(failed.docker);
   assert.equal(made[0], "network create bench-replica");
-  assert.match(made[1] ?? "", /^run -d --cidfile \S+postgres\.cid --label mason-bench\.owner=\d+@.+ --name bench-pg /);
+  assert.match(made[1] ?? "", /^run -d --cidfile \S+postgres\.cid --label mason-bench\.owner=boot:boot-of-the-test\/pidns:pid:\[4026531836\]\/pid:\d+\/start:555 --name bench-pg /);
   assert.deepEqual(made.slice(2), ["rm -f -v pg-made-not-started", "network rm net-made-by-this-run"],
     "Postgres by its --cidfile and the network by its id; nothing by a name, which may be another run's");
   assert.equal(failed.sudo.length, 1, "the page cache dropped once, before the run began");

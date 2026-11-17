@@ -61,8 +61,12 @@ says why the published run is the cold mode.
   Both sessions run in UTC (`PGTZ`), since `date_trunc` of a `timestamptz` depends on the time zone.
 - **Secrets** (Postgres's password, Mason's API key, the bench user's password from `mason user add --json`) go to
   0600 env files in a 0700 folder. None is on a command line or in the output.
-- **Another run is never touched.** A cold run holds a lock, `/tmp/bench-replica-cold.lock`, from its start to its
-  end. A lock whose process is alive refuses the next run before any Docker call, and a killed run's lock is taken over.
+- **Another run is never touched.** A cold run holds a lock, `bench-replica-cold.lock` in the temp folder (`/tmp`),
+  from its start to its end. The lock names the run's process by the machine's boot, its pid namespace, its pid and
+  the tick it started (from `/proc`), so no time zone or clock change can make a live run look ended. A lock whose process may be alive
+  refuses the next run before any Docker call, and so does one that cannot be checked. Only one run takes over a killed
+  run's lock. A warm run refuses while a cold run holds the lock, and its `--reuse-postgres` never adopts a cold run's
+  `bench-pg`.
   A `bench-pg`, `bench-mason` or `bench-client` container, or a Mason volume of a size to be measured, that is already
   there is refused too, before the page cache is dropped. `--reuse-postgres` adopts only a `bench-pg` whose owner (its
   `mason-bench.owner` label) has ended: the Postgres a `--keep-postgres` run left. A check Docker cannot answer, such

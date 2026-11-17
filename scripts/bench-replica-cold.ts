@@ -47,8 +47,9 @@
  * never a command line or the log. Mason's project is copied into its container (`docker cp`), so the container's
  * user reads it wherever --work is.
  *
- * ANOTHER RUN IS NEVER TOUCHED. A cold run holds a lock (/tmp/bench-replica-cold.lock, its process and start) from its
- * start to its end, and one whose holder is alive refuses the run. A bench-pg, bench-mason or bench-client container,
+ * ANOTHER RUN IS NEVER TOUCHED. A cold run holds a lock (bench-replica-cold.lock in the temp folder: its boot, pid
+ * namespace, pid and start tick, from /proc) from its start to its end. One whose holder may be alive refuses the run, and so does one
+ * it cannot check. A warm run refuses too while a cold run holds it. A bench-pg, bench-mason or bench-client container,
  * or a Mason volume of a size to be measured, that is already there is refused too, before anything else (the page
  * cache is not dropped either). --reuse-postgres adopts only a bench-pg whose owner (its label) has ended. A check
  * Docker cannot answer refuses, and only Docker's "no such" means absent. At the end the run removes what
@@ -77,8 +78,6 @@ const PG_ALIAS = "pg";
 /** a size's disk on both engines, by the row, before any size was measured here: 1 M rows of the cold data measured
  *  376 bytes a row in Postgres (its tables and indexes) and about 103 in Mason's synced data */
 const BYTES_PER_ROW = 500;
-/** the lock a cold run holds from its start to its end: one cold run on a machine at a time */
-const LOCK_FILE = "/tmp/bench-replica-cold.lock";
 /** the label on the Postgres container a cold run made: the run that owns it (`ownerOf`) */
 const OWNER_LABEL = "mason-bench.owner";
 /** how long an engine may take to answer after its restart, or Mason its first sync */
@@ -457,55 +456,130 @@ function exists(kind: "container" | "network" | "volume", name: string): boolean
   throw new Usage(`docker ${kind} inspect ${name} could not tell whether it exists: ${r.stderr.trim() || `exit ${r.status}`}`);
 }
 
-/** a process's start, as ps says it, or null when there is no such process; ps that cannot run refuses */
-function processStart(pid: number): string | null {
-  const r = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" });
-  if (r.error !== undefined) throw new Usage(`ps could not be run, to tell whether another cold run is alive: ${r.error.message}`);
-  const out = r.stdout.trim();
-  return r.status === 0 && out !== "" ? out : null;
+/**
+ * A PROCESS, NAMED SO A LATER ONE CANNOT BE TAKEN FOR IT: the machine's boot (/proc/sys/kernel/random/boot_id), the
+ * pid namespace its pid is counted in (/proc/self/ns/pid), the pid, and the process's start in clock ticks since that
+ * boot (/proc/<pid>/stat's 22nd field). None of it depends on a time zone, a clock step or how a tool formats a time.
+ * `procRoot` is /proc; a test gives a folder of its own.
+ */
+export function ownerOf(pid: number, procRoot = "/proc"): string {
+  const boot = fs.readFileSync(path.join(procRoot, "sys/kernel/random/boot_id"), "utf8").trim();
+  const ns = fs.readlinkSync(path.join(procRoot, "self/ns/pid"));
+  return `boot:${boot}/pidns:${ns}/pid:${pid}/start:${startTicksOf(fs.readFileSync(path.join(procRoot, String(pid), "stat"), "utf8"))}`;
 }
-/** this process, as the owner of a lock or a container: its pid and its start, which a later process of the same pid lacks */
-export function ownerOf(pid: number): string {
-  const started = processStart(pid);
-  if (started === null) throw new Error(`no process ${pid}`);
-  return `${pid}@${started}`;
+/** a process's start in clock ticks since the boot: /proc/<pid>/stat's 22nd field, counted after its name's ")",
+ *  since the name itself may hold spaces and parentheses */
+export function startTicksOf(stat: string): string {
+  const fields = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+  // the fields after the name start at the 3rd: the 22nd is the 20th of these
+  const start = fields[19];
+  if (start === undefined || !/^\d+$/.test(start)) throw new Error(`a /proc/<pid>/stat it cannot read: ${JSON.stringify(stat.slice(0, 120))}`);
+  return start;
 }
-/** whether the process an owner names is alive: the same pid, started at the same time */
-export function ownerAlive(owner: string): boolean {
-  const m = /^(\d+)@(.+)$/.exec(owner);
-  if (m === null) throw new Usage(`an owner that is not one: ${JSON.stringify(owner)}: remove what names it if no cold run is in progress`);
-  return processStart(Number(m[1])) === m[2];
+/**
+ * Whether the process an owner names may be alive. Only what proves it has ended says no: another boot, no process of
+ * its pid in its own pid namespace, or a process of its pid that started at another tick. Anything it cannot tell (an
+ * owner it cannot read, a /proc it cannot read, a process in another pid namespace or another user's) says yes, so a
+ * run in progress is never taken for an ended one.
+ */
+export function ownerAlive(owner: string, procRoot = "/proc"): boolean {
+  const m = /^boot:([^/\s]+)\/pidns:([^/\s]+)\/pid:(\d+)\/start:(\d+)$/.exec(owner);
+  if (m === null) return true;
+  let boot: string, ns: string;
+  try {
+    boot = fs.readFileSync(path.join(procRoot, "sys/kernel/random/boot_id"), "utf8").trim();
+    ns = fs.readlinkSync(path.join(procRoot, "self/ns/pid"));
+  } catch { return true; } // cannot tell: alive
+  if (boot !== m[1]) return false;
+  // a pid counted in another namespace (a run in a container, or this one in one) is not one this process can look up
+  if (ns !== m[2]) return true;
+  const pid = Number(m[3]);
+  try { process.kill(pid, 0); } catch (e) {
+    // ESRCH: no such process. EPERM: one there, another user's
+    if ((e as NodeJS.ErrnoException).code === "ESRCH") return false;
+    return true;
+  }
+  // a live pid whose start cannot be read (/proc mounted hidepid): cannot tell, so alive
+  try { return startTicksOf(fs.readFileSync(path.join(procRoot, String(pid), "stat"), "utf8")) === m[4]; } catch { return true; }
+}
+const ownerPid = (owner: string): string => /\/pid:(\d+)\//.exec(owner)?.[1] ?? "unknown";
+
+/** where the cold mode's lock is: the OS temp folder ($TMPDIR, else /tmp) */
+export const lockFileOf = (): string => path.join(os.tmpdir(), "bench-replica-cold.lock");
+/** why a lock refuses a run, or null when its holder has ended: one starting, one in progress, or one it cannot read */
+function lockHolderRefusal(held: string, file: string, procRoot: string): string | null {
+  if (held === "") return `a cold run is starting (its lock ${file} is being written): wait for it, or remove the lock if no run is starting`;
+  if (!ownerAlive(held, procRoot)) return null;
+  return /^boot:/.test(held)
+    ? `a cold run is in progress (process ${ownerPid(held)}; its lock ${file}): wait for it to end`
+    : `a cold run may be in progress: its lock ${file} names ${JSON.stringify(held)}, which this version cannot check. Remove the lock if no run is in progress`;
+}
+/** the refusal a live cold run's lock gives another bench run (a warm one too), or null when no cold run holds it */
+export function coldRunRefusal(file = lockFileOf(), procRoot = "/proc"): string | null {
+  let held: string;
+  try { held = fs.readFileSync(file, "utf8").trim(); } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw e;
+  }
+  return lockHolderRefusal(held, file, procRoot);
 }
 
 /**
- * THE LOCK: one cold run on a machine at a time. It holds this run's owner (`ownerOf`); one whose process is alive
- * refuses the run, and one whose process ended is taken over. Released when the run ends, however it ends.
+ * THE LOCK: one cold run on a machine at a time. It holds this run's owner (`ownerOf`), written whole before it is
+ * linked into place, so no run reads it half written. A lock whose holder may be alive refuses the run. One whose holder
+ * has ended is taken over under a second lock (<lock>.takeover, made with O_EXCL), so of two runs that find it together
+ * only one takes it. Released when the run ends, however it ends.
  */
-export function takeLock(file: string): () => void {
-  for (let tries = 0; tries < 2; tries++) {
-    let fd: number;
-    try { fd = fs.openSync(file, "wx", 0o644); } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      const held = fs.readFileSync(file, "utf8").trim();
-      if (ownerAlive(held)) throw new Usage(`a cold run is in progress (process ${held.split("@")[0]}, started ${held.split("@")[1]}; its lock ${file}): wait for it to end`);
-      // its run ended without releasing it (killed): taken over
-      fs.rmSync(file, { force: true });
-      continue;
+export function takeLock(file: string, procRoot = "/proc"): () => void {
+  const me = ownerOf(process.pid, procRoot);
+  const mine = `${file}.${process.pid}.new`;
+  fs.writeFileSync(mine, `${me}\n`, { mode: 0o644 });
+  const link = (): boolean => {
+    try { fs.linkSync(mine, file); return true; } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "EEXIST") return false;
+      throw e;
     }
-    const me = ownerOf(process.pid);
-    fs.writeSync(fd, `${me}\n`);
-    fs.closeSync(fd);
-    let released = false;
-    const release = (): void => {
-      if (released) return;
-      released = true;
-      // only our own: a lock another run took over after a kill is theirs
-      if (fs.existsSync(file) && fs.readFileSync(file, "utf8").trim() === me) fs.rmSync(file, { force: true });
-    };
-    process.on("exit", release);
-    return release;
-  }
-  throw new Usage(`${file}: another cold run took the lock as this one did: wait for it to end`);
+  };
+  const read = (): string | null => {
+    try { return fs.readFileSync(file, "utf8").trim(); } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw e;
+    }
+  };
+  try {
+    let got = link();
+    if (!got) {
+      const held = read();
+      if (held === null) got = link();
+      else {
+        const refusal = lockHolderRefusal(held, file, procRoot);
+        if (refusal !== null) throw new Usage(refusal);
+        // its run ended without releasing it (killed): taken over by one run alone
+        const takeover = `${file}.takeover`;
+        let fd: number;
+        try { fd = fs.openSync(takeover, "wx", 0o644); } catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+          throw new Usage(`another cold run is taking over the lock ${file} now, or was killed while it did: remove ${takeover} if no run is starting`);
+        }
+        try {
+          fs.writeSync(fd, `${me}\n`);
+          fs.closeSync(fd);
+          if (read() === held) fs.rmSync(file, { force: true });
+          got = link();
+        } finally { fs.rmSync(takeover, { force: true }); }
+      }
+    }
+    if (!got) throw new Usage(`another cold run took the lock ${file} as this one did: wait for it to end`);
+  } finally { fs.rmSync(mine, { force: true }); }
+  let released = false;
+  const release = (): void => {
+    if (released) return;
+    released = true;
+    // only our own: a lock another run took over after a kill is theirs
+    if (read() === me) fs.rmSync(file, { force: true });
+  };
+  process.on("exit", release);
+  return release;
 }
 
 /** what a container read from disk so far: its cgroup v2 io.stat's rbytes, its cgroup found from its process */
@@ -583,7 +657,7 @@ export function coldHelp(): string {
   return text.slice(a + 4, z).replace(/^ \* ?/gm, "") + "\n";
 }
 
-export async function mainCold(argv: string[], at: { lockFile?: string } = {}): Promise<number> {
+export async function mainCold(argv: string[], at: { lockFile?: string; procRoot?: string } = {}): Promise<number> {
   if (argv.includes("--help") || argv.includes("-h")) { process.stdout.write(coldHelp()); return 0; }
   const version = (JSON.parse(fs.readFileSync(path.join(REPO, "cli/package.json"), "utf8")) as { version: string }).version;
   const o = parseColdArgs(argv, { cpus: os.cpus().length, ramBytes: os.totalmem(), version });
@@ -591,8 +665,9 @@ export async function mainCold(argv: string[], at: { lockFile?: string } = {}): 
   if (process.platform !== "linux") throw new Usage("--cold drops Linux's page cache before every run: run it on a Linux server");
   // before anything with a side effect: a refused run must not touch another's containers, nor drop the page cache
   // under its measurement. The lock first: a run in progress holds it whatever it is doing
-  const releaseLock = takeLock(at.lockFile ?? LOCK_FILE);
-  try { refuseRunInProgress(o); } catch (e) { releaseLock(); throw e; }
+  const procRoot = at.procRoot ?? "/proc";
+  const releaseLock = takeLock(at.lockFile ?? lockFileOf(), procRoot);
+  try { refuseRunInProgress(o, procRoot); } catch (e) { releaseLock(); throw e; }
   const info = ((): string => {
     try { return docker(["info", "--format", "{{.CgroupVersion}} {{.DockerRootDir}}"]); } catch (e) { releaseLock(); throw e; }
   })();
@@ -664,7 +739,7 @@ export async function mainCold(argv: string[], at: { lockFile?: string } = {}): 
       const env = path.join(secrets, "postgres.env");
       writeSecret(env, { POSTGRES_PASSWORD: pgPassword });
       const settings = replicaSettings(o.memoryBytes, o.cpus);
-      made.postgres = docker(["run", "-d", "--cidfile", made.postgresIdFile, "--label", `${OWNER_LABEL}=${ownerOf(process.pid)}`, "--name", PG_CONTAINER, "--network", NETWORK, "--network-alias", PG_ALIAS, "-p", `127.0.0.1:${pgPort}:5432`, ...limits,
+      made.postgres = docker(["run", "-d", "--cidfile", made.postgresIdFile, "--label", `${OWNER_LABEL}=${ownerOf(process.pid, procRoot)}`, "--name", PG_CONTAINER, "--network", NETWORK, "--network-alias", PG_ALIAS, "-p", `127.0.0.1:${pgPort}:5432`, ...limits,
         "--shm-size", "1g", "--env-file", env, o.postgresImage, ...Object.entries(settings).flatMap(([k, v]) => ["-c", `${k}=${v}`])]);
       log(`started ${PG_CONTAINER} (${o.postgresImage}) on 127.0.0.1:${pgPort}, --cpus ${o.cpus} --memory ${gibText(o.memoryBytes)}`);
     }
@@ -862,7 +937,7 @@ interface Made {
  * Another run's containers, or the volumes this run would make, refused before this run does anything: a run in
  * progress (its Postgres, Mason or client), or the Postgres a --keep-postgres run left, which --reuse-postgres adopts.
  */
-function refuseRunInProgress(o: ColdOptions): void {
+function refuseRunInProgress(o: ColdOptions, procRoot: string): void {
   for (const name of [MASON_CONTAINER, CLIENT_CONTAINER]) {
     if (exists("container", name)) throw new Usage(`a container named ${name} exists already: a cold run in progress, or one that was killed. Wait for it, or remove it (docker rm -f -v ${name}) if no run is in progress`);
   }
@@ -872,7 +947,7 @@ function refuseRunInProgress(o: ColdOptions): void {
     // the run that made it: alive, it is using it (generating a size's data, or between sizes)
     const owner = docker(["inspect", "--format", `{{index .Config.Labels "${OWNER_LABEL}"}}`, PG_CONTAINER]);
     if (owner === "" || owner === "<no value>") throw new Usage(`${PG_CONTAINER} is not one a --cold --keep-postgres run left (it has no ${OWNER_LABEL} label): remove it (docker rm -f -v ${PG_CONTAINER})`);
-    if (ownerAlive(owner)) throw new Usage(`${PG_CONTAINER} belongs to a cold run in progress (process ${owner.split("@")[0]}): --reuse-postgres adopts it once that run has ended`);
+    if (ownerAlive(owner, procRoot)) throw new Usage(`${PG_CONTAINER} belongs to a cold run that may be in progress (process ${ownerPid(owner)}): --reuse-postgres adopts it once that run has ended`);
   }
   if (!o.reusePostgres && pgThere) throw new Usage(`a container named ${PG_CONTAINER} exists already: a run in progress, or one --keep-postgres left (--reuse-postgres adopts it; docker rm -f -v ${PG_CONTAINER} removes it)`);
   for (const rows of o.sizes) {

@@ -500,7 +500,10 @@ async function startContainer(memoryBytes: number, cpus: number, maxClients: num
 async function adoptContainer(memoryBytes: number, log: (l: string) => void): Promise<{ url: string; id: string }> {
   const id = docker(["ps", "-a", "--filter", `name=^/${CONTAINER}$`, "--format", "{{.ID}}"]);
   if (id === "") throw new Usage(`--reuse-postgres: there is no container named ${CONTAINER} (a run with --keep-postgres leaves one)`);
-  const info = (JSON.parse(docker(["inspect", id])) as Array<{ Config: { Env: string[]; Image: string }; HostConfig: { Memory: number; PortBindings: Record<string, Array<{ HostPort: string }>> }; State: { Running: boolean } }>)[0]!;
+  const info = (JSON.parse(docker(["inspect", id])) as Array<{ Config: { Env: string[]; Image: string; Labels: Record<string, string> | null }; HostConfig: { Memory: number; PortBindings: Record<string, Array<{ HostPort: string }>> }; State: { Running: boolean } }>)[0]!;
+  // a cold run's Postgres (scripts/bench-replica-cold.ts labels it): that run may be measuring it, and this one would stop and remove it
+  const coldOwner = info.Config.Labels?.["mason-bench.owner"];
+  if (coldOwner !== undefined) throw new Usage(`--reuse-postgres: ${CONTAINER} (${id}) was made by a cold run (--cold), which may be measuring it now. The warm mode adopts only one a warm --keep-postgres run left`);
   const password = info.Config.Env.find((e) => e.startsWith("POSTGRES_PASSWORD="))?.slice("POSTGRES_PASSWORD=".length);
   const port = info.HostConfig.PortBindings["5432/tcp"]?.[0]?.HostPort;
   if (password === undefined || port === undefined) throw new Error(`${CONTAINER} (${id}) has no POSTGRES_PASSWORD or no published 5432: not a container this script made`);
@@ -817,6 +820,9 @@ type Engine = "postgres" | "mason";
 async function main(): Promise<number> {
   const o = parseArgs(process.argv.slice(2));
   const log = (l: string): void => { process.stdout.write(`${l}\n`); };
+  // a cold run in progress: this run would load the machine it measures, and could take its Postgres's name
+  const coldRun = (await import("./bench-replica-cold.ts")).coldRunRefusal();
+  if (coldRun !== null) throw new Usage(coldRun);
   const { DEFAULT_MEMORY_LIMIT, DUCKDB_VERSION, machineMemoryBytes, memoryLimitBytes } = await import("../src/duck/store.ts");
   const { COPY_PARALLEL } = await import("../src/duck/sync.ts");
   const memoryLimit = (o.memory ?? (process.env.MASON_DUCKDB_MEMORY || DEFAULT_MEMORY_LIMIT)).trim();
