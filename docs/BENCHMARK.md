@@ -1,12 +1,129 @@
 # Mason against a Postgres read replica: the benchmark
 
-`scripts/bench-replica.ts` answers "why not just use a Postgres read replica?" with numbers: what the same SQL costs on
-a Postgres and on Mason as the tables grow and as more readers ask at once. Its result is
-`tests/fixtures/bench-replica.json`, from which [MEASUREMENTS.md](MEASUREMENTS.md) ("When is Mason faster?") and the
-README's headline numbers are rendered;
-docs/DESIGN.md "Mason against a Postgres read replica" says why the sweep is shaped so and what a run does and does not show.
+`scripts/bench-replica.ts` answers "why not just use a Postgres read replica?" with numbers. It has two modes:
 
-## What it measures
+- **The cold mode** (`--cold`) is the published run. It answers the question a reader asks first: how long does one
+  query take on each, the first time, with one client and with ten?
+- **The warm mode** (no `--cold`) measures a mix of six queries for a fixed time, after a warm-up, as the tables grow
+  and as more readers ask at once.
+
+The published result is `tests/fixtures/bench-replica.json`. [MEASUREMENTS.md](MEASUREMENTS.md) ("When is Mason
+faster?") and the README's "Speed" table are rendered from it. docs/DESIGN.md "Mason against a Postgres read replica"
+says why the published run is the cold mode.
+
+## The cold mode
+
+### What it measures
+
+- **Three queries**, sent as written to both (`COLD_STATEMENTS` in `scripts/bench-replica-cold.ts`): a count by status
+  over every order, revenue by month and signup year over orders joined to customers, and one order by its primary
+  key. Neither uses `extract(...)`.
+- **Three sizes**: 1 M, 10 M and 100 M orders (`--sizes`).
+- **The data** (`COLD_DATA` and `coldDataSql`) is the warm mode's `orders` and `customers` (below), with two changes. The
+  primary keys are random UUIDs: `orders.id` is `gen_random_uuid()`, and a customer's id is `md5('customer' || n)::uuid`,
+  so an order's `customer_id` is computed with no join. And `orders (status)` has no index, so the count reads every row
+  on both. The other indexes are a read replica's: both primary keys, `orders (tenant_id, created_at)` and
+  `orders (created_at)`. `created_at` still rises with the heap's order. The data has its own databases
+  (`bench_replica_cold_<rows>`) and marker, so neither mode reuses the other's. The fixture records it (`data`), and a
+  fixture of other data does not render.
+- **1 client and 10 clients** (`--clients`). In a run, each client sends the query once, and all clients send it at
+  the same moment. A client's time excludes its connection.
+- **3 runs of each cell** (`--runs`). A cell's time is the median over its runs of the slowest client: the time until
+  every client has its answer. The fixture keeps every run, with each client's time and the mean.
+- **What each run read from disk**: the bytes the measured engine's container read while pgbench ran, from its cgroup
+  v2 `io.stat` (`rbytes`, over every device). On Mason's runs the idle Postgres's read is recorded too. Where Docker
+  does not use cgroup v2, or a container's `io.stat` cannot be read, the run refuses at its start.
+  docs/MEASUREMENTS.md shows each run's read in GB, and the MB/s it implies. `--disk "<words>"` records the disk, and
+  the README names it, since cold times on Postgres depend on the disk's throughput.
+- **The lookup's rows**: each client asks for a different row, sampled from the data once per size
+  (`TABLESAMPLE SYSTEM` over about 2,000 rows' pages, never a sort of the table) and recorded in the fixture. pgbench
+  picks the client's id with `\if :client_id = 0` … `\endif`, so each engine is sent a plain quoted literal,
+  `WHERE id = '<uuid>'`. The script checks that each id is a UUID's 36 characters before it goes into the SQL. A literal chosen inside the SQL, such as `CASE :client_id WHEN 0 THEN … END`, stops Mason's engine from
+  pushing the filter down, and makes Mason look many times slower than it is.
+
+### What it does
+
+- **The same resources.** Postgres (`postgres:18`) and Mason (the `ghcr.io/embeddable-hq/mason-data` image of this
+  checkout's version) each run in a container with the same `--cpus`, `--memory` and `--memory-swap`, so neither
+  swaps. A cgroup v2 memory limit counts the page cache, so both get the same cache. Postgres gets a read replica's
+  settings for that memory (`replicaSettings`). Mason gives its engine half the container's limit, as it does in any
+  container.
+- **The same rows.** Both containers are on a Docker network of their own (`bench-replica`). Mason syncs the size's
+  database from Postgres by its alias on that network, with every table `sync: off`, so nothing polls the source while
+  it is measured. Every query's answer is compared on both before anything is timed.
+- **Cold, before every run.** Mason is stopped and Postgres restarted. For Mason's run, Mason is started after that.
+  The run waits until the engine answers `SELECT 1 FROM orders LIMIT 0`, waits `--settle` seconds more (10), and drops
+  the OS page cache.
+- **One at a time.** Mason is stopped while Postgres is measured. Postgres stays up while Mason is measured, because a
+  Mason start reads its source's catalog, but it is idle and was restarted first. The engines take turns going first.
+- **The client** is pgbench from the Postgres image, in a container of its own on the host's network:
+  `pgbench -n -c N -j N -t 1 -f <script> --log`. Each client's time is read from pgbench's log of each transaction.
+  Both sessions run in UTC (`PGTZ`), since `date_trunc` of a `timestamptz` depends on the time zone.
+- **Secrets** (Postgres's password, Mason's API key, the bench user's password from `mason user add --json`) go to
+  0600 env files in a 0700 folder. None is on a command line or in the output.
+- **Another run is never touched.** A cold run holds a lock, `/tmp/bench-replica-cold.lock` whatever `$TMPDIR` says,
+  from its start to its end. The lock names the run's process by the machine's boot, its pid namespace, its pid and
+  the tick it started (from `/proc`), so no time zone or clock change can make a live run look ended. A lock whose process may be alive
+  refuses the next run before any Docker call, and so does one that cannot be checked. Only one run takes over a killed
+  run's lock. A warm run refuses while a cold run holds the lock, and its `--reuse-postgres` never adopts a cold run's
+  `bench-pg`. Before it drops the page cache, a cold run also makes a container, `bench-replica-owner`, that is never
+  started and is labelled with the same owner. Docker allows only one container of a name, so only one run holds the
+  bench's Postgres, the one it made or the one it adopted, even when the two runs see different `/tmp` folders. A run
+  removes it when it ends. One whose run may be alive refuses the next run.
+  A `bench-pg`, `bench-mason` or `bench-client` container, or a Mason volume of a size to be measured, that is already
+  there is refused too, before the page cache is dropped. `--reuse-postgres` adopts only a `bench-pg` whose owner (its
+  `mason-bench.owner` label) has ended: the Postgres a `--keep-postgres` run left. A check Docker cannot answer, such
+  as with its daemon down, refuses the run. Only Docker's own "no such" counts as absent.
+- **At the end** the run removes what it made itself, by the ids Docker gave back: its containers, volumes, network and
+  files. `--keep-postgres` keeps its Postgres, its databases and the network, for a later run with `--reuse-postgres`.
+  A Postgres container adopted with `--reuse-postgres` is not removed. The fixture is written after each size, and
+  `--resume` measures only the sizes it lacks.
+
+### What it needs
+
+- **Linux, Docker, and passwordless sudo** for `tee /proc/sys/vm/drop_caches`. Without them the run refuses, and says
+  why.
+- **About 150 GB of free disk** where Docker keeps its data, for 100 M rows on both engines. At 1 M rows the cold data
+  measured 376 bytes a row in Postgres (its tables and indexes) and about 103 in Mason's synced data, so 100 M rows
+  take about 50 GB on both, and the indexes' builds and the WAL need room beside it. The run predicts each size from the
+  last one it measured. A size whose estimate would leave less than `--reserve-gb` (60 GiB) free is skipped, and the
+  output and the fixture say so.
+- **Docker using cgroup v2**, to read each engine's disk read.
+- **3 GiB of memory or more** for each container (`--memory`, by default half the RAM).
+- **A quiet machine.** Stop anything else that reads the disk or uses the CPU first.
+- **Time.** At 100 M rows, Postgres makes the data in tens of minutes, and Mason's first sync takes about as long. Each
+  of the 36 runs of a size restarts an engine, waits, and drops the page cache.
+
+### Running it
+
+```bash
+npm ci
+node scripts/bench-replica.ts --cold --help                     # every option
+node scripts/bench-replica.ts --cold --sizes 100k --runs 1 --memory 8GiB --out /tmp/cold-smoke.json   # a smoke, a few minutes
+node scripts/bench-replica.ts --cold --label "m7g.xlarge, 4 vCPU, 16 GiB RAM" --disk "EBS gp3, 125 MB/s, 3000 IOPS" --memory 8GiB --out /tmp/bench-cold.json
+```
+
+`tests/integration/bench-replica-cold.itest.ts` runs a smoke at 1 M rows and checks its fixture, when
+`IT_BENCH_COLD=1`. CI does not run it by default: it would add about ten minutes to every PR, on a runner shared with
+other jobs.
+
+### Publishing it
+
+```bash
+cp /tmp/bench-cold.json tests/fixtures/bench-replica.json
+UPDATE_FIXTURE=1 node --test --test-timeout=300000 --test-force-exit tests/bench-replica.test.ts
+git diff docs/MEASUREMENTS.md README.md                         # read it
+```
+
+The renderer (`renderCold` in `tests/bench-replica.test.ts`) reads the fixture's `mode: "cold"`. The numbers come from
+the fixture and the sentences from the renderer, so the wording is changed in the renderer, never in the rendered
+files. The README's "Speed" has one table: each query × size × clients, Postgres's time, Mason's time and **Mason is**
+(`15× faster`, `79× slower`), with the note that a lookup through an index is faster on Postgres when the run shows
+it, and the disk the run read. docs/MEASUREMENTS.md has the same table, every run, the data and the first sync, and "How it was measured".
+
+## The warm mode
+
+### What it measures
 
 - **The data**: a synthetic `orders` table (id, tenant_id over 200 tenants, customer_id, status, amount numeric(12,2),
   created_at over two years rising with the heap's order, a ~150-byte jsonb payload, a text note) and `customers` (one
@@ -24,10 +141,10 @@ docs/DESIGN.md "Mason against a Postgres read replica" says why the sweep is sha
   get another (at most two more), and the median is kept. The load average before each run, the client process's CPU
   and its event loop's delay are recorded, so a client process that was the bottleneck shows.
 
-## Two shapes: the sweep to a minute (published) and the grid (a smoke)
+### Two shapes: the sweep to a minute and the grid (a smoke)
 
-**The published run is the sweep to a minute** (both the concurrency and the row count are pushed until Postgres takes
-at least a minute to answer). With `--target-postgres-seconds 60` the
+**The warm mode's main run is the sweep to a minute** (both the concurrency and the row count are pushed until
+Postgres takes at least a minute to answer). It was the published run before the cold mode. With `--target-postgres-seconds 60` the
 sizes and client counts are not chosen in advance; each axis is pushed until Postgres's p95 of the mix reaches the
 target, and Mason is measured at every cell Postgres is:
 
@@ -51,7 +168,7 @@ reached the target, its slowest statement there, and Mason at the same cell — 
 **Without `--target-postgres-seconds` the run is a grid**, every `--sizes` × every `--clients`: what a smoke on a
 laptop runs (`--sizes 1M --clients 1,8 --seconds 10 --runs 1`).
 
-## Running it on a server
+### Running it on a server
 
 ```bash
 npm install
@@ -86,7 +203,7 @@ node scripts/bench-replica.ts --label "m7g.xlarge, EBS" --target-postgres-second
 The output prints a line per run as it ends, and the fixture is written after each size and at the end, so an
 interrupted run keeps the sizes it finished.
 
-## Measuring a layout of the copy (never a published run)
+### Measuring a layout of the copy (never a published run)
 
 Four bench-only options measure Mason over a copy in another physical order (issue #9) against the same data, the same
 statements and the same machine, one thing changed per run:
@@ -104,7 +221,10 @@ statements and the same machine, one thing changed per run:
 - `--keep-copy` leaves the copy at the end with `statements.json` beside it: each statement's DuckDB SQL as Mason
   plans it (its `EXPLAIN (FORMAT JSON)`), to time the statements over the file alone.
 
-## Publishing a result
+### Publishing a warm run
+
+A warm fixture has no `mode`, and the renderer lays it out as below. `tests/fixtures/bench-replica-warm.json` keeps a
+warm run for the warm renderer's tests.
 
 ```bash
 node scripts/bench-replica.ts --label "<the machine>" --target-postgres-seconds 60 … --out tests/fixtures/bench-replica.json
