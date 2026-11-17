@@ -189,6 +189,16 @@ export function parseCommand(spec: CommandSpec, argv: string[]): { values: Recor
   return { values: parsed.values as Record<string, string | boolean | string[] | boolean[] | undefined>, positionals: parsed.positionals };
 }
 
+/** Where the line's FIRST POSITIONAL (a command's verb: `mason user <verb>`) sits in argv, read with the options
+ *  parseCommand reads, wherever options or `--` put it — or null when there is none. Read without parseCommand's
+ *  strictness, so before it: a line parseCommand accepts has the same first positional (an option's value is never
+ *  one), and a line it refuses still says its verb, so a verb with a reader of its own takes every line it is in. */
+export function verbAt(spec: Pick<CommandSpec, "options">, argv: readonly string[]): number | null {
+  const { tokens } = parseArgs({ args: [...argv], options: { ...spec.options, ...HELP }, allowPositionals: true, strict: false, tokens: true });
+  const verb = tokens.find((t) => t.kind === "positional");
+  return verb === undefined ? null : verb.index;
+}
+
 /** A LIST FLAG's value, one comma list however it was written (`multiple: true` in the spec): `--columns id,status`
  *  and `--columns id --columns status` mean the same, `id,status`; undefined when it was not given. */
 export function listFlag(v: unknown): string | undefined {

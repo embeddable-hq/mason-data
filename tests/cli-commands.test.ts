@@ -2062,3 +2062,64 @@ test("mason user check <name>: the password on stdin, answered ok, wrong, disabl
     assert.match((await run(["user", "--help"])).stdout, /Exit 0 ok, 3 wrong, 4 disabled, 5 removed/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+test("mason user check with options BEFORE check (mason user --json check <name>, -- check, --help check): check's own reader, never add; exit 0 for the right password alone, users.json unchanged, no part of the password said", async () => {
+  // src/cli/user.ts user(): the verb found as the parser finds it (verbAt, src/cli/command.ts), wherever options put it.
+  // At 3b8cd567 a line with an option before check reached the add code: a user made from the sign-in page's word, exit 0
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mason-user-check-before-")));
+  try {
+    fs.mkdirSync(path.join(root, "mason", "sources"), { recursive: true });
+    fs.mkdirSync(path.join(root, ".mason"), { mode: 0o700 });
+    fs.writeFileSync(path.join(root, ".mason", "config.json"), JSON.stringify({ name: "shop", folder: "mason", remote: false, apiKey: "k".repeat(48), sourceServer: null, running: null, lastRun: null }), { mode: 0o600 });
+    fs.writeFileSync(path.join(root, "mason", "sources", "shop.yml"), "kind: postgres\nurl: postgres://mason:x@127.0.0.1:1/shop\ndatabase: shop\ntables: {}\n");
+    const run = (argv: string[], stdin?: string, env: Record<string, string> = {}) => runMason(root, argv, matrixEnv(env), 60_000, undefined, stdin);
+    const pw = (JSON.parse((await run(["user", "add", "metabase", "--json"])).stdout) as { password: string }).password;
+    const [, pid, mac] = /^mason_([0-9a-f]{16})_([0-9a-f]{32})$/.exec(pw)!;
+    const usersFile = path.join(root, ".mason", "users.json");
+    const users = fs.readFileSync(usersFile, "utf8");
+    const held = (line: string[], a: Answer, stdin: string): void => {
+      const said = `${a.stdout}${a.stderr}`;
+      if (stdin !== pw) assert.notEqual(a.code, 0, `${JSON.stringify(line)}: exit 0 is ok alone`);
+      assert.equal(fs.readFileSync(usersFile, "utf8"), users, `${JSON.stringify(line)}: the users file changed`);
+      // the id is said on ok alone (the user's own, as mason user list says it); the MAC never
+      for (const part of [...(a.code === 0 ? [] : [pid!]), mac!.slice(0, 12), mac!.slice(-12)]) assert.ok(!said.includes(part), `${JSON.stringify(line)}: a part of the password said:\n${said}`);
+    };
+    // [the line after `mason user`, stdin, the exit expected (null: any but 0)]
+    const lines: Array<[string[], string, number | null]> = [
+      [["--json", "check", "stranger"], "wrong", 3], [["check", "--json", "stranger"], "wrong", 3],
+      [["--json", "check", pw], pw, null], [["--json", "check", "metabase"], pw, 0], [["--json", "check", "metabase"], "wrong", 3],
+      [["--", "check", "x"], "wrong", 3], [["--json", "--", "check", "x"], "wrong", 3], [["--", "check", "metabase"], pw, 0],
+      [["--json", "check", `${pw}\r`], pw, null], [["--json", "check", `${pw} `], pw, null], [["--json", "check", "--help"], pw, 2], [["--json", "check", "-h"], pw, 2],
+      [["--help", "check", "metabase"], pw, 2], [["-h", "--json", "check", "metabase"], pw, 2], [["--json=1", "check", "metabase"], pw, 2],
+      [["--role", "r", "check", "metabase"], pw, 2], [["--replica", "acme/shop", "check", "metabase"], pw, 2], [["--any", "check", pw], pw, 2],
+    ];
+    for (const [line, stdin, expected] of lines) {
+      for (const json of [true, false]) {
+        const argv = json ? line : line.filter((w) => w !== "--json");
+        const a = await run(["user", ...argv], stdin);
+        held(argv, a, stdin === pw && expected === 0 ? pw : "wrong");
+        if (expected !== null) assert.equal(a.code, expected, `${JSON.stringify(argv)}:\n${a.stdout}${a.stderr}`);
+        if (argv.includes("--json") && expected !== null && expected !== 2) assert.equal(JSON.parse(a.stdout).answer, expected === 0 ? "ok" : "wrong", JSON.stringify(argv));
+      }
+    }
+    // MASON_REPLICA reaches no replica from check's line, wherever check sits: this project's users answer
+    for (const line of [["--json", "check", "x"], ["--json", "check", "metabase"]]) {
+      const a = await run(["user", ...line], pw, { MASON_REPLICA: "acme/shop" });
+      held(line, a, line[2] === "metabase" ? pw : "wrong");
+      assert.equal(a.code, line[2] === "metabase" ? 0 : 3, `${JSON.stringify(line)} under MASON_REPLICA:\n${a.stdout}${a.stderr}`);
+    }
+    // another spelling of check is no check, and never add: refused, exit 2, nothing written
+    for (const line of [["CHECK", "metabase"], ["--json", "Check", "x"], ["--check", "metabase"], ["check=metabase"], ["--json", `--check=${pw}`]]) {
+      const a = await run(["user", ...line], pw);
+      held(line, a, "wrong");
+      assert.equal(a.code, 2, JSON.stringify(line));
+    }
+    // and no other verb's line is taken for check: a user NAMED check is added and removed, options before or after
+    for (const line of [["--json", "add", "check"], ["--json", "remove", "check"], ["add", "check", "--json"], ["remove", "--json", "check"]]) {
+      const a = await run(["user", ...line]);
+      assert.equal(a.code, 0, `${JSON.stringify(line)}:\n${a.stdout}${a.stderr}`);
+      const said = JSON.parse(a.stdout) as { user?: string; removedUser?: { name: string } };
+      assert.equal(said.user ?? said.removedUser?.name, "check");
+    }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});

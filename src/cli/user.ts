@@ -11,7 +11,7 @@
  * called by the run's command server; so are `disableUser` and `enableUser`.
  */
 import * as path from "node:path";
-import { failed, jsonText, listFlag, parseCommand, reportText, strict, withEnd, type CommandSpec, type Failure, type NextStep } from "./command.ts";
+import { failed, jsonText, listFlag, parseCommand, verbAt, reportText, strict, withEnd, type CommandSpec, type Failure, type NextStep } from "./command.ts";
 import { reach } from "./state.ts";
 import { callRun, RunUnreachable } from "./control.ts";
 import { clientLink, connectionUrl, listenerTips, psqlLine, type PostgresLink } from "./pg-url.ts";
@@ -391,7 +391,7 @@ export const disableEffect = (name: string): string =>
 export const disabledText = (disabledAt: string): string => `Disabled ${stamp(disabledAt)} UTC`;
 
 /** Why `name` is not one `mason user <verb>` takes (a usage failure), or null. */
-export function userNameProblem(verb: "add" | "remove" | "disable" | "enable" | "from" | "check", name: string | undefined): string | null {
+export function userNameProblem(verb: "add" | "remove" | "disable" | "enable" | "from", name: string | undefined): string | null {
   if (name === undefined) return `mason user ${verb} <name>: which user`;
   if (!USER_NAME_RE.test(name)) return `${JSON.stringify(name)} is not a user name: ${USER_NAME_RULE}`;
   return null;
@@ -736,17 +736,22 @@ export function addedReport(r: Omit<AddedUser, "replaced"> & { replaced?: boolea
 
 export async function user(argv: string[]): Promise<number> {
   // check's line is read by its own reader, before the spec's parser: its words come from a sign-in page (untrusted), so
-  // no option of the parser's (--help's exit 0 above all, which is check's ok) applies, and no word is ever repeated
-  if (argv[0] === "check") return checkLine(argv.slice(1));
+  // no option of the parser's (--help's exit 0 above all, which is check's ok) applies, and no word is ever repeated.
+  // EVERY line whose verb is check, wherever the options and -- put it (mason user --json check <name>), is that reader's:
+  // the verb found as the parser finds it (verbAt), the word itself taken out and the rest read by checkLine
+  const at = verbAt(USER, argv);
+  if (at !== null && argv[at] === "check") return checkLine([...argv.slice(0, at), ...argv.slice(at + 1)]);
   const f = parseCommand(USER, argv);
   if (typeof f === "number") return f;
   const json = f.values.json === true;
   const usage = (message: string): number => failed("user", { message, code: "usage", usage: USER.usage }, { json });
   const [verb, name, ...rest] = f.positionals;
+  // never reached (verbAt took check's line above), and never a fall through to add: refused, no word of it repeated
+  if (verb === "check") return failed("user", { message: "mason user check's line was not read as one", code: "usage", why: "no word of its line is repeated (it may hold a password)",
+    fix: "mason user check <name> [--json] < password.txt" }, { json });
   const VERBS = ["add", "list", "from", "disable", "enable", "remove", "check"];
   if (verb === undefined) return usage("add, list, from, disable, enable, remove or check: mason user add <name> makes a user");
   if (!VERBS.includes(verb)) return usage(`there is no mason user ${verb}: add, list, from, disable, enable, remove or check${didYouMean(verb, VERBS)}`);
-  // a word after check's name may be a password, and so may the name itself: refused without repeating it
   if (verb === "list" ? name !== undefined : verb !== "from" && rest.length) return usage(`mason user ${verb} takes ${verb === "list" ? "no name" : "one name"}: ${[name, ...rest].filter(Boolean).join(" ")} is too many`);
   // the address ranges: --from on add, the positionals of from (or its --any); each read by the one grammar, a wrong one a
   // wrong line before anything is read, written or sent
@@ -764,7 +769,7 @@ export async function user(argv: string[]): Promise<number> {
   if (sets.length > 0 && verb !== "add") return usage(`--set goes with mason user add: mason user add <name> --role <role> --set ${sets[0]!}`);
   for (const arg of sets) { const s = setOf(arg); if (typeof s === "string") return usage(s); }
   if (verb !== "list") {
-    const problem = userNameProblem(verb as "add" | "remove" | "disable" | "enable" | "from" | "check", name);
+    const problem = userNameProblem(verb as "add" | "remove" | "disable" | "enable" | "from", name);
     if (problem !== null) return usage(problem);
   }
   const ranges = given === null ? null : rangesToSet(given, `mason user ${verb} ${name!}`);
@@ -851,7 +856,8 @@ export async function user(argv: string[]): Promise<number> {
     return 0;
   }
 
-  // add
+  // add, and nothing else: a verb no branch above took is refused, never added
+  if (verb !== "add") return usage(`there is no mason user ${verb}: add, list, from, disable, enable, remove or check`);
   const run = w.state === "up" ? w.run : null;
   const link: PostgresLink | null = run ? clientLink(run) : null;
   // the role must be one the roles file names NOW (the listener's reading while the run is up): refused before writing

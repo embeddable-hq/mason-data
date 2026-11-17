@@ -2415,7 +2415,10 @@ password of a name removed and added again says `removed` with the OLD id, never
   `--help`'s exit 0 would have been `ok` to a page that signs in on exit 0. No word of the line is repeated unless it is
   exactly a user's name of the file: a password typed on the line, near its shape (`\r` after it, inside a URL, cut
   short, after `--role`), was printed back in full by the generic refusals. A word that is no user's is answered `wrong`
-  with `user` null, after the same work.
+  with `user` null, after the same work. The reader takes EVERY line whose verb is `check`, wherever options or `--`
+  put it (`verbAt`, src/cli/command.ts, finds the verb as the spec's parser does): its re-check found
+  `mason user --json check <name>` falling through to `add`, making the page's word a user and exiting 0; `add`
+  is now reached by its own verb alone.
 - **The page must limit attempts**: `check` answers `wrong` as often as it is asked, so a page that lets anyone ask makes
   it a free oracle. The docs say to count failures by the browser's address, the replica and the user name.
 
