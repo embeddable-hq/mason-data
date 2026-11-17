@@ -4749,7 +4749,9 @@ test("issue 214: a numeric parameter beside a value the engine holds exactly is 
     for (const [sql, values] of [["SELECT count(*) FROM big WHERE id < $1::numeric", ["100"]], ["SELECT count(*) FROM big WHERE id::numeric = $1", ["99999"]],
       [`${x} b.x = $1 ORDER BY 1`, ["2.5"]], [`${x} b.x BETWEEN $1 AND $2 ORDER BY 1`, ["1", "2.5"]]] as Array<[string, string[]]>) {
       const called = await calledFor(sql, values);
-      assert.ok(called.some(([k]) => k === "__mason_numeric_fits") && called.every(([, n]) => n <= values.length), `${sql}: ${JSON.stringify(called)}`);
+      // folded once as its plan is run, and once more as its plan is weighed when it may keep rows (an ORDER BY:
+      // src/duck/admission.ts): a few calls, never one a vector
+      assert.ok(called.some(([k]) => k === "__mason_numeric_fits") && called.every(([, n]) => n <= 2 * values.length), `${sql}: ${JSON.stringify(called)}`);
     }
     const keyed = await calledFor("SELECT count(*) FROM big WHERE id < $1::numeric", ["100.5"]);
     assert.ok(keyed.some(([k, n]) => k === "__mason_numeric_order" && n > 10), `a value an integer does not hold is keyed row by row: ${JSON.stringify(keyed)}`);

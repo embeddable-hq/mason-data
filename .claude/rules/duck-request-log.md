@@ -36,7 +36,7 @@ paths:
   `NumericError`'s or `Unsupported`'s own `gap`), read from the text (`gapIn`) only where a refusal crossed DuckDB as
   its message (src/duck/store.ts `pgErrorOf`), and carried across the executor's worker (`WireError`); a re-wrap of an
   error keeps it (tests/duck-wire.test.ts holds every path). `unsupported` groups by it (`/api/unsupported`, `mason
-  status`). A row answered XX000 carries its `origin`, the first frame in Mason's `src/` of the error it was made from
+  status`). A heavy statement's row has its wait for its turn (`waited_ms`, src/duck/admission.ts; null for a light one). A row answered XX000 carries its `origin`, the first frame in Mason's `src/` of the error it was made from
   (`PgError.from`, src/lib/failure-facts.ts; issue 924), as a file and a line. ("The request log")
 - **A statement that took `SLOW_MS` or more has its plan on its row, recorded after its answer and never in its way**
   (src/api/postgres/slow-plan.ts `SlowPlans`, issue 825: a slow preview's cause took a hand-run EXPLAIN on the server,

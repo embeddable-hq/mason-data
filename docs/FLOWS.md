@@ -229,6 +229,10 @@ probe measured the event loop's longest stall during each call.
   sets `UV_THREADPOOL_SIZE` to 32 before it starts. At four, six statements on six connections finished four together,
   then the rest; a `connect` beside them waited 1.5 s, and 3.7 s with a pool of two. So a call that looks free can be
   waiting behind running statements, here past 32 of them or more (docs/DESIGN.md "The pool").
+- **A heavy statement waits for its turn before it reaches the worker.** `RemoteRunner.admit` weighs it with a plain
+  EXPLAIN on its connection (unless its tree keeps nothing), and a heavy one waits on the listener's thread for one of
+  the instance's few turns (src/duck/admission.ts; docs/DESIGN.md "Heavy statements take a turn"). It holds no pool
+  thread while it waits.
 - **`stream()` is not where the work is, reliably.** For a call-free aggregate it returned in 2 ms and the first
   `fetchChunk` took the whole 1.3 s. The comment in `SessionRunner.streamed` describes a calling count computing inside
   `stream()`. Handle both.

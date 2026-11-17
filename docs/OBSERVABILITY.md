@@ -191,6 +191,7 @@ Key: ✅ built · ⏸ deferred
 | Query ID | ✅ | `requestId` |
 | The plan of a slow statement | ✅ | `plan`, `planTruncated` ("The plan of a slow statement" below): in the row's details, and whole in `mason logs --requests --id <requestId>` |
 | Where an internal error failed | ✅ | `origin` on a row answered XX000: the first frame in Mason's code, a file and a line (src/lib/failure-facts.ts); null on every other row |
+| How long a heavy query waited for its turn | ✅ | `waitedMs` (`waited_ms`; src/duck/admission.ts): 0 when a turn was free, null for a light query, which never waits; in `mason logs --requests --id <requestId>` as `waited` |
 | Rows scanned | ⏸ | **Decide later: may add cost to every query.** DuckDB reports it only with its profiler on per statement, whose cost is not measured. Measure (about half a day) before promising it. |
 | Filters: status, date, user | ✅ | `/api/requests`: outcome, `failed`, since / until, user, client, `slow`, `search`, and paging (`before`) |
 

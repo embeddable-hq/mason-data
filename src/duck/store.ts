@@ -51,6 +51,7 @@ import { extensionSettings, findExtensions, type Extensions } from "./extensions
 import { messageOf } from "../lib/secret-mask.ts";
 import { SCALE_PREFIX } from "./scale-column.ts";
 import { BOM_PROBE, keepLeadingBom } from "./text.ts";
+import { Admission, heavyRowsFor, heavyTurns, keptRows } from "./admission.ts";
 
 export const MASON_SCHEMA = "_mason";
 
@@ -339,6 +340,8 @@ export class DuckStore {
   private readonly closeGraceMs: number | undefined;
   /** where the copy's extensions come from: Mason's package for this platform, or DuckDB's install (src/duck/extensions.ts) */
   readonly extensions: Extensions;
+  /** the heavy statements' turns (src/duck/admission.ts): how many run at once, and what is heavy */
+  get admission(): Admission { return this.executor.admission; }
   private constructor(file: string, executor: Executor, memoryLimit: number, extensions: Extensions, spill: { limit: number; set: number | null; diskFree: (dir: string) => number }, log: (line: string) => void, closeGraceMs?: number) {
     this.file = file; this.executor = executor; this.memoryLimitBytes = memoryLimit; this.extensions = extensions; this.closeGraceMs = closeGraceMs;
     this.spillLimitBytes = spill.limit; this.spillSet = spill.set; this.diskFree = spill.diskFree; this.log = log;
@@ -351,7 +354,11 @@ export class DuckStore {
   /** `silentMs` and `closeGraceMs`: the executor's bounds (src/duck/executor.ts SILENT_MS, CLOSE_GRACE_MS), shorter only
    *  in a test; `workerFile`, the executor worker's module, another only in a test; `extensions`, this machine's
    *  (`findExtensions`) unless a test names a package */
-  static async open(file: string, log: (line: string) => void, options: { memoryLimit?: string; spillLimit?: string; diskFree?: (dir: string) => number; silentMs?: number; closeGraceMs?: number; workerFile?: string; extensions?: Extensions } = {}): Promise<DuckStore> {
+  /** `heavyQueries`: MASON_HEAVY_QUERIES (src/duck/admission.ts `heavyQueriesOf`), the heavy statements run at once;
+   *  absent or null, derived from the memory limit and the engine's threads. `heavyRows`: the rows kept at which a
+   *  statement is heavy, another only in a test (else `heavyRowsFor`) */
+  static async open(file: string, log: (line: string) => void, options: { memoryLimit?: string; spillLimit?: string; diskFree?: (dir: string) => number; silentMs?: number; closeGraceMs?: number; workerFile?: string; extensions?: Extensions;
+    heavyQueries?: number | null; heavyRows?: number } = {}): Promise<DuckStore> {
     const extensions = options.extensions ?? findExtensions();
     const memoryLimit = options.memoryLimit ?? DEFAULT_MEMORY_LIMIT;
     if (!MEMORY_LIMIT_RE.test(memoryLimit)) throw new Error(memoryProblemText(memorySettingWrong(memoryLimit)));
@@ -381,6 +388,11 @@ export class DuckStore {
     try {
       await executor.writer().run(spillCeilingSql(spillLimit));
       problem = await instanceSettingsProblem(executor.writer(), { ...settings, max_temp_directory_size: spillSetting(spillLimit) });
+      // THE HEAVY STATEMENTS' TURNS (src/duck/admission.ts), from the memory limit and the threads the engine runs on (its
+      // own count: a container's CPU limit is what it reads, never the machine's)
+      const threads = Number((await executor.writer().runAndReadAll("SELECT current_setting('threads')")).getRowsJS()[0]?.[0]);
+      const bytes = memoryLimitBytes(memoryLimit);
+      executor.admission = new Admission(heavyTurns(bytes, threads, options.heavyQueries ?? null), options.heavyRows ?? heavyRowsFor(bytes));
     } catch (e) { problem = `its settings could not be set and read back: ${e instanceof Error ? e.message : String(e)}`; }
     if (problem !== null) {
       // closed as a store closes: a thread given up on keeps the file here (`abandoned`)
@@ -1016,6 +1028,20 @@ export class SessionRunner implements DuckRunner {
     const explained: Explained = { copies: await this.copies(scannedTables(plan), how.copies, how.rowFilters ?? []), sql: oneLine(sql.text), computed: computedOf(how.exact, how.fields),
       functions: [...sql.functions], plan, ...(analyzed === undefined ? {} : { analyzed }), ...(how.detailsHidden === true ? { detailsHidden: true as const } : {}) };
     return o.format === "json" ? [explainJson(explained, o)] : explainText(explained, o);
+  }
+
+  /** the rows the statement's plan keeps in memory at once, by DuckDB's estimates (src/duck/admission.ts `keptRows`):
+   *  what decides whether it waits for a heavy statement's turn. Its plain EXPLAIN, after the session's last answer is
+   *  released, as an EXPLAIN is */
+  weigh(sql: PlannedSql, params: readonly (string | null)[], session: DuckSession, signal: AbortSignal): Promise<number> {
+    const seq = this.next;
+    return this.track((async () => {
+      await Promise.all([...this.releasing]);
+      // ITS OWN NUMBER IN THE CANCEL TABLE, as a run's: the engine folds a Mason function over constants while it plans,
+      // and that call must read this one's cancel, never the cancel of the statement before it (which would raise)
+      beginStatement(this.cancels, this.slot, seq);
+      return keptRows(await this.plainPlan(sql, params, session, signal));
+    })());
   }
 
   /** DuckDB's `EXPLAIN (FORMAT JSON)` of the planned SQL, its parameters bound: its plan, estimates only */
