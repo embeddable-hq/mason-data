@@ -83,9 +83,9 @@ const BYTES_PER_ROW = 700;
 // --------------------------------------------------------------------------------------------- the statements
 
 /** The data's two years start here; the windows below are literals, as a BI tool's filter sends them. */
-const DATA_START = "2024-10-01 00:00:00+00";
-const DATA_DAYS = 730;
-const TENANTS = 200;
+export const DATA_START = "2024-10-01 00:00:00+00";
+export const DATA_DAYS = 730;
+export const TENANTS = 200;
 
 export interface BenchQuery { name: string; title: string; sql: string; params?: "id" }
 export const QUERIES: BenchQuery[] = [
@@ -530,9 +530,16 @@ async function waitReady(url: string, log: (l: string) => void): Promise<void> {
 const withDb = (url: string, db: string): string => { const u = new URL(url); u.pathname = `/${db}`; return u.toString(); };
 const whereOf = (url: string): string => { const u = new URL(url); return `${u.hostname}:${u.port || "5432"}`; };
 
-/** the database of one size: made by `dataSql`, or reused when its marker says it holds exactly this */
-export async function ensureData(adminUrl: string, rows: number, log: (l: string) => void): Promise<{ url: string; generatedSeconds: number | null }> {
-  const db = `bench_replica_${rows}`;
+/** a size's data: the database it is made in, the comment on its orders that says what it holds, and the SQL that makes it */
+export interface DataShape { database: string; marker: string; sql: string[] }
+/** the warm mode's data: `dataSql` in `bench_replica_<rows>` */
+const warmShape = (rows: number): DataShape => ({ database: `bench_replica_${rows}`, marker: marker(rows), sql: dataSql(rows) });
+
+/** the database of one size: made by its shape's SQL (the warm mode's, `dataSql`, by default), or reused when its
+ *  marker says it holds exactly this */
+export async function ensureData(adminUrl: string, rows: number, log: (l: string) => void, shape: DataShape = warmShape(rows)): Promise<{ url: string; generatedSeconds: number | null }> {
+  const db = shape.database;
+  if (!/^[a-z_][a-z0-9_]*$/.test(db)) throw new Error(`a bench database's name is a plain identifier: ${JSON.stringify(db)}`);
   const url = withDb(adminUrl, db);
   const admin = new pg.Client({ connectionString: adminUrl });
   await admin.connect();
@@ -542,8 +549,8 @@ export async function ensureData(adminUrl: string, rows: number, log: (l: string
       await c.connect();
       const m = ((await c.query("SELECT obj_description(to_regclass('public.orders'), 'pg_class') AS m")).rows[0]?.m ?? null) as string | null;
       await c.end();
-      if (m === marker(rows)) { log(`${db}: reused (${m})`); return { url, generatedSeconds: null }; }
-      log(`${db}: holds ${JSON.stringify(m)}, not ${JSON.stringify(marker(rows))}: made again`);
+      if (m === shape.marker) { log(`${db}: reused (${m})`); return { url, generatedSeconds: null }; }
+      log(`${db}: holds ${JSON.stringify(m)}, not ${JSON.stringify(shape.marker)}: made again`);
       await admin.query(`DROP DATABASE ${db} WITH (FORCE)`);
     }
     await admin.query(`CREATE DATABASE ${db}`);
@@ -552,7 +559,7 @@ export async function ensureData(adminUrl: string, rows: number, log: (l: string
   await c.connect();
   const t0 = performance.now();
   try {
-    for (const sql of dataSql(rows)) {
+    for (const sql of shape.sql) {
       const s0 = performance.now();
       await c.query(sql);
       log(`  ${db}: ${sql.slice(0, 60).replace(/\s+/g, " ")}… ${((performance.now() - s0) / 1000).toFixed(1)} s`);

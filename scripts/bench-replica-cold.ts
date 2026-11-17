@@ -2,8 +2,9 @@
  * THE COLD MODE OF scripts/bench-replica.ts (`--cold`, docs/BENCHMARK.md "The cold mode"): how long one query takes on
  * a Postgres and on Mason the first time, with one client and with ten. It is the published run.
  *
- *   node scripts/bench-replica.ts --cold --label "<the machine>" --memory 8GiB --out tests/fixtures/bench-replica.json
+ *   node scripts/bench-replica.ts --cold --label "<the machine>" --disk "<the disk>" --memory 8GiB --out tests/fixtures/bench-replica.json
  *     --sizes 1M,10M,100M   --clients 1,10   --runs 3
+ *     --disk "<words>"      the disk both engines read, recorded and published ("EBS gp3, 125 MB/s, 3000 IOPS")
  *     --cpus <n>            each engine's container's CPUs (default this machine's)
  *     --memory <n>GiB       each engine's container's memory, the page cache included, no swap (default half the RAM)
  *     --mason-image <ref>   default ghcr.io/embeddable-hq/mason-data:<this checkout's version>
@@ -12,14 +13,19 @@
  *     --work <dir>          the run's files: secrets in 0600 files, the client's script and logs (default the OS temp dir)
  *     --reserve-gb 60       a size whose disk on both engines would leave less free than this is skipped, said
  *     --keep-postgres       leave the bench-pg container, its data and the bench-replica network for the next run
- *     --reuse-postgres      adopt the bench-pg container a --keep-postgres run left
+ *     --reuse-postgres      adopt the bench-pg container a --keep-postgres run left, once that run has ended
  *     --resume              keep the sizes --out finished, measure the rest
+ *
+ * THE DATA (COLD_DATA, `coldDataSql`): the warm mode's orders and customers, with random UUID primary keys and no
+ * index on status, in databases of their own (`bench_replica_cold_<rows>`). The fixture records it.
  *
  * WHAT IS MEASURED. Three statements (COLD_STATEMENTS), sent as written to both engines: a count over every row, a sum
  * by month over a join, and one row by its primary key. Each size × client count × statement × engine is run --runs
  * times. In each run every client sends the statement once, all at the same moment, and the run records each client's
  * time. A client's time excludes its connection. The cell's time is the median over the runs of the slowest client:
- * the time until every client has its answer.
+ * the time until every client has its answer. Each run also records what the measured engine's container read from
+ * disk while pgbench ran (and, beside Mason, the idle Postgres's), from its cgroup v2 io.stat; where that cannot be
+ * read, the run refuses at its start.
  *
  * COLD. Before every run, the engine is restarted (its own buffers emptied), the run waits until it answers
  * `SELECT 1 FROM orders LIMIT 0`, waits --settle seconds more, and drops the OS page cache (root, by `sudo -n`; the run
@@ -33,17 +39,19 @@
  *
  * THE CLIENT is pgbench from the Postgres image, in a container of its own on the host's network:
  * `pgbench -n -c N -j N -t 1 -f <script> --log`. Each client's time is read from its per-transaction log. For the
- * lookup each client asks for a different row, picked at random once per size and recorded in the fixture, as a plain
- * literal chosen by pgbench's `\if :client_id = …`. A literal chosen inside the SQL (`CASE :client_id WHEN 0 THEN …`)
+ * lookup each client asks for a different row, sampled from the data once per size and recorded in the fixture, as a
+ * quoted UUID literal chosen by pgbench's `\if :client_id = …`. A literal chosen inside the SQL (`CASE :client_id WHEN 0 THEN …`)
  * stops Mason's engine from pushing the filter down, and makes Mason look many times slower than it is.
  *
  * Secrets (Postgres's password, Mason's API key, the bench user's password) go to 0600 env files in a 0700 folder,
  * never a command line or the log. Mason's project is copied into its container (`docker cp`), so the container's
  * user reads it wherever --work is.
  *
- * ANOTHER RUN IS NEVER TOUCHED. A bench-pg, bench-mason or bench-client container, or a Mason volume of a size to be
- * measured, that is already there is refused before anything else (the page cache is not dropped either): it is a run
- * in progress, or what a --keep-postgres run left (--reuse-postgres adopts that one). At the end the run removes what
+ * ANOTHER RUN IS NEVER TOUCHED. A cold run holds a lock (/tmp/bench-replica-cold.lock, its process and start) from its
+ * start to its end, and one whose holder is alive refuses the run. A bench-pg, bench-mason or bench-client container,
+ * or a Mason volume of a size to be measured, that is already there is refused too, before anything else (the page
+ * cache is not dropped either). --reuse-postgres adopts only a bench-pg whose owner (its label) has ended. A check
+ * Docker cannot answer refuses, and only Docker's "no such" means absent. At the end the run removes what
  * it made itself, by the ids Docker gave back: its containers, volumes, network and files. --keep-postgres keeps its
  * Postgres, and a Postgres container adopted with --reuse-postgres is not removed.
  */
@@ -51,11 +59,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
-import { createHash, randomBytes, randomInt } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
-import { Usage, customersOf, docker, ensureData, fmtRows, freePort, median, parseCount, postgresFacts, replicaSettings, round } from "./bench-replica.ts";
+import { DATA_DAYS, DATA_START, TENANTS, Usage, customersOf, docker, ensureData, fmtRows, freePort, median, parseCount, postgresFacts, replicaSettings, round } from "./bench-replica.ts";
+import type { DataShape } from "./bench-replica.ts";
 
 const SCRIPT = fileURLToPath(import.meta.url);
 const REPO = path.resolve(path.dirname(SCRIPT), "..");
@@ -65,10 +74,71 @@ const CLIENT_CONTAINER = "bench-client";
 const NETWORK = "bench-replica";
 /** the network alias Mason syncs Postgres by */
 const PG_ALIAS = "pg";
-/** a size's disk on both engines, by the row, before any size was measured here: Postgres's ~700 bytes and Mason's volume */
-const BYTES_PER_ROW = 900;
+/** a size's disk on both engines, by the row, before any size was measured here: 1 M rows of the cold data measured
+ *  376 bytes a row in Postgres (its tables and indexes) and about 103 in Mason's synced data */
+const BYTES_PER_ROW = 500;
+/** the lock a cold run holds from its start to its end: one cold run on a machine at a time */
+const LOCK_FILE = "/tmp/bench-replica-cold.lock";
+/** the label on the Postgres container a cold run made: the run that owns it (`ownerOf`) */
+const OWNER_LABEL = "mason-bench.owner";
 /** how long an engine may take to answer after its restart, or Mason its first sync */
 const READY_TIMEOUT_MS = 30 * 60_000;
+
+// --------------------------------------------------------------------------------------------- the data
+
+/**
+ * THE COLD MODE'S DATA: the warm mode's rows (the same orders and customers, from `generate_series`), with random UUID
+ * primary keys, and no index on status. It is its own database (`bench_replica_cold_<rows>`), with its own marker, so
+ * neither mode reuses the other's. Recorded in the fixture as it is here, so a fixture of other data cannot render as
+ * this run's.
+ */
+export const COLD_DATA = {
+  version: 1,
+  /** the primary keys' type: orders.id and customers.id, and orders.customer_id */
+  keys: "uuid",
+  /** every index, as a read replica would have them; none on orders (status), so the count reads every row on both */
+  indexes: ["customers (id), its primary key", "orders (id), its primary key", "orders (tenant_id, created_at)", "orders (created_at)"],
+} as const;
+export type ColdData = { version: number; keys: string; indexes: string[] };
+
+/**
+ * The cold data's SQL. orders.id is a random v4 UUID (`gen_random_uuid()`); a customer's id is the md5 of its number as a
+ * UUID, so an order's customer_id is computed from the customer's number with no join, uniformly spread and the same in
+ * every run. created_at rises with the heap's order, as an append-only table's does. The primary keys are added after
+ * the rows, as one sorted build each.
+ */
+export function coldDataSql(rows: number): string[] {
+  const nc = customersOf(rows);
+  return [
+    "SELECT setseed(0.42)",
+    "CREATE TABLE public.customers (id uuid NOT NULL, tenant_id integer NOT NULL, name text NOT NULL, email text NOT NULL, created_at timestamptz NOT NULL)",
+    `INSERT INTO public.customers SELECT md5('customer' || g)::uuid, 1 + g % ${TENANTS}, 'Customer ' || g, 'customer' || g || '@example.com', ` +
+      `timestamptz '${DATA_START}' + (g::float8 / ${nc}) * interval '${DATA_DAYS} days' FROM generate_series(1, ${nc}) g`,
+    "ALTER TABLE public.customers ADD PRIMARY KEY (id)",
+    "CREATE TABLE public.orders (id uuid NOT NULL, tenant_id integer NOT NULL, customer_id uuid NOT NULL, status text NOT NULL, " +
+      "amount numeric(12,2) NOT NULL, created_at timestamptz NOT NULL, payload jsonb NOT NULL, note text)",
+    `INSERT INTO public.orders SELECT gen_random_uuid(), 1 + c % ${TENANTS}, md5('customer' || c)::uuid, ` +
+      "CASE WHEN r < 0.05 THEN 'pending' WHEN r < 0.45 THEN 'paid' WHEN r < 0.75 THEN 'shipped' WHEN r < 0.93 THEN 'delivered' WHEN r < 0.98 THEN 'cancelled' ELSE 'refunded' END, " +
+      "round((5 + random() * 495)::numeric, 2), " +
+      `timestamptz '${DATA_START}' + ((g - 1)::float8 / ${rows}) * interval '${DATA_DAYS} days' + floor(random() * 600) * interval '1 second', ` +
+      "jsonb_build_object('source', (ARRAY['web','ios','android','api','pos','email'])[1 + floor(random() * 6)::int], " +
+      "'campaign', 'cmp-' || floor(random() * 40)::int, " +
+      "'device', jsonb_build_object('os', (ARRAY['ios','android','macos','windows','linux'])[1 + floor(random() * 5)::int], 'version', (10 + floor(random() * 8))::int || '.' || floor(random() * 10)::int), " +
+      "'items', 1 + floor(random() * 9)::int, 'gift', random() < 0.1, 'ref', md5(g::text)), " +
+      "CASE WHEN random() < 0.3 THEN 'customer asked for ' || (ARRAY['gift wrap','a call before delivery','delivery after 5pm','an invoice'])[1 + floor(random() * 4)::int] END " +
+      `FROM (SELECT g, 1 + floor(random() * ${nc})::bigint AS c, random() AS r FROM generate_series(1, ${rows}) g) s`,
+    "ALTER TABLE public.orders ADD PRIMARY KEY (id)",
+    "CREATE INDEX orders_tenant_created ON public.orders (tenant_id, created_at)",
+    "CREATE INDEX orders_created ON public.orders (created_at)",
+    "VACUUM (ANALYZE) public.customers",
+    "VACUUM (ANALYZE) public.orders",
+    `COMMENT ON TABLE public.orders IS '${coldMarker(rows)}'`,
+  ];
+}
+const coldMarker = (rows: number): string =>
+  `bench-replica cold v${COLD_DATA.version}: ${rows} orders, ${customersOf(rows)} customers, ${COLD_DATA.keys} keys, no index on status`;
+/** a size's cold data: its own database, marker and SQL */
+export const coldShape = (rows: number): DataShape => ({ database: `bench_replica_cold_${rows}`, marker: coldMarker(rows), sql: coldDataSql(rows) });
 
 // --------------------------------------------------------------------------------------------- the statements
 
@@ -81,13 +151,15 @@ export const COLD_STATEMENTS: readonly ColdStatement[] = [
   { name: "revenue_by_month", title: "Revenue by month, orders joined to customers",
     sql: "SELECT date_trunc('month', o.created_at) AS month, date_trunc('year', c.created_at) AS signup_year, sum(o.amount) AS revenue " +
       "FROM orders o JOIN customers c ON c.id = o.customer_id GROUP BY 1, 2 ORDER BY 1, 2" },
-  { name: "lookup", title: "One order by its primary key", sql: `SELECT * FROM orders WHERE id = ${LOOKUP_ID}`, lookup: true },
+  { name: "lookup", title: "One order by its primary key", sql: `SELECT * FROM orders WHERE id = '${LOOKUP_ID}'`, lookup: true },
 ];
 
-/** the statement as sent: the lookup with its id as a literal */
+/** a UUID as Postgres writes it: 36 characters, lower-case hex in groups of 8, 4, 4, 4 and 12 */
+const UUID_TEXT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** the statement as sent: the lookup with its id as a quoted literal, checked to be a UUID's 36 characters first */
 export function statementSql(st: ColdStatement, id?: string): string {
   if (st.lookup !== true) return st.sql;
-  if (id === undefined || !/^[1-9]\d*$/.test(id)) throw new Error(`a lookup's id is a whole number: ${JSON.stringify(id)}`);
+  if (id === undefined || !UUID_TEXT.test(id)) throw new Error(`a lookup's id is a UUID as Postgres writes it: ${JSON.stringify(id)}`);
   return st.sql.replace(LOOKUP_ID, id);
 }
 
@@ -107,12 +179,28 @@ export function coldScript(st: ColdStatement, clients: number, ids: readonly str
   return `${lines.join("\n")}\n`;
 }
 
-/** `n` different ids in 1..rows, at random: the lookup's, one per client */
-export function pickLookupIds(rows: number, n: number): string[] {
-  if (n > rows) throw new Error(`${n} different ids from ${rows} rows`);
-  const ids = new Set<number>();
-  while (ids.size < n) ids.add(randomInt(1, rows + 1));
-  return [...ids].map(String);
+/** the share of orders' pages to sample, in percent, for about `want` rows of `rows` (at most every page) */
+export function samplePercent(rows: number, want: number): number {
+  return Math.min(100, Number((want / rows * 100).toPrecision(2)));
+}
+/**
+ * The lookup's ids: `n` orders' ids at random, read from the data. TABLESAMPLE SYSTEM reads a share of the table's pages
+ * at random (about `want` rows, never every row at 100 M), and only that sample is shuffled.
+ */
+export function lookupIdsSql(rows: number, n: number, want = Math.max(2000, 100 * n)): string {
+  return `SELECT id::text AS id FROM public.orders TABLESAMPLE SYSTEM (${samplePercent(rows, want)}) ORDER BY random() LIMIT ${n}`;
+}
+/** `n` different orders' ids at random, from the data; a sample short of `n` (a small table's few pages) is taken again larger */
+async function pickLookupIds(conn: pg.ClientConfig, rows: number, n: number): Promise<string[]> {
+  const c = new pg.Client(conn);
+  await c.connect();
+  try {
+    for (let want = Math.max(2000, 100 * n); ; want *= 4) {
+      const ids = ((await c.query(lookupIdsSql(rows, n, want))).rows as Array<{ id: string }>).map((r) => r.id);
+      if (ids.length === n) return ids;
+      if (samplePercent(rows, want) >= 100) throw new Error(`${n} different ids from orders, which has ${ids.length}`);
+    }
+  } finally { await c.end(); }
 }
 
 // --------------------------------------------------------------------------------------------- one run's times
@@ -153,14 +241,41 @@ export interface ColdRun {
   clientsMs: number[];
   /** from the engine's restart to its first answer to the probe, ms */
   readyMs: number;
+  /** the bytes the measured engine's container read from disk while pgbench ran (its cgroup's io.stat, rbytes) */
+  readBytes: number;
+  /** on Mason's runs: the bytes Postgres's container, idle, read meanwhile */
+  idleReadBytes?: number;
   at: string;
 }
-export function runOf(times: readonly ClientTime[], readyMs: number, at: string): ColdRun {
+export interface DiskRead { readBytes: number; idleReadBytes?: number }
+export function runOf(times: readonly ClientTime[], readyMs: number, at: string, disk: DiskRead): ColdRun {
   if (times.length === 0) throw new Error("a run with no client");
   const lat = times.map((t) => t.latencyMs);
   const start = Math.min(...times.map((t) => t.endMs - t.latencyMs)), end = Math.max(...times.map((t) => t.endMs));
   return { slowestMs: round(Math.max(...lat), 3), meanMs: round(lat.reduce((a, b) => a + b, 0) / lat.length, 3), spanMs: round(end - start, 3),
-    clientsMs: lat.map((x) => round(x, 3)), readyMs: round(readyMs, 0), at };
+    clientsMs: lat.map((x) => round(x, 3)), readyMs: round(readyMs, 0), readBytes: disk.readBytes,
+    ...(disk.idleReadBytes === undefined ? {} : { idleReadBytes: disk.idleReadBytes }), at };
+}
+
+/** the cgroup v2 path of a process, from its /proc/<pid>/cgroup (the `0::<path>` line); none on a cgroup v1 machine */
+export function cgroupOf(procCgroup: string): string {
+  const line = procCgroup.split("\n").find((l) => l.startsWith("0::"));
+  if (line === undefined) throw new Error(`no cgroup v2 line (0::<path>) in /proc/<pid>/cgroup: ${JSON.stringify(procCgroup.slice(0, 200))}`);
+  const p = line.slice(3).trim();
+  if (!p.startsWith("/") || p.split("/").includes("..")) throw new Error(`a cgroup path that is not one: ${JSON.stringify(p)}`);
+  return p;
+}
+/** the bytes read, summed over every device, from a cgroup v2 io.stat (`<major>:<minor> rbytes=… wbytes=… …` a line) */
+export function readBytesOf(ioStat: string): number {
+  let sum = 0;
+  for (const line of ioStat.split("\n")) {
+    if (line.trim() === "") continue;
+    if (!/^\d+:\d+ /.test(line)) throw new Error(`an io.stat line it does not write: ${JSON.stringify(line)}`);
+    const m = /\brbytes=(\d+)\b/.exec(line);
+    if (m === null) throw new Error(`an io.stat line with no rbytes: ${JSON.stringify(line)}`);
+    sum += Number(m[1]);
+  }
+  return sum;
 }
 
 export type ColdEngine = "postgres" | "mason";
@@ -208,7 +323,11 @@ export interface ColdFixture {
       settings: Record<string, string> };
     client: { image: string; pgbench: string; command: string };
     method: { sizes: number[]; clients: number[]; runs: number; settleSeconds: number; timeZone: string };
+    /** the disk both engines read, in words (--disk), or null when not said */
+    disk: string | null;
   };
+  /** what the data is: its keys and indexes (COLD_DATA) */
+  data: ColdData;
   statements: Array<{ name: string; title: string; sql: string }>;
   sizes: ColdSize[];
   skipped: Array<{ rows: number; why: string }>;
@@ -225,6 +344,7 @@ export function coldFixtureProblems(f: ColdFixture): string[] {
   const out: string[] = [];
   if (f.mode !== "cold") out.push(`mode is ${JSON.stringify(f.mode)}, not "cold"`);
   if (JSON.stringify(f.statements.map((s) => [s.name, s.sql])) !== JSON.stringify(COLD_STATEMENTS.map((s) => [s.name, s.sql]))) out.push("its statements are not the ones scripts/bench-replica-cold.ts sends now: run it again");
+  if (JSON.stringify(f.data ?? null) !== JSON.stringify(COLD_DATA)) out.push("its data is not the data scripts/bench-replica-cold.ts makes now (COLD_DATA): run it again");
   const m = f.environment.method;
   for (const rows of m.sizes) if (!f.sizes.some((z) => z.rows === rows) && !f.skipped.some((k) => k.rows === rows)) out.push(`${rows} rows: neither measured nor skipped`);
   for (const z of f.sizes) {
@@ -236,6 +356,7 @@ export function coldFixtureProblems(f: ColdFixture): string[] {
       const cell = c[0]!;
       if (cell.runs.length !== m.runs) out.push(`${where}: ${cell.runs.length} runs, not ${m.runs}`);
       if (cell.runs.some((r) => r.clientsMs.length !== clients || !(r.slowestMs > 0))) out.push(`${where}: a run without every client's time`);
+      if (cell.runs.some((r) => !Number.isFinite(r.readBytes) || (engine === "mason") !== (r.idleReadBytes !== undefined))) out.push(`${where}: a run without what it read from disk`);
       if (cell.slowestMs !== round(median(cell.runs.map((r) => r.slowestMs)), 3)) out.push(`${where}: its time is not the median of its runs' slowest`);
     }
   }
@@ -248,6 +369,8 @@ export function coldFixtureProblems(f: ColdFixture): string[] {
 export interface ColdOptions {
   sizes: number[]; clients: number[]; runs: number; cpus: number; memoryBytes: number; masonImage: string; postgresImage: string;
   settleSeconds: number; work: string; reserveGb: number; label: string; out: string; keepPostgres: boolean; reusePostgres: boolean; resume: boolean;
+  /** the disk, in words, for the fixture (--disk) */
+  disk: string | null;
 }
 /** a container's memory: 8GiB, 8g, 8192MiB, 8192m (GiB and MiB, as Docker reads g and m) */
 export function memoryBytesOf(s: string): number {
@@ -258,7 +381,7 @@ export function memoryBytesOf(s: string): number {
 export function parseColdArgs(argv: readonly string[], machine: { cpus: number; ramBytes: number; version: string }): ColdOptions {
   const o: ColdOptions = { sizes: [1e6, 1e7, 1e8], clients: [1, 10], runs: 3, cpus: machine.cpus, memoryBytes: Math.floor(machine.ramBytes / 2 / 2 ** 30) * 2 ** 30,
     masonImage: `ghcr.io/embeddable-hq/mason-data:${machine.version}`, postgresImage: "postgres:18", settleSeconds: 10, work: os.tmpdir(), reserveGb: 60,
-    label: os.hostname(), out: path.join(REPO, "tests/fixtures/bench-replica.json"), keepPostgres: false, reusePostgres: false, resume: false };
+    label: os.hostname(), out: path.join(REPO, "tests/fixtures/bench-replica.json"), keepPostgres: false, reusePostgres: false, resume: false, disk: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     const v = (): string => { const x = argv[++i]; if (x === undefined) throw new Usage(`${a} needs a value`); return x; };
@@ -276,6 +399,7 @@ export function parseColdArgs(argv: readonly string[], machine: { cpus: number; 
       case "--work": o.work = path.resolve(v()); break;
       case "--reserve-gb": o.reserveGb = atLeastZero(v()); break;
       case "--label": o.label = v(); break;
+      case "--disk": o.disk = v().trim(); if (o.disk === "") throw new Usage("--disk: the disk in words, e.g. \"EBS gp3, 125 MB/s, 3000 IOPS\""); break;
       case "--out": o.out = path.resolve(v()); break;
       case "--keep-postgres": o.keepPostgres = true; break;
       case "--reuse-postgres": o.reusePostgres = true; break;
@@ -323,8 +447,74 @@ function writeSecret(file: string, lines: Record<string, string>): void {
   fs.chmodSync(file, 0o600);
 }
 
-const exists = (kind: "container" | "network" | "volume", name: string): boolean =>
-  spawnSync("docker", [kind, "inspect", name], { encoding: "utf8" }).status === 0;
+/** whether docker has a container, network or volume of this name. Only docker's own "no such" is no: anything else it
+ *  says (its daemon down, permission denied) refuses the run, since a check that cannot tell must not pass */
+function exists(kind: "container" | "network" | "volume", name: string): boolean {
+  const r = spawnSync("docker", [kind, "inspect", name], { encoding: "utf8" });
+  if (r.error !== undefined) throw new Usage(`docker could not be run: ${r.error.message}`);
+  if (r.status === 0) return true;
+  if (/no such|not found/i.test(r.stderr)) return false;
+  throw new Usage(`docker ${kind} inspect ${name} could not tell whether it exists: ${r.stderr.trim() || `exit ${r.status}`}`);
+}
+
+/** a process's start, as ps says it, or null when there is no such process; ps that cannot run refuses */
+function processStart(pid: number): string | null {
+  const r = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" });
+  if (r.error !== undefined) throw new Usage(`ps could not be run, to tell whether another cold run is alive: ${r.error.message}`);
+  const out = r.stdout.trim();
+  return r.status === 0 && out !== "" ? out : null;
+}
+/** this process, as the owner of a lock or a container: its pid and its start, which a later process of the same pid lacks */
+export function ownerOf(pid: number): string {
+  const started = processStart(pid);
+  if (started === null) throw new Error(`no process ${pid}`);
+  return `${pid}@${started}`;
+}
+/** whether the process an owner names is alive: the same pid, started at the same time */
+export function ownerAlive(owner: string): boolean {
+  const m = /^(\d+)@(.+)$/.exec(owner);
+  if (m === null) throw new Usage(`an owner that is not one: ${JSON.stringify(owner)}: remove what names it if no cold run is in progress`);
+  return processStart(Number(m[1])) === m[2];
+}
+
+/**
+ * THE LOCK: one cold run on a machine at a time. It holds this run's owner (`ownerOf`); one whose process is alive
+ * refuses the run, and one whose process ended is taken over. Released when the run ends, however it ends.
+ */
+export function takeLock(file: string): () => void {
+  for (let tries = 0; tries < 2; tries++) {
+    let fd: number;
+    try { fd = fs.openSync(file, "wx", 0o644); } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      const held = fs.readFileSync(file, "utf8").trim();
+      if (ownerAlive(held)) throw new Usage(`a cold run is in progress (process ${held.split("@")[0]}, started ${held.split("@")[1]}; its lock ${file}): wait for it to end`);
+      // its run ended without releasing it (killed): taken over
+      fs.rmSync(file, { force: true });
+      continue;
+    }
+    const me = ownerOf(process.pid);
+    fs.writeSync(fd, `${me}\n`);
+    fs.closeSync(fd);
+    let released = false;
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      // only our own: a lock another run took over after a kill is theirs
+      if (fs.existsSync(file) && fs.readFileSync(file, "utf8").trim() === me) fs.rmSync(file, { force: true });
+    };
+    process.on("exit", release);
+    return release;
+  }
+  throw new Usage(`${file}: another cold run took the lock as this one did: wait for it to end`);
+}
+
+/** what a container read from disk so far: its cgroup v2 io.stat's rbytes, its cgroup found from its process */
+function containerReadBytes(name: string): number {
+  const pid = docker(["inspect", "--format", "{{.State.Pid}}", name]);
+  if (!/^[1-9]\d*$/.test(pid)) throw new Error(`${name} has no process (pid ${JSON.stringify(pid)}): it is not running`);
+  const cgroup = cgroupOf(fs.readFileSync(`/proc/${pid}/cgroup`, "utf8"));
+  return readBytesOf(fs.readFileSync(path.join("/sys/fs/cgroup", cgroup, "io.stat"), "utf8"));
+}
 /** a docker removal of what may not be there: a missing one is the normal case, anything else is said */
 function removeQuietly(args: string[], log: (l: string) => void): boolean {
   const r = spawnSync("docker", args, { encoding: "utf8" });
@@ -393,17 +583,25 @@ export function coldHelp(): string {
   return text.slice(a + 4, z).replace(/^ \* ?/gm, "") + "\n";
 }
 
-export async function mainCold(argv: string[]): Promise<number> {
+export async function mainCold(argv: string[], at: { lockFile?: string } = {}): Promise<number> {
   if (argv.includes("--help") || argv.includes("-h")) { process.stdout.write(coldHelp()); return 0; }
   const version = (JSON.parse(fs.readFileSync(path.join(REPO, "cli/package.json"), "utf8")) as { version: string }).version;
   const o = parseColdArgs(argv, { cpus: os.cpus().length, ramBytes: os.totalmem(), version });
   const log = (l: string): void => { process.stdout.write(`${l}\n`); };
   if (process.platform !== "linux") throw new Usage("--cold drops Linux's page cache before every run: run it on a Linux server");
   // before anything with a side effect: a refused run must not touch another's containers, nor drop the page cache
-  // under its measurement
-  refuseRunInProgress(o);
+  // under its measurement. The lock first: a run in progress holds it whatever it is doing
+  const releaseLock = takeLock(at.lockFile ?? LOCK_FILE);
+  try { refuseRunInProgress(o); } catch (e) { releaseLock(); throw e; }
+  const info = ((): string => {
+    try { return docker(["info", "--format", "{{.CgroupVersion}} {{.DockerRootDir}}"]); } catch (e) { releaseLock(); throw e; }
+  })();
+  const cgroupVersion = info.split(" ")[0], dockerRoot = info.slice(info.indexOf(" ") + 1);
+  if (cgroupVersion !== "2") {
+    releaseLock();
+    throw new Usage(`--cold records what each engine reads from disk from its container's cgroup v2 io.stat, and Docker says cgroup version ${JSON.stringify(cgroupVersion)}: run it where Docker uses cgroup v2`);
+  }
   dropPageCache();
-  const dockerRoot = docker(["info", "--format", "{{.DockerRootDir}}"]);
   const masonImageId = ensureImage(o.masonImage, log);
   ensureImage(o.postgresImage, log);
   const pgbenchVersion = docker(["run", "--rm", o.postgresImage, "pgbench", "--version"]);
@@ -421,7 +619,7 @@ export async function mainCold(argv: string[]): Promise<number> {
   fs.mkdirSync(clientDir, { mode: 0o700 });
 
   let cleaned = false;
-  const made: Made = { postgres: null, mason: null, network: null, volumes: new Set(), clientIdFile: path.join(dir, "client.cid") };
+  const made: Made = { postgres: null, mason: null, network: null, volumes: new Set(), clientIdFile: path.join(dir, "client.cid"), postgresIdFile: path.join(dir, "postgres.cid") };
   // what THIS run made, removed by the ids docker gave back: never a container, volume or network found by its name,
   // which may be another run's (a run in progress, or the Postgres a --keep-postgres run left)
   const cleanup = (): void => {
@@ -431,15 +629,18 @@ export async function mainCold(argv: string[]): Promise<number> {
     if (client !== "") removeQuietly(["rm", "-f", "-v", client], log);
     if (made.mason !== null) removeQuietly(["rm", "-f", "-v", made.mason], log);
     for (const v of made.volumes) removeQuietly(["volume", "rm", v], log);
+    // docker run -d's container by its --cidfile too: one made and not started (its port taken) has no id printed
+    const postgres = made.postgres ?? (fs.existsSync(made.postgresIdFile) ? fs.readFileSync(made.postgresIdFile, "utf8").trim() || null : null);
     if (o.keepPostgres) {
-      if (made.postgres !== null) log(`kept ${PG_CONTAINER}, its data${made.network !== null ? ` and the ${NETWORK} network` : ""} (--keep-postgres)`);
+      if (postgres !== null) log(`kept ${PG_CONTAINER}, its data${made.network !== null ? ` and the ${NETWORK} network` : ""} (--keep-postgres)`);
     } else {
       // -v: the image's anonymous volume, where Postgres's data is
-      if (made.postgres !== null && removeQuietly(["rm", "-f", "-v", made.postgres], log)) log(`removed ${PG_CONTAINER} and its data`);
+      if (postgres !== null && removeQuietly(["rm", "-f", "-v", postgres], log)) log(`removed ${PG_CONTAINER} and its data`);
       if (made.network !== null && removeQuietly(["network", "rm", made.network], log)) log(`removed the ${NETWORK} network`);
     }
     if (o.reusePostgres) log(`left ${PG_CONTAINER}, adopted with --reuse-postgres: docker rm -f -v ${PG_CONTAINER} removes it and its data`);
     fs.rmSync(dir, { recursive: true, force: true });
+    releaseLock();
   };
   const onSignal = (code: number) => (): void => { log("interrupted: the fixture holds the sizes finished"); cleanup(); process.exit(code); };
   process.on("SIGINT", onSignal(130));
@@ -463,13 +664,17 @@ export async function mainCold(argv: string[]): Promise<number> {
       const env = path.join(secrets, "postgres.env");
       writeSecret(env, { POSTGRES_PASSWORD: pgPassword });
       const settings = replicaSettings(o.memoryBytes, o.cpus);
-      made.postgres = docker(["run", "-d", "--name", PG_CONTAINER, "--network", NETWORK, "--network-alias", PG_ALIAS, "-p", `127.0.0.1:${pgPort}:5432`, ...limits,
+      made.postgres = docker(["run", "-d", "--cidfile", made.postgresIdFile, "--label", `${OWNER_LABEL}=${ownerOf(process.pid)}`, "--name", PG_CONTAINER, "--network", NETWORK, "--network-alias", PG_ALIAS, "-p", `127.0.0.1:${pgPort}:5432`, ...limits,
         "--shm-size", "1g", "--env-file", env, o.postgresImage, ...Object.entries(settings).flatMap(([k, v]) => ["-c", `${k}=${v}`])]);
       log(`started ${PG_CONTAINER} (${o.postgresImage}) on 127.0.0.1:${pgPort}, --cpus ${o.cpus} --memory ${gibText(o.memoryBytes)}`);
     }
     const admin = `postgres://postgres:${pgPassword}@127.0.0.1:${pgPort}/postgres`;
     const pgConnOf = (db: string): pg.ClientConfig => ({ host: "127.0.0.1", port: pgPort, user: "postgres", password: pgPassword, database: db });
     await untilReady(admin);
+    // what each engine reads from disk is part of every run: refused now, before any data, where it cannot be read
+    try { containerReadBytes(PG_CONTAINER); } catch (e) {
+      throw new Usage(`--cold records what each engine reads from disk, from its container's cgroup v2 io.stat, and could not read ${PG_CONTAINER}'s: ${(e as Error).message}`);
+    }
     const pgFacts = await postgresFacts(admin);
     const pgClientEnv = path.join(secrets, "client-postgres.env");
     writeSecret(pgClientEnv, { PGPASSWORD: pgPassword, PGTZ: "UTC" });
@@ -486,7 +691,9 @@ export async function mainCold(argv: string[]): Promise<number> {
           settings: { sync: "off", MASON_STATEMENT_TIMEOUT: "0", MASON_PG_SELF_SIGNED_TLS: "1", MASON_PROJECT_READONLY: "1" } },
         client: { image: o.postgresImage, pgbench: pgbenchVersion, command: "pgbench -n -c <clients> -j <clients> -t 1 -f <script> --log" },
         method: { sizes: o.sizes, clients: o.clients, runs: o.runs, settleSeconds: o.settleSeconds, timeZone: "UTC" },
+        disk: o.disk,
       },
+      data: { version: COLD_DATA.version, keys: COLD_DATA.keys, indexes: [...COLD_DATA.indexes] },
       statements: COLD_STATEMENTS.map((s) => ({ name: s.name, title: s.title, sql: s.sql })),
       sizes: [], skipped: [], cells: [], complete: false,
     };
@@ -495,8 +702,8 @@ export async function mainCold(argv: string[]): Promise<number> {
       const was = JSON.parse(fs.readFileSync(o.out, "utf8")) as ColdFixture;
       if (was.mode !== "cold" || JSON.stringify(was.environment.limits) !== JSON.stringify(fresh.environment.limits) || was.environment.mason.imageId !== masonImageId
         || was.environment.method.runs !== o.runs || JSON.stringify(was.environment.method.clients) !== JSON.stringify(o.clients)
-        || JSON.stringify(was.statements) !== JSON.stringify(fresh.statements)) {
-        throw new Usage(`--resume: ${o.out} is not a cold run with these limits, image, clients, runs and statements: leave out --resume, or give --out another file`);
+        || JSON.stringify(was.statements) !== JSON.stringify(fresh.statements) || JSON.stringify(was.data ?? null) !== JSON.stringify(fresh.data)) {
+        throw new Usage(`--resume: ${o.out} is not a cold run with these limits, image, clients, runs, statements and data: leave out --resume, or give --out another file`);
       }
       fixture = { ...was, environment: { ...was.environment, method: { ...was.environment.method, sizes: o.sizes } }, skipped: was.skipped.filter((k) => !o.sizes.includes(k.rows)), complete: false };
       log(`--resume: ${fixture.sizes.map((z) => fmtRows(z.rows)).join(", ") || "no size"} kept from ${o.out}`);
@@ -525,7 +732,7 @@ export async function mainCold(argv: string[]): Promise<number> {
         continue;
       }
       log(`\n== ${rows.toLocaleString("en-US")} orders ==`);
-      const data = await ensureData(admin, rows, log);
+      const data = await ensureData(admin, rows, log, coldShape(rows));
       const db = new URL(data.url).pathname.slice(1);
       const pgConn = pgConnOf(db);
       const sizeClient = new pg.Client(pgConn);
@@ -539,7 +746,7 @@ export async function mainCold(argv: string[]): Promise<number> {
       try {
         if (fixture.environment.mason.engineMemory === "unknown") fixture.environment.mason.engineMemory = mason.engineMemory;
         const masonConn: pg.ClientConfig = { host: "127.0.0.1", port: mason.port, user: "bench", password: mason.password, database: mason.database, ssl: { rejectUnauthorized: false } };
-        const ids = pickLookupIds(rows, Math.max(...o.clients));
+        const ids = await pickLookupIds(pgConn, rows, Math.max(...o.clients));
         // ---- the answers, before anything is timed
         const a = await answersOf(pgConn, ids), b = await answersOf(masonConn, ids);
         const answers = Object.fromEntries([...a.keys()].map((k) => [k, { postgres: md5(a.get(k)!), mason: md5(b.get(k) ?? "") }]));
@@ -579,10 +786,15 @@ export async function mainCold(argv: string[]): Promise<number> {
               for (const engine of (n % 2 === 0 ? ["postgres", "mason"] : ["mason", "postgres"]) as ColdEngine[]) {
                 const readyMs = await cold(engine);
                 const at = new Date().toISOString();
+                // what the measured engine (and, beside Mason, the idle Postgres) read from disk while pgbench ran
+                const measured = engine === "postgres" ? PG_CONTAINER : MASON_CONTAINER;
+                const before = { measured: containerReadBytes(measured), idle: engine === "mason" ? containerReadBytes(PG_CONTAINER) : 0 };
                 const times = await pgbench(o.postgresImage, clientDir, made.clientIdFile, target[engine], clients, uid, gid);
-                const r = runOf(times, readyMs, at);
+                const disk: DiskRead = { readBytes: containerReadBytes(measured) - before.measured,
+                  ...(engine === "mason" ? { idleReadBytes: containerReadBytes(PG_CONTAINER) - before.idle } : {}) };
+                const r = runOf(times, readyMs, at, disk);
                 runs[engine].push(r);
-                log(`[${fmtRows(rows)} · ${stmt.name} · ${clients} client${clients === 1 ? "" : "s"} · ${engine.padEnd(8)} · run ${n + 1}] slowest ${secondsText(r.slowestMs)}, mean ${secondsText(r.meanMs)}; answered the probe ${secondsText(r.readyMs)} after its start`);
+                log(`[${fmtRows(rows)} · ${stmt.name} · ${clients} client${clients === 1 ? "" : "s"} · ${engine.padEnd(8)} · run ${n + 1}] slowest ${secondsText(r.slowestMs)}, mean ${secondsText(r.meanMs)}; read ${(r.readBytes / 1e6).toFixed(1)} MB; answered the probe ${secondsText(r.readyMs)} after its start`);
               }
             }
             for (const e of ["postgres", "mason"] as const) cells.push(coldCell(rows, clients, e, stmt.name, runs[e]));
@@ -642,6 +854,8 @@ interface Made {
   volumes: Set<string>;
   /** where docker writes the id of pgbench's container while it runs */
   clientIdFile: string;
+  /** where docker writes the id of the Postgres container this run makes */
+  postgresIdFile: string;
 }
 
 /**
@@ -654,6 +868,12 @@ function refuseRunInProgress(o: ColdOptions): void {
   }
   const pgThere = exists("container", PG_CONTAINER);
   if (o.reusePostgres && !pgThere) throw new Usage(`--reuse-postgres: there is no container named ${PG_CONTAINER} (a run with --keep-postgres leaves one)`);
+  if (o.reusePostgres) {
+    // the run that made it: alive, it is using it (generating a size's data, or between sizes)
+    const owner = docker(["inspect", "--format", `{{index .Config.Labels "${OWNER_LABEL}"}}`, PG_CONTAINER]);
+    if (owner === "" || owner === "<no value>") throw new Usage(`${PG_CONTAINER} is not one a --cold --keep-postgres run left (it has no ${OWNER_LABEL} label): remove it (docker rm -f -v ${PG_CONTAINER})`);
+    if (ownerAlive(owner)) throw new Usage(`${PG_CONTAINER} belongs to a cold run in progress (process ${owner.split("@")[0]}): --reuse-postgres adopts it once that run has ended`);
+  }
   if (!o.reusePostgres && pgThere) throw new Usage(`a container named ${PG_CONTAINER} exists already: a run in progress, or one --keep-postgres left (--reuse-postgres adopts it; docker rm -f -v ${PG_CONTAINER} removes it)`);
   for (const rows of o.sizes) {
     const volume = `bench-mason-${rows}`;

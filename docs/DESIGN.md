@@ -4217,7 +4217,9 @@ A tuned Postgres would close part of the gap, not 23×.
 key) at 1 M, 10 M and 100 M rows, sent once by 1 client or by 10 at the same moment. Before every run the engine is
 restarted and the OS page cache dropped. A cell's number is the median of 3 runs of the slowest client. Postgres and
 Mason (the `mason-data` image) each run in a container with the same `--cpus`, `--memory` and `--memory-swap`. The
-client is pgbench, timed by its per-transaction log. docs/BENCHMARK.md "The cold mode" has the method in full.
+client is pgbench, timed by its per-transaction log. The data has random UUID primary keys and no index on status.
+Each run records what the measured engine read from disk (its cgroup's `io.stat`), and the fixture names the disk.
+docs/BENCHMARK.md "The cold mode" has the method in full.
 
 **Why.**
 - **The reader's question.** A reader asks how long one query takes the first time, with one user and with ten. The
@@ -4231,6 +4233,12 @@ client is pgbench, timed by its per-transaction log. docs/BENCHMARK.md "The cold
 - **The lookup trap.** A pgbench script that picks each client's row inside the SQL (`CASE :client_id WHEN 0 THEN …`)
   made Mason's lookup look many times slower than it is, because its engine does not push that filter down. Each client
   is sent its row as a plain literal (`\if :client_id = …` in the script), and a test holds the script to it.
+- **The data an application has (Tom, 2026-11-17).** Many applications key their tables by UUID, and a random key
+  spreads a lookup's index over the whole table. A count by a column with no index is what a dashboard often sends; with
+  an index on status, Postgres could answer it from the index alone. The first runs had bigint keys and that index, and
+  were stopped for this.
+- **The disk decides Postgres's cold time.** A cold scan is bounded by the disk's throughput, so each run's bytes read
+  and the disk's own numbers are published beside the times.
 - **One engine at a time.** Mason is stopped while Postgres is measured. Postgres must stay up while Mason is measured,
   because a Mason start reads its source's catalog, so it is restarted first and left idle.
 
