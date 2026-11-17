@@ -108,7 +108,7 @@ const EVERY = "so any client could claim to be any other: name the proxy's own a
  * whose entries TOGETHER name every IPv4 or every IPv6 address (read as places, never spellings), under which any
  * client could claim to be any other.
  */
-export function parseProxyFrom(value: string | undefined): ProxyFrom | null | { problem: string } {
+export function parseProxyFrom(value: string | undefined, setting: string = PROXY_SETTING): ProxyFrom | null | { problem: string } {
   if (value === undefined || value.trim() === "") return null;
   const entries = value.split(",").map((e) => e.trim());
   const ranges: Range[] = [], wrong: string[] = [];
@@ -117,14 +117,14 @@ export function parseProxyFrom(value: string | undefined): ProxyFrom | null | { 
     const c = cidrOf(e, EVERY);
     if ("problem" in c) wrong.push(c.problem); else ranges.push(rangeOf(c));
   }
-  const setting = `${PROXY_SETTING}=${JSON.stringify(value)}`;
-  if (wrong.length) return { problem: `${setting}: ${wrong.join("; ")}` };
+  const said = `${setting}=${JSON.stringify(value)}`;
+  if (wrong.length) return { problem: `${said}: ${wrong.join("; ")}` };
   const every = [
     ...(covers(ranges, V4_START, V4_END) ? ["every IPv4 address (0.0.0.0/0)"] : []),
     // IPv6's every address but the v4-mapped ones, which are IPv4's and judged above
     ...(covers(ranges, 0n, V4_START - 1n) && covers(ranges, V4_END + 1n, ALL_END) ? ["every IPv6 address (::/0)"] : []),
   ];
-  if (every.length) return { problem: `${setting}: its entries together name ${every.join(" and ")}, so any client could claim to be any other: name the proxy's own addresses` };
+  if (every.length) return { problem: `${said}: its entries together name ${every.join(" and ")}, so any client could claim to be any other: name the proxy's own addresses` };
   return { entries, ranges };
 }
 

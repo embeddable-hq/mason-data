@@ -357,7 +357,7 @@ claude mcp add mason --env MASON_URL="postgres://claude:<password>@127.0.0.1:543
 ```
 
 A hosted agent (claude.ai, ChatGPT) reaches `mason serve` over HTTPS instead, signed in by your OAuth server: set
-`MASON_MCP_URL` and `MASON_MCP_ISSUER` ([docs/POSTGRES-API.md](docs/POSTGRES-API.md#from-a-hosted-agent-mcp-over-https)).
+`MASON_MCP_URL`, `MASON_MCP_ISSUER` and `MASON_MCP_JWKS_URL` ([docs/POSTGRES-API.md](docs/POSTGRES-API.md#from-a-hosted-agent-mcp-over-https)).
 
 A coding agent (Claude Code, Codex, …) uses the same commands you do. With `--json`, a command prints one JSON object
 with a documented shape and what to run next, and its exit code says whether it worked. `mason help agent` is the page

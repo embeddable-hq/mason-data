@@ -3,48 +3,54 @@
  * server over HTTPS"): its settings, and the check of a bearer token. Mason issues no token and runs no sign-in page:
  * the operator's authorization server (MASON_MCP_ISSUER) does both. Mason only checks what a client presents:
  *
- *   - THE TOKEN IS A SIGNED JWT, checked by the issuer's published keys (its metadata's `jwks_uri`, found by RFC 8414 /
- *     OpenID discovery from the issuer, whose metadata must name the same issuer): an asymmetric `alg` alone (RS*, PS*,
- *     ES*, EdDSA), never `none` nor HS* (a public key used as an HMAC secret), a `kid` the issuer's keys hold, of the
- *     key's own type and curve, `crit` refused, `typ` a JWT's or an access token's;
- *   - ITS CLAIMS: `iss` the issuer exactly, `aud` naming THIS endpoint's public address (MASON_MCP_URL: the operator's
- *     setting, never an address Mason sees — a relay in front decides the address a client reaches), `exp` in the
- *     future and `nbf` past, each within CLOCK_SKEW_S;
- *   - THE USER: the claim MASON_MCP_USER_CLAIM names (default `sub`), a `mason user`'s name.
+ *   - THE TOKEN IS A SIGNED JWT, checked by the issuer's keys at the JWKS URL the operator names (MASON_MCP_JWKS_URL:
+ *     configured, never discovered): an asymmetric `alg` alone (RS*, PS*, ES*, EdDSA), never `none` nor HS* (a public
+ *     key used as an HMAC secret), a `kid` the issuer's keys hold, of the key's own type and curve, `crit` refused,
+ *     `typ` a JWT's or an access token's;
+ *   - ITS CLAIMS: `iss` the issuer exactly, `aud` EXACTLY this endpoint's public address (MASON_MCP_URL: the operator's
+ *     setting, never an address Mason sees — a relay in front decides the address a client reaches; a list is taken only
+ *     when it holds that address alone), `exp` in the future and `nbf` past, each within CLOCK_SKEW_S;
+ *   - THE USER: the claim MASON_MCP_USER_CLAIM names a `mason user`, and the claim MASON_MCP_USER_ID_CLAIM holds its id
+ *     (the 16 hex digits `mason user add` made, `mason user list` shows): the endpoint looks the user up by both at every
+ *     request (src/cli/mcp-http.ts), so a user removed and added again — a new id — is not the old token's.
  *
- * FAIL CLOSED: keys that cannot be fetched, metadata that names another issuer, a key that cannot be read: every token
- * is refused (503 "could not tell"), never let through. The keys are cached (KEYS_TTL_MS), at most MAX_KEYS, and
- * fetched again for a `kid` they do not hold at most once every REFRESH_MIN_MS, so a stream of tokens with made-up
- * kids costs the issuer one request a minute. Every answer of the issuer is untrusted: no redirect followed, bounded in
- * size and time. A TOKEN NEVER REACHES a log line, an error or an answer: what is said of one is what is wrong with it.
+ * FAIL CLOSED: keys that cannot be fetched or read: every token is refused (503 "could not tell"), never let through.
+ * The keys are cached (KEYS_TTL_MS), at most MAX_KEYS, and fetched again for a `kid` they do not hold at most once every
+ * REFRESH_MIN_MS, so a stream of tokens with made-up kids costs the issuer one request a minute. Every answer of the JWKS
+ * URL is untrusted: no redirect followed, bounded in size and time. A TOKEN NEVER REACHES a log line, an error or an
+ * answer: what is said of one is what is wrong with it.
  *
  * Node's own `crypto` verifies every signature (a JWK read by `createPublicKey`): no dependency.
  */
 import * as crypto from "node:crypto";
 import { isLoopback } from "../api/postgres/plain.ts";
 import { USER_NAME_RE } from "../duck/users.ts";
+import { parseProxyFrom, type ProxyFrom } from "../api/postgres/proxy.ts";
 
 // ------------------------------------------------------------------ the settings
-
-/** How a user's "connects from" ranges apply to the endpoint's requests (MASON_MCP_FROM). */
-export type McpFrom = "client" | "token";
 
 /** The endpoint as the environment configures it. */
 export interface McpSettings {
   /** MASON_MCP_URL: the endpoint's public address — what clients reach, the protected resource's identifier and the
-   *  audience every token must name */
+   *  audience every token must name exactly */
   url: URL;
-  /** MASON_MCP_ISSUER: the authorization server, as its metadata's `issuer` says it */
+  /** MASON_MCP_ISSUER: the authorization server, as the tokens' `iss` names it */
   issuer: string;
-  /** MASON_MCP_USER_CLAIM: the claim that names the mason user (default sub) */
+  /** MASON_MCP_JWKS_URL: where its signing keys are published (a JWK set) */
+  jwks: string;
+  /** MASON_MCP_USER_CLAIM: the claim that names the mason user (default mason_user) */
   claim: string;
-  /** MASON_MCP_FROM: client (the default) judges a user's ranges on the HTTP client's address; token lets the endpoint's
-   *  own authorization replace them, for a request with a valid token alone */
-  from: McpFrom;
+  /** MASON_MCP_USER_ID_CLAIM: the claim that holds the user's id (default mason_user_id) */
+  idClaim: string;
+  /** MASON_MCP_PROXY_FROM: the proxies (a relay) whose X-Forwarded-For entry is believed, or null: none, every
+   *  request's address its peer's */
+  proxyFrom: ProxyFrom | null;
 }
 
-/** The endpoint's settings, each with its default, as `mason serve --help` lists them (one list: the check reads it). */
-export const MCP_SETTINGS = ["MASON_MCP_URL", "MASON_MCP_ISSUER", "MASON_MCP_USER_CLAIM", "MASON_MCP_FROM", "MASON_MCP_PLAIN"] as const;
+/** The endpoint's settings, as `mason serve --help` lists them (one list: the checks read it). */
+export const MCP_SETTINGS = ["MASON_MCP_URL", "MASON_MCP_ISSUER", "MASON_MCP_JWKS_URL", "MASON_MCP_USER_CLAIM", "MASON_MCP_USER_ID_CLAIM", "MASON_MCP_PROXY_FROM", "MASON_MCP_PLAIN"] as const;
+/** the setting that names the trusted proxies, as its refusals name it */
+export const MCP_PROXY_SETTING = "MASON_MCP_PROXY_FROM";
 
 /** the path the endpoint answers on, on the health port */
 export const MCP_PATH = "/mcp";
@@ -69,25 +75,33 @@ function addressProblem(setting: string, value: string): string | URL {
 
 /**
  * THE ENDPOINT'S SETTINGS, OR EVERY ONE MISSING OR WRONG: null when none is set (the endpoint is off, the default);
- * set at all, MASON_MCP_URL and MASON_MCP_ISSUER are required — a partial configuration refuses the start with what
- * is missing, never runs a half. `healthHost` is where the endpoint listens (MASON_HEALTH_HOST): off loopback, the
- * operator says TLS is terminated in front of it (MASON_MCP_PLAIN=1), as MASON_PG_PLAIN says it of the Postgres API.
+ * set at all, MASON_MCP_URL, MASON_MCP_ISSUER and MASON_MCP_JWKS_URL are required — a partial configuration refuses the
+ * start naming what is missing, never runs a half. `healthHost` is where the endpoint listens (MASON_HEALTH_HOST): off
+ * loopback, the operator says TLS is terminated in front of it (MASON_MCP_PLAIN=1), as MASON_PG_PLAIN says it of the
+ * Postgres API. MASON_MCP_PROXY_FROM is read by MASON_PG_PROXY_FROM's own reader (src/api/postgres/proxy.ts
+ * `parseProxyFrom`): addresses and CIDRs, never every address.
  */
 export function mcpSettings(env: Readonly<Record<string, string | undefined>>, healthHost: string): McpSettings | null | { problems: string[] } {
   const set = MCP_SETTINGS.filter((k) => (env[k] ?? "") !== "");
   if (set.length === 0) return null;
   const problems: string[] = [];
   const on = `the MCP endpoint is on (${set.join(", ")} set)`;
-  const urlText = env.MASON_MCP_URL ?? "";
-  const url = urlText === "" ? `MASON_MCP_URL is not set, and ${on}: the endpoint's public address, as a client reaches it (https://mason.example.com/mcp) — the audience every token must name` : addressProblem("MASON_MCP_URL", urlText);
-  if (typeof url === "string") problems.push(url);
-  const issuerText = env.MASON_MCP_ISSUER ?? "";
-  const issuer = issuerText === "" ? `MASON_MCP_ISSUER is not set, and ${on}: the authorization server that signs the tokens, as its metadata's issuer says it (https://auth.example.com)` : addressProblem("MASON_MCP_ISSUER", issuerText);
-  if (typeof issuer === "string") problems.push(issuer);
-  const claim = env.MASON_MCP_USER_CLAIM || "sub";
-  if (!CLAIM_RE.test(claim)) problems.push(`MASON_MCP_USER_CLAIM=${JSON.stringify(claim.slice(0, 200))} is not a claim's name: letters, digits, _ . : / - (default sub)`);
-  const from = env.MASON_MCP_FROM || "client";
-  if (from !== "client" && from !== "token") problems.push(`MASON_MCP_FROM=${JSON.stringify(from.slice(0, 200))}: client (a user's address ranges judged on the HTTP client's address, the default) or token (the endpoint's own authorization in their place, for its requests alone)`);
+  const required = (k: string, what: string): URL | null => {
+    const v = env[k] ?? "";
+    const r = v === "" ? `${k} is not set, and ${on}: ${what}` : addressProblem(k, v);
+    if (typeof r === "string") { problems.push(r); return null; }
+    return r;
+  };
+  const url = required("MASON_MCP_URL", "the endpoint's public address, as a client reaches it through the relay in front (https://mason.example.com/mcp) — the audience every token must name");
+  required("MASON_MCP_ISSUER", "the authorization server that signs the tokens, as their iss names it (https://auth.example.com)");
+  const jwks = required("MASON_MCP_JWKS_URL", "where that server publishes its signing keys, a JWK set (https://auth.example.com/.well-known/jwks.json)");
+  const claim = env.MASON_MCP_USER_CLAIM || "mason_user";
+  if (!CLAIM_RE.test(claim)) problems.push(`MASON_MCP_USER_CLAIM=${JSON.stringify(claim.slice(0, 200))} is not a claim's name: letters, digits, _ . : / - (default mason_user)`);
+  const idClaim = env.MASON_MCP_USER_ID_CLAIM || "mason_user_id";
+  if (!CLAIM_RE.test(idClaim)) problems.push(`MASON_MCP_USER_ID_CLAIM=${JSON.stringify(idClaim.slice(0, 200))} is not a claim's name: letters, digits, _ . : / - (default mason_user_id)`);
+  else if (idClaim === claim) problems.push(`MASON_MCP_USER_ID_CLAIM and MASON_MCP_USER_CLAIM both name ${claim}: the user's name and its id are two claims`);
+  const proxy = parseProxyFrom(env[MCP_PROXY_SETTING], MCP_PROXY_SETTING);
+  if (proxy !== null && "problem" in proxy) problems.push(proxy.problem);
   const plain = env.MASON_MCP_PLAIN || "0";
   if (plain !== "0" && plain !== "1") problems.push(`MASON_MCP_PLAIN=${JSON.stringify(plain.slice(0, 200))}: 1, or 0 (the default)`);
   else if (plain === "0" && !isLoopback(healthHost)) {
@@ -95,7 +109,7 @@ export function mcpSettings(env: Readonly<Record<string, string | undefined>>, h
       "put a TLS proxy or relay in front of it and say so with MASON_MCP_PLAIN=1, or MASON_HEALTH_HOST=127.0.0.1 for one on this machine");
   }
   if (problems.length) return { problems };
-  return { url: url as URL, issuer: issuerText, claim, from: from as McpFrom };
+  return { url: url!, issuer: env.MASON_MCP_ISSUER!, jwks: jwks!.href, claim, idClaim, proxyFrom: proxy === null || "problem" in proxy ? null : proxy };
 }
 
 /** The resource's metadata (RFC 9728): what a client reads to find where to sign in. */
@@ -137,7 +151,7 @@ const TYPES = new Set(["jwt", "at+jwt", "application/at+jwt"]);
 
 /** A token's check: the user it names, or why it is refused — 401 the token's own fault (the client signs in again),
  *  503 the check could not tell (the issuer's keys could not be read). `reason` never holds the token. */
-export type TokenCheck = { user: string; subject: string | null } | { status: 401 | 503; reason: string };
+export type TokenCheck = { user: string; id: string } | { status: 401 | 503; reason: string };
 
 /** what fetching takes: the global fetch, or a test's */
 export type Fetcher = (url: string, init: { redirect: "manual"; signal: AbortSignal; headers: Record<string, string> }) => Promise<Response>;
@@ -155,7 +169,7 @@ function part(text: string, what: string): Record<string, unknown> | string {
 }
 
 /**
- * THE ISSUER, AS MASON TRUSTS IT: its metadata and keys, fetched when a token first needs them and cached; `check`
+ * THE ISSUER, AS MASON TRUSTS IT: its keys, fetched from MASON_MCP_JWKS_URL when a token first needs them and cached; `check`
  * judges a token by them. One fetch at a time: concurrent checks share it.
  */
 export class Issuer {
@@ -164,7 +178,6 @@ export class Issuer {
   private readonly now: () => number;
   private readonly log: (line: string) => void;
   private keys: Keys | null = null;
-  private jwksUri: string | null = null;
   private fetching: Promise<Keys | string> | null = null;
   /** when the keys were last asked for (successfully or not): the rate a `kid` they lack may ask again */
   private askedAt = -Infinity;
@@ -222,9 +235,11 @@ export class Issuer {
     if (!verified) return bad("the token's signature is not the issuer's");
     // THE CLAIMS
     if (payload.iss !== this.settings.issuer) return bad("the token was issued by another authorization server than MASON_MCP_ISSUER");
+    // EXACTLY this endpoint: its public address, or a list of that alone (a token for this and another resource is
+    // a token another resource could replay here)
     const aud = payload.aud, resource = this.settings.url.href;
-    if (!(aud === resource || (Array.isArray(aud) && aud.includes(resource)))) {
-      return bad(`the token is not for this endpoint: its audience (aud) must name ${resource} (MASON_MCP_URL), the resource a client asks the authorization server for`);
+    if (!(aud === resource || (Array.isArray(aud) && aud.length === 1 && aud[0] === resource))) {
+      return bad(`the token is not for this endpoint: its audience (aud) must be exactly ${resource} (MASON_MCP_URL), the resource a client asks the authorization server for`);
     }
     const now = this.now() / 1000;
     if (typeof payload.exp !== "number") return bad("the token has no expiry (exp)");
@@ -236,7 +251,11 @@ export class Issuer {
     if (typeof named !== "string" || !USER_NAME_RE.test(named)) {
       return bad(`the token's ${this.settings.claim} claim (MASON_MCP_USER_CLAIM) is ${typeof named === "string" ? "not a mason user's name" : "missing"}: the authorization server must put the mason user's name there (lower case letters, digits, _ . -)`);
     }
-    return { user: named, subject: typeof payload.sub === "string" ? payload.sub.slice(0, 200) : null };
+    const id = payload[this.settings.idClaim];
+    if (typeof id !== "string" || !/^[0-9a-f]{16}$/.test(id)) {
+      return bad(`the token's ${this.settings.idClaim} claim (MASON_MCP_USER_ID_CLAIM) is ${typeof id === "string" ? "not a mason user's id" : "missing"}: the authorization server must put the user's id there, as mason user list shows it (16 hex digits)`);
+    }
+    return { user: named, id };
   }
 
   /** the keys to judge by: cached, else (past KEYS_TTL_MS, or none yet) fetched */
@@ -264,17 +283,13 @@ export class Issuer {
     return this.fetching;
   }
 
-  /** The issuer's metadata (once found), then its key set: every answer untrusted. */
+  /** The issuer's key set, at the JWKS URL set: every answer untrusted. */
   private async fetchKeys(): Promise<Keys | string> {
-    if (this.jwksUri === null) {
-      const found = await this.discover();
-      if (typeof found === "string") return found;
-      this.jwksUri = found.jwks;
-    }
-    const set = await this.getJson(this.jwksUri);
-    if (typeof set === "string") return `its keys (${this.jwksUri}): ${set}`;
+    const at = this.settings.jwks;
+    const set = await this.getJson(at);
+    if (typeof set === "string") return `its keys (${at}, MASON_MCP_JWKS_URL): ${set}`;
     const list = set.keys;
-    if (!Array.isArray(list)) return `its keys (${this.jwksUri}) are not a JWK set ({ "keys": [...] })`;
+    if (!Array.isArray(list)) return `its keys (${this.settings.jwks}) are not a JWK set ({ "keys": [...] })`;
     const byKid = new Map<string, crypto.KeyObject & { jwk: Record<string, unknown> }>();
     for (const k of list.slice(0, MAX_KEYS)) {
       if (typeof k !== "object" || k === null || Array.isArray(k)) continue;
@@ -289,26 +304,8 @@ export class Issuer {
       if (key.asymmetricKeyType === "rsa" && (key.asymmetricKeyDetails?.modulusLength ?? 0) < 2048) continue;
       byKid.set(jwk.kid, Object.assign(key, { jwk: { ...pub, ...(typeof jwk.alg === "string" ? { alg: jwk.alg } : {}) } }));
     }
-    if (byKid.size === 0) return `its keys (${this.jwksUri}) hold no signing key Mason can read (RSA of 2048 bits or more, EC, or Ed25519 / Ed448, each with a kid)`;
+    if (byKid.size === 0) return `its keys (${this.settings.jwks}) hold no signing key Mason can read (RSA of 2048 bits or more, EC, or Ed25519 / Ed448, each with a kid)`;
     return { byKid, at: this.now() };
-  }
-
-  /** Where the issuer's keys are: RFC 8414's metadata, else OpenID Connect's, whose `issuer` must be the one set. */
-  private async discover(): Promise<{ jwks: string } | string> {
-    const u = new URL(this.settings.issuer);
-    const p = u.pathname === "/" ? "" : u.pathname.replace(/\/$/, "");
-    const tried = [`${u.origin}/.well-known/oauth-authorization-server${p}`, `${u.origin}/.well-known/openid-configuration${p}`,
-      ...(p !== "" ? [`${u.origin}${p}/.well-known/openid-configuration`] : [])];
-    const why: string[] = [];
-    for (const at of tried) {
-      const m = await this.getJson(at);
-      if (typeof m === "string") { why.push(`${at}: ${m}`); continue; }
-      if (m.issuer !== this.settings.issuer) return `its metadata (${at}) names another issuer than MASON_MCP_ISSUER (${this.settings.issuer}): set MASON_MCP_ISSUER to the issuer it names, exactly`;
-      const jwks = typeof m.jwks_uri === "string" ? addressProblem("its jwks_uri", m.jwks_uri) : "it names no jwks_uri";
-      if (typeof jwks === "string") return `its metadata (${at}): ${jwks}`;
-      return { jwks: jwks.href };
-    }
-    return `no metadata found for ${this.settings.issuer} (${why.join("; ")})`;
   }
 
   /** One GET of a JSON object: no redirect followed, at most MAX_ANSWER bytes, within FETCH_MS; why not, as text. */

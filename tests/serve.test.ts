@@ -63,32 +63,37 @@ test("the settings: every one missing or wrong said at once, each with what to s
   assert.deepEqual([t.project, t.data, t.name, t.selfSignedTls, t.health], ["/mason/project", "/mason/data", "shop", true, { host: "127.0.0.1", port: 8080 }]);
 });
 
-test("the MCP endpoint's settings: off unless set; a partial one, junk, an address that is not https or carries a secret, and plain HTTP off loopback refused on the one report", () => {
+test("the MCP endpoint's settings: off unless set; a partial one, junk, an address that is not https or carries a secret, every address trusted as a proxy, and plain HTTP off loopback refused on the one report", () => {
   const base = { DATABASE_URL: URL_, MASON_API_KEY: KEY };
   const said = (env: Record<string, string>): string => { const r = serveSettings({ ...base, ...env }, "/srv"); assert.ok("message" in r, JSON.stringify(env)); return r.message; };
   // a partial configuration: what is missing, never half an endpoint
   assert.match(said({ MASON_MCP_URL: "https://mason.example.test/mcp", MASON_HEALTH_HOST: "127.0.0.1" }),
-    /MASON_MCP_ISSUER is not set, and the MCP endpoint is on \(MASON_MCP_URL set\): the authorization server that signs the tokens/);
-  assert.match(said({ MASON_MCP_FROM: "token", MASON_HEALTH_HOST: "127.0.0.1" }), /MASON_MCP_URL is not set, and the MCP endpoint is on \(MASON_MCP_FROM set\): the endpoint's public address[^;]*; MASON_MCP_ISSUER is not set/);
-  const on = { MASON_MCP_URL: "https://mason.example.test/mcp", MASON_MCP_ISSUER: "https://auth.example.test" };
+    /MASON_MCP_ISSUER is not set, and the MCP endpoint is on \(MASON_MCP_URL set\): the authorization server that signs the tokens[^;]*; MASON_MCP_JWKS_URL is not set, and the MCP endpoint is on \(MASON_MCP_URL set\): where that server publishes its signing keys/);
+  assert.match(said({ MASON_MCP_USER_CLAIM: "user", MASON_HEALTH_HOST: "127.0.0.1" }), /MASON_MCP_URL is not set, and the MCP endpoint is on \(MASON_MCP_USER_CLAIM set\): the endpoint's public address[^;]*; MASON_MCP_ISSUER is not set/);
+  const on = { MASON_MCP_URL: "https://mason.example.test/mcp", MASON_MCP_ISSUER: "https://auth.example.test", MASON_MCP_JWKS_URL: "https://auth.example.test/.well-known/jwks.json" };
   // plain HTTP off loopback: the operator says TLS is terminated in front
   assert.match(said(on), /the MCP endpoint would answer on 0\.0\.0\.0 \(MASON_HEALTH_HOST\), off this machine, in plain HTTP[^;]*MASON_MCP_PLAIN=1/);
   for (const [env, re] of [
-    [{ MASON_MCP_FROM: "abc" }, /MASON_MCP_FROM="abc": client \(/],
     [{ MASON_MCP_PLAIN: "2" }, /MASON_MCP_PLAIN="2": 1, or 0/],
     [{ MASON_MCP_USER_CLAIM: "a b", MASON_MCP_PLAIN: "1" }, /MASON_MCP_USER_CLAIM="a b" is not a claim's name/],
+    [{ MASON_MCP_USER_ID_CLAIM: "mason_user", MASON_MCP_PLAIN: "1" }, /MASON_MCP_USER_ID_CLAIM and MASON_MCP_USER_CLAIM both name mason_user/],
     [{ MASON_MCP_URL: "http://mason.example.test/mcp", MASON_MCP_PLAIN: "1" }, /MASON_MCP_URL="http:\/\/mason\.example\.test\/mcp": https:\/\//],
+    [{ MASON_MCP_JWKS_URL: "http://auth.example.test/jwks", MASON_MCP_PLAIN: "1" }, /MASON_MCP_JWKS_URL="http:\/\/auth\.example\.test\/jwks": https:\/\//],
     [{ MASON_MCP_ISSUER: "https://u:p@auth.example.test", MASON_MCP_PLAIN: "1" }, /MASON_MCP_ISSUER=.* carries a user or a password/],
     [{ MASON_MCP_URL: "https://mason.example.test/mcp?x=1", MASON_MCP_PLAIN: "1" }, /carries a query or a fragment/],
     [{ MASON_MCP_ISSUER: "not a url", MASON_MCP_PLAIN: "1" }, /MASON_MCP_ISSUER="not a url" is not a URL/],
+    // read as MASON_PG_PROXY_FROM is: never every address, and an entry that is none refused
+    [{ MASON_MCP_PROXY_FROM: "0.0.0.0/0", MASON_MCP_PLAIN: "1" }, /MASON_MCP_PROXY_FROM="0\.0\.0\.0\/0": .*names every address/],
+    [{ MASON_MCP_PROXY_FROM: "relay.internal", MASON_MCP_PLAIN: "1" }, /MASON_MCP_PROXY_FROM="relay\.internal": .*is not an address or a CIDR/],
   ] as Array<[Record<string, string>, RegExp]>) assert.match(said({ ...on, ...env }), re, JSON.stringify(env));
-  const ok = serveSettings({ ...base, ...on, MASON_MCP_PLAIN: "1" }, "/srv");
+  const ok = serveSettings({ ...base, ...on, MASON_MCP_PLAIN: "1", MASON_MCP_PROXY_FROM: "10.0.0.0/16, 2001:db8::1" }, "/srv");
   assert.ok(!("message" in ok));
-  assert.deepEqual(ok.mcp && { url: ok.mcp.url.href, issuer: ok.mcp.issuer, claim: ok.mcp.claim, from: ok.mcp.from },
-    { url: "https://mason.example.test/mcp", issuer: "https://auth.example.test", claim: "sub", from: "client" });
-  // on loopback, no MASON_MCP_PLAIN needed
-  const local = serveSettings({ ...base, ...on, MASON_HEALTH_HOST: "127.0.0.1", MASON_MCP_FROM: "token" }, "/srv");
-  assert.ok(!("message" in local) && local.mcp?.from === "token");
+  assert.deepEqual(ok.mcp && { url: ok.mcp.url.href, issuer: ok.mcp.issuer, jwks: ok.mcp.jwks, claim: ok.mcp.claim, idClaim: ok.mcp.idClaim, proxyFrom: ok.mcp.proxyFrom?.entries },
+    { url: "https://mason.example.test/mcp", issuer: "https://auth.example.test", jwks: "https://auth.example.test/.well-known/jwks.json", claim: "mason_user", idClaim: "mason_user_id",
+      proxyFrom: ["10.0.0.0/16", "2001:db8::1"] });
+  // on loopback, no MASON_MCP_PLAIN needed; no proxy named, none
+  const local = serveSettings({ ...base, ...on, MASON_HEALTH_HOST: "127.0.0.1" }, "/srv");
+  assert.ok(!("message" in local) && local.mcp?.proxyFrom === null);
   const usage = (serveModule as unknown as { SERVE: { usage: string } }).SERVE.usage;
   // mason start refuses it, never runs without it silently
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "serve-mcp-"));
@@ -100,7 +105,11 @@ test("the MCP endpoint's settings: off unless set; a partial one, junk, an addre
         fix: "unset MASON_MCP_URL and MASON_MCP_ISSUER: an agent on this machine runs mason mcp (mason help mcp)" });
     assert.equal(startSettingRefusal(p, { MASON_MCP_URL: "https://mason.example.test/mcp" }, { serve: true }), null);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
-  for (const k of ["MASON_MCP_URL", "MASON_MCP_ISSUER", "MASON_MCP_USER_CLAIM", "MASON_MCP_FROM", "MASON_MCP_PLAIN"]) assert.match(usage, new RegExp(`\\n {4}${k} +\\S`), k);
+  for (const k of ["MASON_MCP_URL", "MASON_MCP_ISSUER", "MASON_MCP_JWKS_URL", "MASON_MCP_USER_CLAIM", "MASON_MCP_USER_ID_CLAIM", "MASON_MCP_PROXY_FROM", "MASON_MCP_PLAIN"]) {
+    assert.match(usage, new RegExp(`\\n {4}${k} +\\S`), k);
+  }
+  assert.match(usage, /\(default mason_user\)/);
+  assert.match(usage, /\(default mason_user_id\)/);
 });
 
 test("the config: new on an empty volume, resumed over what the runs recorded; a developer's project and a renamed copy refused", () => {

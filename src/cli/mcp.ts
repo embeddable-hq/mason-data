@@ -327,10 +327,18 @@ export class McpServer {
   private applicationName = "mason-mcp";
   private readonly link: McpLink;
   private readonly log: (line: string) => void;
+  /** the protocol versions it answers in kind, the first the one a client asking for another is answered with */
+  private readonly versions: readonly string[];
   /** the requests being answered, by their id (a cancellation names one) */
   private readonly calls = new Map<string, Call>();
 
-  constructor(link: McpLink, logLine: (line: string) => void) { this.link = link; this.log = logLine; }
+  constructor(link: McpLink, logLine: (line: string) => void, versions: readonly string[] = PROTOCOL_VERSIONS) { this.link = link; this.log = logLine; this.versions = versions; }
+
+  /** names the client where no initialize does (a request of MCP's stateless revision over HTTP): application_name's part */
+  named(client: string | null): void {
+    const c = clientPart(client);
+    this.applicationName = c === null ? "mason-mcp" : `mason-mcp/${c}`;
+  }
 
   /** the application_name its statements carry: mason-mcp/<the client's name>, once initialize named it */
   get application(): string { return this.applicationName; }
@@ -415,7 +423,7 @@ export class McpServer {
         const client = clientPart((params.clientInfo as { name?: unknown } | undefined)?.name);
         this.applicationName = client === null ? "mason-mcp" : `mason-mcp/${client}`;
         return {
-          protocolVersion: PROTOCOL_VERSIONS.includes(asked as never) ? asked : PROTOCOL_VERSIONS[0],
+          protocolVersion: this.versions.includes(asked as never) ? asked : this.versions[0],
           capabilities: { tools: { listChanged: false }, resources: { listChanged: false } },
           serverInfo: { name: "mason", title: "Mason", version: version() },
           instructions: INSTRUCTIONS,

@@ -719,7 +719,7 @@ form.formcard input { width: 18em; }
 .connects select { width: auto; max-width: 100%; }
 .connects .ranges input { width: 22em; max-width: 100%; }
 /* "anywhere" chosen: the address box keeps its place, unseen, so nothing in the form moves when the choice changes */
-.connects:has(option[value="any"]:checked) .ranges { visibility: hidden; }
+.connects:has(option[value="any"]:checked) .ranges, .connects:has(option[value^="preset:"]:checked) .ranges { visibility: hidden; }
 /* THE ADD BOX (src/web/pages/users.js): where a cloud tunnel may be opened, a card of its own with what it
    creates on top (New user · Temporary cloud tunnel, the time range's segmented control) and the two panes in ONE grid
    cell, the one not chosen unseen in its place: the box keeps the height of the taller, so a choice moves nothing below.

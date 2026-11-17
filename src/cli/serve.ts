@@ -163,19 +163,26 @@ export const SERVE: CommandSpec = {
                             bytes; it is inline, so the browser makes no request for it; any other value is refused
                             (default unset: no icon)
     MASON_MCP_URL           an MCP endpoint for a hosted agent (claude.ai, ChatGPT, a team's agent platform): mason mcp's
-                            tools over MCP's Streamable HTTP, at ${MCP_PATH} on MASON_HEALTH_PORT. This is its PUBLIC address, as a
-                            client reaches it through the relay or proxy in front (https://mason.example.com/mcp): the
-                            resource its metadata names (/.well-known/oauth-protected-resource) and the audience every
-                            token must carry — never the address Mason sees. Set with MASON_MCP_ISSUER, or neither
+                            tools over MCP's Streamable HTTP (revisions 2025-11-25 and 2026-07-28), at ${MCP_PATH} on
+                            MASON_HEALTH_PORT. This is its PUBLIC address, as a client reaches it through the relay in
+                            front (https://mason.example.com/mcp): the resource its metadata names
+                            (/.well-known/oauth-protected-resource) and the audience every token must name exactly —
+                            never the address Mason sees. Set with MASON_MCP_ISSUER and MASON_MCP_JWKS_URL, or none
                             (default unset: no endpoint)
-    MASON_MCP_ISSUER        the OAuth authorization server that signs the endpoint's tokens, as its metadata's issuer says
-                            it (https://auth.example.com): its published keys check each token's signature, issuer,
-                            audience and expiry; Mason issues no token and runs no sign-in page (required with MASON_MCP_URL)
-    MASON_MCP_USER_CLAIM    the token's claim that names the mason user each request runs as, under its role and limits;
-                            a user that does not exist or is disabled is refused (default sub)
-    MASON_MCP_FROM          how a user's address ranges (mason user from) apply to the endpoint: client judges them on the
-                            HTTP client's address, which behind a relay is the relay's; token lets a request's valid token
-                            replace them — for this endpoint's requests alone, never the Postgres API's (default client)
+    MASON_MCP_ISSUER        the OAuth authorization server that signs the endpoint's tokens, as their iss names it
+                            (https://auth.example.com); Mason issues no token and runs no sign-in page (required with
+                            MASON_MCP_URL)
+    MASON_MCP_JWKS_URL      where that server publishes its signing keys, a JWK set, read by Mason (never discovered):
+                            each token's signature is checked by them (required with MASON_MCP_URL)
+    MASON_MCP_USER_CLAIM    the token's claim that names the mason user each request runs as, under its role and limits
+                            (default mason_user)
+    MASON_MCP_USER_ID_CLAIM  the token's claim that holds that user's id, as mason user list shows it: the user is
+                            looked up by both at every request, so a user removed (or removed and added again: a new
+                            id) or disabled is refused at once (default mason_user_id)
+    MASON_MCP_PROXY_FROM    the relay or proxy in front of the endpoint: its own addresses, CIDRs comma-separated, read as
+                            MASON_PG_PROXY_FROM is; from one of them alone, the client is the LAST X-Forwarded-For entry
+                            (the one it appended), which a user's address ranges are judged on; from any other address
+                            the header is ignored and the peer judged (default unset: every request's peer)
     MASON_MCP_PLAIN         1 to say TLS is terminated in front of the endpoint (a relay, a proxy), required when
                             MASON_HEALTH_HOST is off loopback: a bearer token must never cross a network in clear (default 0)
     MASON_PG_HOST, MASON_PG_PORT   the Postgres API's address (default 127.0.0.1:5433)
@@ -628,7 +635,7 @@ export async function serve(argv: string[]): Promise<number> {
   say(`  metrics   http://${s.health.host}:${s.health.port}/metrics`);
   if (s.mcp !== null) {
     say(`  mcp       ${s.mcp.url.href} (MASON_MCP_URL), served at http://${s.health.host}:${s.health.port}${MCP_PATH}: tokens of ${s.mcp.issuer}, ` +
-      `the user in their ${s.mcp.claim} claim, ${s.mcp.from === "token" ? "a valid token in place of a user's address ranges (MASON_MCP_FROM=token)" : "a user's address ranges judged on the client's address"}`);
+      `the user in their ${s.mcp.claim} and ${s.mcp.idClaim} claims, a user's address ranges judged on ${s.mcp.proxyFrom === null ? "each request's peer" : `the X-Forwarded-For entry of ${s.mcp.proxyFrom.entries.join(", ")} (MASON_MCP_PROXY_FROM), else the peer`}`);
   }
   for (const l of socketSaid) say(`  ${l}`);
   if (s.ui.runFile !== null) say(`  run file  ${s.ui.runFile}: written once Mason answers (mode 0600; it holds the run's token)`);
@@ -681,7 +688,7 @@ export async function serve(argv: string[]): Promise<number> {
         },
         stopping: () => { state = { phase: "stopping" }; page?.close(); runFile?.remove(); void mcp?.close(); },
         failed: () => { state = { phase: "failed" }; engineStopped = true; page?.close(); runFile?.remove(); void mcp?.close(); },
-        ...(s.mcp !== null ? { mcp: { url: s.mcp.url.href, issuer: s.mcp.issuer, from: s.mcp.from } } : {}),
+        ...(s.mcp !== null ? { mcp: { url: s.mcp.url.href, issuer: s.mcp.issuer } } : {}),
         ...(page !== null ? { page: page.attach, socket: page.file } : {}) } });
   } finally {
     // removed whatever ended the run: a stop, a crash of the engine's thread, or a start that failed

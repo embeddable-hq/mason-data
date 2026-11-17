@@ -2090,13 +2090,14 @@ test("the users: From… asks where the user connects from in a popover beside i
 test("the add form: Connects from, a dropdown in mason user add's words — anywhere (the default, no from sent) or only these addresses, the box beside it, a comma list as --from takes it, the run judging each", async () => {
   const renderAddUser = fn<[unknown], string>("renderAddUser");
   const form = renderAddUser(CATALOG_STATE);
-  assert.match(textOf(form), /Name Connects from anywhere only these addresses Address ranges, comma-separated Add a user Roles can limit/);
-  assert.match(form, /<span class="connects"><label for="add-user-connects">Connects from<\/label> <select id="add-user-connects" name="connects"><option value="any" selected>anywhere<\/option><option value="only">only these addresses<\/option><\/select> <span class="ranges">/,
+  // the run's state carries the hosted agents' published ranges (issue 1115): each a choice after these two
+  assert.match(textOf(form), /Name Connects from anywhere only these addresses Claude \(Anthropic\) Address ranges, comma-separated Add a user Roles can limit/);
+  assert.match(form, /<span class="connects"><label for="add-user-connects">Connects from<\/label> <select id="add-user-connects" name="connects"><option value="any" selected>anywhere<\/option><option value="only">only these addresses<\/option><option value="preset:[^"]+">Claude \(Anthropic\)<\/option><\/select> <span class="ranges">/,
     "a dropdown, its label; anywhere the default, as mason user add with no --from; the box beside it");
   assert.doesNotMatch(form, /type="radio"|<fieldset/, "no radios");
   // the box keeps its place while anywhere is chosen (visibility, never display): nothing in the form moves when the choice changes
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
-  assert.match(css, /\.connects:has\(option\[value="any"\]:checked\) \.ranges \{ visibility: hidden; \}/);
+  assert.match(css, /\.connects:has\(option\[value="any"\]:checked\) \.ranges, \.connects:has\(option\[value\^="preset:"\]:checked\) \.ranges \{ visibility: hidden; \}/);
   assert.doesNotMatch(css, /fieldset\.connects|\.connects[^{]*input\[type="radio"\]/, "the radios' rules are gone");
   assert.match(form, /<input id="add-user-from" name="from" spellcheck="false" autocapitalize="off" placeholder="e\.g\. 192\.0\.2\.0\/24, 2001:db8::\/32" value="">/);
   assert.ok(!/pattern=/.test(form), "never validated in the page");
@@ -2115,7 +2116,7 @@ test("the add form on one line where its card is wide enough: each field a label
   const children = [...form.replace(/^<form[^>]*>|<\/form>$/g, "").matchAll(/<(span|button)\b[^>]*? class="([^"]*)"/g)];
   assert.match(form, /^<form id="add-user" class="formcard" autocomplete="off"><span class="name-field"><label for="user-name">Name<\/label> <input id="user-name"[^>]*><\/span> <span class="role-field">/);
   assert.ok(["name-field", "role-field", "connects", "primary"].every((c) => children.some((m) => m[2] === c)), "the four fields");
-  assert.match(textOf(renderAddUser(CATALOG_STATE)), /^Name Connects from anywhere only these addresses Address ranges, comma-separated Add a user Roles can limit a user to some tables, columns and rows\. Configure them via mason\/roles\.yml \. The README describes how\.$/);
+  assert.match(textOf(renderAddUser(CATALOG_STATE)), /^Name Connects from anywhere only these addresses Claude \(Anthropic\) Address ranges, comma-separated Add a user Roles can limit a user to some tables, columns and rows\. Configure them via mason\/roles\.yml \. The README describes how\.$/);
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
   assert.match(css, /#add-user \.roles-line \{ flex: 0 0 100%;/, "the line on roles is the form's own last row, under the fields");
   const rule = (sel: string) => css.match(new RegExp(`(?:^|\\})\\s*${sel.replace(/[.#[\]="]/g, "\\$&")}\\s*\\{([^}]*)\\}`))?.[1] ?? "";
@@ -2126,7 +2127,7 @@ test("the add form on one line where its card is wide enough: each field a label
   assert.match(rule("#add-user .connects .ranges"), /min-width: 0;/, "the address box shrinks inside its field, never over Add a user");
   assert.match(rule("#add-user .connects .ranges input"), /width: 100%; min-width: 0;/);
   // the box's place is kept while anywhere is chosen: the choice changes no width, so nothing moves
-  assert.match(css, /\.connects:has\(option\[value="any"\]:checked\) \.ranges \{ visibility: hidden; \}/);
+  assert.match(css, /\.connects:has\(option\[value="any"\]:checked\) \.ranges, \.connects:has\(option\[value\^="preset:"\]:checked\) \.ranges \{ visibility: hidden; \}/);
   assert.doesNotMatch(css, /\.ranges\s*\{[^}]*display: none/);
 });
 
@@ -5919,7 +5920,7 @@ test("Users: mason serve's MCP endpoint on (issue 1115) — its public address w
   const usersPage = await import(path.join(WEB, "pages", "users.js") as string) as Record<string, unknown>;
   const renderUsersMcp = usersPage.renderUsersMcp as (pg: unknown, served?: boolean, version?: unknown, mcp?: unknown) => string;
   const pg = { url: "postgresql://127.0.0.1:5433/shop", host: "127.0.0.1", port: 5433, database: "shop", shown: "postgres://<user>:<password>@127.0.0.1:5433/shop" };
-  const mcp = { url: "https://mason.example.test/mcp", issuer: "https://auth.example.test", from: "client" };
+  const mcp = { url: "https://mason.example.test/mcp", issuer: "https://auth.example.test" };
   const html = renderUsersMcp(pg, true, "0.22.0", mcp);
   assert.match(html, /<code id="users-mcp-url">https:\/\/mason\.example\.test\/mcp<\/code>/);
   assert.match(html, /data-copy="users-mcp-url"/);
@@ -5927,11 +5928,48 @@ test("Users: mason serve's MCP endpoint on (issue 1115) — its public address w
   assert.ok(text.includes("claude.ai, ChatGPT and other hosted agents: add this address as a custom connector."), text);
   assert.ok(text.includes("In the agent's settings, add a custom connector and paste the URL (in claude.ai: Settings, then Connectors, then Add custom connector)."), text);
   assert.ok(text.includes("Connect, and sign in when the agent asks. You sign in at https://auth.example.test , and the agent's queries run as the Mason user your sign-in names."), text);
-  assert.ok(text.includes("A user limited to some addresses can't connect this way unless the agent's servers are among them."), text);
+  assert.ok(text.includes("A user limited to some addresses connects this way only from the agent's own: choose its company under Connects from."), text);
   assert.doesNotMatch(text, /can't connect this way yet/);
-  // MASON_MCP_FROM=token: no word of address ranges; off (null): the box as before
-  assert.doesNotMatch(textOf(renderUsersMcp(pg, true, "0.22.0", { ...mcp, from: "token" })), /limited to some addresses/);
+  // off (null): the box as before
   assert.match(textOf(renderUsersMcp(pg, true, "0.22.0", null)), /can't connect this way yet/);
+});
+
+test("Users: Connects from offers each hosted agent's published ranges (issue 1115) — a choice that sends them, chosen for a user whose ranges are exactly a company's; none offered when the run says none", async () => {
+  const usersPage = await import(path.join(WEB, "pages", "users.js") as string) as Record<string, unknown>;
+  const connectsChoice = usersPage.connectsChoice as (id: string, from?: string[] | null, presets?: unknown[]) => string;
+  const rangesOf = usersPage.rangesOf as (e: unknown) => string[] | null;
+  const { presetsForPage, ADDRESS_PRESETS } = await import("../src/cli/address-presets.ts");
+  const presets = presetsForPage();
+  // the run's list, what /api/state carries: the company's label and its ranges, never its source
+  assert.deepEqual(presets, [{ id: "claude", label: "Claude (Anthropic)", ranges: ["160.79.104.0/21", "153.61.208.0/20"] }]);
+  assert.ok(ADDRESS_PRESETS.every((p) => p.source.startsWith("https://")), "each list cites where it is published");
+  // every range is one mason user from takes
+  const { userRanges } = await import("../src/duck/users.ts");
+  for (const p of presets) assert.ok(!("problem" in userRanges(p.ranges)), p.id);
+  const html = connectsChoice("add-user", null, presets);
+  assert.match(html, /<option value="any" selected>anywhere<\/option><option value="only">only these addresses<\/option><option value="preset:160\.79\.104\.0\/21,153\.61\.208\.0\/20">Claude \(Anthropic\)<\/option><\/select>/);
+  // chosen, it sends its ranges, whatever the box holds
+  assert.deepEqual(rangesOf({ connects: { value: "preset:160.79.104.0/21,153.61.208.0/20" }, from: { value: "192.0.2.0/24" } }), ["160.79.104.0/21", "153.61.208.0/20"]);
+  // a user whose ranges are exactly a company's opens on it; any other list is its own
+  assert.match(connectsChoice("user-from", ["160.79.104.0/21", "153.61.208.0/20"], presets), /<option value="preset:[^"]+" selected>Claude \(Anthropic\)<\/option>/);
+  assert.match(connectsChoice("user-from", ["160.79.104.0/21"], presets), /<option value="only" selected>/);
+  // no list from the run: the two choices of before
+  assert.doesNotMatch(connectsChoice("add-user", null), /preset:/);
+  // the box hides behind a company's choice as behind anywhere: nothing in the form moves
+  assert.match(fs.readFileSync(path.join(WEB, "app.css"), "utf8"), /\.connects:has\(option\[value\^="preset:"\]:checked\) \.ranges/);
+});
+
+test("scripts/connector-ranges.ts reads a company's list under its heading and up to the next, and nothing else on the page", async () => {
+  const { pageText, rangesUnder } = await import("../scripts/connector-ranges.ts");
+  // a page shaped as the company's: the inbound list, the outbound one, then the phased-out one (synthetic addresses)
+  const html = `<h2>Inbound IP addresses</h2><p>IPv4</p><code>192.0.2.0/24</code>` +
+    `<h2>Outbound IP addresses</h2><p>These are the stable IP addresses used for outbound requests.</p><code>198.51.100.0/24</code><code>203.0.113.0/25</code>` +
+    `<h2>Phased out IP addresses</h2><code>203.0.113.200/32</code><nav>Outbound IP addresses</nav>`;
+  assert.deepEqual(rangesUnder(pageText(html), "Outbound IP addresses", "Phased out IP addresses"), ["198.51.100.0/24", "203.0.113.0/25"]);
+  const plain = "Inbound IP addresses 192.0.2.0/24 Outbound IP addresses These are the stable IP addresses 198.51.100.0/24 2001:db8:5::/48 Phased out IP addresses 203.0.113.200/32";
+  assert.deepEqual(rangesUnder(plain, "Outbound IP addresses", "Phased out IP addresses"), ["198.51.100.0/24", "2001:db8:5::/48"]);
+  assert.equal(rangesUnder(plain, "Egress IP addresses", "Phased out IP addresses"), null, "a heading gone: could not tell");
+  assert.equal(rangesUnder("Outbound IP addresses 198.51.100.0/24", "Outbound IP addresses", "Phased out IP addresses"), null, "no end: could not tell");
 });
 
 test("New user added: a closed Connect an MCP client under the URL — the box's two lines with the user's own URL, each Shown once with its Copy, and why the JSON keeps the password out of the shell's history (issue 1114)", async () => {

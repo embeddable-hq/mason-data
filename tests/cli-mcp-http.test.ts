@@ -1,18 +1,20 @@
 /**
  * `mason serve`'s MCP ENDPOINT OVER STREAMABLE HTTP, WITH OAUTH (src/cli/mcp-http.ts, src/cli/mcp-oauth.ts; issue 1115):
  * a Postgres listener over a throwaway DuckStore with its users file, the endpoint mounted on the health server as
- * `mason serve` mounts it, and a test authorization server this file runs itself (its metadata and published keys on
- * 127.0.0.1, synthetic keys, synthetic user names). A client posts JSON-RPC to /mcp as a hosted agent does. What it
- * must hold:
+ * `mason serve` mounts it, and a test authorization server this file runs itself (its published keys on 127.0.0.1,
+ * synthetic keys, synthetic user names). A client posts JSON-RPC to /mcp as a hosted agent does. What it must hold:
  *   - the protected resource's metadata at RFC 9728's paths, naming the PUBLIC address (MASON_MCP_URL) and the issuer;
  *     a request with no token is 401 with WWW-Authenticate naming that metadata;
+ *   - both revisions, by the version the client asks for: 2025-11-25 with a session, 2026-07-28 with none;
  *   - a valid token lists the tables and runs a query as the user it names, and the request log names the user, the
  *     client (mason-mcp/<client>) and the client's address;
- *   - refused, each with what to do: a missing, expired, not-yet-valid, wrong-audience (the address Mason sees included),
- *     wrong-issuer, bad-signature, unknown-key, `alg: none` and HS256 token; a token for an unknown or disabled user;
- *   - MASON_MCP_FROM: client judges a user's ranges on the client's address; token replaces them for a request with a
- *     valid token alone, never for one without, and never on the Postgres API's own listener;
- *   - a cancellation (notifications/cancelled) stops the statement where it runs, as over stdio;
+ *   - refused, each with what to do: a missing, expired, not-yet-valid, wrong-audience (the address Mason sees, and a
+ *     list holding another, included), wrong-issuer, bad-signature, unknown-key, `alg: none` and HS256 token; a token for
+ *     an unknown user, a disabled one, one removed (at once, mid-session too), and a removed-and-added-again user's old
+ *     token (its id no longer the name's);
+ *   - a user's ranges judged on the client: the peer, or a proxy MASON_MCP_PROXY_FROM names' LAST X-Forwarded-For entry
+ *     — never an entry the client forged in front of it, never a header from a peer it does not name;
+ *   - a cancellation (notifications/cancelled) stops the statement where it runs, as over stdio, in both revisions;
  *   - a session is its user's; the issuer's keys unreadable refuse every token (503), never let one through.
  */
 import { test, after, before } from "node:test";
@@ -29,11 +31,16 @@ import { startPostgresApi, type PgApiServer } from "../src/api/postgres/server.t
 import type { PgSchema } from "../src/api/postgres/schema.ts";
 import type { CopyState } from "../src/duck/sync.ts";
 import { listenerLogins, LiveUsers, USERS_FILE } from "../src/duck/users.ts";
-import { addUser, disableUser } from "../src/cli/user.ts";
+import { addUser, disableUser, enableUser, removeUser } from "../src/cli/user.ts";
 import { PgConnection, PgError } from "../src/cdc/pg-wire.ts";
 import { healthServer } from "../src/cli/serve.ts";
-import { mcpEndpoint, type McpEndpoint } from "../src/cli/mcp-http.ts";
-import { mcpSettings, type McpSettings } from "../src/cli/mcp-oauth.ts";
+// the endpoint's modules, imported when the tests run: at a commit without them each test fails by name
+// (scripts/fails-without.ts), never the file
+type Http = typeof import("../src/cli/mcp-http.ts");
+type OAuth = typeof import("../src/cli/mcp-oauth.ts");
+const httpModule = await import("../src/cli/mcp-http.ts" as string).catch((e: unknown) => { if ((e as NodeJS.ErrnoException).code !== "ERR_MODULE_NOT_FOUND") throw e; return null; }) as Http | null;
+const oauthModule = await import("../src/cli/mcp-oauth.ts" as string).catch((e: unknown) => { if ((e as NodeJS.ErrnoException).code !== "ERR_MODULE_NOT_FOUND") throw e; return null; }) as OAuth | null;
+type McpEndpoint = import("../src/cli/mcp-http.ts").McpEndpoint;
 
 const API_KEY = "k".repeat(48);
 /** the endpoint's public address: what a relay in front serves, never the address the test reaches */
@@ -46,6 +53,8 @@ let api: PgApiServer;
 let ledger: RequestLedger;
 let users: LiveUsers;
 let limitedPassword = "";
+/** each user's id, as mason user add made it */
+const idOf: Record<string, string> = {};
 
 const schema: PgSchema = {
   database: "shop",
@@ -65,6 +74,7 @@ const ec = crypto.generateKeyPairSync("ec", { namedCurve: "P-256" });
 const stranger = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
 let issuerServer: http.Server;
 let ISSUER = "";
+let JWKS = "";
 let keyFetches = 0;
 
 const b64 = (v: unknown): string => Buffer.from(JSON.stringify(v)).toString("base64url");
@@ -82,8 +92,17 @@ function jwt(claims: Record<string, unknown>, o: { alg?: string; kid?: string; k
 }
 
 const nowS = (): number => Math.floor(Date.now() / 1000);
-/** a valid token's claims for `user` */
-const claims = (user: string, more: Record<string, unknown> = {}): Record<string, unknown> => ({ iss: ISSUER, aud: PUBLIC, sub: user, exp: nowS() + 600, iat: nowS(), ...more });
+/** a valid token's claims for `user`: its name and its id, as the authorization server signs them in */
+const claims = (user: string, more: Record<string, unknown> = {}): Record<string, unknown> =>
+  ({ iss: ISSUER, aud: PUBLIC, sub: `subject-of-${user}`, mason_user: user, mason_user_id: idOf[user] ?? "0123456789abcdef", exp: nowS() + 600, iat: nowS(), ...more });
+
+/** a user added as mason user add adds one: its id kept */
+function add(name: string, o: { from?: string[] } = {}): void {
+  const added = addUser(usersFile, API_KEY, name, { link: { url: "", host: "127.0.0.1", port: api.port, database: "shop" }, database: "shop", ...o });
+  if ("message" in added) throw new Error(JSON.stringify(added));
+  idOf[name] = added.id;
+  if (name === "limited") limitedPassword = new URL(added.url!).password;
+}
 
 // ------------------------------------------------------------------ the endpoint, as mason serve mounts it
 
@@ -91,12 +110,13 @@ interface Mounted { endpoint: McpEndpoint; server: http.Server; base: string; lo
 const mounted: Mounted[] = [];
 
 async function mount(env: Record<string, string>): Promise<Mounted> {
-  const s = mcpSettings({ MASON_MCP_URL: PUBLIC, MASON_MCP_ISSUER: ISSUER, ...env }, "127.0.0.1");
-  assert.ok(s !== null && !("problems" in s), JSON.stringify(s));
+  assert.ok(httpModule !== null && oauthModule !== null, "src/cli/mcp-http.ts and src/cli/mcp-oauth.ts: the endpoint");
+  const s = oauthModule.mcpSettings({ MASON_MCP_URL: PUBLIC, MASON_MCP_ISSUER: ISSUER, MASON_MCP_JWKS_URL: JWKS, ...env }, "127.0.0.1");
+  assert.ok(s !== null && !("problems" in s), JSON.stringify(s, (_k, v: unknown) => typeof v === "bigint" ? String(v) : v));
   const logged: string[] = [];
-  const endpoint = mcpEndpoint(s as McpSettings, { log: (l) => logged.push(l) });
+  const endpoint = httpModule.mcpEndpoint(s, { log: (l) => logged.push(l) });
   await endpoint.attach({ listener: api, users, database: "shop" });
-  const server = healthServer(() => ({ phase: "starting" }), Date.now(), (l) => logged.push(l), undefined, endpoint);
+  const server = (healthServer as unknown as (...a: unknown[]) => http.Server)(() => ({ phase: "starting" }), Date.now(), (l: string) => logged.push(l), undefined, endpoint);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const m = { endpoint, server, base: `http://127.0.0.1:${(server.address() as { port: number }).port}`, logged };
   mounted.push(m);
@@ -107,7 +127,6 @@ before(async () => {
   fs.mkdirSync(home, { recursive: true, mode: 0o700 });
   issuerServer = http.createServer((req, res) => {
     const json = (v: unknown): void => { res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(v)); };
-    if (req.url === "/.well-known/oauth-authorization-server") { json({ issuer: ISSUER, jwks_uri: `${ISSUER}/jwks`, authorization_endpoint: `${ISSUER}/authorize` }); return; }
     if (req.url === "/jwks") {
       keyFetches++;
       json({ keys: [{ ...rsa.publicKey.export({ format: "jwk" }), kid: "r1", use: "sig", alg: "RS256" }, { ...ec.publicKey.export({ format: "jwk" }), kid: "e1", use: "sig" }] });
@@ -117,6 +136,7 @@ before(async () => {
   });
   await new Promise<void>((resolve) => issuerServer.listen(0, "127.0.0.1", resolve));
   ISSUER = `http://127.0.0.1:${(issuerServer.address() as { port: number }).port}`;
+  JWKS = `${ISSUER}/jwks`;
   store = await DuckStore.open(path.join(home, "duck.db"), () => undefined);
   await store.writer.run("CREATE TABLE public.orders (id BIGINT, status VARCHAR); INSERT INTO public.orders VALUES (1, 'paid'), (2, 'paid'), (3, 'pending')");
   await store.writer.run("CREATE TABLE public.events AS SELECT range::INTEGER AS id FROM range(150000)");
@@ -127,12 +147,9 @@ before(async () => {
     schema: () => schema, record: (row) => ledger.record(row), log: () => undefined,
     duck: await store.listener(undefined, undefined, undefined, copies),
   });
-  const link = { url: "", host: "127.0.0.1", port: api.port, database: "shop" };
-  for (const [name, o] of [["analyst", {}], ["limited", { from: ["10.0.0.0/8"] }], ["paused", {}]] as const) {
-    const added = addUser(usersFile, API_KEY, name, { link, database: "shop", ...o });
-    if ("message" in added) throw new Error(JSON.stringify(added));
-    if (name === "limited") limitedPassword = new URL(added.url!).password;
-  }
+  add("analyst");
+  add("limited", { from: ["10.0.0.0/8"] });
+  add("paused");
   const d = disableUser(usersFile, "paused");
   if ("message" in d) throw new Error(JSON.stringify(d));
 });
@@ -159,21 +176,23 @@ async function post(m: Mounted, message: unknown, o: { token?: string; session?:
 }
 
 let ids = 1;
-/** a session opened as a hosted agent opens one: initialize, then notifications/initialized */
-async function session(m: Mounted, token: string): Promise<string> {
-  const init = await post(m, { jsonrpc: "2.0", id: ids++, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "hosted agent", version: "1" } } }, { token });
+const INIT = (version = "2025-11-25") => ({ jsonrpc: "2.0", id: ids++, method: "initialize", params: { protocolVersion: version, capabilities: {}, clientInfo: { name: "hosted agent", version: "1" } } });
+
+/** a session opened as a hosted agent opens one under 2025-11-25: initialize, then notifications/initialized */
+async function session(m: Mounted, token: string, headers: Record<string, string> = {}): Promise<string> {
+  const init = await post(m, INIT(), { token, headers });
   assert.equal(init.status, 200, JSON.stringify(init.body));
   const sid = init.headers.get("mcp-session-id");
   assert.ok(sid !== null && sid.length >= 32, "a session id");
   assert.equal((init.body!.result as { serverInfo: { name: string } }).serverInfo.name, "mason");
-  const ack = await post(m, { jsonrpc: "2.0", method: "notifications/initialized" }, { token, session: sid });
+  const ack = await post(m, { jsonrpc: "2.0", method: "notifications/initialized" }, { token, session: sid, headers });
   assert.equal(ack.status, 202);
   assert.equal(ack.body, null);
   return sid;
 }
 
-async function call(m: Mounted, token: string, sid: string, name: string, args: Record<string, unknown> = {}): Promise<{ isError?: boolean; text: string; structured: Record<string, unknown> }> {
-  const a = await post(m, { jsonrpc: "2.0", id: ids++, method: "tools/call", params: { name, arguments: args } }, { token, session: sid });
+async function call(m: Mounted, token: string, sid: string | null, name: string, args: Record<string, unknown> = {}, headers: Record<string, string> = {}): Promise<{ isError?: boolean; text: string; structured: Record<string, unknown> }> {
+  const a = await post(m, { jsonrpc: "2.0", id: ids++, method: "tools/call", params: { name, arguments: args } }, { token, ...(sid !== null ? { session: sid } : {}), headers });
   assert.equal(a.status, 200, JSON.stringify(a.body));
   const r = a.body!.result as { content: Array<{ text: string }>; structuredContent: Record<string, unknown>; isError?: boolean };
   return { ...(r.isError ? { isError: true } : {}), text: r.content[0]!.text, structured: r.structuredContent };
@@ -184,6 +203,8 @@ async function rows(): Promise<Awaited<ReturnType<RequestLedger["recent"]>>> {
   return (await ledger.recent({ limit: 500 })).filter((r) => r.applicationName.startsWith("mason-mcp"));
 }
 
+const STATELESS = { "mcp-protocol-version": "2026-07-28" };
+
 // ------------------------------------------------------------------ the tests
 
 test("the protected resource's metadata names the public address and the issuer; a request with no token is 401 naming it", async () => {
@@ -193,7 +214,7 @@ test("the protected resource's metadata names the public address and the issuer;
     assert.equal(res.status, 200, p);
     assert.deepEqual(await res.json(), { resource: PUBLIC, authorization_servers: [ISSUER], bearer_methods_supported: ["header"], resource_name: "Mason" });
   }
-  const none = await post(m, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
+  const none = await post(m, INIT());
   assert.equal(none.status, 401);
   // built from the PUBLIC address, never the address the request reached (RFC 9728 section 5.1)
   assert.equal(none.headers.get("www-authenticate"), 'Bearer resource_metadata="https://mason.example.test/.well-known/oauth-protected-resource/mcp"');
@@ -202,7 +223,7 @@ test("the protected resource's metadata names the public address and the issuer;
   assert.equal((await fetch(`${m.base}/healthz`)).status, 503);
 });
 
-test("a valid token lists the tables and runs a query as the user it names; the request log names the user, the client and its address", async () => {
+test("2025-11-25: a valid token lists the tables and runs a query as the user it names; the request log names the user, the client and its address", async () => {
   const m = await mount({});
   const token = jwt(claims("analyst"));
   const sid = await session(m, token);
@@ -230,16 +251,45 @@ test("a valid token lists the tables and runs a query as the user it names; the 
   assert.ok(m.logged.every((l) => !l.includes(token.split(".")[2]!)), m.logged.join("\n"));
 });
 
+test("the revision is the client's: 2025-11-25 opens a session, 2026-07-28 has none and each POST stands alone; one it does not know is answered with 2025-11-25", async () => {
+  const m = await mount({});
+  const token = jwt(claims("analyst"));
+  const older = await post(m, INIT("2025-11-25"), { token });
+  assert.equal((older.body!.result as { protocolVersion: string }).protocolVersion, "2025-11-25");
+  assert.ok(older.headers.get("mcp-session-id") !== null);
+  const newer = await post(m, INIT("2026-07-28"), { token, headers: STATELESS });
+  assert.equal(newer.status, 200, JSON.stringify(newer.body));
+  assert.equal((newer.body!.result as { protocolVersion: string }).protocolVersion, "2026-07-28");
+  assert.equal(newer.headers.get("mcp-session-id"), null, "no session under 2026-07-28");
+  const unknown = await post(m, INIT("2099-01-01"), { token });
+  assert.equal((unknown.body!.result as { protocolVersion: string }).protocolVersion, "2025-11-25");
+  // under 2026-07-28 a tool call carries no session: it runs as the token's user, its client named by its User-Agent
+  const q = await call(m, token, null, "query", { sql: "SELECT count(*) AS stateless FROM orders" }, { ...STATELESS, "user-agent": "agent-platform/3.1" });
+  assert.deepEqual(q.structured.rows, [["3"]]);
+  const r = (await rows()).find((x) => x.query.includes("AS stateless"));
+  assert.ok(r !== undefined);
+  assert.deepEqual([r.user, r.applicationName], ["analyst", "mason-mcp/agent-platform"]);
+  // under 2025-11-25 a request with no session is refused, naming both ways
+  const lone = await post(m, { jsonrpc: "2.0", id: ids++, method: "tools/list" }, { token, headers: { "mcp-protocol-version": "2025-11-25" } });
+  assert.equal(lone.status, 400);
+  assert.match((lone.body!.error as { fix: string }).fix, /Mcp-Session-Id .* MCP-Protocol-Version: 2026-07-28/);
+  // the token is checked on each stateless POST as on any other
+  assert.equal((await post(m, { jsonrpc: "2.0", id: ids++, method: "tools/list" }, { headers: STATELESS })).status, 401);
+});
+
 test("refused with what to do: a missing, expired, not-yet-valid, wrong-audience, wrong-issuer, bad-signature, unknown-key, alg none or HS256 token", async () => {
   const m = await mount({});
   const seen = `${m.base}/mcp`;
   const cases: Array<[string, string, RegExp]> = [
     ["expired", jwt(claims("analyst", { exp: nowS() - 120 })), /expired: sign in again/],
     ["not yet valid", jwt(claims("analyst", { nbf: nowS() + 600 })), /not valid yet/],
-    ["no expiry", jwt({ iss: ISSUER, aud: PUBLIC, sub: "analyst" }), /no expiry/],
-    ["another audience", jwt(claims("analyst", { aud: "https://other.example.test/mcp" })), /audience \(aud\) must name https:\/\/mason\.example\.test\/mcp \(MASON_MCP_URL\)/],
+    ["no expiry", jwt({ ...claims("analyst"), exp: undefined }), /no expiry/],
+    ["another audience", jwt(claims("analyst", { aud: "https://other.example.test/mcp" })), /audience \(aud\) must be exactly https:\/\/mason\.example\.test\/mcp \(MASON_MCP_URL\)/],
     // the address Mason SEES is not its address: the operator's public one is
     ["the address Mason sees", jwt(claims("analyst", { aud: seen })), /audience/],
+    // exactly: a list naming this endpoint and another is a token another resource could replay here
+    ["a list of this and another", jwt(claims("analyst", { aud: [PUBLIC, "https://other.example.test/mcp"] })), /audience/],
+    ["the address with a slash after it", jwt(claims("analyst", { aud: `${PUBLIC}/` })), /audience/],
     ["another issuer", jwt(claims("analyst", { iss: "https://issuer.example.test" })), /another authorization server than MASON_MCP_ISSUER/],
     ["a signature by another key", jwt(claims("analyst"), { key: stranger.privateKey }), /signature is not the issuer's/],
     ["a payload changed after signing", ((t) => { const [h, , s] = t.split("."); return `${h}.${b64(claims("paused"))}.${s}`; })(jwt(claims("analyst"))), /signature is not the issuer's/],
@@ -250,10 +300,11 @@ test("refused with what to do: a missing, expired, not-yet-valid, wrong-audience
     ["an RS256 alg over an EC key", jwt(claims("analyst"), { alg: "RS256", kid: "e1" }), /does not fit its key's type/],
     ["crit", jwt(claims("analyst"), { header: { crit: ["exp"] } }), /crit/],
     ["not a JWT", "abc", /not a JWT/],
-    ["no user claim", jwt({ iss: ISSUER, aud: PUBLIC, exp: nowS() + 600 }), /sub claim \(MASON_MCP_USER_CLAIM\) is missing/],
+    ["no user claim", jwt({ ...claims("analyst"), mason_user: undefined }), /mason_user claim \(MASON_MCP_USER_CLAIM\) is missing/],
+    ["no id claim", jwt({ ...claims("analyst"), mason_user_id: undefined }), /mason_user_id claim \(MASON_MCP_USER_ID_CLAIM\) is missing/],
   ];
   for (const [what, token, reason] of cases) {
-    const a = await post(m, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, { token });
+    const a = await post(m, INIT(), { token });
     assert.equal(a.status, 401, what);
     const challenge = a.headers.get("www-authenticate") ?? "";
     assert.match(challenge, /^Bearer resource_metadata="https:\/\/mason\.example\.test\/\.well-known\/oauth-protected-resource\/mcp", error="invalid_token", error_description="/, what);
@@ -264,103 +315,135 @@ test("refused with what to do: a missing, expired, not-yet-valid, wrong-audience
   assert.ok(m.logged.every((l) => cases.every(([, t]) => t === "abc" || !l.includes(t.slice(-30)))), "no token in the log");
 });
 
-test("a valid token for an unknown or a disabled user: 403, with the mason user command that fixes it", async () => {
+test("the user is looked up at every request: unknown, disabled, removed (at once, mid-session) and removed-and-added-again (the old token's id no longer the name's) are refused 403 with the command that fixes each", async () => {
   const m = await mount({});
-  const unknown = await post(m, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, { token: jwt(claims("ghost")) });
+  const unknown = await post(m, INIT(), { token: jwt(claims("ghost")) });
   assert.equal(unknown.status, 403);
-  assert.deepEqual(unknown.body, { error: { code: "invalid_user", message: "the token names the mason user ghost, which this Mason does not have",
-    fix: "mason user add ghost, beside mason serve, makes it; or the authorization server puts another user's name in the sub claim (MASON_MCP_USER_CLAIM)" } });
-  const paused = await post(m, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, { token: jwt(claims("paused")) });
+  assert.equal((unknown.body!.error as { code: string }).code, "invalid_user");
+  assert.match((unknown.body!.error as { fix: string }).fix, /^mason user add ghost, beside mason serve, makes it/);
+  const paused = await post(m, INIT(), { token: jwt(claims("paused")) });
   assert.equal(paused.status, 403);
   assert.deepEqual(paused.body, { error: { code: "user_disabled", message: "the mason user paused is disabled", fix: "mason user enable paused, beside mason serve, lets it connect again" } });
-  // a claim of another name, as MASON_MCP_USER_CLAIM says
-  const byName = await mount({ MASON_MCP_USER_CLAIM: "mason_user" });
-  const t = jwt(claims("someone-else", { mason_user: "analyst" }));
-  const sid = await session(byName, t);
-  assert.deepEqual((await call(byName, t, sid, "query", { sql: "SELECT count(*) FROM orders" })).structured.rows, [["3"]]);
+
+  // a user that works, then is disabled, enabled, removed and added again: every change at the very next request
+  add("temp");
+  const old = jwt(claims("temp"));
+  const oldId = idOf.temp!;
+  const sid = await session(m, old);
+  assert.deepEqual((await call(m, old, sid, "query", { sql: "SELECT count(*) FROM orders" })).structured.rows, [["3"]]);
+  assert.ok(!("message" in disableUser(usersFile, "temp")));
+  const off = await post(m, { jsonrpc: "2.0", id: ids++, method: "tools/list" }, { token: old, session: sid });
+  assert.deepEqual([off.status, (off.body!.error as { code: string }).code], [403, "user_disabled"]);
+  assert.ok(!("message" in enableUser(usersFile, "temp")));
+  assert.equal((await post(m, { jsonrpc: "2.0", id: ids++, method: "tools/list" }, { token: old, session: sid })).status, 200);
+  assert.ok(!("message" in removeUser(usersFile, "temp")));
+  const gone = await post(m, { jsonrpc: "2.0", id: ids++, method: "tools/list" }, { token: old, session: sid });
+  assert.deepEqual([gone.status, (gone.body!.error as { code: string }).code], [403, "invalid_user"]);
+  add("temp");
+  assert.notEqual(idOf.temp, oldId);
+  // the old token, its signature and claims valid: its id is not the name's user's now
+  const replaced = await post(m, { jsonrpc: "2.0", id: ids++, method: "tools/list" }, { token: old, session: sid });
+  assert.equal(replaced.status, 403);
+  assert.deepEqual(replaced.body, { error: { code: "user_removed", message: `the token was issued for the mason user temp with the id ${oldId}, which was removed: the name is another user's now`,
+    fix: "sign in again, so the authorization server issues a token for the user temp as it is now (mason user list shows its id)" } });
+  // a token for the user as it is now opens a session of its own; the old session is not its
+  const now = jwt(claims("temp"));
+  assert.equal((await post(m, { jsonrpc: "2.0", id: ids++, method: "tools/list" }, { token: now, session: sid })).status, 404);
+  const fresh = await session(m, now);
+  assert.deepEqual((await call(m, now, fresh, "query", { sql: "SELECT count(*) FROM orders" })).structured.rows, [["3"]]);
 });
 
-test("MASON_MCP_FROM: client judges a user's ranges on the client's address; token replaces them only for a request with a valid token, and never on the Postgres API", async () => {
-  const client = await mount({});
+test("a user's ranges are judged on the client: the peer, or a named proxy's LAST X-Forwarded-For entry — never one the client forged in front, never a header from a peer not named", async () => {
   const valid = jwt(claims("limited"));
-  const outside = await post(client, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, { token: valid });
-  assert.equal(outside.status, 403);
-  assert.equal((outside.body!.error as { code: string }).code, "address_not_allowed");
-  assert.match((outside.body!.error as { fix: string }).fix, /mason user from limited <ranges>.*MASON_MCP_FROM=token/);
-
-  const token = await mount({ MASON_MCP_FROM: "token" });
-  // no token, or an invalid one, from an address outside the user's ranges: 401, no bypass
-  assert.equal((await post(token, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} })).status, 401);
-  assert.equal((await post(token, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, { token: jwt(claims("limited", { exp: nowS() - 600 })) })).status, 401);
-  assert.equal((await post(token, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, { token: jwt(claims("limited"), { key: stranger.privateKey }) })).status, 401);
-  // a valid token: allowed, and its statements run on the listener as the user
-  const sid = await session(token, valid);
-  const q = await call(token, valid, sid, "query", { sql: "SELECT count(*) FROM orders" });
-  assert.equal(q.isError, undefined, q.text);
+  // no proxy named: the peer (127.0.0.1) is judged, whatever X-Forwarded-For says (an untrusted peer's header is ignored)
+  const direct = await mount({});
+  for (const headers of [{}, { "x-forwarded-for": "10.1.2.3" }]) {
+    const a = await post(direct, INIT(), { token: valid, headers });
+    assert.equal(a.status, 403, JSON.stringify(headers));
+    assert.deepEqual([(a.body!.error as { code: string }).code, (a.body!.error as { message: string }).message],
+      ["address_not_allowed", "the mason user limited may not connect from 127.0.0.1, outside its address ranges"]);
+  }
+  // 127.0.0.1 named as the relay: its appended entry, the last, is the client
+  const relayed = await mount({ MASON_MCP_PROXY_FROM: "127.0.0.1" });
+  const inside = { "x-forwarded-for": "10.1.2.3" };
+  const sid = await session(relayed, valid, inside);
+  const q = await call(relayed, valid, sid, "query", { sql: "SELECT count(*) AS relayed FROM orders" }, inside);
   assert.deepEqual(q.structured.rows, [["3"]]);
-  assert.equal((await rows()).filter((r) => r.user === "limited" && r.query.includes("count(*) FROM orders")).length >= 1, true);
-  // the Postgres API's own listener still refuses the same user from the same address, its password right
+  const r = (await rows()).find((x) => x.query.includes("AS relayed"));
+  assert.deepEqual([r?.user, r?.clientAddress], ["limited", "10.1.2.3"], "the listener judged and logged the forwarded client");
+  // a client that forges an entry inside the ranges, in front of the one the relay appends, is judged by the relay's
+  const forged = await post(relayed, INIT(), { token: valid, headers: { "x-forwarded-for": "10.9.9.9, 203.0.113.7" } });
+  assert.equal(forged.status, 403);
+  assert.equal((forged.body!.error as { message: string }).message, "the mason user limited may not connect from 203.0.113.7, outside its address ranges");
+  // the same request with the forged entry last is the relay's own word: inside
+  assert.equal((await post(relayed, INIT(), { token: valid, headers: { "x-forwarded-for": "203.0.113.7, 10.9.9.9" } })).status, 200);
+  // a named relay that says nothing, or something that is no address: refused, never the peer let in
+  for (const headers of [{}, { "x-forwarded-for": "10.1.2.3, unknown" }, { "x-forwarded-for": "10.0.0.0/8" }]) {
+    const a = await post(relayed, INIT(), { token: valid, headers });
+    assert.deepEqual([a.status, (a.body!.error as { code: string }).code], [400, "address_unreadable"], JSON.stringify(headers));
+  }
+  // no token, or an invalid one, gets nothing whatever the address: 401 before the user is looked at
+  assert.equal((await post(relayed, INIT(), { headers: inside })).status, 401);
+  assert.equal((await post(relayed, INIT(), { token: jwt(claims("limited"), { key: stranger.privateKey }), headers: inside })).status, 401);
+  // the Postgres API's own listener still refuses the same user from 127.0.0.1, its password right
   await assert.rejects(PgConnection.connect({ host: "127.0.0.1", port: api.port, database: "shop", user: "limited", password: limitedPassword, sslmode: "disable", textForms: [] }),
     (e: unknown) => e instanceof PgError && e.code === "28000" && /no entry for host "127\.0\.0\.1"/.test(e.fields.M ?? ""));
 });
 
 test("the endpoint's door to the listener takes its own connections alone: a user's password with any PROXY header does not log in there", async () => {
-  const m = await mount({ MASON_MCP_FROM: "token" });
+  const m = await mount({});
   const door = m.endpoint.doorPort!;
   assert.ok(door > 0 && door !== api.port);
   const { proxyHeaderFor } = await import("../src/api/postgres/proxy.ts");
   const header = proxyHeaderFor("10.1.2.3")!;
   for (const [what, o] of [["a user's own password", { password: limitedPassword, proxyHeader: header }], ["no PROXY header", { password: limitedPassword }],
-    ["a made-up secret", { password: "x".repeat(43), proxyHeader: header }]] as const) {
+    ["a made-up secret and the user's id", { password: `${"x".repeat(43)}.${idOf.limited}`, proxyHeader: header }]] as const) {
     await assert.rejects(PgConnection.connect({ host: "127.0.0.1", port: door, database: "shop", user: "limited", sslmode: "disable", connectTimeoutMs: 5_000, textForms: [], ...o }),
       (e: unknown) => e instanceof Error && (what === "no PROXY header" ? /PROXY|closed/.test(e.message) : e instanceof PgError && e.code === "28P01"), what);
   }
   // the Postgres API refuses a PROXY header from an address MASON_PG_PROXY_FROM does not name, as before
   await assert.rejects(PgConnection.connect({ host: "127.0.0.1", port: api.port, database: "shop", user: "limited", password: limitedPassword, sslmode: "disable", textForms: [], proxyHeader: header }),
     (e: unknown) => e instanceof PgError && e.code === "08P01" && /PROXY/.test(e.message));
-  assert.equal((await rows()).some((r) => r.clientAddress === "10.1.2.3"), false);
+  assert.equal((await rows()).some((r) => r.clientAddress === "10.1.2.3" && r.query.includes("pg_catalog")), false);
 });
 
-test("a cancelled request: its statement is cancelled where it runs, and it is answered no further, as over stdio", async () => {
+test("a cancelled request: its statement is cancelled where it runs, and it is answered no further, as over stdio — in both revisions", async () => {
   const m = await mount({});
   const token = jwt(claims("analyst"));
   const sid = await session(m, token);
-  const id = 4242;
-  const long = post(m, { jsonrpc: "2.0", id, method: "tools/call", params: { name: "query", arguments: { sql: "SELECT count(*) FROM events a, events b WHERE (a.id::bigint * b.id) % 7 = 2", timeout_ms: 120_000 } } }, { token, session: sid });
-  await sleep(800);
-  const t0 = Date.now();
-  const cancel = await post(m, { jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: id, reason: "the user stopped it" } }, { token, session: sid });
-  assert.equal(cancel.status, 202);
-  const answered = await long;
-  // answered no further: accepted, no JSON-RPC answer
-  assert.equal(answered.status, 202);
-  assert.equal(answered.body, null);
-  assert.ok(Date.now() - t0 < 10_000);
-  for (let i = 0; ; i++) {
-    const r = (await rows()).filter((x) => x.query.includes("% 7 = 2"));
-    if (r.length > 0) { assert.deepEqual(r.map((x) => x.sqlstate), ["57014"]); assert.match(r[0]!.message ?? "", /user request/); break; }
-    assert.ok(i < 20, "the statement was cancelled");
-    await sleep(250);
+  for (const [revision, id, how] of [["2025-11-25", 4242, { session: sid }], ["2026-07-28", 4343, { headers: STATELESS }]] as const) {
+    const marker = `% 7 = ${id % 7}`;
+    const long = post(m, { jsonrpc: "2.0", id, method: "tools/call", params: { name: "query", arguments: { sql: `SELECT count(*) FROM events a, events b WHERE (a.id::bigint * b.id) ${marker}`, timeout_ms: 120_000 } } }, { token, ...how });
+    await sleep(800);
+    const t0 = Date.now();
+    const cancel = await post(m, { jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: id, reason: "the user stopped it" } }, { token, ...how });
+    assert.equal(cancel.status, 202, revision);
+    const answered = await long;
+    // answered no further: accepted, no JSON-RPC answer
+    assert.deepEqual([answered.status, answered.body], [202, null], revision);
+    assert.ok(Date.now() - t0 < 10_000, revision);
+    for (let i = 0; ; i++) {
+      const r = (await rows()).filter((x) => x.query.includes(marker));
+      if (r.length > 0) { assert.deepEqual(r.map((x) => x.sqlstate), ["57014"], revision); assert.match(r[0]!.message ?? "", /user request/); break; }
+      assert.ok(i < 20, `${revision}: the statement was cancelled`);
+      await sleep(250);
+    }
+    assert.ok(m.logged.some((l) => l === `[mcp] analyst: request ${id} cancelled by the client: the user stopped it`), m.logged.join("\n"));
   }
-  assert.ok(m.logged.some((l) => l === "[mcp] analyst: request 4242 cancelled by the client: the user stopped it"), m.logged.join("\n"));
 });
 
 test("a session is its user's; one that does not exist is 404; DELETE ends one; GET is not served", async () => {
-  const m = await mount({});
+  const m = await mount({ MASON_MCP_PROXY_FROM: "127.0.0.1" });
+  const inside = { "x-forwarded-for": "10.1.2.3" };
   const a = jwt(claims("analyst"));
-  const sid = await session(m, a);
+  const sid = await session(m, a, inside);
   // another valid user's token naming the session: no such session for it
-  const other = await post(m, { jsonrpc: "2.0", id: 9, method: "ping" }, { token: jwt(claims("limited")), session: sid, headers: {} });
-  assert.ok(other.status === 403 || other.status === 404, String(other.status));
-  const m2 = await mount({ MASON_MCP_FROM: "token" });
-  const sid2 = await session(m2, a);
-  assert.equal((await post(m2, { jsonrpc: "2.0", id: 9, method: "ping" }, { token: jwt(claims("limited")), session: sid2 })).status, 404);
-  assert.equal((await post(m, { jsonrpc: "2.0", id: 9, method: "ping" }, { token: a, session: "nope" })).status, 404);
-  assert.equal((await post(m, { jsonrpc: "2.0", id: 9, method: "ping" }, { token: a })).status, 400);
-  assert.equal((await post(m, { jsonrpc: "2.0", id: 9, method: "ping" }, { token: a, session: sid, headers: { "mcp-protocol-version": "1999-01-01" } })).status, 400);
-  assert.equal((await fetch(`${m.base}/mcp`, { headers: { authorization: `Bearer ${a}` } })).status, 405);
-  assert.equal((await fetch(`${m.base}/mcp`, { method: "DELETE", headers: { authorization: `Bearer ${a}`, "mcp-session-id": sid } })).status, 204);
-  assert.equal((await post(m, { jsonrpc: "2.0", id: 9, method: "ping" }, { token: a, session: sid })).status, 404);
+  assert.equal((await post(m, { jsonrpc: "2.0", id: 9, method: "ping" }, { token: jwt(claims("limited")), session: sid, headers: inside })).status, 404);
+  assert.equal((await post(m, { jsonrpc: "2.0", id: 9, method: "ping" }, { token: a, session: "nope", headers: inside })).status, 404);
+  assert.equal((await post(m, { jsonrpc: "2.0", id: 9, method: "ping" }, { token: a, session: sid, headers: { ...inside, "mcp-protocol-version": "1999-01-01" } })).status, 400);
+  assert.equal((await fetch(`${m.base}/mcp`, { headers: { ...inside, authorization: `Bearer ${a}` } })).status, 405);
+  assert.equal((await fetch(`${m.base}/mcp`, { method: "DELETE", headers: { ...inside, authorization: `Bearer ${a}`, "mcp-session-id": sid } })).status, 204);
+  assert.equal((await post(m, { jsonrpc: "2.0", id: 9, method: "ping" }, { token: a, session: sid, headers: inside })).status, 404);
 });
 
 test("the issuer's keys cannot be read: every token is refused 503, never let through; an unknown kid fetches them again at most once a minute", async () => {
@@ -368,20 +451,20 @@ test("the issuer's keys cannot be read: every token is refused 503, never let th
   await new Promise<void>((resolve) => dead.listen(0, "127.0.0.1", resolve));
   const at = `http://127.0.0.1:${(dead.address() as { port: number }).port}`;
   try {
-    const m = await mount({ MASON_MCP_ISSUER: at });
-    const a = await post(m, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, { token: jwt({ ...claims("analyst"), iss: at }) });
+    const m = await mount({ MASON_MCP_JWKS_URL: `${at}/jwks` });
+    const a = await post(m, INIT(), { token: jwt(claims("analyst")) });
     assert.equal(a.status, 503);
     assert.equal((a.body!.error as { code: string }).code, "unchecked");
     assert.ok(m.logged.some((l) => /keys could not be read, so every token is refused/.test(l)), m.logged.join("\n"));
   } finally { dead.close(); }
   const m = await mount({});
-  await post(m, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, { token: jwt(claims("analyst")) });
+  await post(m, INIT(), { token: jwt(claims("analyst")) });
   const fetched = keyFetches;
-  for (let i = 0; i < 5; i++) await post(m, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, { token: jwt(claims("analyst"), { kid: `made-up-${i}` }) });
+  for (let i = 0; i < 5; i++) await post(m, INIT(), { token: jwt(claims("analyst"), { kid: `made-up-${i}` }) });
   assert.equal(keyFetches, fetched, "made-up kids fetch the keys again at most once a minute");
 });
 
-test("mason serve with MASON_MCP_URL and MASON_MCP_ISSUER: /mcp on its health port runs a query as the token's user; mason status and mason logs --requests name it", { timeout: 180_000 }, async () => {
+test("mason serve with MASON_MCP_URL, MASON_MCP_ISSUER and MASON_MCP_JWKS_URL: /mcp on its health port runs a query as the token's user; mason status and mason logs --requests name it", { timeout: 180_000 }, async () => {
   const { spawn } = await import("node:child_process");
   const { DemoSource } = await import("../src/demo/source.ts");
   const { unassignedPort } = await import("./test-ports.ts");
@@ -397,7 +480,7 @@ test("mason serve with MASON_MCP_URL and MASON_MCP_ISSUER: /mcp on its health po
   const health = await unassignedPort();
   const env = { PATH: process.env.PATH ?? "", HOME: root, DATABASE_URL: source.url, MASON_API_KEY: API_KEY, MASON_DATA: data, MASON_PROJECT: path.join(root, "project"),
     MASON_HEALTH_PORT: String(health), MASON_HEALTH_HOST: "127.0.0.1", MASON_PG_PORT: String(await unassignedPort()), MASON_UI_PORT: String(await unassignedPort()),
-    MASON_MCP_URL: PUBLIC, MASON_MCP_ISSUER: ISSUER };
+    MASON_MCP_URL: PUBLIC, MASON_MCP_ISSUER: ISSUER, MASON_MCP_JWKS_URL: JWKS };
   const child = spawn(process.execPath, [MAIN, "serve"], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
   let out = "";
   child.stdout.on("data", (d) => { out += String(d); });
@@ -406,15 +489,16 @@ test("mason serve with MASON_MCP_URL and MASON_MCP_ISSUER: /mcp on its health po
   try {
     for (let i = 0; i < 1200 && !out.includes("mason start: ready"); i++) await sleep(50);
     assert.match(out, /mason start: ready/, out);
-    assert.match(out, /  mcp       https:\/\/mason\.example\.test\/mcp \(MASON_MCP_URL\), served at http:\/\/127\.0\.0\.1:\d+\/mcp: tokens of http:\/\/127\.0\.0\.1:\d+, the user in their sub claim/);
+    assert.match(out, /  mcp       https:\/\/mason\.example\.test\/mcp \(MASON_MCP_URL\), served at http:\/\/127\.0\.0\.1:\d+\/mcp: tokens of http:\/\/127\.0\.0\.1:\d+, the user in their mason_user and mason_user_id claims/);
     const added = await runMason(data, ["user", "add", "agent", "--json"], env);
     assert.equal(added.code, 0, added.stdout + added.stderr);
+    idOf.agent = (JSON.parse(added.stdout) as { id: string }).id;
     const m: Mounted = { endpoint: null as unknown as McpEndpoint, server: null as unknown as http.Server, base: `http://127.0.0.1:${health}`, logged: [] };
     const token = jwt(claims("agent"));
     let sid = "";
     // /mcp answers once the endpoint's door is open, just after ready
     for (let i = 0; i < 100; i++) {
-      const init = await post(m, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "hosted agent", version: "1" } } }, { token });
+      const init = await post(m, INIT(), { token });
       if (init.status === 200) { sid = init.headers.get("mcp-session-id")!; break; }
       assert.equal(init.status, 503, JSON.stringify(init.body));
       await sleep(100);
@@ -424,10 +508,11 @@ test("mason serve with MASON_MCP_URL and MASON_MCP_ISSUER: /mcp on its health po
     let q = await call(m, token, sid, "query", { sql: "SELECT count(*) > 0 AS answer FROM customers" });
     for (let i = 0; i < 100 && q.isError === true; i++) { await sleep(200); q = await call(m, token, sid, "query", { sql: "SELECT count(*) > 0 AS answer FROM customers" }); }
     assert.deepEqual(q.structured.rows, [["t"]], q.text);
-    const status = await runMason(data, ["status", "--json"], env);
-    assert.deepEqual(JSON.parse(status.stdout).mcp, { url: PUBLIC, issuer: ISSUER, from: "client" });
+    const status = JSON.parse((await runMason(data, ["status", "--json"], env)).stdout) as { mcp: unknown; addressPresets: Array<{ id: string; ranges: string[] }> };
+    assert.deepEqual(status.mcp, { url: PUBLIC, issuer: ISSUER });
+    assert.deepEqual(status.addressPresets.map((p) => p.id), ["claude"]);
     const said = await runMason(data, ["status"], env);
-    assert.match(said.stdout, /\n  MCP +https:\/\/mason\.example\.test\/mcp  \(signed in by http:\/\/127\.0\.0\.1:\d+; a user's address ranges judged on the client's address\)\n/);
+    assert.match(said.stdout, /\n  MCP +https:\/\/mason\.example\.test\/mcp  \(for a hosted agent, signed in by http:\/\/127\.0\.0\.1:\d+\)\n/);
     // the request log is written a few seconds after the statement (its flush)
     let logs = await runMason(data, ["logs", "--requests", "--client", "mason-mcp/hosted-agent"], env);
     for (let i = 0; i < 40 && !logs.stdout.includes("FROM customers"); i++) { await sleep(500); logs = await runMason(data, ["logs", "--requests", "--client", "mason-mcp/hosted-agent"], env); }

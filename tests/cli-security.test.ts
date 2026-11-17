@@ -13,7 +13,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { matrixEnv, runMason, type Answer } from "./cli-matrix.ts";
 import * as security from "../src/cli/security.ts";
-import { Issuer, mcpSettings } from "../src/cli/mcp-oauth.ts";
+// the MCP endpoint's modules, imported when the file loads: at a commit without them each of their tests fails by name
+// (scripts/fails-without.ts), never the file
+const oauth = await import("../src/cli/mcp-oauth.ts" as string).catch((e: unknown) => { if ((e as NodeJS.ErrnoException).code !== "ERR_MODULE_NOT_FOUND") throw e; return null; }) as typeof import("../src/cli/mcp-oauth.ts") | null;
+const mcpHttp = await import("../src/cli/mcp-http.ts" as string).catch((e: unknown) => { if ((e as NodeJS.ErrnoException).code !== "ERR_MODULE_NOT_FOUND") throw e; return null; }) as typeof import("../src/cli/mcp-http.ts") | null;
+const { parseProxyFrom } = await import("../src/api/postgres/proxy.ts");
+const mcpSettings: typeof import("../src/cli/mcp-oauth.ts").mcpSettings = (...a) => { assert.ok(oauth !== null, "src/cli/mcp-oauth.ts"); return oauth.mcpSettings(...a); };
+type Issuer = import("../src/cli/mcp-oauth.ts").Issuer;
 import { cookieName, cookieOf, guard, newToken, newTunnel, sameSecret, setCookieHeader, SECURITY_HEADERS, TICKET_MS, type GuardRequest } from "../src/cli/security.ts";
 
 const token = newToken();
@@ -267,13 +273,15 @@ function bearer(header: Record<string, unknown>, claims: Record<string, unknown>
     : alg === "EdDSA" ? crypto.sign(null, Buffer.from(signed), key) : crypto.sign("sha256", Buffer.from(signed), key);
   return `${signed}.${sig.toString("base64url")}`;
 }
-const valid = (more: Record<string, unknown> = {}): Record<string, unknown> => ({ iss: ISSUER, aud: RESOURCE, sub: "analyst", exp: Math.floor(Date.now() / 1000) + 600, ...more });
+const valid = (more: Record<string, unknown> = {}): Record<string, unknown> => ({ iss: ISSUER, aud: RESOURCE, mason_user: "analyst", mason_user_id: "0123456789abcdef", exp: Math.floor(Date.now() / 1000) + 600, ...more });
+const JWKS_AT = `${ISSUER}/jwks`;
 
 /** an issuer whose answers are a test's, by URL; what was asked, in order */
-function issuerOf(answers: Record<string, () => Response>, asked: string[] = []): InstanceType<typeof Issuer> {
-  const s = mcpSettings({ MASON_MCP_URL: RESOURCE, MASON_MCP_ISSUER: ISSUER }, "127.0.0.1");
+function issuerOf(answers: Record<string, () => Response>, asked: string[] = []): Issuer {
+  assert.ok(oauth !== null, "src/cli/mcp-oauth.ts");
+  const s = mcpSettings({ MASON_MCP_URL: RESOURCE, MASON_MCP_ISSUER: ISSUER, MASON_MCP_JWKS_URL: JWKS_AT }, "127.0.0.1");
   assert.ok(s !== null && !("problems" in s));
-  return new Issuer(s, { log: () => undefined, fetch: async (url, init) => {
+  return new oauth.Issuer(s, { log: () => undefined, fetch: async (url, init) => {
     asked.push(url);
     assert.equal(init.redirect, "manual", "a redirect is never followed");
     const a = answers[url];
@@ -282,14 +290,12 @@ function issuerOf(answers: Record<string, () => Response>, asked: string[] = [])
   } });
 }
 const json = (v: unknown): () => Response => () => new Response(JSON.stringify(v), { status: 200, headers: { "content-type": "application/json" } });
-const META = `${ISSUER}/.well-known/oauth-authorization-server`;
-const KEYS = { [META]: json({ issuer: ISSUER, jwks_uri: `${ISSUER}/jwks` }),
-  [`${ISSUER}/jwks`]: json({ keys: [jwk(rsaKey.publicKey, "r1", { use: "sig" }), jwk(weakKey.publicKey, "weak"), jwk(edKey.publicKey, "ed"), jwk(rsaKey.publicKey, "enc", { use: "enc" })] }) };
+const KEYS = { [JWKS_AT]: json({ keys: [jwk(rsaKey.publicKey, "r1", { use: "sig" }), jwk(weakKey.publicKey, "weak"), jwk(edKey.publicKey, "ed"), jwk(rsaKey.publicKey, "enc", { use: "enc" })] }) };
 
 test("an MCP bearer token: the issuer's signature by its published key alone — never alg none, an HMAC keyed by the public key, a weak or an encryption key", async () => {
   const issuer = issuerOf(KEYS);
-  assert.deepEqual(await issuer.check(bearer({ alg: "RS256", kid: "r1" }, valid(), rsaKey.privateKey)), { user: "analyst", subject: "analyst" });
-  assert.deepEqual(await issuer.check(bearer({ alg: "EdDSA", kid: "ed" }, valid(), edKey.privateKey)), { user: "analyst", subject: "analyst" });
+  assert.deepEqual(await issuer.check(bearer({ alg: "RS256", kid: "r1" }, valid(), rsaKey.privateKey)), { user: "analyst", id: "0123456789abcdef" });
+  assert.deepEqual(await issuer.check(bearer({ alg: "EdDSA", kid: "ed" }, valid(), edKey.privateKey)), { user: "analyst", id: "0123456789abcdef" });
   const publicBytes = Buffer.from(rsaKey.publicKey.export({ format: "pem", type: "spki" }) as string);
   const refused: Array<[string, string, RegExp]> = [
     ["alg none", bearer({ alg: "none", kid: "r1" }, valid(), null), /never none nor HS/],
@@ -300,7 +306,10 @@ test("an MCP bearer token: the issuer's signature by its published key alone —
     ["EdDSA named on an RSA key", bearer({ alg: "EdDSA", kid: "r1" }, valid(), edKey.privateKey), /does not fit its key's type/],
     ["a signature cut off", bearer({ alg: "RS256", kid: "r1" }, valid(), rsaKey.privateKey).replace(/\.[^.]+$/, "."), /no signature/],
     ["an audience list without this endpoint", bearer({ alg: "RS256", kid: "r1" }, valid({ aud: ["https://other.example.test", `${RESOURCE}/`] }), rsaKey.privateKey), /audience/],
-    ["a user name of another grammar", bearer({ alg: "RS256", kid: "r1" }, valid({ sub: "Robert'); --" }), rsaKey.privateKey), /not a mason user's name/],
+    // exactly this endpoint: a list naming it beside another is a token the other could replay here
+    ["an audience list of this endpoint and another", bearer({ alg: "RS256", kid: "r1" }, valid({ aud: ["https://other.example.test", RESOURCE] }), rsaKey.privateKey), /audience \(aud\) must be exactly/],
+    ["a user name of another grammar", bearer({ alg: "RS256", kid: "r1" }, valid({ mason_user: "Robert'); --" }), rsaKey.privateKey), /not a mason user's name/],
+    ["an id of another grammar", bearer({ alg: "RS256", kid: "r1" }, valid({ mason_user_id: "1 OR 1=1" }), rsaKey.privateKey), /not a mason user's id/],
     ["a JWE", "a.b.c.d.e", /encrypted/],
     ["too long", "a".repeat(20_000), /at most/],
   ];
@@ -311,26 +320,48 @@ test("an MCP bearer token: the issuer's signature by its published key alone —
     // what is said of a token never holds it, nor its signature
     assert.ok(!r.reason.includes(t.slice(-16)), what);
   }
-  // an audience list that names it is accepted
-  assert.ok("user" in await issuer.check(bearer({ alg: "RS256", kid: "r1" }, valid({ aud: ["https://other.example.test", RESOURCE] }), rsaKey.privateKey)));
+  // a list of this endpoint alone is accepted
+  assert.ok("user" in await issuer.check(bearer({ alg: "RS256", kid: "r1" }, valid({ aud: [RESOURCE] }), rsaKey.privateKey)));
 });
 
-test("the issuer's answers are untrusted: a redirect not followed, metadata naming another issuer, an answer too large or not JSON — every token refused 503, never let through", async () => {
+test("the issuer's keys are untrusted: a redirect not followed, an answer too large or not JSON, no key Mason can read, the server down — every token refused 503, never let through; a JWKS URL that is not https refused at the start", async () => {
   const t = bearer({ alg: "RS256", kid: "r1" }, valid(), rsaKey.privateKey);
   const cases: Array<[string, Record<string, () => Response>, RegExp]> = [
-    ["a redirect", { [META]: () => new Response("", { status: 302, headers: { location: "https://evil.example.test/" } }) }, /HTTP 302 \(a redirect, which Mason does not follow\)/],
-    ["another issuer", { [META]: json({ issuer: "https://evil.example.test", jwks_uri: "https://evil.example.test/jwks" }) }, /names another issuer/],
-    ["a jwks_uri in plain http", { [META]: json({ issuer: ISSUER, jwks_uri: "http://auth.example.test/jwks" }) }, /https/],
-    ["keys too large", { [META]: json({ issuer: ISSUER, jwks_uri: `${ISSUER}/jwks` }), [`${ISSUER}/jwks`]: () => new Response("x".repeat(600_000)) }, /more than/],
-    ["keys not JSON", { [META]: json({ issuer: ISSUER, jwks_uri: `${ISSUER}/jwks` }), [`${ISSUER}/jwks`]: () => new Response("<html>") }, /not JSON/],
-    ["no key Mason can read", { [META]: json({ issuer: ISSUER, jwks_uri: `${ISSUER}/jwks` }), [`${ISSUER}/jwks`]: json({ keys: [{ kty: "oct", k: "c2VjcmV0", kid: "r1" }] }) }, /no signing key/],
-    ["the issuer down", { [META]: () => { throw new TypeError("fetch failed"); } }, /could not be fetched/],
+    ["a redirect", { [JWKS_AT]: () => new Response("", { status: 302, headers: { location: "https://evil.example.test/" } }) }, /HTTP 302 \(a redirect, which Mason does not follow\)/],
+    ["keys too large", { [JWKS_AT]: () => new Response("x".repeat(600_000)) }, /more than/],
+    ["keys not JSON", { [JWKS_AT]: () => new Response("<html>") }, /not JSON/],
+    ["not a JWK set", { [JWKS_AT]: json({ issuer: ISSUER }) }, /not a JWK set/],
+    ["no key Mason can read", { [JWKS_AT]: json({ keys: [{ kty: "oct", k: "c2VjcmV0", kid: "r1" }] }) }, /no signing key/],
+    ["the issuer down", { [JWKS_AT]: () => { throw new TypeError("fetch failed"); } }, /could not be fetched/],
   ];
   for (const [what, answers, re] of cases) {
     const asked: string[] = [];
     const r = await issuerOf(answers, asked).check(t);
     assert.ok("status" in r && r.status === 503, `${what}: ${JSON.stringify(r)}`);
     assert.match(r.reason, re, what);
-    assert.ok(asked.every((u) => u.startsWith(ISSUER)), `${what}: nothing asked of another host: ${asked.join(", ")}`);
+    assert.deepEqual([...new Set(asked)], [JWKS_AT], `${what}: the JWKS URL set, and nothing else, asked`);
   }
+  const plain = mcpSettings({ MASON_MCP_URL: RESOURCE, MASON_MCP_ISSUER: ISSUER, MASON_MCP_JWKS_URL: "http://auth.example.test/jwks" }, "127.0.0.1");
+  assert.ok(plain !== null && "problems" in plain && /MASON_MCP_JWKS_URL="http:\/\/auth\.example\.test\/jwks": https:\/\//.test(plain.problems.join("; ")));
+});
+
+test("the MCP endpoint's client address: a named proxy's LAST X-Forwarded-For entry alone; an entry the client forged in front of it, and a header from a peer not named, never believed", () => {
+  assert.ok(mcpHttp !== null, "src/cli/mcp-http.ts");
+  const { clientOf } = mcpHttp;
+  const relay = parseProxyFrom("10.0.0.1, 2001:db8::1", "MASON_MCP_PROXY_FROM");
+  assert.ok(relay !== null && !("problem" in relay));
+  // a peer no setting names: its own address, whatever header it sends (a client can send any)
+  assert.deepEqual(clientOf("203.0.113.7", "10.1.2.3", relay), { address: "203.0.113.7" });
+  assert.deepEqual(clientOf("::ffff:203.0.113.7", "10.1.2.3", null), { address: "203.0.113.7" });
+  // the named relay: the entry IT appended, the last; what came before it is the client's to write
+  assert.deepEqual(clientOf("10.0.0.1", "10.1.2.3", relay), { address: "10.1.2.3" });
+  assert.deepEqual(clientOf("10.0.0.1", "10.9.9.9, 198.51.100.4", relay), { address: "198.51.100.4" });
+  assert.deepEqual(clientOf("10.0.0.1", ["10.9.9.9", "198.51.100.4"], relay), { address: "198.51.100.4" }, "the header sent twice: the last line's last entry");
+  assert.deepEqual(clientOf("::ffff:10.0.0.1", "  198.51.100.4  ", relay), { address: "198.51.100.4" });
+  assert.deepEqual(clientOf("2001:db8::1", "2001:db8:7::9", relay), { address: "2001:db8:7::9" });
+  // a named relay that does not say, or says what is no address: refused, never the relay itself let in
+  for (const header of [undefined, "", "10.1.2.3, ", "unknown", "10.0.0.0/8", "10.1.2.3:443", "[2001:db8::9]"]) {
+    assert.ok("refused" in clientOf("10.0.0.1", header, relay), String(header));
+  }
+  assert.ok("refused" in clientOf(undefined, undefined, null), "a peer that cannot be read");
 });

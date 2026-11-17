@@ -21,6 +21,7 @@
  * LOOPBACK BY CONSTRUCTION: `listenOnLoopback` is how this server listens, and it takes no address. No setting names
  * one, and a container's page is reached from inside the container, never published (docs/WEB-UI.md).
  */
+import { presetsForPage } from "./address-presets.ts";
 import * as fs from "node:fs";
 import * as http from "node:http";
 import * as path from "node:path";
@@ -131,8 +132,8 @@ export interface RunContext {
   pageIcon?: string | null;
   /** MASON_UI_SOCKET (src/cli/ui-socket.ts): the Unix socket the page is served on too, or null */
   pageSocket?: string | null;
-  /** mason serve's MCP endpoint (src/cli/mcp-http.ts): its public address, issuer and MASON_MCP_FROM, or null when it is off */
-  mcp?: { url: string; issuer: string; from: "client" | "token" } | null;
+  /** mason serve's MCP endpoint (src/cli/mcp-http.ts): its public address and issuer, or null when it is off */
+  mcp?: { url: string; issuer: string } | null;
   /** the project's database is the demo database this run hosts (`mason init demo`, src/cli/demo.ts): mason status says so */
   demo?: boolean;
   /** the project's users (src/cli/user.ts): what `/api/users` lists and changes, with the functions `mason user` calls —
@@ -358,6 +359,8 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     pageSocket: ctx.pageSocket ?? null,
     // mason serve's MCP endpoint (MASON_MCP_URL), or null: mason status and the Users page say it
     mcp: ctx.mcp ?? null,
+    // the address ranges hosted agents' companies publish (src/cli/address-presets.ts): the Users page's Connects from
+    addressPresets: presetsForPage(),
     source: { url: maskedUrl(ctx.source.url), host: ctx.source.host, database: ctx.source.database, remote: ctx.source.remote, demo: ctx.demo === true,
       // `replication` while a table's sync is replication (the run streams), else `poll`: each table's own is its kept
       version: facts.versionText, standby: facts.standby, changes: repl !== null ? "replication" : "poll", name: sources.file?.name ?? null, file: sources.file?.file ?? null,

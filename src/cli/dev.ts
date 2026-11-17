@@ -118,8 +118,8 @@ export interface ServeHooks {
   page?: (server: Server) => void;
   /** that socket's path: `/api/state` `pageSocket` */
   socket?: string;
-  /** the MCP endpoint's public address, issuer and MASON_MCP_FROM (src/cli/mcp-http.ts): `/api/state` `mcp` */
-  mcp?: { url: string; issuer: string; from: "client" | "token" };
+  /** the MCP endpoint's public address and issuer (src/cli/mcp-http.ts): `/api/state` `mcp` */
+  mcp?: { url: string; issuer: string };
 }
 
 /** a line to the run's terminal, which a full disk never ends (src/cli/run-output.ts), a write under .mason/ that

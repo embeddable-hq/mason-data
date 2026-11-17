@@ -50,16 +50,20 @@ export const fromText = (from) => from === null || from === undefined ? "from an
 /**
  * THE "CONNECTS FROM" CHOICE, as `mason user add --help` says it: a dropdown, anywhere (no --from, the default: no
  * `from` is sent) or only these addresses (--from <range>, a comma list as `--from a,b` takes it), the address box
- * beside it. The box is shown only while "only these addresses" is chosen, and its place is kept while "anywhere" is
+ * beside it; or a hosted agent's company (`presets`: `/api/state` `addressPresets`, src/cli/address-presets.ts), which sends
+ * the ranges it publishes for its connectors (its option's value carries them, so the choice is read from the form alone),
+ * chosen when a user's ranges are exactly a company's. The box is shown only while "only these addresses" is chosen, and its place is kept while "anywhere" is
  * (the stylesheet hides it by `visibility`, never `display`), so nothing in the form moves when the choice changes.
  * `id`: the form's own, so two forms on the page never share an input's id; `from`: the ranges it opens with (null:
  * anywhere). The page never judges a range: the run reads each, and its refusal is said as the run words it (one
  * grammar, the server's).
  */
-export function connectsChoice(id, from = null) {
-  const only = Array.isArray(from);
+export function connectsChoice(id, from = null, presets = []) {
+  const chosen = Array.isArray(from) ? presets.find((p) => p.ranges.length === from.length && p.ranges.every((r, i) => r === from[i])) : undefined;
+  const only = Array.isArray(from) && chosen === undefined;
   return `<span class="connects"><label for="${esc(id)}-connects">Connects from</label> ` +
-    `<select id="${esc(id)}-connects" name="connects"><option value="any"${only ? "" : " selected"}>anywhere</option><option value="only"${only ? " selected" : ""}>only these addresses</option></select>` +
+    `<select id="${esc(id)}-connects" name="connects"><option value="any"${only ? "" : " selected"}>anywhere</option><option value="only"${only ? " selected" : ""}>only these addresses</option>` +
+    presets.map((p) => `<option value="preset:${esc(p.ranges.join(","))}"${p === chosen ? " selected" : ""}>${esc(p.label)}</option>`).join("") + `</select>` +
     ` <span class="ranges"><label class="sr" for="${esc(id)}-from">Address ranges, comma-separated</label>` +
     `<input id="${esc(id)}-from" name="from" spellcheck="false" autocapitalize="off" placeholder="e.g. 192.0.2.0/24, 2001:db8::/32" value="${esc(only ? from.join(", ") : "")}"></span></span>`;
 }
@@ -70,7 +74,10 @@ export function connectsChoice(id, from = null) {
  * empty one dropped: `--from a,b`'s list. Nothing more is judged here; none typed is sent as none, for the run to refuse.
  */
 export function rangesOf(elements) {
-  if ((elements?.connects?.value ?? "any") !== "only") return null;
+  const choice = String(elements?.connects?.value ?? "any");
+  // a company's published ranges, as its option carries them
+  if (choice.startsWith("preset:")) return choice.slice("preset:".length).split(",").filter((r) => r !== "");
+  if (choice !== "only") return null;
   return String(elements.from?.value ?? "").split(",").map((r) => r.trim()).filter((r) => r !== "");
 }
 
@@ -115,7 +122,7 @@ function usersTabs(show, active, removed) {
  * row's actions as Disable does, where it connects from (`confirming` { name, verb: "from" }) — the choice the add form
  * offers, opened at its ranges now — and sends POST /api/users/<name>/from.
  */
-export function renderUsers(list, confirming = null, now = Date.now(), refused = null, roles = null, readOnly = null, show = "active", { sending = () => false, fromSent = null } = {}) {
+export function renderUsers(list, confirming = null, now = Date.now(), refused = null, roles = null, readOnly = null, show = "active", { sending = () => false, fromSent = null, presets = [] } = {}) {
   const live = list.users.filter((u) => u.removedAt == null);
   const gone = list.users.filter((u) => u.removedAt != null);
   const why = readOnlyLine("Users are not added, changed, disabled or removed", readOnly);
@@ -151,7 +158,7 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
     // Written again while it is sent, it keeps the choice the person sent (`fromSent`)
     else if (asking === "from") pops.push(pop(anchor, `<form id="user-from" class="from-form" autocomplete="off">` +
       `<p class="ask-from">Choose where ${esc(u.name)} can connect from. If you limit it, open sessions from other addresses end at their next query.</p>` +
-      connectsChoice("user-from", fromSent !== null && busy ? fromSent.from : u.from ?? null) +
+      connectsChoice("user-from", fromSent !== null && busy ? fromSent.from : u.from ?? null, presets) +
       `<p class="pop-actions">${sendButton(`Change ${u.name}`, "Changing…", {}, "primary small", { busy, submit: true })} ${cancel}</p>` +
       `<input type="hidden" name="user" value="${esc(u.name)}"></form>`, { kind: "dialog", label: `Where ${u.name} connects from` }));
     else if (refused?.name === u.name) pops.push(failurePop(anchor, refused.failure, { dismissRefused: "" }));
@@ -244,7 +251,7 @@ export function renderHostedMcp(mcp) {
     `<dl class="facts"><dt>URL</dt><dd>${copyable("users-mcp-url", mcp.url)}</dd></dl>` +
     `<ol class="mcp-steps"><li>In the agent's settings, add a custom connector and paste the URL (in claude.ai: Settings, then Connectors, then Add custom connector).</li>` +
     `<li>Connect, and sign in when the agent asks. You sign in at ${code(mcp.issuer)}, and the agent's queries run as the Mason user your sign-in names.</li></ol>` +
-    (mcp.from === "token" ? "" : `<p class="tip">A user limited to some addresses can't connect this way unless the agent's servers are among them.</p>`);
+    `<p class="tip">A user limited to some addresses connects this way only from the agent's own: choose its company under Connects from.</p>`;
 }
 
 // ------------------------------------------------------------------ Temporary cloud tunnel (mason share, from the page)
@@ -513,7 +520,7 @@ export function renderAddUser(state, inBox = false, { busy = false, sent = null 
   // the form is the same whatever writes it; none once a user is added
   return `<form id="add-user"${inBox ? "" : ` class="formcard"`} autocomplete="off"><span class="name-field"><label for="user-name">Name</label> ` +
     `<input id="user-name" name="name" required placeholder="e.g. metabase" spellcheck="false" autocapitalize="off"${sent?.name ? ` value="${esc(sent.name)}"` : ""}></span>` +
-    roleChoice(state.roles, sent?.role ?? "") + connectsChoice("add-user", sent?.from ?? null) +
+    roleChoice(state.roles, sent?.role ?? "") + connectsChoice("add-user", sent?.from ?? null, Array.isArray(state.addressPresets) ? state.addressPresets : []) +
     // Add a user → Adding… in the room of both; its refusal a popover beside it (`renderAddUser`'s page: `action`)
     `${sendButton("Add a user", "Adding…", {}, "primary", { id: "add-user-submit", busy, submit: true })}${ROLES_LINE}</form>`;
 }
@@ -749,7 +756,7 @@ export const page = {
         const offer = shareable(s) && renderAddUser(s) !== "";
         return {
           // the roles file's state is the run's (/api/state roles): a file that cannot be read refuses every user held to it
-          users: u ? renderUsers(u, m.confirming, h !== null ? h.now : ctx.now().getTime(), m.refused, state?.roles ?? null, usersReadOnly(state), m.show, { sending: ctx.sending, fromSent: m.fromSent }) : "",
+          users: u ? renderUsers(u, m.confirming, h !== null ? h.now : ctx.now().getTime(), m.refused, state?.roles ?? null, usersReadOnly(state), m.show, { sending: ctx.sending, fromSent: m.fromSent, presets: Array.isArray(state?.addressPresets) ? state.addressPresets : [] }) : "",
           // the add box: what it creates where the page may open a cloud tunnel (else the plain form), each
           // kind's pane a part of its own, so a choice of kind rewrites neither (a name being typed stays)
           "add-kinds": offer ? renderAddKinds(m.addKind) : "",
