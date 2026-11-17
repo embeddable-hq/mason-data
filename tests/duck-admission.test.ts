@@ -176,7 +176,7 @@ const client = async (): Promise<pg.Client> => {
 };
 
 /** a raw session: frames written, replies read up to each ReadyForQuery */
-async function rawSession(): Promise<{ socket: net.Socket; pid: number; secret: number; untilReady(): Promise<BackendMessage[]>; end(): void }> {
+async function rawSession(): Promise<{ socket: net.Socket; pid: number; secret: number; untilReady(): Promise<BackendMessage[]>; untilSuspended(): Promise<BackendMessage[]>; end(): void }> {
   const socket = net.connect(api.port, "127.0.0.1");
   await new Promise<void>((r) => socket.once("connect", () => r()));
   let chunks: Buffer[] = [];
@@ -184,30 +184,28 @@ async function rawSession(): Promise<{ socket: net.Socket; pid: number; secret: 
   let wake: (() => void) | null = null;
   socket.on("data", (d: Buffer) => { chunks.push(d); tail = Buffer.concat([tail, d]).subarray(-6); wake?.(); });
   const ready = (): boolean => tail.length === 6 && tail[0] === 0x5a && tail.readInt32BE(1) === 5;
-  const untilReady = async (): Promise<BackendMessage[]> => {
-    while (!ready()) await new Promise<void>((r) => { wake = r; });
+  // a PortalSuspended last: what an Execute with a row limit ends with before a Flush, with no ReadyForQuery after it
+  const suspended = (): boolean => tail.length === 6 && tail[1] === 0x73 && tail.readInt32BE(2) === 4;
+  const until = async (done: () => boolean): Promise<BackendMessage[]> => {
+    while (!done()) await new Promise<void>((r) => { wake = r; });
     const ms = wire.replies(Buffer.concat(chunks));
     chunks = []; tail = Buffer.alloc(0);
     return ms;
   };
+  const untilReady = (): Promise<BackendMessage[]> => until(ready);
   socket.write(wire.startup({ user: "mason", database: "app" }));
   while (chunks.length === 0) await new Promise<void>((r) => { wake = r; });
   chunks = [];
   socket.write(wire.password(mintToken(API_KEY, 600).token));
   const key = (await untilReady()).find((m) => m.type === "BackendKeyData") as Extract<BackendMessage, { type: "BackendKeyData" }>;
-  return { socket, pid: key.pid, secret: key.secret, untilReady, end: () => { socket.destroy(); } };
+  return { socket, pid: key.pid, secret: key.secret, untilReady, untilSuspended: () => until(suspended), end: () => { socket.destroy(); } };
 }
 
-/** a session holding the one turn: a heavy statement's portal suspended after 10 rows, inside a transaction (released
- *  when the portal is closed) */
+/** the one turn, held as a heavy statement running holds it (released by `release`) */
 async function holdTheTurn(): Promise<{ release(): Promise<void>; end(): void }> {
-  const s = await rawSession();
-  s.socket.write(wire.query("BEGIN READ ONLY"));
-  await s.untilReady();
-  s.socket.write(Buffer.concat([wire.parse("", HEAVY), wire.bind("held", "", [], []), wire.execute("held", 10), wire.sync()]));
-  const ms = await s.untilReady();
-  assert.ok(ms.some((m) => m.type === "PortalSuspended"), `the heavy portal is suspended: ${ms.map((m) => m.type).join(", ")}`);
-  return { release: async () => { s.socket.write(Buffer.concat([wire.close("P", "held"), wire.sync()])); await s.untilReady(); }, end: () => s.end() };
+  const release = await store.admission.admit(new AbortController().signal);
+  assert.ok(release !== null, "the turn is free to take");
+  return { release: async () => { release(); }, end: () => { release(); } };
 }
 
 const rowOf = (sql: string): ApiLogRow | undefined => recorded.findLast((r) => r.payload === sql);
@@ -276,6 +274,46 @@ test("a heavy statement waits for the turn: its statement_timeout and its cancel
       assert.ok((rowOf(`SELECT count(*)::int AS m FROM (${HEAVY}) j`)?.waitedMs ?? -1) >= 0);
     } finally { await waiter.end(); }
   } finally { held.end(); }
+});
+
+/** a heavy statement on another session, under a statement_timeout of 3 s: answered at once while no statement holds
+ *  the turn, where one waiting on a turn that is never released fails 57014 at its timeout */
+async function heavyAnswersPromptly(): Promise<void> {
+  const b = await client();
+  try {
+    await b.query("SET statement_timeout = 3000");
+    const t = Date.now();
+    assert.deepEqual((await b.query(`SELECT count(*)::int AS n FROM (${HEAVY}) j`)).rows, [{ n: 200000 }]);
+    assert.ok(Date.now() - t < 3_000, `answered after ${Date.now() - t} ms`);
+  } finally { await b.end(); }
+}
+
+test("a session idle with a heavy statement's named portal suspended holds no turn, past the COMMIT that ended its transaction: another session's heavy statement answers at once", async () => {
+  const a = await rawSession();
+  try {
+    a.socket.write(wire.query("BEGIN READ ONLY"));
+    await a.untilReady();
+    a.socket.write(Buffer.concat([wire.parse("", HEAVY), wire.bind("c_1", "", [], []), wire.execute("c_1", 10), wire.sync()]));
+    const ms = await a.untilReady();
+    assert.ok(ms.some((m) => m.type === "PortalSuspended"), `the heavy portal is suspended: ${ms.map((m) => m.type).join(", ")}`);
+    a.socket.write(wire.query("COMMIT"));
+    await a.untilReady();
+    // A stays idle, its portal suspended
+    assert.equal(store.admission.running, 0, "no heavy statement holds a turn");
+    await heavyAnswersPromptly();
+  } finally { a.end(); }
+});
+
+test("a session idle with a heavy statement's unnamed portal suspended before a Sync (Execute with a row limit, then Flush, as a streaming cursor does) holds no turn: another session's heavy statement answers at once", async () => {
+  const a = await rawSession();
+  try {
+    a.socket.write(Buffer.concat([wire.parse("", HEAVY), wire.bind("", "", [], []), wire.execute("", 10), wire.flush()]));
+    const ms = await a.untilSuspended();
+    assert.equal(ms.filter((m) => m.type === "DataRow").length, 10, `10 rows, then suspended: ${ms.map((m) => m.type).join(", ")}`);
+    // A stays idle, its portal suspended, with no Sync
+    assert.equal(store.admission.running, 0, "no heavy statement holds a turn");
+    await heavyAnswersPromptly();
+  } finally { a.end(); }
 });
 
 test("a statement is weighed under its own cancel: one after a cancelled statement that called a Mason function is weighed, not taken for cancelled", async () => {

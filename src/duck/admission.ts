@@ -13,8 +13,13 @@
  *   of the memory limit, at most one a thread (a heavy statement already uses every thread), at least one.
  *   `MASON_HEAVY_QUERIES` sets it instead (`heavyQueriesOf`).
  * - THE WAIT is on the listener's thread, under the statement's own signal (`Admission.admit`): its cancel and its
- *   statement_timeout end it with 57014, as they end a running statement. Turns are given first come, first served. A
- *   statement holds its turn until its answer ends (read to its end, failed, or closed: `heldUntilEnd`).
+ *   statement_timeout end it with 57014, as they end a running statement. Turns are given first come, first served.
+ * - THE TURN IS HELD UNTIL THE FIRST ROWS (`heldUntilFirstRows`): the statement's first chunk read, its end, its failure,
+ *   or its close, whichever comes first. What a heavy statement keeps is built before its first row: a join's build
+ *   side, a group by's groups, a sort's or a window's rows each end a pipeline the rows come out of only once it is
+ *   done. What is left is a scan and a probe at the pace the client reads. A client may stop reading for as long as it
+ *   likes (a portal suspended by an Execute's row limit, idle past its COMMIT or before a Sync), and its turn must not
+ *   wait for it: another session's heavy statement would wait without end (PR 1136's review).
  */
 import type { DuckAnswer } from "../api/postgres/server.ts";
 import type { PlanNode } from "./explain.ts";
@@ -225,16 +230,14 @@ export class Admission {
   }
 }
 
-/** An answer whose turn is released once it ends: read to its end, failed, or closed. */
-export function heldUntilEnd(a: DuckAnswer, release: () => void): DuckAnswer {
+/** An answer whose turn is released once its first fetch returns (rows, its end, or its failure), or it is closed:
+ *  never held while the answer waits on its client. */
+export function heldUntilFirstRows(a: DuckAnswer, release: () => void): DuckAnswer {
   return {
     columns: a.columns,
     fetch: async (formats, session) => {
-      let rows: Buffer[] | null;
-      try { rows = await a.fetch(formats, session); }
-      catch (e) { release(); throw e; }
-      if (rows === null) release();
-      return rows;
+      try { return await a.fetch(formats, session); }
+      finally { release(); }
     },
     close: () => { try { a.close(); } finally { release(); } },
   };

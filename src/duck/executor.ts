@@ -653,7 +653,7 @@ class RemoteRunner implements DuckRunner {
       if (e instanceof ExecutorGone) return { failure: goneError(e, sql.text) };
       // anything else: a turn taken all the same (a check that cannot tell holds it back, never refuses it); the
       // statement's run says its own error if it has one
-      this.ex.say(`the engine's estimate of a statement could not be read (${e instanceof Error ? e.message : String(e)}): it waits for a heavy statement's turn — ${sql.text.replace(/\s+/g, " ").slice(0, 200)}`);
+      this.ex.say(`the engine's estimate of a statement could not be read (${e instanceof Error ? e.message : String(e)}): it waits for a heavy statement's turn`);
       rows = Infinity;
     } finally { unwatch(); }
     if (rows < a.heavyRows) return LIGHT;

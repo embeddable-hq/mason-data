@@ -59,7 +59,7 @@
  */
 import type { ExactColumn } from "../../duck/rewrite.ts";
 import type { PlannedSql } from "../../duck/plan.ts";
-import { heldUntilEnd, LIGHT, type Admitted, type Turn } from "../../duck/admission.ts";
+import { heldUntilFirstRows, LIGHT, type Admitted, type Turn } from "../../duck/admission.ts";
 import { copyFacts, type CopyFacts } from "../../duck/explain.ts";
 import { utf8Fatal } from "../../duck/text.ts";
 import { scaledKey } from "../../duck/scale-column.ts";
@@ -2166,12 +2166,12 @@ class Session {
       const values = await this.duckValues(plan, params, clock, read);
       const session = await this.duckSession();
       // A HEAVY STATEMENT WAITS FOR ITS TURN (src/duck/admission.ts), under this statement's signal: its cancel and its
-      // timeout end the wait as they end a run. The turn is held until the answer ends
+      // timeout end the wait as they end a run. The turn is held until its first rows, never while it waits on the client
       const turn = await this.turnOf(runner, plan.sql, values, session, controller.signal);
       let a: DuckAnswer;
       try { a = await runner.run(plan.sql, values, session, controller.signal, plan.fields, plan.exact ?? []); }
       catch (e) { turn.release(); throw e; }
-      if (turn.heavy) a = heldUntilEnd(a, turn.release);
+      if (turn.heavy) a = heldUntilFirstRows(a, turn.release);
       // it reached the engine: its plan can be recorded should it prove slow, answered or failed (recordRequest)
       const ran: Ran = { plan, values, session, ...(turn.heavy ? { waitedMs: turn.waitedMs } : {}) };
       if (this.asked !== null) this.asked.ran = ran;

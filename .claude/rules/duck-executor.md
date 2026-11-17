@@ -125,8 +125,9 @@ paths:
   `store.memoryLimitBytes`, at most one a thread of the engine, at least one; `MASON_HEAVY_QUERIES`), one `Admission`
   per instance. The wait is on the listener's thread (`RemoteRunner.admit`), never the worker's, under the statement's
   own signal: its cancel and its timeout end it with 57014, it holds no libuv thread, and its row of the request log
-  has the wait (`waited_ms`). A turn is held until the answer ends (`heldUntilEnd`: read to its end, failed, closed),
-  so a portal left suspended holds it. A weight that cannot be read is logged and counted heavy, never refused.
+  has the wait (`waited_ms`). A turn is held until the answer's first rows (`heldUntilFirstRows`: its first fetch
+  returned, or it closed), never while it waits on its client: a portal suspended and left idle must hold no turn, or
+  another session's heavy statement waits without end. A weight that cannot be read is logged and counted heavy, never refused.
   DETECTOR: `tests/duck-admission.test.ts`. ("Heavy statements take a turn")
 - **Nothing ends the worker's JavaScript while DuckDB has work in flight on it** (a test file under load aborted at
   exit, `libc++abi: … Napi::Error`: its close outlasted the grace and the executor terminated the worker under a

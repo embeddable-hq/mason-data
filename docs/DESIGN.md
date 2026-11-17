@@ -3097,8 +3097,14 @@ whose memory it guards. The statement's signal is there, so its cancel and its s
 end a run (57014, the timeout's words). The listener's dispatch would have had the signal too, but not the engine, and
 the worker has the engine but hears a cancel only once its loop turns. A waiting statement holds nothing on the worker
 and no libuv thread, so "The pool" still serves the light ones. The listener asks for the turn before `run` (and an
-EXPLAIN ANALYZE's `explain`), and holds it until the answer ends (`heldUntilEnd`), its wait on its row (`waited_ms`).
-A portal left suspended holds its turn, as it holds its memory.
+EXPLAIN ANALYZE's `explain`), and holds it until the answer's first rows (`heldUntilFirstRows`), its wait on its row (`waited_ms`).
+PR 1136's review found the first version held the turn until the answer ended. A client that stopped reading kept it: a
+named portal suspended by an Execute's row limit and left idle past its COMMIT, or an unnamed one suspended before a Sync
+(Execute and Flush, as a streaming cursor reads). Another session's heavy statement then waited without end, or until its
+statement_timeout. So the turn is now released at the first rows. What a heavy statement keeps is built before them: a
+join's build side, a group by's groups, a sort's rows each end a pipeline the rows come out of only once it is done. What
+is left is a scan and a probe at the client's pace. A portal left suspended still holds its memory (its hash table), as it
+does in Postgres, but no turn.
 
 ### Local gates (2026-10-30)
 
