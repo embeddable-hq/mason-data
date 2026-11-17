@@ -14,6 +14,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import type { Cell, Fixture, SweepVerdict } from "../scripts/bench-replica.ts";
 import type { ColdCell, ColdFixture, ColdRun } from "../scripts/bench-replica-cold.ts";
 import { QUERIES, clientSteps, nextSize, reorderSql } from "../scripts/bench-replica.ts";
@@ -753,4 +755,80 @@ test("the published fixture is a run that ended, with every cell its mode measur
   } else {
     assert.ok(f.complete, "the fixture is of a run that ended (complete: true)");
   }
+});
+
+/** A fake `docker` for a --cold run: every call recorded in $FAKE_DOCKER_LOG; the containers and volumes named in
+ *  $FAKE_EXISTING are there (another run's); $FAKE_FAIL_RUN makes `docker run -d` fail, after the network was made */
+const FAKE_DOCKER = `#!/bin/sh
+echo "$*" >> "$FAKE_DOCKER_LOG"
+if [ "$2" = inspect ] && { [ "$1" = container ] || [ "$1" = volume ] || [ "$1" = network ]; }; then
+  for n in $FAKE_EXISTING; do if [ "$n" = "$3" ]; then echo "[]"; exit 0; fi; done
+  echo "Error: No such object: $3" >&2; exit 1
+fi
+case "$1 $2" in
+  "info --format") echo /tmp ;;
+  "image inspect") echo sha256:fake ;;
+  "run --rm") echo "fake 18.1" ;;
+  "network create") echo net-made-by-this-run ;;
+  "run -d") if [ -n "$FAKE_FAIL_RUN" ]; then echo "docker: the fake refuses" >&2; exit 125; fi; echo pg-made-by-this-run ;;
+esac
+exit 0
+`;
+/** A fake `sudo`: the page cache's drop, recorded in $FAKE_SUDO_LOG */
+const FAKE_SUDO = `#!/bin/sh
+echo "$*" >> "$FAKE_SUDO_LOG"
+cat > /dev/null
+exit 0
+`;
+
+test("--cold never touches another run: a run in progress is refused before any side effect, and a failed run removes only what it made, by id", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-cold-guard-"));
+  try {
+    const bin = path.join(dir, "bin");
+    fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, "docker"), FAKE_DOCKER, { mode: 0o755 });
+    fs.writeFileSync(path.join(bin, "sudo"), FAKE_SUDO, { mode: 0o755 });
+    const module = pathToFileURL(path.join(ROOT, "scripts/bench-replica-cold.ts")).href;
+    // the run in a process of its own, on a platform said to be Linux, the fakes first on PATH
+    const child = `Object.defineProperty(process, "platform", { value: "linux" });
+      const { mainCold } = await import(${JSON.stringify(module)});
+      try { await mainCold(JSON.parse(process.env.COLD_ARGS)); console.log("RAN"); } catch (e) { console.log("REFUSED " + e.message); }`;
+    const runWith = (name: string, env: Record<string, string>, more: string[] = []): { out: string; docker: string[]; sudo: string[]; left: string[] } => {
+      const work = path.join(dir, name), dockerLog = path.join(dir, `${name}.docker`), sudoLog = path.join(dir, `${name}.sudo`);
+      fs.mkdirSync(work);
+      const r = spawnSync(process.execPath, ["--input-type=module", "-e", child], { encoding: "utf8", timeout: 60_000,
+        env: { ...process.env, ...env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, FAKE_DOCKER_LOG: dockerLog, FAKE_SUDO_LOG: sudoLog,
+          COLD_ARGS: JSON.stringify(["--sizes", "100k", "--runs", "1", "--memory", "8GiB", "--cpus", "1", "--work", work, "--out", path.join(work, "x.json"), ...more]) } });
+      const lines = (f: string): string[] => fs.existsSync(f) ? fs.readFileSync(f, "utf8").split("\n").filter(Boolean) : [];
+      return { out: `${r.stdout}${r.stderr}`, docker: lines(dockerLog), sudo: lines(sudoLog), left: fs.readdirSync(work) };
+    };
+    // a docker call that makes, changes or removes something
+    const acts = (calls: string[]): string[] => calls.filter((c) => /^(run -d|create|start|stop|restart|rm|network (create|rm)|volume (create|rm))\b/.test(c));
+
+    for (const [existing, said] of [["bench-pg", /REFUSED a container named bench-pg exists already: a run in progress, or one --keep-postgres left \(--reuse-postgres adopts it/],
+      ["bench-mason", /REFUSED a container named bench-mason exists already: a cold run in progress/],
+      ["bench-client", /REFUSED a container named bench-client exists already/],
+      ["bench-mason-100000", /REFUSED a volume named bench-mason-100000 exists already/]] as const) {
+      const r = runWith(existing, { FAKE_EXISTING: existing });
+      assert.match(r.out, said, r.out);
+      assert.deepEqual(acts(r.docker), [], `${existing} there: nothing made, changed or removed`);
+      assert.deepEqual(r.sudo, [], `${existing} there: the page cache is not dropped under the other run's measurement`);
+      assert.deepEqual(r.left, [], `${existing} there: no file made`);
+    }
+
+    // --reuse-postgres with no Postgres to adopt: refused, untouched
+    const none = runWith("reuse", { FAKE_EXISTING: "" }, ["--reuse-postgres"]);
+    assert.match(none.out, /REFUSED --reuse-postgres: there is no container named bench-pg/, none.out);
+    assert.deepEqual([acts(none.docker), none.sudo, none.left], [[], [], []], "nothing made, and the page cache not dropped");
+
+    // nothing there, and the run fails after making its network: it removes that network by its id, and nothing by a name
+    const failed = runWith("failed", { FAKE_EXISTING: "", FAKE_FAIL_RUN: "1" });
+    assert.match(failed.out, /REFUSED docker run: docker: the fake refuses/, failed.out);
+    const made = acts(failed.docker);
+    assert.equal(made[0], "network create bench-replica");
+    assert.match(made[1] ?? "", /^run -d --name bench-pg /);
+    assert.deepEqual(made.slice(2), ["network rm net-made-by-this-run"], "the network removed by its id; no container or volume removed by a name, which may be another run's");
+    assert.equal(failed.sudo.length, 1, "the page cache dropped once, before the run began");
+    assert.deepEqual(failed.left.filter((n) => n.startsWith("bench-cold-")), [], "the run's files removed");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

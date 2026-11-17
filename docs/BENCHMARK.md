@@ -48,8 +48,12 @@ says why the published run is the cold mode.
   Both sessions run in UTC (`PGTZ`), since `date_trunc` of a `timestamptz` depends on the time zone.
 - **Secrets** (Postgres's password, Mason's API key, the bench user's password from `mason user add --json`) go to
   0600 env files in a 0700 folder. None is on a command line or in the output.
-- **At the end** the run removes every container, volume, network and file it made. `--keep-postgres` keeps Postgres,
-  its databases and the network, for a later run with `--reuse-postgres`. The fixture is written after each size, and
+- **Another run is never touched.** A `bench-pg`, `bench-mason` or `bench-client` container, or a Mason volume of a
+  size to be measured, that is already there is refused before anything else, and the page cache is not dropped. It
+  is a run in progress, or the Postgres a `--keep-postgres` run left, which `--reuse-postgres` adopts.
+- **At the end** the run removes what it made itself, by the ids Docker gave back: its containers, volumes, network and
+  files. `--keep-postgres` keeps its Postgres, its databases and the network, for a later run with `--reuse-postgres`.
+  A Postgres container adopted with `--reuse-postgres` is not removed. The fixture is written after each size, and
   `--resume` measures only the sizes it lacks.
 
 ### What it needs
@@ -73,7 +77,8 @@ node scripts/bench-replica.ts --cold --label "m7g.xlarge, 4 vCPU, 16 GiB RAM, EB
 ```
 
 `tests/integration/bench-replica-cold.itest.ts` runs a smoke at 1 M rows and checks its fixture, when
-`IT_BENCH_COLD=1`. CI does not run it: its runners give no root to drop the page cache.
+`IT_BENCH_COLD=1`. CI does not run it by default: it would add about ten minutes to every PR, on a runner shared with
+other jobs.
 
 ### Publishing it
 

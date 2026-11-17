@@ -39,8 +39,13 @@
  *
  * Secrets (Postgres's password, Mason's API key, the bench user's password) go to 0600 env files in a 0700 folder,
  * never a command line or the log. Mason's project is copied into its container (`docker cp`), so the container's
- * user reads it wherever --work is. Everything the run made (containers, volumes, the network, its files) is removed
- * at the end, unless --keep-postgres keeps Postgres's.
+ * user reads it wherever --work is.
+ *
+ * ANOTHER RUN IS NEVER TOUCHED. A bench-pg, bench-mason or bench-client container, or a Mason volume of a size to be
+ * measured, that is already there is refused before anything else (the page cache is not dropped either): it is a run
+ * in progress, or what a --keep-postgres run left (--reuse-postgres adopts that one). At the end the run removes what
+ * it made itself, by the ids Docker gave back: its containers, volumes, network and files. --keep-postgres keeps its
+ * Postgres, and a Postgres container adopted with --reuse-postgres is not removed.
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -394,6 +399,9 @@ export async function mainCold(argv: string[]): Promise<number> {
   const o = parseColdArgs(argv, { cpus: os.cpus().length, ramBytes: os.totalmem(), version });
   const log = (l: string): void => { process.stdout.write(`${l}\n`); };
   if (process.platform !== "linux") throw new Usage("--cold drops Linux's page cache before every run: run it on a Linux server");
+  // before anything with a side effect: a refused run must not touch another's containers, nor drop the page cache
+  // under its measurement
+  refuseRunInProgress(o);
   dropPageCache();
   const dockerRoot = docker(["info", "--format", "{{.DockerRootDir}}"]);
   const masonImageId = ensureImage(o.masonImage, log);
@@ -412,21 +420,25 @@ export async function mainCold(argv: string[]): Promise<number> {
   const clientDir = path.join(dir, "client");
   fs.mkdirSync(clientDir, { mode: 0o700 });
 
-  let networkCreated = false;
   let cleaned = false;
-  /** Mason's volumes this run made and has not removed yet */
-  const masonVolumes = new Set<string>();
+  const made: Made = { postgres: null, mason: null, network: null, volumes: new Set(), clientIdFile: path.join(dir, "client.cid") };
+  // what THIS run made, removed by the ids docker gave back: never a container, volume or network found by its name,
+  // which may be another run's (a run in progress, or the Postgres a --keep-postgres run left)
   const cleanup = (): void => {
     if (cleaned) return;
     cleaned = true;
-    removeQuietly(["rm", "-f", "-v", CLIENT_CONTAINER], log);
-    removeQuietly(["rm", "-f", "-v", MASON_CONTAINER], log);
-    for (const v of masonVolumes) removeQuietly(["volume", "rm", v], log);
-    if (!o.keepPostgres) {
+    const client = fs.existsSync(made.clientIdFile) ? fs.readFileSync(made.clientIdFile, "utf8").trim() : "";
+    if (client !== "") removeQuietly(["rm", "-f", "-v", client], log);
+    if (made.mason !== null) removeQuietly(["rm", "-f", "-v", made.mason], log);
+    for (const v of made.volumes) removeQuietly(["volume", "rm", v], log);
+    if (o.keepPostgres) {
+      if (made.postgres !== null) log(`kept ${PG_CONTAINER}, its data${made.network !== null ? ` and the ${NETWORK} network` : ""} (--keep-postgres)`);
+    } else {
       // -v: the image's anonymous volume, where Postgres's data is
-      if (removeQuietly(["rm", "-f", "-v", PG_CONTAINER], log)) log(`removed ${PG_CONTAINER} and its data`);
-      if (removeQuietly(["network", "rm", NETWORK], log)) log(`removed the ${NETWORK} network`);
-    } else if (networkCreated) log(`kept ${PG_CONTAINER} and the ${NETWORK} network (--keep-postgres)`);
+      if (made.postgres !== null && removeQuietly(["rm", "-f", "-v", made.postgres], log)) log(`removed ${PG_CONTAINER} and its data`);
+      if (made.network !== null && removeQuietly(["network", "rm", made.network], log)) log(`removed the ${NETWORK} network`);
+    }
+    if (o.reusePostgres) log(`left ${PG_CONTAINER}, adopted with --reuse-postgres: docker rm -f -v ${PG_CONTAINER} removes it and its data`);
     fs.rmSync(dir, { recursive: true, force: true });
   };
   const onSignal = (code: number) => (): void => { log("interrupted: the fixture holds the sizes finished"); cleanup(); process.exit(code); };
@@ -435,10 +447,9 @@ export async function mainCold(argv: string[]): Promise<number> {
 
   try {
     // ---- Postgres: its own container, on a network Mason syncs it over (as `pg`), on a loopback port for the clients
-    if (!exists("network", NETWORK)) { docker(["network", "create", NETWORK]); networkCreated = true; }
+    if (!exists("network", NETWORK)) made.network = docker(["network", "create", NETWORK]);
     let pgPort: number, pgPassword: string;
     if (o.reusePostgres) {
-      if (!exists("container", PG_CONTAINER)) throw new Usage(`--reuse-postgres: there is no container named ${PG_CONTAINER} (a run with --keep-postgres leaves one)`);
       const info = (JSON.parse(docker(["inspect", PG_CONTAINER])) as Array<{ Config: { Env: string[] }; HostConfig: { Memory: number; NanoCpus: number; PortBindings: Record<string, Array<{ HostPort: string }> | null> }; NetworkSettings: { Networks: Record<string, unknown> }; State: { Running: boolean } }>)[0]!;
       const pw = info.Config.Env.find((e) => e.startsWith("POSTGRES_PASSWORD="))?.slice("POSTGRES_PASSWORD=".length);
       const port = info.HostConfig.PortBindings["5432/tcp"]?.[0]?.HostPort;
@@ -448,12 +459,11 @@ export async function mainCold(argv: string[]): Promise<number> {
       pgPort = Number(port); pgPassword = pw;
       log(`adopted ${PG_CONTAINER} on 127.0.0.1:${pgPort} (--reuse-postgres)`);
     } else {
-      if (exists("container", PG_CONTAINER)) throw new Usage(`a container named ${PG_CONTAINER} exists already: a run in progress, or one --keep-postgres left (--reuse-postgres adopts it; docker rm -f -v ${PG_CONTAINER} removes it)`);
       pgPort = await freePort(); pgPassword = randomBytes(18).toString("hex");
       const env = path.join(secrets, "postgres.env");
       writeSecret(env, { POSTGRES_PASSWORD: pgPassword });
       const settings = replicaSettings(o.memoryBytes, o.cpus);
-      docker(["run", "-d", "--name", PG_CONTAINER, "--network", NETWORK, "--network-alias", PG_ALIAS, "-p", `127.0.0.1:${pgPort}:5432`, ...limits,
+      made.postgres = docker(["run", "-d", "--name", PG_CONTAINER, "--network", NETWORK, "--network-alias", PG_ALIAS, "-p", `127.0.0.1:${pgPort}:5432`, ...limits,
         "--shm-size", "1g", "--env-file", env, o.postgresImage, ...Object.entries(settings).flatMap(([k, v]) => ["-c", `${k}=${v}`])]);
       log(`started ${PG_CONTAINER} (${o.postgresImage}) on 127.0.0.1:${pgPort}, --cpus ${o.cpus} --memory ${gibText(o.memoryBytes)}`);
     }
@@ -525,8 +535,7 @@ export async function mainCold(argv: string[]): Promise<number> {
 
       // ---- Mason: a container of the image, syncing this database (sync: off), its synced data on a volume of its own
       const volume = `bench-mason-${rows}`;
-      masonVolumes.add(volume);
-      const mason = await startMason(o, { db, pgPassword, limits, secrets, rows, volume }, log);
+      const mason = await startMason(o, { db, pgPassword, limits, secrets, rows, volume }, made, log);
       try {
         if (fixture.environment.mason.engineMemory === "unknown") fixture.environment.mason.engineMemory = mason.engineMemory;
         const masonConn: pg.ClientConfig = { host: "127.0.0.1", port: mason.port, user: "bench", password: mason.password, database: mason.database, ssl: { rejectUnauthorized: false } };
@@ -570,7 +579,7 @@ export async function mainCold(argv: string[]): Promise<number> {
               for (const engine of (n % 2 === 0 ? ["postgres", "mason"] : ["mason", "postgres"]) as ColdEngine[]) {
                 const readyMs = await cold(engine);
                 const at = new Date().toISOString();
-                const times = await pgbench(o.postgresImage, clientDir, target[engine], clients, uid, gid);
+                const times = await pgbench(o.postgresImage, clientDir, made.clientIdFile, target[engine], clients, uid, gid);
                 const r = runOf(times, readyMs, at);
                 runs[engine].push(r);
                 log(`[${fmtRows(rows)} · ${stmt.name} · ${clients} client${clients === 1 ? "" : "s"} · ${engine.padEnd(8)} · run ${n + 1}] slowest ${secondsText(r.slowestMs)}, mean ${secondsText(r.meanMs)}; answered the probe ${secondsText(r.readyMs)} after its start`);
@@ -583,8 +592,8 @@ export async function mainCold(argv: string[]): Promise<number> {
         fixture.cells.push(...cells);
         save(`${fmtRows(rows)} done`);
       } finally {
-        removeQuietly(["rm", "-f", "-v", MASON_CONTAINER], log);
-        if (removeQuietly(["volume", "rm", volume], log)) masonVolumes.delete(volume);
+        if (made.mason !== null && removeQuietly(["rm", "-f", "-v", made.mason], log)) made.mason = null;
+        if (made.volumes.has(volume) && removeQuietly(["volume", "rm", volume], log)) made.volumes.delete(volume);
       }
       if (!o.keepPostgres) {
         const c = new pg.Client({ connectionString: admin });
@@ -626,6 +635,32 @@ async function untilReady(url: string): Promise<void> {
   }
 }
 
+/** what this run made, by the ids docker gave back: the only things its cleanup removes */
+interface Made {
+  postgres: string | null; mason: string | null; network: string | null;
+  /** Mason's volumes this run made and has not removed yet */
+  volumes: Set<string>;
+  /** where docker writes the id of pgbench's container while it runs */
+  clientIdFile: string;
+}
+
+/**
+ * Another run's containers, or the volumes this run would make, refused before this run does anything: a run in
+ * progress (its Postgres, Mason or client), or the Postgres a --keep-postgres run left, which --reuse-postgres adopts.
+ */
+function refuseRunInProgress(o: ColdOptions): void {
+  for (const name of [MASON_CONTAINER, CLIENT_CONTAINER]) {
+    if (exists("container", name)) throw new Usage(`a container named ${name} exists already: a cold run in progress, or one that was killed. Wait for it, or remove it (docker rm -f -v ${name}) if no run is in progress`);
+  }
+  const pgThere = exists("container", PG_CONTAINER);
+  if (o.reusePostgres && !pgThere) throw new Usage(`--reuse-postgres: there is no container named ${PG_CONTAINER} (a run with --keep-postgres leaves one)`);
+  if (!o.reusePostgres && pgThere) throw new Usage(`a container named ${PG_CONTAINER} exists already: a run in progress, or one --keep-postgres left (--reuse-postgres adopts it; docker rm -f -v ${PG_CONTAINER} removes it)`);
+  for (const rows of o.sizes) {
+    const volume = `bench-mason-${rows}`;
+    if (exists("volume", volume)) throw new Usage(`a volume named ${volume} exists already: a cold run in progress, or one that was killed. Wait for it, or remove it (docker volume rm ${volume}) if no run is in progress`);
+  }
+}
+
 /** what the container logged, both streams: the image logs to stdout, and a warning may go to stderr */
 function containerLog(name: string, tail?: number): string {
   const r = spawnSync("docker", ["logs", ...(tail === undefined ? [] : ["--tail", String(tail)]), name], { encoding: "utf8", maxBuffer: 256 * 2 ** 20 });
@@ -644,7 +679,7 @@ export const SOURCES_FILE = "kind: postgres\nurl: ${DATABASE_URL}\nsync: off\nta
 interface MasonUp { port: number; password: string; database: string; clientEnv: string; bytes: number; syncSeconds: number; engineMemory: string }
 /** Mason for one size: the image, syncing the size's database by the network alias, every table `sync: off`; its first
  *  sync waited for, a bench user made, its password in a 0600 env file and never printed */
-async function startMason(o: ColdOptions, s: { db: string; pgPassword: string; limits: string[]; secrets: string; rows: number; volume: string }, log: (l: string) => void): Promise<MasonUp> {
+async function startMason(o: ColdOptions, s: { db: string; pgPassword: string; limits: string[]; secrets: string; rows: number; volume: string }, made: Made, log: (l: string) => void): Promise<MasonUp> {
   if (exists("container", MASON_CONTAINER)) throw new Usage(`a container named ${MASON_CONTAINER} exists already: remove it (docker rm -f -v ${MASON_CONTAINER}) if it is a bench's`);
   if (exists("volume", s.volume)) throw new Usage(`a volume named ${s.volume} exists already: remove it (docker volume rm ${s.volume}) if it is a bench's`);
   const env = path.join(s.secrets, `mason-${s.rows}.env`);
@@ -656,7 +691,8 @@ async function startMason(o: ColdOptions, s: { db: string; pgPassword: string; l
   const port = await freePort(), health = await freePort();
   const t0 = performance.now();
   log(`Mason: syncing ${s.db} in ${MASON_CONTAINER} (${o.masonImage})…`);
-  docker(["create", "--name", MASON_CONTAINER, "--network", NETWORK, ...s.limits, "--env-file", env, "-v", `${s.volume}:/mason/data`,
+  made.volumes.add(docker(["volume", "create", s.volume]));
+  made.mason = docker(["create", "--name", MASON_CONTAINER, "--network", NETWORK, ...s.limits, "--env-file", env, "-v", `${s.volume}:/mason/data`,
     "-p", `127.0.0.1:${port}:5433`, "-p", `127.0.0.1:${health}:4140`, o.masonImage]);
   // the project goes into the container, not through a bind mount: the container's user (uid 1000) reads it wherever
   // --work is, whatever this user's folders allow
@@ -695,9 +731,11 @@ async function startMason(o: ColdOptions, s: { db: string; pgPassword: string; l
 
 interface PgbenchTarget { port: number; db: string; user: string; ssl: string; env: string }
 /** one run's clients: pgbench in a container of its own on the host's network, as this user, its log read back */
-async function pgbench(image: string, clientDir: string, t: PgbenchTarget, clients: number, uid: number, gid: number): Promise<ClientTime[]> {
+async function pgbench(image: string, clientDir: string, idFile: string, t: PgbenchTarget, clients: number, uid: number, gid: number): Promise<ClientTime[]> {
   for (const f of fs.readdirSync(clientDir)) if (f.startsWith("log")) fs.rmSync(path.join(clientDir, f));
-  const r = await run("docker", ["run", "--rm", "--name", CLIENT_CONTAINER, "--network", "host", "--user", `${uid}:${gid}`, "-v", `${clientDir}:/work`, "--env-file", t.env,
+  // docker refuses a --cidfile that exists: the last run's, its container gone with --rm
+  fs.rmSync(idFile, { force: true });
+  const r = await run("docker", ["run", "--rm", "--cidfile", idFile, "--name", CLIENT_CONTAINER, "--network", "host", "--user", `${uid}:${gid}`, "-v", `${clientDir}:/work`, "--env-file", t.env,
     image, "pgbench", "-n", "-c", String(clients), "-j", String(clients), "-t", "1", "-f", "/work/script.sql", "--log", "--log-prefix=/work/log",
     `host=127.0.0.1 port=${t.port} dbname=${t.db} user=${t.user} sslmode=${t.ssl}`]);
   if (r.status !== 0) throw new Error(`pgbench exited ${r.status}: ${(r.stderr || r.stdout).trim().slice(-2000)}`);

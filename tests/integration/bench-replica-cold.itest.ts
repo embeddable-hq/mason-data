@@ -6,7 +6,7 @@
  *
  * What it needs: IT_BENCH_COLD=1, Linux, Docker (the images are pulled when missing: the `mason-data` image of this
  * checkout's version and postgres:18), passwordless sudo to drop the page cache, and several minutes. It is not in CI
- * by default: CI's runners give no root to drop the page cache, and the run is minutes of Docker. IT_POSTGRES_URL is not
+ * by default: it would add about ten minutes to every PR, on a runner shared with other jobs. IT_POSTGRES_URL is not
  * read. IT_BENCH_COLD_SIZES (default 1M) and IT_BENCH_COLD_MEMORY (default the script's, half the RAM) change its size.
  */
 import { test } from "node:test";
