@@ -2457,15 +2457,192 @@ exit codes, `mason help agent`). A tool error carrying the SQLSTATE and HINT is 
 instead of giving up; a `kept` line is what stops it presenting a copy over the poll's row limit as current. And every
 statement lands in the request log under the agent's name.
 
-**Not yet: the same server inside `mason serve`, over HTTPS.** A hosted agent (claude.ai, a team's agent platform)
-cannot spawn a process; it needs MCP's Streamable HTTP transport on the server. What that would take: a route on
-`mason serve` beside `/healthz` (its own port or path, TLS as the Postgres API's: `MASON_PG_TLS_CERT` or the operator's
-proxy), the same tools over the same session code, and authorization by MCP's OAuth 2.1 profile — Mason as the
-resource server, publishing its protected-resource metadata, the bearer token mapped to a `mason user` so the request
-log still names who asked — or, before an authorization server exists, a user's password as a bearer token for the
-clients that take a static header. The tool code would not change; the transport and the login would.
+**Over HTTPS, inside `mason serve`**: "An MCP server over HTTPS", below — the same session code, another transport and
+another login.
 
 **Where.** `src/cli/mcp.ts`, `src/cdc/pg-wire.ts` (`extended`, `cancel`); `tests/cli-mcp.test.ts`, `tests/pg-wire.test.ts`.
+
+### An MCP server over HTTPS (2026-11-17, issue 1115)
+
+**Decision.** `mason serve` serves `mason mcp`'s tools over MCP's Streamable HTTP transport, for a hosted agent
+(claude.ai, ChatGPT, a team's agent platform) that cannot start a process, with Mason as an OAuth 2.1 resource server
+(MCP's authorization profile). Off unless configured: `MASON_MCP_URL`, `MASON_MCP_ISSUER` and `MASON_MCP_JWKS_URL`
+together, or the start is refused naming what is missing. The owner's spec (2026-11-17) decided each point below.
+
+- **Where: `/mcp` on the port `mason serve` already listens on** (MASON_HEALTH_PORT, beside `/healthz`), so a relay in
+  front forwards one port. `POST /mcp` takes one JSON-RPC message and answers it as JSON, `DELETE /mcp` ends a session,
+  `GET` is 405 (Mason sends nothing of its own). The protected resource's metadata (RFC 9728) is at
+  `/.well-known/oauth-protected-resource` and at RFC 9728's insertion of the public path
+  (`/.well-known/oauth-protected-resource/mcp`), on that port.
+- **Two eras, chosen as 2026-07-28 says a server of both chooses** ("Versioning and Compatibility": "A dual-era server
+  selects its behavior from how the client opens"; built to the published text, the second review of PR 1125,
+  2026-11-17). **An `initialize` is the legacy era**: 2025-11-25 (claude.ai's documentation still points at it;
+  2025-06-18 and 2025-03-26 are answered too), where it opens a session (`Mcp-Session-Id`); one asking for 2026-07-28,
+  which has no `initialize`, or for a version Mason does not know, is answered with 2025-11-25. **A request carrying
+  2026-07-28's per-request `_meta`, or the `MCP-Protocol-Version` header 2026-07-28, is that revision's**, and is
+  answered as its text says:
+  - no session ("Streamable HTTP": an `Mcp-Session-Id` is ignored, none minted) and no `initialize`: each request's
+    `_meta` carries `io.modelcontextprotocol/protocolVersion` and `…/clientCapabilities`, or it is `-32602`, 400 ("Base
+    protocol": "_meta");
+  - a version other than 2026-07-28 in `_meta`, or a header no revision of Mason's has, is `UnsupportedProtocolVersion`
+    (`-32022`, 400) listing what Mason speaks ("Versioning": "Protocol version negotiation");
+  - the `MCP-Protocol-Version`, `Mcp-Method` and, for `tools/call` and `resources/read`, `Mcp-Name` headers (its
+    `=?base64?…?=` form decoded) must be present and equal to the body, or `HeaderMismatch` (`-32020`, 400) ("Streamable
+    HTTP": "Request metadata", "Server validation");
+  - `server/discover` (a server MUST: "Discovery") says the versions, the capabilities and the instructions; `tools/list`,
+    `tools/call`, `resources/list`, `resources/templates/list` and `resources/read` are answered as in 2025-11-25, a
+    resource not found `-32602` ("Resources": "Error handling");
+  - every result carries `resultType: "complete"` and `_meta["io.modelcontextprotocol/serverInfo"]` ("Base protocol":
+    "ResultType", "Per-response protocol fields"); `server/discover`, the lists and `resources/read` carry `ttlMs`
+    (300,000) and `cacheScope: "public"`, since they change only with a release and are the same for every user
+    ("Caching");
+  - **a cancel is the client closing its request's connection** ("Streamable HTTP": "Cancellation"; "Cancellation":
+    "Transport-specific cancellation"): the statement is cancelled where it runs and nothing more is written. A
+    `notifications/cancelled` POST, which 2026-07-28 no longer expects on HTTP, still reaches the user's requests;
+  - the client is named by `_meta`'s `io.modelcontextprotocol/clientInfo`, so `application_name` is
+    `mason-mcp/<its name>`; only a request that carries none falls back to its User-Agent's first word (the first
+    implementation's own choice, kept as the last fallback);
+  - **not answered, 404 `-32601`** ("Streamable HTTP": "a server that does not implement the requested RPC method MUST
+    respond with 404"): `ping` and `logging/setLevel` (removed by 2026-07-28); `subscriptions/listen`, since Mason's
+    tools and resources never change while it runs (it declares no `listChanged` and no `subscribe`, so no notification
+    would ever flow); prompts and completion (Mason declares neither). Mason sends no `notifications/message`, so a
+    request's `io.modelcontextprotocol/logLevel` changes nothing, and it asks no input of the client (MRTR), so it
+    requires no client capability. Answers are JSON, never an SSE stream, which the text allows ("the server MUST
+    return either application/json or text/event-stream").
+- **The public address is a setting, never what Mason sees.** Replicas sit behind a relay, so the address a client
+  reaches is not the listen address, the Host header or X-Forwarded-*. `MASON_MCP_URL` (https, or http to this machine
+  for a test) is the resource the metadata publishes, the audience every token must name EXACTLY (a string, or a list
+  of it alone: a token for this and another resource is one the other could replay here), and the base of the 401's
+  `WWW-Authenticate: Bearer resource_metadata="…"`. A token whose audience is the address Mason sees is refused.
+- **The token**: a JWT whose `iss` is `MASON_MCP_ISSUER` exactly, signed by a key of the JWK set at `MASON_MCP_JWKS_URL`
+  (configured, never discovered: one URL the operator names, at most 100 keys). An asymmetric `alg` alone (RS*, PS*, ES*, EdDSA; never `none` nor HS*, which a public key
+  could forge), the `kid` a key published for signatures, of the alg's own type, `crit` refused, `exp` required, `nbf` /
+  `iat` within 60 s of skew. Node's `crypto` verifies (no dependency). **Fail closed**: keys that cannot be fetched or
+  read (no answer, a redirect — never followed —, too large, not JSON) refuse every token with 503. Mason issues no
+  token and runs no sign-in page.
+- **The keys' cache, and what a fetch costs the issuer** (the review of PR 1125, 2026-11-17). Keys are used for at most
+  **5 minutes** (`KEYS_TTL_MS`), less when the JWKS answer's `Cache-Control: max-age` says less (`no-store` / `no-cache`
+  read as 0), never more, and never under a minute: **a key the issuer removes is refused within 5 minutes**. Past their
+  life they are never used again — **no grace period**: a fetch that fails then refuses every token (503) until one
+  succeeds, as fail closed asks (a grace would let a key the issuer revoked during an outage keep signing). Fetches are
+  **single-flight and at most one a minute** (`REFRESH_MIN_MS`), whatever asks — keys past their life, a `kid` they lack
+  — so a burst of tokens, valid or not, costs the issuer one request a minute; **while fetches fail the wait doubles**,
+  1, 2, 4, 8 minutes, **bounded at 10** (`BACKOFF_MAX_MS`), and every token meanwhile is 503 without a fetch. Before,
+  a key was trusted for an hour after its removal, and 53 requests against a failing JWKS made 28 fetches.
+  **An issuer outage longer than the keys' life stops the endpoint, by design**: every token is 503 ("the token could not
+  be checked") until a fetch succeeds, and mason serve's log names the JWKS URL and why. The operator's step is to make
+  that URL reachable from the replica; nothing in Mason extends the keys' life.
+  **The keys' life, the wait between fetches and the back-off are timed on a monotonic clock** (`performance.now()`),
+  never the wall clock (the second review of PR 1125, 2026-11-17): with the wall clock stepped back an hour, a key the
+  issuer removed was accepted for that whole hour, and a back-off would have held every token at 503 until the clock
+  caught up. A token's `exp`, `nbf` and `iat` are wall-clock times, and are read on the wall clock.
+- **The user, looked up at every request.** One claim names the `mason user` (`MASON_MCP_USER_CLAIM`, default
+  `mason_user`), another holds its id (`MASON_MCP_USER_ID_CLAIM`, default `mason_user_id`): the 16 hex digits `mason user
+  add` made and `mason user list` shows (`mason user check` answers it too, for the operator's sign-in page). The users
+  file is read for every request, never cached for the token's life (`LiveUsers.vouched`), and again by the listener
+  before every statement: a user removed or disabled is refused at once, and a user removed and added again — a new id —
+  refuses the old token (`user_removed`), each 403 with the command that fixes it. The client holds a valid token of the
+  operator's issuer, so it is told which; the Postgres API keeps a missing user and a limited one alike for a stranger.
+- **Addresses still apply, judged on the real client.** `MASON_MCP_PROXY_FROM` names the relay's addresses, read by
+  `MASON_PG_PROXY_FROM`'s own reader (never every address). From a peer it names, the client is the **last entry of
+  `X-Forwarded-For`** — the one that peer appended; every entry before it came to the relay from the client, which can
+  write anything there. From any other peer the header is ignored and the peer is judged. A named relay's request without
+  the header, or with a last entry that is not one address, is refused (400): it could not tell. **The entry is read in
+  the forms relays write** (`forwardedAddress`, the review of PR 1125): a port beside it (`203.0.113.7:51234`,
+  `[2001:db8::1]:443`) is dropped, and a v4-mapped address (`::ffff:203.0.113.7`, nginx on a dual-stack `[::]` listener)
+  is the IPv4 client, as the relay's own peer address is when the setting is matched (`shownAddress`); a bare IPv6 address
+  is read whole, never as one with a port, and anything else that is not one address (a CIDR, a name, `unknown`, a zone,
+  a leading zero) is still 400. `X-Forwarded-For` rather
+  than `Forwarded` (RFC 7239): it is what relays and load balancers append by default (nginx, HAProxy, cloud load
+  balancers), where `Forwarded` is rarely sent, and the rule — the trusted peer's own entry, the last — is the same for
+  both. A user's "connects from" ranges are judged on that address by the endpoint and, through the PROXY header the
+  door's connection carries, by the listener at login and before every statement; the request log names it. No setting
+  bypasses the check (an earlier draft's `MASON_MCP_FROM=token` is gone), and nothing here changes the Postgres API's.
+- **Presets for a hosted agent's addresses**: the Users page's Connects from offers "Claude (Anthropic)", the outbound
+  ranges Anthropic publishes for MCP tool calls (https://platform.claude.com/docs/en/api/ip-addresses, "Outbound IP
+  addresses"), and "ChatGPT (OpenAI)", the file OpenAI's page of IP egress ranges
+  (https://developers.openai.com/api/docs/guides/ip-addresses, "Outbound IP addresses": "ChatGPT integrations —
+  Plugins, connectors, GPT Actions, and agentic commerce") names for them, https://openai.com/chatgpt-connectors.json
+  (289 ranges, its `creationTime` 2026-11-06; `chatgpt-actions.json` beside it is GPT Actions' alone and not used), so a
+  user held to them connects through this endpoint from that agent alone (`src/cli/address-presets.ts`, `/api/state`
+  `addressPresets`). The ranges are written as a user's ranges are kept (one address without its `/32`), so a user given a
+  company's list is shown as that company's ("from ChatGPT (OpenAI)'s addresses (289 ranges)"), the choice names the
+  company (`preset:<id>`), never a wall of CIDRs in the box, and a user takes up to 1,000 ranges (`MAX_RANGES`, 100
+  before, which OpenAI's list did not fit). **They ship with the release; Mason never fetches them at run time** (a vendor's page
+  changing under a run would change who connects without anyone deciding it). **How they stay up to date**:
+  `scripts/connector-ranges.ts` reads each source again — a page's CIDRs under its heading, or a JSON file's
+  `prefixes` (`ipv4Prefix` and `ipv6Prefix`) — and says what drifted (exit 1; 3 when a source could not be read or holds
+  what is not a range: never "no drift"), and `--write` updates the module, so a change is a reviewed pull request and a release note. The
+  proposal is a weekly scheduled CI job running it, which opens an issue on drift (not added: a process change is the
+  owner's).
+- **The same session code**: an MCP session is `mason mcp`'s `McpServer` (src/cli/mcp.ts), its messages handed to it
+  whole; only how it reaches the Postgres API differs (`McpLink`). Its connections go to the run's own listener through a
+  door of their own (`openLocal`, src/api/postgres/server.ts): on loopback, every connection beginning with a PROXY v2
+  header naming the client, its password a secret this process alone holds with the user's id — never a user's password,
+  so no other process on the machine logs in there, whatever header it sends. A cancellation is a CancelRequest for its
+  statement, as over stdio.
+- **Nothing off loopback in clear**: the health port is plain HTTP, so with `MASON_HEALTH_HOST` off loopback (its default
+  is 0.0.0.0) the endpoint is refused unless `MASON_MCP_PLAIN=1` says TLS is terminated in front (a relay, a proxy), as
+  `MASON_PG_PLAIN` says it of the Postgres API. A token never reaches a log line, an error or an answer.
+- **Bounds**: a message at most 1 MiB, a token 16 KiB, a session ended after an hour unused, and a session bound to its
+  user and id (another's token naming it is told it does not exist).
+- **Sessions: one user never ends another's** (the review of PR 1125). At most **32 sessions a user**
+  (`MAX_USER_SESSIONS`): past it the user's own least recently used session that runs nothing makes way, or, each of
+  them running a request, the new one is refused 429. At most **1,000 in all** (`MAX_SESSIONS`): past it a session
+  **unused for 10 minutes** (`EVICTABLE_IDLE_MS`) and running nothing makes way, whoever's — abandoned in all but name;
+  its client meets a 404 and initializes again — else the new session is refused **503 with Retry-After**, never made
+  by ending a session in use. Before, the oldest session made way whatever it was doing, so one user opening sessions
+  ended everyone else's.
+- **The health port's limits**, now that it answers whoever reaches /mcp (`HEALTH_LIMITS`, src/cli/serve.ts; not
+  settings): a request's headers within **10 s**, its body within **30 s**, an idle keep-alive connection closed after
+  **5 s**, at most **1,024 connections** (one past it is closed at once), and at most **256 JSON-RPC requests running**
+  on /mcp (`MAX_REQUESTS`: past it 503 with Retry-After; a cancellation and a DELETE are never held to it, or a client at
+  the bound could not stop what holds it there), **each request of a JSON-RPC batch counted**: a batch is admitted whole
+  or refused whole (503), never in part. A body is at most 1 MiB (`MAX_BODY`). Node's `requestTimeout` times the request alone, never the answer, and
+  an answer is written once its query ends, so **a tool call that runs for minutes is answered whole** (the test runs one
+  twice the request timeout). **/healthz under the cap**: /mcp's running requests alone stay far under the connection
+  cap, so a platform's health check is answered beside them; connections that send nothing are closed within 10 s, so
+  only a flood that keeps opening connections faster than that can hold the cap, and while it does a health check can be
+  refused — that is not guaranteed against, and a platform that health-checks the port should allow for a retry.
+
+- **A JSON-RPC batch, by the revision** (the second review of PR 1125, 2026-11-17: a batch counted as one request,
+  so with the bound at 4 a batch of 40 queries ran all 40 at once, and one of 8,000 grew the process by about 0.7 GB).
+  The revisions disagree: **2025-03-26** says a server "MUST support receiving JSON-RPC batches"; **2025-06-18** removed
+  batching ("the body of the POST request MUST be a single JSON-RPC request, notification, or response"), and
+  **2025-11-25** and **2026-07-28** say the same. So a batch is taken under **2025-03-26 alone** (`BATCH_VERSION`: the
+  session's agreed revision, else the `MCP-Protocol-Version` header), of at most **32 messages** (`MAX_BATCH`, and
+  never more requests than `MAX_REQUESTS`), each request in it counted against `MAX_REQUESTS`; under any other revision
+  it is refused **400** with JSON-RPC's `-32600` (Invalid Request), as those revisions forbid it. Refusing batches
+  everywhere would have broken a revision Mason says it speaks; counting them everywhere would accept what three of the
+  four forbid. A batch of notifications alone (cancellations) is never held to the bound.
+
+- **`Origin` is validated, as MCP Streamable HTTP's MUST says** (the owner's decision, 2026-11-17, the third review of
+  PR 1125). The bearer token already makes DNS rebinding harmless here — no cookie or ambient credential exists, and a
+  cross-origin preflight is 401 with no CORS headers — but the MUST is cheap to meet. A request carrying `Origin` is a
+  browser's and is answered only when `MASON_MCP_ORIGINS` names that origin exactly (default: none), else 403
+  `origin_not_allowed` naming the setting; `Origin: null` (a sandboxed page, a file) is present and never named, so
+  refused. It is judged first, before the token is read, under every revision, so a page elsewhere learns nothing of
+  the token check. A request with no `Origin` is not judged: hosted agents call from their servers and desktop apps from
+  their own process, and neither sends one (Node's `fetch` sends none; checked). Each entry is held at the start to the
+  form a browser sends (`entry === new URL(entry).origin`, http or https, no `*`), since an entry written otherwise would
+  never match; a bad entry refuses the start, said as its origin alone or not at all, never a path or a user.
+- **A client never writes a line of the log** (the third review of PR 1125: a cancellation's `reason`, `bye\n[mcp]
+  refused a request from …`, logged a second, forged line to `mason serve`'s stdout, the platform's log; a method held
+  NEL and CSI). Every value that came from the network — a JSON-RPC method, id or reason, a header, a client's name, a
+  token's claim, an error another server's answer made — reaches a log line through ONE function, `untrustedText`
+  (src/lib/one-line.ts): `oneLine`'s rule, the one `serviceText` applies to a hosted service's text (every C0 and C1
+  control, newline, CR, DEL, U+2028 / U+2029, the directional marks and bidi overrides as `?`), and a length cap. The
+  endpoint's own `log` makes every line one line too, so a site that missed the function still cannot start a line (a
+  stack is then said on one line).
+
+**Left out.** No server-sent events: every answer is JSON. No CORS headers: an origin `MASON_MCP_ORIGINS` names is let
+through, and a page that needs CORS to read the answer is not served yet. Opaque (non-JWT) tokens and token introspection are not read; no scope is required.
+
+**Where.** `src/cli/mcp-http.ts` (the endpoint, `clientOf`), `src/cli/mcp-oauth.ts` (the settings, the token),
+`src/cli/mcp.ts` (`McpServer`, `McpLink`), `src/cli/address-presets.ts`, `scripts/connector-ranges.ts`,
+`src/api/postgres/server.ts` (`openLocal`), `src/api/postgres/proxy.ts` (`proxyHeaderFor`), `src/duck/users.ts`
+(`LiveUsers.vouched`), `src/cli/serve.ts`; `tests/cli-mcp-http.test.ts`, `tests/cli-security.test.ts`,
+`tests/serve.test.ts`, `tests/web-page.test.ts`.
 
 ### One OID for a type the source made: the catalog's (2026-11-12, issue 861)
 

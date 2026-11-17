@@ -106,7 +106,9 @@ export interface ServeHooks {
    *  the run then stops with that as its lastStop, and never says it is ready */
   ready: (run: { tables: () => CopyState[]; metrics: () => Promise<Omit<RunMetrics, "uptimeSeconds">>;
     /** the page's port on 127.0.0.1 and the run's token: what MASON_UI_RUN_FILE writes (src/cli/ui-run-file.ts) */
-    page: { port: number; token: string } }) => string | null;
+    page: { port: number; token: string };
+    /** the listener, the users and the database a tool names: what `mason serve`'s MCP endpoint reaches (src/cli/mcp-http.ts) */
+    postgres: { listener: Pick<PgApiServer, "openLocal">; users: LiveUsers; database: string } }) => string | null;
   /** a SIGTERM or SIGINT is stopping it */
   stopping: () => void;
   /** the engine stopped under it (its thread died, or the synced data was invalidated): the run ends, exit 1, for the
@@ -116,6 +118,8 @@ export interface ServeHooks {
   page?: (server: Server) => void;
   /** that socket's path: `/api/state` `pageSocket` */
   socket?: string;
+  /** the MCP endpoint's public address and issuer (src/cli/mcp-http.ts): `/api/state` `mcp` */
+  mcp?: { url: string; issuer: string };
 }
 
 /** a line to the run's terminal, which a full disk never ends (src/cli/run-output.ts), a write under .mason/ that
@@ -821,6 +825,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     pageIcon: o.serve !== undefined ? iconOf(uiIconSetting(process.env)) : null,
     // MASON_UI_SOCKET: the page on a Unix socket too (src/cli/ui-socket.ts), or null
     pageSocket: o.serve?.socket ?? null,
+    mcp: o.serve?.mcp ?? null,
     demo: cfg.demo === true,
     users: { file: path.join(home, USERS_FILE), apiKey: cfg.apiKey, database, postgresUrl, postgresPublicUrl },
     // the roles as the listener holds them: their row filters checked by its catalog (a filter Postgres refuses is a problem)
@@ -989,7 +994,8 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   if (elsewhere) say(`  ${elsewhere}`);
   // before the ready line: what a serve writes when it answers (MASON_UI_RUN_FILE) is there when a supervisor reads it
   // a step of it that failed stops the run, said in its words, and the ready line is never printed: it did not get ready
-  const notReady = o.serve?.ready({ tables: () => sync.state(), metrics: () => metricsFacts(runCtx), page: { port: setupPort, token } }) ?? null;
+  const notReady = o.serve?.ready({ tables: () => sync.state(), metrics: () => metricsFacts(runCtx), page: { port: setupPort, token },
+    postgres: { listener: api, users, database } }) ?? null;
   if (notReady !== null) { stopFor(notReady); return await stopped; }
   say(READY);
   say("");

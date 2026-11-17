@@ -288,7 +288,7 @@ test("a user's address ranges: one strict grammar, written back in one form; a f
   assert.match(wrong(["01.2.3.4", "fe80::1%eth0", "db.example", "10.0.0.0/-1", "1.2.3"]), /^"01\.2\.3\.4" is not .*; "fe80::1%eth0" is not .*; "db\.example" is not .*; "10\.0\.0\.0\/-1" is not .*; "1\.2\.3" is not /);
   assert.match(wrong(["::ffff:10.0.0.0/104"]), /IPv4 written as IPv6, which Mason reads as IPv4: did you mean 10\.0\.0\.0\/8\?/);
   assert.match(wrong([]), /no address range/);
-  assert.match(wrong(Array.from({ length: u.MAX_RANGES + 1 }, (_, i) => `10.0.${i}.0/24`)), /at most 100/);
+  assert.match(wrong(Array.from({ length: u.MAX_RANGES + 1 }, (_, i) => `10.${i >> 8}.${i & 255}.0/24`)), /at most 1000/);
   // who may connect from where: any address without ranges; inside them only, with; never an address not read
   assert.equal(u.addressAllowed({}, null), true);
   assert.equal(u.addressAllowed({ from: ["10.0.0.0/8", "2001:db8::/32"] }, "10.200.0.1"), true);
