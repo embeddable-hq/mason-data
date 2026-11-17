@@ -516,6 +516,7 @@ MASON_MCP_USER_CLAIM=mason_user                       # the claim that names the
 MASON_MCP_USER_ID_CLAIM=mason_user_id                 # the claim that holds its id (default mason_user_id)
 MASON_MCP_PROXY_FROM=10.0.0.0/16                      # the relay's own addresses: its X-Forwarded-For is believed
 MASON_MCP_PLAIN=1                                     # TLS is terminated in front (required off loopback)
+MASON_MCP_ORIGINS=https://app.example.test            # browser origins a page may use it from (default: none)
 ```
 
 - **The authorization server** issues signed JWT access tokens (RS256, PS256, ES256, EdDSA, …) whose `iss` is
@@ -549,6 +550,13 @@ MASON_MCP_PLAIN=1                                     # TLS is terminated in fro
   ChatGPT's connectors), so a user held to them connects from that agent alone. The lists ship with each release.
 - **TLS**: the health port is plain HTTP. Off loopback the start is refused unless `MASON_MCP_PLAIN=1` says TLS is
   terminated in front of it, so a bearer token never crosses a network in clear.
+- **`Origin`**: a request that carries an `Origin` header is a browser's, and is refused 403 (`origin_not_allowed`,
+  naming the setting) unless `MASON_MCP_ORIGINS` names that origin exactly: comma-separated, each written as a browser
+  sends it (`https://app.example.test`, `http://localhost:5173`: the scheme and host in lower case, no default port, no
+  path). `Origin: null` is refused. It is checked first, before the token, under every revision. A request with no
+  `Origin` is not judged by it: a hosted agent calls from its own servers and a desktop app from its own process
+  (Node's `fetch`, which MCP's TypeScript SDK uses, sends none), so neither needs the setting. An entry that is not an
+  origin refuses the start.
 - **Bounds**: the authorization server's keys are kept at most 5 minutes (less under its `Cache-Control: max-age`), so a
   key it removes is refused within 5 minutes, and fetched at most once a minute, backing off to 10 minutes while the
   fetch fails (every token 503 meanwhile). **If the keys cannot be fetched for longer than their 5 minutes, every

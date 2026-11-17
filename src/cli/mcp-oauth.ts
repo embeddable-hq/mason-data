@@ -30,6 +30,7 @@
 import * as crypto from "node:crypto";
 import { isLoopback } from "../api/postgres/plain.ts";
 import { USER_NAME_RE } from "../duck/users.ts";
+import { untrustedText } from "../lib/one-line.ts";
 import { parseProxyFrom, type ProxyFrom } from "../api/postgres/proxy.ts";
 
 // ------------------------------------------------------------------ the settings
@@ -50,12 +51,16 @@ export interface McpSettings {
   /** MASON_MCP_PROXY_FROM: the proxies (a relay) whose X-Forwarded-For entry is believed, or null: none, every
    *  request's address its peer's */
   proxyFrom: ProxyFrom | null;
+  /** MASON_MCP_ORIGINS: the browser origins a request carrying an `Origin` header may come from (none by default) */
+  origins: readonly string[];
 }
 
 /** The endpoint's settings, as `mason serve --help` lists them (one list: the checks read it). */
-export const MCP_SETTINGS = ["MASON_MCP_URL", "MASON_MCP_ISSUER", "MASON_MCP_JWKS_URL", "MASON_MCP_USER_CLAIM", "MASON_MCP_USER_ID_CLAIM", "MASON_MCP_PROXY_FROM", "MASON_MCP_PLAIN"] as const;
+export const MCP_SETTINGS = ["MASON_MCP_URL", "MASON_MCP_ISSUER", "MASON_MCP_JWKS_URL", "MASON_MCP_USER_CLAIM", "MASON_MCP_USER_ID_CLAIM", "MASON_MCP_PROXY_FROM", "MASON_MCP_PLAIN", "MASON_MCP_ORIGINS"] as const;
 /** the setting that names the trusted proxies, as its refusals name it */
 export const MCP_PROXY_SETTING = "MASON_MCP_PROXY_FROM";
+/** the setting that names the browser origins /mcp answers, as its refusals name it */
+export const MCP_ORIGINS_SETTING = "MASON_MCP_ORIGINS";
 
 /** the path the endpoint answers on, on the health port */
 export const MCP_PATH = "/mcp";
@@ -86,6 +91,34 @@ function addressProblem(setting: string, value: string): string | URL {
   if (u.protocol === "http:" && !isLoopback(host)) return `${setting} is http://${u.host}/…: https:// (http:// only to this machine, for a test)`;
   if (!web) return `${setting} is not an https:// address: ${shape}`;
   return u;
+}
+
+/**
+ * MASON_MCP_ORIGINS AS A LIST OF ORIGINS, or what is wrong with it: comma-separated, each an origin as a browser sends
+ * it in the `Origin` header — `http` or `https`, the host, a port only when it is not the scheme's own, nothing after
+ * (`https://app.example.test`, `http://localhost:5173`). An entry is compared with the header exactly, so one written
+ * otherwise would never match, and is refused. What is wrong is said without quoting what is not an origin (it may be a
+ * secret pasted in the wrong place); an entry that parses is said as its origin alone.
+ */
+export function originsSetting(value: string | undefined): readonly string[] | string {
+  if (value === undefined || value.trim() === "") return [];
+  const shape = "scheme://host[:port], such as https://app.example.test, comma-separated";
+  const origins: string[] = [];
+  for (const [i, raw] of value.split(",").entries()) {
+    const entry = raw.trim();
+    const which = `${MCP_ORIGINS_SETTING}'s entry ${i + 1}`;
+    if (entry === "") return `${which} is empty: ${shape}`;
+    if (entry.includes("*")) return `${which} holds a *: every origin is named in full, ${shape}`;
+    if (entry.length > MAX_URL) return `${which} is ${entry.length} characters: an origin is at most ${MAX_URL} (${shape})`;
+    let u: URL;
+    try { u = new URL(entry); } catch { return `${which} is not an origin: ${shape}`; }
+    const web = u.protocol === "https:" || u.protocol === "http:";
+    if (!web) return `${which} is not an http:// or https:// origin: ${shape}`;
+    if (u.username !== "" || u.password !== "") return `${which} carries a user or a password (${u.protocol}//****@${u.host}): an origin alone, ${shape}`;
+    if (entry !== u.origin) return `${which} is not written as a browser sends its origin: ${u.origin} (the scheme and host in lower case, no default port, no path, query or fragment)`;
+    origins.push(u.origin);
+  }
+  return origins;
 }
 
 /**
@@ -123,8 +156,11 @@ export function mcpSettings(env: Readonly<Record<string, string | undefined>>, h
     problems.push(`the MCP endpoint would answer on ${healthHost} (MASON_HEALTH_HOST), off this machine, in plain HTTP, where a bearer token travels in clear: ` +
       "put a TLS proxy or relay in front of it and say so with MASON_MCP_PLAIN=1, or MASON_HEALTH_HOST=127.0.0.1 for one on this machine");
   }
+  const origins = originsSetting(env[MCP_ORIGINS_SETTING]);
+  if (typeof origins === "string") problems.push(origins);
   if (problems.length) return { problems };
-  return { url: url!, issuer: env.MASON_MCP_ISSUER!, jwks: jwks!.href, claim, idClaim, proxyFrom: proxy === null || "problem" in proxy ? null : proxy };
+  return { url: url!, issuer: env.MASON_MCP_ISSUER!, jwks: jwks!.href, claim, idClaim, proxyFrom: proxy === null || "problem" in proxy ? null : proxy,
+    origins: typeof origins === "string" ? [] : origins };
 }
 
 /** The resource's metadata (RFC 9728): what a client reads to find where to sign in. */
@@ -237,7 +273,7 @@ export class Issuer {
     if (typeof header === "string") return bad(`the token's ${header}`);
     const alg = header.alg;
     if (typeof alg !== "string" || !Object.hasOwn(ALGS, alg)) {
-      return bad(`the token's alg ${typeof alg === "string" ? JSON.stringify(alg.slice(0, 20)) : "is missing"}: Mason takes ${Object.keys(ALGS).join(", ")} (an asymmetric signature by the issuer's published key), never none nor HS*`);
+      return bad(`the token's alg ${typeof alg === "string" ? JSON.stringify(untrustedText(alg, 20)) : "is missing"}: Mason takes ${Object.keys(ALGS).join(", ")} (an asymmetric signature by the issuer's published key), never none nor HS*`);
     }
     if (header.crit !== undefined) return bad("the token's header names crit extensions, which Mason does not read");
     if (header.typ !== undefined && (typeof header.typ !== "string" || !TYPES.has(header.typ.toLowerCase()))) return bad("the token's typ is neither a JWT's nor an access token's (at+jwt)");
@@ -363,7 +399,7 @@ export class Issuer {
   private async getJson(url: string): Promise<{ value: Record<string, unknown>; cacheControl: string | null } | string> {
     let res: Response;
     try { res = await this.fetcher(url, { redirect: "manual", signal: AbortSignal.timeout(FETCH_MS), headers: { accept: "application/json" } }); }
-    catch (e) { return `could not be fetched (${(e as Error).name === "TimeoutError" ? `no answer in ${FETCH_MS / 1000} s` : (e as Error).message})`; }
+    catch (e) { return `could not be fetched (${(e as Error).name === "TimeoutError" ? `no answer in ${FETCH_MS / 1000} s` : untrustedText((e as Error).message, 200)})`; }
     if (res.status !== 200) { await res.body?.cancel(); return `answered HTTP ${res.status}${res.status >= 300 && res.status < 400 ? " (a redirect, which Mason does not follow)" : ""}`; }
     const chunks: Uint8Array[] = [];
     let size = 0;
@@ -374,7 +410,7 @@ export class Issuer {
         if (size > MAX_ANSWER) return `answered more than ${MAX_ANSWER} bytes`;
         chunks.push(c as Uint8Array);
       }
-    } catch (e) { return `could not be read (${(e as Error).message})`; }
+    } catch (e) { return `could not be read (${untrustedText((e as Error).message, 200)})`; }
     let v: unknown;
     try { v = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { return "answered what is not JSON"; }
     if (typeof v !== "object" || v === null || Array.isArray(v)) return "answered what is not a JSON object";

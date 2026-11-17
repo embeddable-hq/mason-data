@@ -37,12 +37,13 @@ import * as crypto from "node:crypto";
 import type * as http from "node:http";
 import { PgConnection } from "../cdc/pg-wire.ts";
 import { shownAddress } from "../lib/cidr.ts";
+import { oneLine, untrustedText } from "../lib/one-line.ts";
 import { proxyHeaderFor, proxyNames, type ProxyFrom } from "../api/postgres/proxy.ts";
 import { ADDRESS_NOT_ALLOWED, ApiError, USER_DISABLED } from "../api/error.ts";
 import type { PgApiServer, ShareSocket } from "../api/postgres/server.ts";
 import { USER_REMOVED, type LiveUsers } from "../duck/users.ts";
 import { INSTRUCTIONS, McpServer, SERVER_CAPABILITIES, serverInfo } from "./mcp.ts";
-import { Issuer, MCP_PATH, MCP_PROXY_SETTING, RESOURCE_METADATA_PATH, resourceMetadata, resourceMetadataUrl, type Fetcher, type McpSettings } from "./mcp-oauth.ts";
+import { Issuer, MCP_ORIGINS_SETTING, MCP_PATH, MCP_PROXY_SETTING, RESOURCE_METADATA_PATH, resourceMetadata, resourceMetadataUrl, type Fetcher, type McpSettings } from "./mcp-oauth.ts";
 
 /** the most MCP sessions open at once, every user's together: past it a new session is refused (503), never made by
  *  ending another user's session that is in use */
@@ -146,6 +147,18 @@ export function forwardedAddress(entry: string): string | null {
   return shownAddress(entry);
 }
 
+/**
+ * WHY A REQUEST'S `Origin` IS REFUSED, or null: none sent (a client that is not a browser), or one `allowed` names
+ * exactly. `null` (an opaque origin: a sandboxed page, a file, a redirect across origins) is present and never named, so
+ * refused.
+ */
+export function originRefusal(origin: string | string[] | undefined, allowed: readonly string[]): string | null {
+  if (origin === undefined) return null;
+  const o = Array.isArray(origin) ? origin.join(", ") : origin;
+  if (allowed.includes(o)) return null;
+  return `the request came from the browser origin ${JSON.stringify(untrustedText(o, 100))}, which ${MCP_ORIGINS_SETTING} does not name${allowed.length === 0 ? " (it names none)" : ""}`;
+}
+
 /** A refusal's body, in the CLI's failure words: what is wrong, the way out. */
 const body = (code: string, message: string, fix: string): string => `${JSON.stringify({ error: { code, message, fix } })}\n`;
 
@@ -187,9 +200,9 @@ export function modernRefusal(msg: unknown, headers: http.IncomingHttpHeaders): 
   if (typeof caps !== "object" || caps === null || Array.isArray(caps)) return { status: 400, code: -32602, message: `the request's params._meta carries no ${META.capabilities} (an object): under ${STATELESS_VERSION} every request names them` };
   const said = (name: string): string | null => { const v = headers[name]; return typeof v === "string" ? v : null; };
   const pv = said("mcp-protocol-version");
-  if (pv !== version) return { status: 400, code: HEADER_MISMATCH, message: pv === null ? "Header mismatch: no MCP-Protocol-Version header" : `Header mismatch: MCP-Protocol-Version ${JSON.stringify(pv.slice(0, 40))} is not the body's ${version}` };
+  if (pv !== version) return { status: 400, code: HEADER_MISMATCH, message: pv === null ? "Header mismatch: no MCP-Protocol-Version header" : `Header mismatch: MCP-Protocol-Version ${JSON.stringify(untrustedText(pv, 40))} is not the body's ${version}` };
   const method = said("mcp-method");
-  if (method !== m.method) return { status: 400, code: HEADER_MISMATCH, message: method === null ? "Header mismatch: no Mcp-Method header" : `Header mismatch: Mcp-Method ${JSON.stringify(method.slice(0, 60))} is not the body's method ${JSON.stringify(m.method.slice(0, 60))}` };
+  if (method !== m.method) return { status: 400, code: HEADER_MISMATCH, message: method === null ? "Header mismatch: no Mcp-Method header" : `Header mismatch: Mcp-Method ${JSON.stringify(untrustedText(method, 60))} is not the body's method ${JSON.stringify(untrustedText(m.method, 60))}` };
   if (m.method === "tools/call" || m.method === "resources/read" || m.method === "prompts/get") {
     const params = (typeof m.params === "object" && m.params !== null ? m.params : {}) as { name?: unknown; uri?: unknown };
     const named = m.method === "resources/read" ? params.uri : params.name;
@@ -198,7 +211,7 @@ export function modernRefusal(msg: unknown, headers: http.IncomingHttpHeaders): 
     if (headerValue(header) !== named) return { status: 400, code: HEADER_MISMATCH, message: `Header mismatch: Mcp-Name is not the body's ${m.method === "resources/read" ? "uri" : "name"}` };
   }
   if (!(MODERN_METHODS as readonly string[]).includes(m.method)) {
-    return { status: 404, code: -32601, message: `Method not found: ${m.method.slice(0, 60)} (under ${STATELESS_VERSION} this server answers ${MODERN_METHODS.join(", ")})` };
+    return { status: 404, code: -32601, message: `Method not found: ${untrustedText(m.method, 60)} (under ${STATELESS_VERSION} this server answers ${MODERN_METHODS.join(", ")})` };
   }
   return null;
 }
@@ -224,7 +237,9 @@ export function mcpEndpoint(settings: McpSettings, o: { log: (line: string) => v
   /** the bounds, MAX_SESSIONS, MAX_USER_SESSIONS and MAX_REQUESTS unless a test names smaller */
   limits?: { sessions?: number; userSessions?: number; requests?: number } }): McpEndpoint {
   const maxSessions = o.limits?.sessions ?? MAX_SESSIONS, maxUserSessions = o.limits?.userSessions ?? MAX_USER_SESSIONS, maxRequests = o.limits?.requests ?? MAX_REQUESTS;
-  const log = o.log;
+  // EVERY LINE ONE LINE, whatever a site put in it: a value from the network reaches a line through untrustedText, and
+  // what a site missed still cannot start a line of mason serve's log, the platform's (a stack is said on one line)
+  const log = (line: string): void => o.log(oneLine(line));
   const now = o.now ?? Date.now;
   const issuer = new Issuer(settings, { log, ...(o.fetch !== undefined ? { fetch: o.fetch } : {}), now });
   const metadataUrl = resourceMetadataUrl(settings);
@@ -521,9 +536,18 @@ export function mcpEndpoint(settings: McpSettings, o: { log: (line: string) => v
         return true;
       }
       if (p !== MCP_PATH) return false;
+      // THE ORIGIN, before anything else of the request is read, its token included, under every revision ("Streamable
+      // HTTP": "Security Warning", the server MUST validate it): a request carrying one is a browser's, answered only
+      // from an origin MASON_MCP_ORIGINS names. A client that is not a browser sends none, and is not judged by it
+      const origin = originRefusal(req.headers.origin, settings.origins);
+      if (origin !== null) {
+        log(`[mcp] refused a request from ${shownAddress(req.socket.remoteAddress) ?? "an address that could not be read"}: ${origin}`);
+        send(res, 403, {}, body("origin_not_allowed", origin, `name the origin in ${MCP_ORIGINS_SETTING} beside mason serve (comma-separated, such as https://app.example.test), if a page there is to use this endpoint`));
+        return true;
+      }
       const slot = { held: 0 };
       serveMcp(req, res, slot).catch((e: unknown) => {
-        log(`[mcp] a request failed: ${(e as Error).message}`);
+        log(`[mcp] a request failed: ${untrustedText((e as Error).message, 500)}`);
         if (!res.headersSent) send(res, 500, {}, body("failed", "the request failed", "mason serve's log says why"));
         else res.destroy();
       }).finally(() => { inFlight -= slot.held; });

@@ -547,6 +547,113 @@ test("MCP 2026-07-28 as its text says: server/discover, tools/list and a tools/c
   assert.ok(m.logged.some((l) => /analyst: request .*4545 cancelled: the client closed its request/.test(l)), m.logged.join("\n"));
 });
 
+/** what no line of the log may hold: C0 and C1 controls (newline, return, ESC, NEL and CSI with them), DEL, the line and
+ *  paragraph separators, the directional marks, embeddings, overrides and isolates */
+const UNSAFE = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/;
+
+test("no client starts a line of mason serve's log: a cancellation's reason and a method, under 2025-11-25 and 2026-07-28, are said in one line with no control character", async () => {
+  const m = await mount({});
+  const token = jwt(claims("analyst"));
+  const sid = await session(m, token);
+  const FORGED = "[mcp] refused a request from 6.6.6.6: FORGED LINE";
+  /** the lines `act` adds to the log, each held to carry no control character and none to begin a forged line */
+  const added = async (what: string, act: () => Promise<void>): Promise<string[]> => {
+    const before = m.logged.length;
+    await act();
+    const lines = m.logged.slice(before).flatMap((l) => l.split(/\r\n|\r|\n|\u0085|\u2028|\u2029/));
+    for (const l of lines) {
+      assert.doesNotMatch(l, UNSAFE, `${what}: ${JSON.stringify(l)}`);
+      assert.ok(!l.startsWith("[mcp] refused a request from 6.6.6.6"), `${what}: a forged line: ${JSON.stringify(lines)}`);
+    }
+    return lines;
+  };
+  // A CANCELLATION'S REASON, under each revision: the line it is said in is one line, the reason's breaks shown as `?`
+  const reasons: Array<[string, string, string]> = [
+    ["a newline", `bye\n${FORGED}`, `bye?${FORGED}`],
+    ["a carriage return", `bye\r${FORGED}`, `bye?${FORGED}`],
+    ["a line separator", `bye\u2028${FORGED}`, `bye?${FORGED}`],
+    ["an ANSI escape", "bye \u001b[2K\u001b[31mred\u001b[0m", "bye ?[2K?[31mred?[0m"],
+  ];
+  let id = 9100;
+  for (const revision of ["2025-11-25", "2026-07-28"] as const) {
+    for (const [what, reason, shown] of reasons) {
+      const rid = ++id;
+      const legacy = revision === "2025-11-25";
+      const long = legacy
+        ? post(m, { jsonrpc: "2.0", id: rid, method: "tools/call", params: longQuery(rid) }, { token, session: sid })
+        : (() => { const r = modernRequest("tools/call", longQuery(rid), { id: rid }); return post(m, r.message, { token, headers: r.headers }); })();
+      await sleep(600);
+      const lines = await added(`${revision}, ${what}`, async () => {
+        const cancel = await post(m, { jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: rid, reason } }, { token, ...(legacy ? { session: sid } : { headers: STATELESS }) });
+        assert.equal(cancel.status, 202, `${revision}, ${what}`);
+        assert.equal((await long).status, 202, `${revision}, ${what}: answered no further`);
+      });
+      assert.deepEqual(lines, [`[mcp] analyst: request ${rid} cancelled by the client: ${shown}`], `${revision}, ${what}`);
+    }
+  }
+  // A METHOD: under 2026-07-28 a method it does not answer is logged as refused (its Mcp-Method header equal to it, so
+  // a header's own characters: NEL and CSI); a body's method that is not its header's is refused naming both
+  const c1 = "x\u0085[mcp] analyst: FORGED\u009b31m";
+  const notFound = modernRequest(c1);
+  const nf = await added("2026-07-28, a method with C1 controls", async () => {
+    const a = await post(m, notFound.message, { token, headers: notFound.headers });
+    assert.equal(a.status, 404, JSON.stringify(a.body));
+  });
+  assert.equal(nf.length, 1, JSON.stringify(nf));
+  assert.match(nf[0]!, /^\[mcp\] refused a request of analyst from 127\.0\.0\.1: Method not found: x\?\[mcp\] analyst: FORGED\?31m \(under 2026-07-28/);
+  const mismatch = modernRequest(`tools/list\n[mcp] FORGED\u2028\u001b[31m`, {}, { headers: { "mcp-method": "tools/list" } });
+  const mm = await added("2026-07-28, a body's method with a newline", async () => {
+    const a = await post(m, mismatch.message, { token, headers: mismatch.headers });
+    assert.equal(a.status, 400, JSON.stringify(a.body));
+  });
+  assert.equal(mm.length, 1, JSON.stringify(mm));
+  assert.match(mm[0]!, /^\[mcp\] refused a request of analyst from 127\.0\.0\.1: Header mismatch: Mcp-Method "tools\/list" is not the body's method "tools\/list\?\[mcp\] FORGED\?\?\[31m"$/);
+  // under 2025-11-25 a method it does not have is answered, and nothing is logged
+  const legacy = await added("2025-11-25, a method with controls", async () => {
+    const a = await post(m, { jsonrpc: "2.0", id: ++id, method: `${c1}\n${FORGED}`, params: {} }, { token, session: sid });
+    assert.equal((a.body!.error as { code: number }).code, -32601);
+  });
+  assert.deepEqual(legacy, []);
+});
+
+test("Origin: a request carrying one is a browser's, answered only from an origin MASON_MCP_ORIGINS names — refused 403 before its token is read, under every revision; Origin: null refused; a request with none (a hosted agent's server, a desktop app) served as before", async () => {
+  const m = await mount({ MASON_MCP_ORIGINS: "https://app.example.test,http://localhost:5173" });
+  const token = jwt(claims("analyst"));
+  // allowed: served, under both revisions
+  const sid = await session(m, token, { origin: "https://app.example.test" });
+  assert.equal((await call(m, token, sid, "tables", {}, { origin: "http://localhost:5173" })).isError, undefined);
+  const discover = modernRequest("server/discover");
+  assert.equal((await post(m, discover.message, { token, headers: { ...discover.headers, origin: "https://app.example.test" } })).status, 200);
+  // refused, with a token or without one (the origin is judged first), under both revisions, with what to do
+  for (const origin of ["https://evil.example.test", "null", "https://app.example.test.evil.example.test", "https://APP.example.test", "http://app.example.test"]) {
+    for (const [what, message, headers] of [
+      ["no token", INIT(), {}],
+      ["a valid token, 2025-11-25", INIT(), {}],
+      ["a valid token, 2026-07-28", discover.message, discover.headers],
+    ] as Array<[string, unknown, Record<string, string>]>) {
+      const before = m.logged.length;
+      const a = await post(m, message, { ...(what === "no token" ? {} : { token }), headers: { ...headers, origin } });
+      assert.equal(a.status, 403, `${origin}, ${what}: ${JSON.stringify(a.body)}`);
+      assert.equal(a.headers.get("www-authenticate"), null, `${origin}, ${what}: refused before the token`);
+      const e = (a.body as { error: { code: string; message: string; fix: string } }).error;
+      assert.equal(e.code, "origin_not_allowed");
+      assert.equal(e.message, `the request came from the browser origin ${JSON.stringify(origin)}, which MASON_MCP_ORIGINS does not name`);
+      assert.match(e.fix, /^name the origin in MASON_MCP_ORIGINS beside mason serve/);
+      assert.deepEqual(m.logged.slice(before), [`[mcp] refused a request from 127.0.0.1: ${e.message}`]);
+    }
+  }
+  // a session's later request from a foreign origin is refused too
+  assert.equal((await post(m, { jsonrpc: "2.0", id: ids++, method: "tools/list" }, { token, session: sid, headers: { origin: "https://evil.example.test" } })).status, 403);
+  // none sent: served (this file's client is Node's fetch, which sends none, as a hosted agent's server does)
+  assert.equal((await call(m, token, sid, "tables")).isError, undefined);
+  // unset: no browser origin at all
+  const off = await mount({});
+  const r = await post(off, INIT(), { token, headers: { origin: "https://app.example.test" } });
+  assert.equal(r.status, 403);
+  assert.equal((r.body as { error: { message: string } }).error.message, "the request came from the browser origin \"https://app.example.test\", which MASON_MCP_ORIGINS does not name (it names none)");
+  assert.equal((await post(off, INIT(), { token })).status, 200);
+});
+
 test("a session is its user's; one that does not exist is 404; DELETE ends one; GET is not served", async () => {
   const m = await mount({ MASON_MCP_PROXY_FROM: "127.0.0.1" });
   const inside = { "x-forwarded-for": "10.1.2.3" };

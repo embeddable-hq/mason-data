@@ -2616,9 +2616,27 @@ together, or the start is refused naming what is missing. The owner's spec (2026
   everywhere would have broken a revision Mason says it speaks; counting them everywhere would accept what three of the
   four forbid. A batch of notifications alone (cancellations) is never held to the bound.
 
-**Left out.** `Origin` is not checked (MCP asks it of a server against DNS rebinding, which reaches a server that trusts
-the network or a cookie; this one trusts only a bearer token sent in a header). No server-sent events: every answer is
-JSON. Opaque (non-JWT) tokens and token introspection are not read; no scope is required.
+- **`Origin` is validated, as MCP Streamable HTTP's MUST says** (the owner's decision, 2026-11-17, the third review of
+  PR 1125). The bearer token already makes DNS rebinding harmless here — no cookie or ambient credential exists, and a
+  cross-origin preflight is 401 with no CORS headers — but the MUST is cheap to meet. A request carrying `Origin` is a
+  browser's and is answered only when `MASON_MCP_ORIGINS` names that origin exactly (default: none), else 403
+  `origin_not_allowed` naming the setting; `Origin: null` (a sandboxed page, a file) is present and never named, so
+  refused. It is judged first, before the token is read, under every revision, so a page elsewhere learns nothing of
+  the token check. A request with no `Origin` is not judged: hosted agents call from their servers and desktop apps from
+  their own process, and neither sends one (Node's `fetch` sends none; checked). Each entry is held at the start to the
+  form a browser sends (`entry === new URL(entry).origin`, http or https, no `*`), since an entry written otherwise would
+  never match; a bad entry refuses the start, said as its origin alone or not at all, never a path or a user.
+- **A client never writes a line of the log** (the third review of PR 1125: a cancellation's `reason`, `bye\n[mcp]
+  refused a request from …`, logged a second, forged line to `mason serve`'s stdout, the platform's log; a method held
+  NEL and CSI). Every value that came from the network — a JSON-RPC method, id or reason, a header, a client's name, a
+  token's claim, an error another server's answer made — reaches a log line through ONE function, `untrustedText`
+  (src/lib/one-line.ts): `oneLine`'s rule, the one `serviceText` applies to a hosted service's text (every C0 and C1
+  control, newline, CR, DEL, U+2028 / U+2029, the directional marks and bidi overrides as `?`), and a length cap. The
+  endpoint's own `log` makes every line one line too, so a site that missed the function still cannot start a line (a
+  stack is then said on one line).
+
+**Left out.** No server-sent events: every answer is JSON. No CORS headers: an origin `MASON_MCP_ORIGINS` names is let
+through, and a page that needs CORS to read the answer is not served yet. Opaque (non-JWT) tokens and token introspection are not read; no scope is required.
 
 **Where.** `src/cli/mcp-http.ts` (the endpoint, `clientOf`), `src/cli/mcp-oauth.ts` (the settings, the token),
 `src/cli/mcp.ts` (`McpServer`, `McpLink`), `src/cli/address-presets.ts`, `scripts/connector-ranges.ts`,

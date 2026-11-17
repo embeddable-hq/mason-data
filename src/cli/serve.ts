@@ -187,7 +187,12 @@ export const SERVE: CommandSpec = {
     MASON_MCP_PLAIN         1 to say TLS is terminated in front of the endpoint (a relay, a proxy), required when
                             MASON_HEALTH_HOST is off loopback: a bearer token must never cross a network in clear
                             (default 0)
-    MASON_PG_HOST, MASON_PG_PORT   the Postgres API's address (default 127.0.0.1:5433)
+    MASON_MCP_ORIGINS       the browser origins a page may use the endpoint from, comma-separated, each written as a
+                            browser sends it (https://app.example.test, http://localhost:5173): a request carrying an
+                            Origin header it does not name, Origin: null included, is refused 403 before its token is
+                            read. A hosted agent's server or a desktop app sends none, and is not judged by it
+                            (default unset: no browser origin)
+    MASON_PG_HOST, MASON_PG_PORT  the Postgres API's address (default 127.0.0.1:5433)
     MASON_PG_TLS_CERT, MASON_PG_TLS_KEY   its certificate, required off loopback; or MASON_PG_SELF_SIGNED_TLS=1
                             for one made in .mason/, or MASON_PG_PLAIN=1 behind a TLS proxy of your own
     MASON_PG_PUBLIC_URL     the Postgres API's address as a client reaches it, behind a load balancer, a proxy or a DNS

@@ -13,3 +13,6 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   address, or anywhere. If the issuer's keys cannot be fetched for more than 5 minutes, every request is 503 until they
   can: check that `MASON_MCP_JWKS_URL` is reachable from the replica.
   Nothing changes until you set them (docs/POSTGRES-API.md "From a hosted agent: MCP over HTTPS").
+  A request to `/mcp` that carries a browser's `Origin` header is refused 403 unless `MASON_MCP_ORIGINS` names that
+  origin (comma-separated, such as `https://app.example.test`; none by default). Hosted agents and desktop apps send no
+  `Origin`, so they need nothing set.

@@ -32,6 +32,7 @@ import { PgConnection, PgError, pgIdent, pgLiteral, socketErrorText, type Extend
 import { qualifiedName, type TableName } from "../duck/explain.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { withLocalSettings } from "../lib/local-settings.ts";
+import { untrustedText } from "../lib/one-line.ts";
 
 /** The URL a client is shown in the help: a user's, as mason user add prints it. */
 const EXAMPLE_URL = "postgres://claude:<password>@127.0.0.1:5433/mason";
@@ -394,7 +395,7 @@ export class McpServer {
       // a request the client cancelled is answered no further (MCP: the receiver SHOULD NOT send a response)
       if (call.cancelled) return null;
       if (e instanceof RpcFailure) return rpcError(id, e.code, e.message);
-      this.log(`${method} failed: ${(e as Error).message}`);
+      this.log(`${untrustedText(method, 60)} failed: ${untrustedText((e as Error).message, 500)}`);
       return rpcError(id, RPC.internal, (e as Error).message);
     } finally { this.calls.delete(key); }
   }
@@ -405,17 +406,20 @@ export class McpServer {
     const requestId = params.requestId;
     const call = isId(requestId) ? this.calls.get(`${typeof requestId}:${requestId}`) : undefined;
     if (call === undefined) return;   // answered already, or never asked: MCP says to ignore it
-    this.cancelCall(JSON.stringify(requestId), call, `cancelled by the client${typeof params.reason === "string" ? `: ${params.reason}` : ""}`);
+    // the reason is the client's words: one line of the log, never a line of its own (untrustedText)
+    this.cancelCall(JSON.stringify(requestId), call, `cancelled by the client${typeof params.reason === "string" ? `: ${untrustedText(params.reason)}` : ""}`);
   }
 
   /** A request's statement cancelled where it runs (Postgres's CancelRequest), then its connections closed. */
   private cancelCall(shown: string, call: Call, why: string): void {
     if (call.cancelled) return;
     call.cancelled = true;
-    this.log(`request ${shown} ${why}`);
+    // `shown` is the client's id (a string id may hold anything)
+    const id = untrustedText(shown, 80);
+    this.log(`request ${id} ${why}`);
     for (const pg of call.connections) {
       // the statement is cancelled where it runs, then its connection closed: the call's work ends at once
-      void pg.cancel().catch((e: unknown) => { this.log(`cancelling request ${shown}: ${(e as Error).message}`); })
+      void pg.cancel().catch((e: unknown) => { this.log(`cancelling request ${id}: ${(e as Error).message}`); })
         .finally(() => pg.close());
     }
   }
