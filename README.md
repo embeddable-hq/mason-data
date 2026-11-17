@@ -23,7 +23,7 @@ A drop-in replacement for your Postgres read replica. Same SQL. Same answers. Se
 - [Use it with your database](#use-it-with-your-database)
   - [Set up a project](#set-up-a-project) · [Choose tables and columns](#choose-tables-and-columns) · [Keep them up to date](#keep-them-up-to-date)
   - [Connect a tool](#connect-a-tool) · [Access control](#access-control) · [Check on it](#check-on-it) · [Run it on a server](#run-it-on-a-server)
-  - [Hosted: Mason read-replica](#hosted-mason-read-replica) · [Change a deployed project](#change-a-deployed-project)
+  - [Hosted: Mason Cloud](#hosted-mason-cloud) · [Change a deployed project](#change-a-deployed-project)
 - [Speed and compatibility](#speed-and-compatibility)
   - [Speed](#speed) · [Compatibility](#compatibility)
 - [Agents](#agents) · [Where to read more](#where-to-read-more) · [Community](#community) · [License](#license)
@@ -31,12 +31,21 @@ A drop-in replacement for your Postgres read replica. Same SQL. Same answers. Se
 ## Try it in 2 minutes
 
 ```bash
-npm i -g @mason-data/cli             # needs Node 22.13+ (run mason doctor to check this machine)
+# needs Node 22.13+ (mason doctor checks this machine)
+npm i -g @mason-data/cli
+
+# start a demo shop database: nothing else to install
 mkdir mason-demo && cd mason-demo
-mason init demo && mason start       # starts a demo shop database for you: nothing else to install
-mason add order_items                # adds the fourth table, so you can watch its sync start
-mason ui                             # opens Mason in your browser: the tables syncing, the users and the queries
-mason destroy                        # deletes the synced data and the demo database
+mason init demo && mason start
+
+# add the fourth table and watch its sync start
+mason add order_items
+
+# open the tables syncing, the users and the queries in your browser
+mason ui
+
+# delete the synced data and the demo database
+mason destroy
 ```
 
 The demo shop has four tables: `customers`, `products`, `orders` and `order_items`. A new order arrives every few
@@ -53,12 +62,18 @@ A Mason project is your app's folder. Run these in it:
 
 ```bash
 cd your-app
-# Mason reads MASON_DATABASE_URL, then DATABASE_URL, from .env.local, .env or the shell.
-mason init                           # creates mason/sources/<database>.yml (commit it) and .mason/ (local, gitignored)
-mason tables                         # lists your database's tables, with their rows and keys
-mason add orders customers           # adds tables to the sources file
-mason start                          # starts Mason in the background and begins the first sync
-mason wait                           # waits until every added table is synced
+
+# write mason/sources/<database>.yml (commit it) and .mason/ (local, gitignored);
+# Mason reads MASON_DATABASE_URL, then DATABASE_URL, from .env.local, .env or the shell
+mason init
+
+# choose the tables to sync: list them with their rows and keys, then add some
+mason tables
+mason add orders customers
+
+# start Mason in the background and wait until every added table is synced
+mason start
+mason wait
 ```
 
 Set `MASON_DATABASE_URL` to sync a different database from your app's. `mason init - < db-url.txt` reads the URL from
@@ -142,8 +157,11 @@ explains how each one works, and why.
 Which command depends on where the tool runs:
 
 ```bash
-mason user add metabase              # a tool that can reach this machine: prints a connection URL (shown only once)
-mason share                          # a tool in the cloud: prints a temporary address and login (Ctrl-C ends it)
+# a tool that can reach this machine: get a connection URL (shown only once)
+mason user add metabase
+
+# a tool in the cloud: get a temporary address and login (Ctrl-C ends it)
+mason share
 ```
 
 Paste what it prints into your tool's Postgres connection form. Each synced table appears as a table in a database
@@ -180,10 +198,15 @@ roles:
 ```
 
 ```bash
-mason user add claude --role agent   # prints its password once, inside the connection URL
+# add users: each prints its password once, inside the connection URL
+mason user add claude --role agent
 mason user add acme --role tenant --set tenant=42
-mason user disable claude            # refuses its logins until mason user enable claude (it keeps its password)
-mason user remove claude             # blocks its next connection, and ends its open sessions at their next query
+
+# refuse a user's logins until mason user enable claude (it keeps its password)
+mason user disable claude
+
+# block a user's next connection and end its open sessions at their next query
+mason user remove claude
 ```
 
 - A query that reads a table or column outside the user's role is refused with `42501`, as Postgres refuses it. A
@@ -196,13 +219,25 @@ mason user remove claude             # blocks its next connection, and ends its 
 ### Check on it
 
 ```bash
-mason status                         # your database, each synced table, the Postgres API, and the last day's and week's queries
-mason ui                             # the same in your browser, and more
-mason logs --requests --failed       # every query that was refused, failed or cancelled, and why
-mason logs --events                  # the sync's events: failures, restarts, each sync you asked for (--scheduled: every one)
-mason logs --running                 # the queries running now (mason cancel <session> stops one)
-mason usage --since 7d --step 1h     # the last week, one line per hour: queries, the synced data, memory
-mason stop                           # stops Mason; the synced data stays, and the next mason start resumes in seconds
+# see your database, each synced table, the Postgres API and the queries, or all that and more
+# in your browser
+mason status
+mason ui
+
+# see every query that was refused, failed or cancelled, and why
+mason logs --requests --failed
+
+# see the sync's events: failures, restarts, each sync you asked for (--scheduled: every one)
+mason logs --events
+
+# see the queries running now (mason cancel <session> stops one)
+mason logs --running
+
+# see the last week, one line per hour: queries, the synced data, memory
+mason usage --since 7d --step 1h
+
+# stop Mason: the synced data stays, and the next mason start resumes in seconds
+mason stop
 ```
 
 `mason status` lists the facts (Source, Sources file, Version, Up, Free disk, Connections open), then each table with
@@ -219,12 +254,17 @@ the project folder, `mason/`. It already names your tables and how each one sync
 the whole road offline.
 
 ```bash
-cd your-app                          # the folder that holds mason/
+# fetch the compose file into the folder that holds mason/
+cd your-app
 curl -fsSLO https://raw.githubusercontent.com/embeddable-hq/mason-data/main/deploy/mason-data/compose.yml
-# On the server, .env sets the database URL (under the name your sources file uses: MASON_DATABASE_URL or
-# DATABASE_URL), MASON_API_KEY (openssl rand -hex 24) and MASON_PG_SELF_SIGNED_TLS=1 (see TLS below).
-docker compose up -d                 # starts ghcr.io/embeddable-hq/mason-data with your mason/ folder
-docker compose exec mason mason user add metabase   # users are kept on the server, so add them there
+
+# on the server, set in .env the database URL (under the name your sources file uses:
+# MASON_DATABASE_URL or DATABASE_URL), MASON_API_KEY (openssl rand -hex 24) and
+# MASON_PG_SELF_SIGNED_TLS=1 (see TLS below), then start Mason with your mason/ folder
+docker compose up -d
+
+# users are kept on the server, so add them there
+docker compose exec mason mason user add metabase
 ```
 
 - **One container per volume.** Only one process can write the synced data. Deploy with stop-then-start (in
@@ -241,18 +281,21 @@ docker compose exec mason mason user add metabase   # users are kept on the serv
 
 [`deploy/mason-data/README.md`](deploy/mason-data/README.md) walks you through it, with
 [the settings](deploy/mason-data/README.md#settings) to decide. [`deploy/README.md`](deploy/README.md) has guides for
-Fly.io, Kubernetes, Railway and AWS ECS. [Mason read-replica](#hosted-mason-read-replica) can also run it for you.
+Fly.io, Kubernetes, Railway and AWS ECS. [Mason Cloud](#hosted-mason-cloud) can also run it for you.
 
-### Hosted: Mason read-replica
+### Hosted: Mason Cloud
 
-[Mason read-replica](https://masondata.ai) runs Mason for you. It keeps a read replica of your Postgres up to date on a
+[Mason Cloud](https://masondata.ai) runs Mason for you. It keeps a read replica of your Postgres up to date on a
 machine it manages, and you connect your BI tools to it.
 
 It uses the same project folder and the same `mason` command. Sign in once, then deploy:
 
 ```bash
-mason login                           # signs this machine in, in your browser
-mason deploy --replica <org>/<name>   # sends mason/ to the replica, and waits until it runs it
+# sign this machine in, in your browser
+mason login
+
+# send mason/ to the replica and wait until it runs it
+mason deploy --replica <org>/<name>
 ```
 
 [Change a deployed project](#change-a-deployed-project) has the steps for each change after that. Choose the hosted
@@ -352,7 +395,10 @@ Mason can't answer a query exactly, the agent gets an error that says what to wr
 one, and run or EXPLAIN a query. To add it to Claude Code, run this in the project's folder while Mason is running:
 
 ```bash
-mason user add claude --role agent   # prints the URL (shown only once)
+# get a connection URL for the agent (shown only once)
+mason user add claude --role agent
+
+# add Mason's MCP server to Claude Code, with that URL's password
 claude mcp add mason --env MASON_URL="postgres://claude:<password>@127.0.0.1:5433/mason" -- mason mcp
 ```
 

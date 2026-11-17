@@ -39,10 +39,13 @@ test("the package's engines and every Node the READMEs name for the package are 
   const cli = docNodeProblems("cli/README.md", fs.readFileSync(path.join(root, "cli", "README.md"), "utf8"), NODE_MIN, ci);
   assert.ok(cli.floorMentions >= 3, "cli/README.md says the floor where it lists what mason needs");
   assert.deepEqual(cli.problems, []);
-  // the repo's README: the package's install line says the floor; its `Node ≥ 23.6` is the checkout's, not the package's
+  // the repo's README: the comment above the package's install line says the floor (issue 1126: a snippet's comment is
+  // its own line, above its commands); its `Node ≥ 23.6` is the checkout's, not the package's
   const src = fs.readFileSync(path.join(root, "README.md"), "utf8");
-  const install = src.split("\n").find((l) => l.startsWith("npm i -g @mason-data/cli"));
-  assert.match(install ?? "", new RegExp(`needs Node ${NODE_MIN.replace(".", "\\.")}\\+ `));
+  const lines = src.split("\n");
+  const install = lines.findIndex((l) => l.startsWith("npm i -g @mason-data/cli"));
+  assert.ok(install > 0, "the README has the package's install line");
+  assert.match(lines[install - 1] ?? "", new RegExp(`^# .*needs Node ${NODE_MIN.replace(".", "\\.")}\\+[ :)]`));
   assert.deepEqual([...src.matchAll(/\bNode (\d+(?:\.\d+)*)\+/g)].map((m) => m[1]), [NODE_MIN], "every `Node <n>+` in the README");
   assert.deepEqual(docNodeProblems("README.md", src, NODE_MIN, ci).problems, []);
   // and what mason prints says it too

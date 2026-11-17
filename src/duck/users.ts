@@ -149,6 +149,31 @@ export const underKey = (u: MasonUser, apiKey: string): boolean => u.key === key
 /** a refusal's code (ApiError.code): the token names a user by a name whose user is now another one, its id new */
 export const USER_REMOVED = "user_removed";
 
+/** What `mason user check` answers of a name and a password (src/cli/user.ts). */
+export type CheckAnswer = "ok" | "wrong" | "disabled" | "removed";
+
+/**
+ * A NAME AND A PASSWORD JUDGED AS THE LISTENER JUDGES A LOGIN, BUT NEVER THE ADDRESS (`mason user check`, for an
+ * operator's own sign-in page): `ok` the live user's password, with its id; `disabled` its password while it is
+ * disabled; `removed` the password of a user of that name that was removed — a removed user's, or a removed-and-added-
+ * again user's OLD password, whose id is not the live one's —, with that id; `wrong` anything else (no such name, a
+ * password of another shape, of another user, under an API key rotated since), with no id. The MAC is computed and
+ * compared in constant time (`timingSafeEqual`) whatever the name and the password's shape, so the answer's time does
+ * not say which it was; only the answer does.
+ */
+export function checkPassword(users: readonly MasonUser[], apiKey: string, name: string, password: string): { answer: CheckAnswer; id: string | null } {
+  const m = PASSWORD_RE.exec(password);
+  const [id, given] = m === null ? ["0".repeat(16), "0".repeat(32)] : [m[1]!, m[2]!];
+  // always one MAC and one comparison, shaped password or not
+  const verifies = crypto.timingSafeEqual(Buffer.from(mac(apiKey, name, id)), Buffer.from(given)) && m !== null;
+  if (!verifies) return { answer: "wrong", id: null };
+  const live = users.find((u) => u.name === name && isActive(u));
+  if (live !== undefined && live.id === id && underKey(live, apiKey)) return { answer: isDisabled(live) ? "disabled" : "ok", id: live.id };
+  const gone = users.find((u) => u.name === name && !isActive(u) && u.id === id);
+  if (gone !== undefined) return { answer: "removed", id: gone.id };
+  return { answer: "wrong", id: null };
+}
+
 // ------------------------------------------------------------------ the file
 
 export type UsersRead = { users: MasonUser[] } | { problem: string };

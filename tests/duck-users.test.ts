@@ -313,3 +313,37 @@ test("a user's address ranges: one strict grammar, written back in one form; a f
     refused(() => new u.LiveUsers(file, KEY).login("bi", u.userPassword(KEY, "bi", entry.id), "203.0.113.1"), 503, /cannot be read/, "bi");
   }
 });
+
+test("mason user check's judgement (checkPassword): ok, wrong, disabled or removed with the user's id, never the address; an old password of a user removed and added again is removed, with the old id", async () => {
+  const u = await users();
+  const file = fileIn();
+  const metabase = await add(file, "metabase");
+  const grafana = await add(file, "grafana");
+  const read = (): Parameters<typeof u.checkPassword>[0] => { const r = u.readUsers(file); assert.ok("users" in r); return r.users; };
+  assert.deepEqual(u.checkPassword(read(), KEY, "metabase", metabase.password), { answer: "ok", id: metabase.id });
+  // wrong: another user's password, a made-up one of the right shape, one of another shape, an empty one, a name that is no user
+  for (const [name, password] of [["metabase", grafana.password], ["metabase", `mason_${metabase.id}_${"0".repeat(32)}`], ["metabase", "hunter2"], ["metabase", ""],
+    ["nobody", metabase.password]] as const) {
+    assert.deepEqual(u.checkPassword(read(), KEY, name, password), { answer: "wrong", id: null }, `${name} / ${password.slice(0, 12)}`);
+  }
+  // the same password under a rotated API key is no one's
+  assert.deepEqual(u.checkPassword(read(), OTHER_KEY, "metabase", metabase.password), { answer: "wrong", id: null });
+  // a user ranged to some addresses: the address is never judged here
+  u.changeUsers(file, (list) => list.map((x) => x.name === "grafana" ? { ...x, from: ["10.0.0.0/8"] } : x));
+  assert.deepEqual(u.checkPassword(read(), KEY, "grafana", grafana.password), { answer: "ok", id: grafana.id });
+  // disabled: its password, its id
+  u.changeUsers(file, (list) => list.map((x) => x.name === "metabase" ? { ...x, disabledAt: "2026-11-17T10:00:00.000Z" } : x));
+  assert.deepEqual(u.checkPassword(read(), KEY, "metabase", metabase.password), { answer: "disabled", id: metabase.id });
+  // removed, then added again under the same name: the old password is removed (its old id), the new one ok (its new id)
+  u.changeUsers(file, (list) => list.map((x) => x.name === "metabase" ? { ...x, removedAt: "2026-11-17T11:00:00.000Z" } : x));
+  assert.deepEqual(u.checkPassword(read(), KEY, "metabase", metabase.password), { answer: "removed", id: metabase.id });
+  const again = await add(file, "metabase");
+  assert.notEqual(again.id, metabase.id);
+  assert.deepEqual(u.checkPassword(read(), KEY, "metabase", metabase.password), { answer: "removed", id: metabase.id });
+  assert.deepEqual(u.checkPassword(read(), KEY, "metabase", again.password), { answer: "ok", id: again.id });
+  // the MAC is compared in constant time, whatever the password's shape
+  const src = fs.readFileSync(new URL("../src/duck/users.ts", import.meta.url), "utf8");
+  const body = src.slice(src.indexOf("export function checkPassword"), src.indexOf("// ------------------------------------------------------------------ the file"));
+  assert.match(body, /crypto\.timingSafeEqual\(/);
+  assert.doesNotMatch(body, /given ===|=== given/);
+});
