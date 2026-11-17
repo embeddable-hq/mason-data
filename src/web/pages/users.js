@@ -264,8 +264,10 @@ export function renderHostedMcp(mcp) {
   return `<p class="mcp-for">claude.ai, ChatGPT and other hosted agents: add this address as a custom connector.</p>` +
     `<dl class="facts"><dt>URL</dt><dd>${copyable("users-mcp-url", mcp.url)}</dd></dl>` +
     `<ol class="mcp-steps"><li>In the agent's settings, add a custom connector and paste the URL (in claude.ai: Settings, then Connectors, then Add custom connector).</li>` +
+    `<li>Paste only the URL. Leave the OAuth client ID, client secret, bearer token and header fields empty: you sign in in your browser.</li>` +
     `<li>Connect, and sign in when the agent asks. You sign in at ${code(mcp.issuer)}, and the agent's queries run as the Mason user your sign-in names.</li></ol>` +
-    `<p class="tip">A user limited to some addresses connects this way only from the agent's own: choose its company under Connects from.</p>`;
+    `<p class="tip">A user limited to some addresses connects this way only from the agent's own: choose its company under Connects from.</p>` +
+    `<p class="tip">A desktop app (Claude Code, Cursor, the ChatGPT desktop app's Streamable HTTP server) connects from your own computer, not from its company's addresses: give its user your computer's address, or anywhere.</p>`;
 }
 
 // ------------------------------------------------------------------ Temporary cloud tunnel (mason share, from the page)

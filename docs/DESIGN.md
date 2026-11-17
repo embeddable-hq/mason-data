@@ -2474,13 +2474,41 @@ together, or the start is refused naming what is missing. The owner's spec (2026
   `GET` is 405 (Mason sends nothing of its own). The protected resource's metadata (RFC 9728) is at
   `/.well-known/oauth-protected-resource` and at RFC 9728's insertion of the public path
   (`/.well-known/oauth-protected-resource/mcp`), on that port.
-- **Two revisions, by the client's.** 2025-11-25 (claude.ai's documentation still points at it; 2025-06-18 and 2025-03-26
-  are answered too), where `initialize` opens a session (`Mcp-Session-Id`); and 2026-07-28, which has no session and no
-  GET stream: each POST stands alone, as its token's user, and a cancellation is a POST of its own naming its request id.
-  The revision is the one `initialize` asks for, else the `MCP-Protocol-Version` header; one Mason does not know is
-  answered with 2025-11-25. Under 2026-07-28 no `initialize` names the client, so `application_name` is
-  `mason-mcp/<the User-Agent's first word>`. (The 2026-07-28 text could not be read from where this was built: what is
-  built is what the owner's spec says of it, no session and no GET stream.)
+- **Two eras, chosen as 2026-07-28 says a server of both chooses** ("Versioning and Compatibility": "A dual-era server
+  selects its behavior from how the client opens"; built to the published text, the second review of PR 1125,
+  2026-11-17). **An `initialize` is the legacy era**: 2025-11-25 (claude.ai's documentation still points at it;
+  2025-06-18 and 2025-03-26 are answered too), where it opens a session (`Mcp-Session-Id`); one asking for 2026-07-28,
+  which has no `initialize`, or for a version Mason does not know, is answered with 2025-11-25. **A request carrying
+  2026-07-28's per-request `_meta`, or the `MCP-Protocol-Version` header 2026-07-28, is that revision's**, and is
+  answered as its text says:
+  - no session ("Streamable HTTP": an `Mcp-Session-Id` is ignored, none minted) and no `initialize`: each request's
+    `_meta` carries `io.modelcontextprotocol/protocolVersion` and `…/clientCapabilities`, or it is `-32602`, 400 ("Base
+    protocol": "_meta");
+  - a version other than 2026-07-28 in `_meta`, or a header no revision of Mason's has, is `UnsupportedProtocolVersion`
+    (`-32022`, 400) listing what Mason speaks ("Versioning": "Protocol version negotiation");
+  - the `MCP-Protocol-Version`, `Mcp-Method` and, for `tools/call` and `resources/read`, `Mcp-Name` headers (its
+    `=?base64?…?=` form decoded) must be present and equal to the body, or `HeaderMismatch` (`-32020`, 400) ("Streamable
+    HTTP": "Request metadata", "Server validation");
+  - `server/discover` (a server MUST: "Discovery") says the versions, the capabilities and the instructions; `tools/list`,
+    `tools/call`, `resources/list`, `resources/templates/list` and `resources/read` are answered as in 2025-11-25, a
+    resource not found `-32602` ("Resources": "Error handling");
+  - every result carries `resultType: "complete"` and `_meta["io.modelcontextprotocol/serverInfo"]` ("Base protocol":
+    "ResultType", "Per-response protocol fields"); `server/discover`, the lists and `resources/read` carry `ttlMs`
+    (300,000) and `cacheScope: "public"`, since they change only with a release and are the same for every user
+    ("Caching");
+  - **a cancel is the client closing its request's connection** ("Streamable HTTP": "Cancellation"; "Cancellation":
+    "Transport-specific cancellation"): the statement is cancelled where it runs and nothing more is written. A
+    `notifications/cancelled` POST, which 2026-07-28 no longer expects on HTTP, still reaches the user's requests;
+  - the client is named by `_meta`'s `io.modelcontextprotocol/clientInfo`, so `application_name` is
+    `mason-mcp/<its name>`; only a request that carries none falls back to its User-Agent's first word (the first
+    implementation's own choice, kept as the last fallback);
+  - **not answered, 404 `-32601`** ("Streamable HTTP": "a server that does not implement the requested RPC method MUST
+    respond with 404"): `ping` and `logging/setLevel` (removed by 2026-07-28); `subscriptions/listen`, since Mason's
+    tools and resources never change while it runs (it declares no `listChanged` and no `subscribe`, so no notification
+    would ever flow); prompts and completion (Mason declares neither). Mason sends no `notifications/message`, so a
+    request's `io.modelcontextprotocol/logLevel` changes nothing, and it asks no input of the client (MRTR), so it
+    requires no client capability. Answers are JSON, never an SSE stream, which the text allows ("the server MUST
+    return either application/json or text/event-stream").
 - **The public address is a setting, never what Mason sees.** Replicas sit behind a relay, so the address a client
   reaches is not the listen address, the Host header or X-Forwarded-*. `MASON_MCP_URL` (https, or http to this machine
   for a test) is the resource the metadata publishes, the audience every token must name EXACTLY (a string, or a list
@@ -2501,6 +2529,9 @@ together, or the start is refused naming what is missing. The owner's spec (2026
   — so a burst of tokens, valid or not, costs the issuer one request a minute; **while fetches fail the wait doubles**,
   1, 2, 4, 8 minutes, **bounded at 10** (`BACKOFF_MAX_MS`), and every token meanwhile is 503 without a fetch. Before,
   a key was trusted for an hour after its removal, and 53 requests against a failing JWKS made 28 fetches.
+  **An issuer outage longer than the keys' life stops the endpoint, by design**: every token is 503 ("the token could not
+  be checked") until a fetch succeeds, and mason serve's log names the JWKS URL and why. The operator's step is to make
+  that URL reachable from the replica; nothing in Mason extends the keys' life.
   **The keys' life, the wait between fetches and the back-off are timed on a monotonic clock** (`performance.now()`),
   never the wall clock (the second review of PR 1125, 2026-11-17): with the wall clock stepped back an hour, a key the
   issuer removed was accepted for that whole hour, and a back-off would have held every token at 503 until the clock

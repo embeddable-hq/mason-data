@@ -5,7 +5,9 @@
  * synthetic keys, synthetic user names). A client posts JSON-RPC to /mcp as a hosted agent does. What it must hold:
  *   - the protected resource's metadata at RFC 9728's paths, naming the PUBLIC address (MASON_MCP_URL) and the issuer;
  *     a request with no token is 401 with WWW-Authenticate naming that metadata;
- *   - both revisions, by the version the client asks for: 2025-11-25 with a session, 2026-07-28 with none;
+ *   - both eras, as 2026-07-28 says a server of both chooses: an initialize opens a 2025-11-25 session; a request
+ *     carrying 2026-07-28's `_meta` is answered by that revision's text — server/discover, tools/list, tools/call as the
+ *     mapped user, its headers held to the body, UnsupportedProtocolVersion, and a cancel by closing the connection;
  *   - a valid token lists the tables and runs a query as the user it names, and the request log names the user, the
  *     client (mason-mcp/<client>) and the client's address;
  *   - refused, each with what to do: a missing, expired, not-yet-valid, wrong-audience (the address Mason sees, and a
@@ -14,7 +16,8 @@
  *     token (its id no longer the name's);
  *   - a user's ranges judged on the client: the peer, or a proxy MASON_MCP_PROXY_FROM names' LAST X-Forwarded-For entry
  *     — never an entry the client forged in front of it, never a header from a peer it does not name;
- *   - a cancellation (notifications/cancelled) stops the statement where it runs, as over stdio, in both revisions;
+ *   - a cancellation stops the statement where it runs: notifications/cancelled under 2025-11-25, as over stdio, and
+ *     the client closing its request under 2026-07-28;
  *   - a session is its user's; the issuer's keys unreadable refuse every token (503), never let one through.
  */
 import { test, after, before } from "node:test";
@@ -209,6 +212,25 @@ async function rows(): Promise<Awaited<ReturnType<RequestLedger["recent"]>>> {
 
 const STATELESS = { "mcp-protocol-version": "2026-07-28" };
 
+/**
+ * A REQUEST AS MCP 2026-07-28 SAYS A CLIENT SENDS ONE ("Base protocol": "_meta"; "Streamable HTTP": "Request metadata"):
+ * its version, client and capabilities in params._meta, and MCP-Protocol-Version, Mcp-Method and (tools/call,
+ * resources/read) Mcp-Name mirrored from the body. `o.meta` and `o.headers` replace what a test breaks.
+ */
+function modernRequest(method: string, params: Record<string, unknown> = {}, o: { id?: number; client?: string | null; meta?: Record<string, unknown>; headers?: Record<string, string | null> } = {}): { message: unknown; headers: Record<string, string> } {
+  const meta = { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {},
+    ...(o.client !== null ? { "io.modelcontextprotocol/clientInfo": { name: o.client ?? "spec-client", version: "1.0.0" } } : {}), ...o.meta };
+  for (const [k, v] of Object.entries(meta)) if (v === undefined) delete (meta as Record<string, unknown>)[k];
+  const named = method === "resources/read" ? params.uri : method === "tools/call" ? params.name : undefined;
+  const headers: Record<string, string | null> = { "mcp-protocol-version": "2026-07-28", "mcp-method": method, ...(typeof named === "string" ? { "mcp-name": named } : {}), ...o.headers };
+  return { message: { jsonrpc: "2.0", id: o.id ?? ids++, method, params: { ...params, _meta: meta } },
+    headers: Object.fromEntries(Object.entries(headers).filter((e): e is [string, string] => e[1] !== null)) };
+}
+async function postModern(m: Mounted, token: string, method: string, params: Record<string, unknown> = {}, o: Parameters<typeof modernRequest>[2] & { more?: Record<string, string> } = {}): Promise<Answer> {
+  const r = modernRequest(method, params, o);
+  return post(m, r.message, { token, headers: { ...r.headers, ...o.more } });
+}
+
 // ------------------------------------------------------------------ the tests
 
 test("the protected resource's metadata names the public address and the issuer; a request with no token is 401 naming it", async () => {
@@ -255,30 +277,38 @@ test("2025-11-25: a valid token lists the tables and runs a query as the user it
   assert.ok(m.logged.every((l) => !l.includes(token.split(".")[2]!)), m.logged.join("\n"));
 });
 
-test("the revision is the client's: 2025-11-25 opens a session, 2026-07-28 has none and each POST stands alone; one it does not know is answered with 2025-11-25", async () => {
+test("the era is the client's: an initialize opens a 2025-11-25 session (one asking for 2026-07-28, which has no initialize, or for a version it does not know, answered with 2025-11-25); a 2026-07-28 request stands alone, its client named by its _meta clientInfo, the User-Agent only when it carries none", async () => {
   const m = await mount({});
   const token = jwt(claims("analyst"));
   const older = await post(m, INIT("2025-11-25"), { token });
   assert.equal((older.body!.result as { protocolVersion: string }).protocolVersion, "2025-11-25");
   assert.ok(older.headers.get("mcp-session-id") !== null);
-  const newer = await post(m, INIT("2026-07-28"), { token, headers: STATELESS });
+  const newer = await post(m, INIT("2026-07-28"), { token });
   assert.equal(newer.status, 200, JSON.stringify(newer.body));
-  assert.equal((newer.body!.result as { protocolVersion: string }).protocolVersion, "2026-07-28");
-  assert.equal(newer.headers.get("mcp-session-id"), null, "no session under 2026-07-28");
+  assert.equal((newer.body!.result as { protocolVersion: string }).protocolVersion, "2025-11-25", "2026-07-28 has no initialize: an initialize is the legacy era's");
+  assert.ok(newer.headers.get("mcp-session-id") !== null);
   const unknown = await post(m, INIT("2099-01-01"), { token });
   assert.equal((unknown.body!.result as { protocolVersion: string }).protocolVersion, "2025-11-25");
-  // under 2026-07-28 a tool call carries no session: it runs as the token's user, its client named by its User-Agent
-  const q = await call(m, token, null, "query", { sql: "SELECT count(*) AS stateless FROM orders" }, { ...STATELESS, "user-agent": "agent-platform/3.1" });
-  assert.deepEqual(q.structured.rows, [["3"]]);
-  const r = (await rows()).find((x) => x.query.includes("AS stateless"));
-  assert.ok(r !== undefined);
+  // under 2026-07-28 a tool call carries no session: it runs as the token's user, its client named by _meta's clientInfo
+  const q = await postModern(m, token, "tools/call", { name: "query", arguments: { sql: "SELECT count(*) AS stateless FROM orders" } }, { client: "agent-platform", more: { "user-agent": "other-name/3.1" } });
+  assert.equal(q.status, 200, JSON.stringify(q.body));
+  assert.deepEqual((q.body!.result as { structuredContent: { rows: unknown } }).structuredContent.rows, [["3"]]);
+  assert.equal(q.headers.get("mcp-session-id"), null, "no session under 2026-07-28");
+  // a request whose _meta names no client: the User-Agent's first word, the last fallback
+  const ua = await postModern(m, token, "tools/call", { name: "query", arguments: { sql: "SELECT count(*) AS stateless_ua FROM orders" } }, { client: null, more: { "user-agent": "fallback-agent/2.0" } });
+  assert.equal(ua.status, 200, JSON.stringify(ua.body));
+  const logged = await rows();
+  const r = logged.find((x) => x.query.includes("AS stateless FROM")), rua = logged.find((x) => x.query.includes("AS stateless_ua"));
+  assert.ok(r !== undefined && rua !== undefined);
   assert.deepEqual([r.user, r.applicationName], ["analyst", "mason-mcp/agent-platform"]);
+  assert.deepEqual([rua.user, rua.applicationName], ["analyst", "mason-mcp/fallback-agent"]);
   // under 2025-11-25 a request with no session is refused, naming both ways
   const lone = await post(m, { jsonrpc: "2.0", id: ids++, method: "tools/list" }, { token, headers: { "mcp-protocol-version": "2025-11-25" } });
   assert.equal(lone.status, 400);
   assert.match((lone.body!.error as { fix: string }).fix, /Mcp-Session-Id .* MCP-Protocol-Version: 2026-07-28/);
   // the token is checked on each stateless POST as on any other
-  assert.equal((await post(m, { jsonrpc: "2.0", id: ids++, method: "tools/list" }, { headers: STATELESS })).status, 401);
+  const bare = modernRequest("tools/list");
+  assert.equal((await post(m, bare.message, { headers: bare.headers })).status, 401);
 });
 
 test("refused with what to do: a missing, expired, not-yet-valid, wrong-audience, wrong-issuer, bad-signature, unknown-key, alg none or HS256 token", async () => {
@@ -415,11 +445,11 @@ test("the endpoint's door to the listener takes its own connections alone: a use
   assert.equal((await rows()).some((r) => r.clientAddress === "10.1.2.3" && r.query.includes("pg_catalog")), false);
 });
 
-test("a cancelled request: its statement is cancelled where it runs, and it is answered no further, as over stdio — in both revisions", async () => {
+test("a cancelled request under 2025-11-25 (notifications/cancelled): its statement is cancelled where it runs, and it is answered no further, as over stdio", async () => {
   const m = await mount({});
   const token = jwt(claims("analyst"));
   const sid = await session(m, token);
-  for (const [revision, id, how] of [["2025-11-25", 4242, { session: sid }], ["2026-07-28", 4343, { headers: STATELESS }]] as const) {
+  for (const [revision, id, how] of [["2025-11-25", 4242, { session: sid }]] as const) {
     const marker = `% 7 = ${id % 7}`;
     const long = post(m, { jsonrpc: "2.0", id, method: "tools/call", params: { name: "query", arguments: { sql: `SELECT count(*) FROM events a, events b WHERE (a.id::bigint * b.id) ${marker}`, timeout_ms: 120_000 } } }, { token, ...how });
     await sleep(800);
@@ -438,6 +468,83 @@ test("a cancelled request: its statement is cancelled where it runs, and it is a
     }
     assert.ok(m.logged.some((l) => l === `[mcp] analyst: request ${id} cancelled by the client: the user stopped it`), m.logged.join("\n"));
   }
+});
+
+test("MCP 2026-07-28 as its text says: server/discover, tools/list and a tools/call query as the mapped user, each result with resultType and serverInfo; a version it does not serve is UnsupportedProtocolVersion; headers held to the body; ping and the removed methods 404; a request cancelled by closing its connection", async () => {
+  const m = await mount({});
+  const token = jwt(claims("analyst"));
+  const serverInfo = (r: Answer) => ((r.body!.result as { _meta: Record<string, { name: string }> })._meta["io.modelcontextprotocol/serverInfo"])?.name;
+  // server/discover (a server MUST implement it: "Discovery"), cacheable, with no session minted
+  const d = await postModern(m, token, "server/discover", {}, { more: { "mcp-session-id": "made-up" } });
+  assert.equal(d.status, 200, JSON.stringify(d.body));
+  const dr = d.body!.result as { resultType: string; supportedVersions: string[]; capabilities: { tools: unknown }; ttlMs: number; cacheScope: string; instructions: string };
+  assert.equal(dr.resultType, "complete");
+  assert.deepEqual(dr.supportedVersions, ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26"]);
+  assert.ok(dr.capabilities.tools !== undefined && typeof dr.instructions === "string");
+  assert.ok(Number.isInteger(dr.ttlMs) && dr.ttlMs >= 0 && dr.cacheScope === "public");
+  assert.equal(serverInfo(d), "mason");
+  assert.equal(d.headers.get("mcp-session-id"), null, "an Mcp-Session-Id is ignored, none minted");
+  // tools/list: the four tools, a cacheable result
+  const l = await postModern(m, token, "tools/list");
+  assert.equal(l.status, 200, JSON.stringify(l.body));
+  const lr = l.body!.result as { resultType: string; tools: Array<{ name: string }>; ttlMs: number; cacheScope: string };
+  assert.deepEqual([lr.resultType, lr.tools.map((t) => t.name), lr.cacheScope], ["complete", ["tables", "describe", "query", "explain"], "public"]);
+  assert.ok(Number.isInteger(lr.ttlMs) && lr.ttlMs >= 0);
+  // tools/call: a query as the token's user, logged with _meta's client
+  const q = await postModern(m, token, "tools/call", { name: "query", arguments: { sql: "SELECT status, count(*) AS modern_n FROM orders GROUP BY 1 ORDER BY 1" } }, { client: "spec-client" });
+  assert.equal(q.status, 200, JSON.stringify(q.body));
+  const qr = q.body!.result as { resultType: string; structuredContent: { rows: unknown }; isError?: boolean };
+  assert.deepEqual([qr.resultType, qr.structuredContent.rows, qr.isError], ["complete", [["paid", "2"], ["pending", "1"]], undefined]);
+  assert.equal(serverInfo(q), "mason");
+  const row = (await rows()).find((x) => x.query.includes("modern_n"));
+  assert.deepEqual([row?.user, row?.applicationName], ["analyst", "mason-mcp/spec-client"]);
+  // Mcp-Name in the base64 form a name outside plain ASCII takes ("Value encoding")
+  const enc = await postModern(m, token, "tools/call", { name: "tables", arguments: {} }, { headers: { "mcp-name": `=?base64?${Buffer.from("tables").toString("base64")}?=` } });
+  assert.equal(enc.status, 200, JSON.stringify(enc.body));
+  // a resource not found is -32602 under 2026-07-28
+  const nf = await postModern(m, token, "resources/read", { uri: "mason://help/none" });
+  assert.equal((nf.body!.error as { code: number }).code, -32602);
+  const rd = await postModern(m, token, "resources/read", { uri: "mason://help/mcp" });
+  assert.deepEqual([(rd.body!.result as { resultType: string; cacheScope: string }).resultType, (rd.body!.result as { cacheScope: string }).cacheScope], ["complete", "public"]);
+  // a version it does not serve this way: 400 UnsupportedProtocolVersion, naming the ones it does
+  for (const version of ["2099-01-01", "2025-11-25"]) {
+    const v = await postModern(m, token, "tools/list", {}, { meta: { "io.modelcontextprotocol/protocolVersion": version }, headers: { "mcp-protocol-version": version } });
+    assert.equal(v.status, 400, version);
+    const e = v.body!.error as { code: number; data: { supported: string[]; requested: string } };
+    assert.deepEqual([v.body!.id !== null, e.code, e.data.requested, e.data.supported.includes("2026-07-28")], [true, -32022, version, true], JSON.stringify(v.body));
+  }
+  // the headers held to the body, and the required _meta ("Server validation"; "_meta")
+  const refusals: Array<[string, Answer, number, number]> = [
+    ["no MCP-Protocol-Version", await postModern(m, token, "tools/list", {}, { headers: { "mcp-protocol-version": null } }), 400, -32020],
+    ["MCP-Protocol-Version unlike _meta's", await postModern(m, token, "tools/list", {}, { meta: { "io.modelcontextprotocol/protocolVersion": "2026-07-28" }, headers: { "mcp-protocol-version": "2025-11-25" } }), 400, -32020],
+    ["no Mcp-Method", await postModern(m, token, "tools/list", {}, { headers: { "mcp-method": null } }), 400, -32020],
+    ["Mcp-Method unlike the body's", await postModern(m, token, "tools/list", {}, { headers: { "mcp-method": "resources/list" } }), 400, -32020],
+    ["no Mcp-Name on tools/call", await postModern(m, token, "tools/call", { name: "tables", arguments: {} }, { headers: { "mcp-name": null } }), 400, -32020],
+    ["Mcp-Name unlike the body's", await postModern(m, token, "tools/call", { name: "tables", arguments: {} }, { headers: { "mcp-name": "query" } }), 400, -32020],
+    ["no clientCapabilities", await postModern(m, token, "tools/list", {}, { meta: { "io.modelcontextprotocol/clientCapabilities": undefined } }), 400, -32602],
+    ["ping, removed in 2026-07-28", await postModern(m, token, "ping"), 404, -32601],
+    ["logging/setLevel, removed", await postModern(m, token, "logging/setLevel", { level: "info" }), 404, -32601],
+    ["subscriptions/listen: Mason's lists never change while it runs", await postModern(m, token, "subscriptions/listen", { notifications: { toolsListChanged: true } }), 404, -32601],
+  ];
+  for (const [what, r, status, code] of refusals) {
+    assert.equal(r.status, status, `${what}: ${JSON.stringify(r.body)}`);
+    assert.equal((r.body!.error as { code: number }).code, code, what);
+  }
+  // CANCEL: the client closes the request's connection ("Streamable HTTP": "Cancellation"); the statement stops where it runs
+  const ac = new AbortController();
+  const long = modernRequest("tools/call", { name: "query", arguments: { sql: "SELECT count(*) AS cancelled_4545 FROM events a, events b WHERE (a.id::bigint * b.id) % 7 = 2", timeout_ms: 120_000 } }, { id: 4545 });
+  const sent = fetch(`${m.base}/mcp`, { method: "POST", body: JSON.stringify(long.message), signal: ac.signal,
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${token}`, ...long.headers } }).then(() => "answered", () => "closed");
+  await sleep(800);
+  ac.abort();
+  assert.equal(await sent, "closed");
+  for (let i = 0; ; i++) {
+    const r = (await rows()).filter((x) => x.query.includes("cancelled_4545"));
+    if (r.length > 0) { assert.deepEqual(r.map((x) => x.sqlstate), ["57014"]); break; }
+    assert.ok(i < 40, "the statement was cancelled when the client closed its request");
+    await sleep(250);
+  }
+  assert.ok(m.logged.some((l) => /analyst: request .*4545 cancelled: the client closed its request/.test(l)), m.logged.join("\n"));
 });
 
 test("a session is its user's; one that does not exist is 404; DELETE ends one; GET is not served", async () => {

@@ -501,7 +501,9 @@ names the agent. Its tools say over this wire what a bare SQL tool would leave a
 ### From a hosted agent: MCP over HTTPS
 
 `mason serve` serves the same tools to a hosted agent (claude.ai, ChatGPT, a team's agent platform) that cannot start
-a process: MCP's Streamable HTTP (revisions 2025-11-25 and 2026-07-28) at `/mcp` on its health port
+a process: MCP's Streamable HTTP (revision 2025-11-25 with a session, and 2026-07-28 as its published text says: no
+session, `server/discover`, each request's version and client in its `_meta`, a cancel by closing the request) at
+`/mcp` on its health port
 (`MASON_HEALTH_PORT`), signed in by an OAuth authorization server the operator runs or rents. Mason issues no token and
 runs no sign-in page; it checks each bearer token against that server's published keys (docs/DESIGN.md "An MCP server
 over HTTPS").
@@ -521,6 +523,13 @@ MASON_MCP_PLAIN=1                                     # TLS is terminated in fro
   the mason user's name and id. Its sign-in page may ask Mason whether a person's Mason password is right with `mason
   user check <name> --json` (the password on stdin), which answers the id to sign in. An agent finds the server from
   `/.well-known/oauth-protected-resource` (also under `/mcp`), which a 401's `WWW-Authenticate` names.
+- **A person adds it by pasting ONLY the URL** as a custom connector (claude.ai: Settings, then Connectors, then Add
+  custom connector; the Users page shows it with Copy). They leave empty any OAuth client ID or client secret field, and
+  any bearer-token or header field a desktop app shows: sign-in happens in their browser, at the authorization server.
+- **A desktop app connects from the person's own computer**: Claude Code, Cursor, and the ChatGPT desktop app's
+  Streamable HTTP server reach `/mcp` from that machine, never from their company's published addresses, so a user
+  held to the "Claude (Anthropic)" or "ChatGPT (OpenAI)" ranges is refused there. Give such a user that computer's
+  address, or anywhere.
 - **`MASON_MCP_URL` is the public address, never what Mason sees.** Behind a relay or proxy, set it to the address the
   agent is given; the relay forwards `/mcp` and `/.well-known/oauth-protected-resource…` to the health port.
 - **Each request runs as the mapped user, looked up every time**: its role, row filters and limits, and the request log
@@ -542,7 +551,10 @@ MASON_MCP_PLAIN=1                                     # TLS is terminated in fro
   terminated in front of it, so a bearer token never crosses a network in clear.
 - **Bounds**: the authorization server's keys are kept at most 5 minutes (less under its `Cache-Control: max-age`), so a
   key it removes is refused within 5 minutes, and fetched at most once a minute, backing off to 10 minutes while the
-  fetch fails (every token 503 meanwhile). A user holds at most 32 sessions and the endpoint 1,000 (a new one past that is
+  fetch fails (every token 503 meanwhile). **If the keys cannot be fetched for longer than their 5 minutes, every
+  request is 503** ("the token could not be checked"), by design: Mason fails closed. mason serve's log says why
+  (`[mcp] the authorization server's keys could not be read…`); check that `MASON_MCP_JWKS_URL` is reachable from the
+  replica, and requests are answered again at the next fetch. A user holds at most 32 sessions and the endpoint 1,000 (a new one past that is
   503 with `Retry-After`, never made by ending a session in use). The health port takes a request's headers within 10 s
   and its body within 30 s, closes an idle connection after 5 s, holds at most 1,024 connections and runs at most 256 MCP
   requests at once, each request of a JSON-RPC batch counted (a batch is taken under MCP 2025-03-26 alone, the one

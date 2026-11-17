@@ -5929,6 +5929,11 @@ test("Users: mason serve's MCP endpoint on (issue 1115) — its public address w
   assert.ok(text.includes("In the agent's settings, add a custom connector and paste the URL (in claude.ai: Settings, then Connectors, then Add custom connector)."), text);
   assert.ok(text.includes("Connect, and sign in when the agent asks. You sign in at https://auth.example.test , and the agent's queries run as the Mason user your sign-in names."), text);
   assert.ok(text.includes("A user limited to some addresses connects this way only from the agent's own: choose its company under Connects from."), text);
+  // only the URL is pasted: sign-in is in the browser, so a client's OAuth and token fields stay empty
+  assert.ok(text.includes("Paste only the URL. Leave the OAuth client ID, client secret, bearer token and header fields empty: you sign in in your browser."), text);
+  // a desktop app connects from the person's own computer: a hosted agent's preset would refuse it
+  assert.ok(text.includes("A desktop app (Claude Code, Cursor, the ChatGPT desktop app's Streamable HTTP server) connects from your own computer, not from its company's addresses: give its user your computer's address, or anywhere."), text);
+  assert.ok(text.indexOf("Paste only the URL.") < text.indexOf("Connect, and sign in when the agent asks."), "the URL alone, before signing in");
   assert.doesNotMatch(text, /can't connect this way yet/);
   // off (null): the box as before
   assert.match(textOf(renderUsersMcp(pg, true, "0.22.0", null)), /can't connect this way yet/);

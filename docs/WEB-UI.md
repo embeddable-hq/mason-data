@@ -241,8 +241,10 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   or later (cli/package.json `engines`, held equal by a test); and that the web versions of ChatGPT and claude.ai can't
   connect this way yet — unless `mason serve`'s MCP endpoint is on (`/api/state` `mcp`, issue 1115): then its public
   address (`MASON_MCP_URL`) with **Copy**, and the short steps to add it as a hosted agent's custom connector (paste
-  the URL; sign in at the issuer, whose user the queries run as), and that a user limited to some addresses connects this
-  way only from the agent's own, its company a choice of **Connects from**. **Connects from** offers, after anywhere and
+  the URL, only the URL: the OAuth client ID, client secret, bearer token and header fields stay empty; sign in at the
+  issuer, whose user the queries run as), and that a user limited to some addresses connects this way only from the
+  agent's own, its company a choice of **Connects from**, while a desktop app (Claude Code, Cursor, the ChatGPT desktop
+  app's Streamable HTTP server) connects from the person's own computer: that address, or anywhere. **Connects from** offers, after anywhere and
   only these addresses, each hosted agent's published ranges (`/api/state` `addressPresets`, src/cli/address-presets.ts:
   "Claude (Anthropic)", "ChatGPT (OpenAI)"), a choice whose option names the company (`preset:<id>`) and sends the
   ranges the run lists for it, chosen for a user whose ranges are exactly a company's; the box hides behind it as behind

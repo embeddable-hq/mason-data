@@ -4,10 +4,13 @@
  * (MASON_HEALTH_PORT), beside /healthz: `POST /mcp` (a JSON-RPC message, answered as JSON), `DELETE /mcp` (a session
  * ended), and the protected resource's metadata at `/.well-known/oauth-protected-resource` (RFC 9728).
  *
- *   - TWO REVISIONS OF THE PROTOCOL, by the version the client asks for (`initialize`'s protocolVersion, else the
- *     MCP-Protocol-Version header): 2025-11-25 (and the older ones), with a session (`Mcp-Session-Id`) that
- *     `initialize` opens; and 2026-07-28, which has none — each POST stands alone, as its user, and a cancellation of
- *     one is a POST of its own that names its request id.
+ *   - TWO ERAS OF THE PROTOCOL, chosen as MCP 2026-07-28 says a server of both chooses ("Versioning": "Backward
+ *     compatibility"): an `initialize` selects the legacy era — 2025-11-25 (and 2025-06-18, 2025-03-26), with a session
+ *     (`Mcp-Session-Id`) it opens; a request carrying the per-request `_meta` protocol version (or the
+ *     MCP-Protocol-Version header 2026-07-28) is served by 2026-07-28's own rules (`modernRefusal`): no session, its
+ *     version, client and capabilities in each request's `_meta`, the Mcp-Method and Mcp-Name headers held to the body,
+ *     `server/discover`, each result carrying `resultType` and the server's identity, and a request cancelled by the
+ *     client closing its connection.
  *   - EVERY REQUEST TO /mcp CARRIES A BEARER TOKEN of the operator's authorization server (src/cli/mcp-oauth.ts), or is
  *     answered 401 with `WWW-Authenticate` naming the metadata at the PUBLIC address (MASON_MCP_URL). The token names a
  *     `mason user` and its id, LOOKED UP AT EVERY REQUEST (`LiveUsers.vouched`): one that does not exist, whose id is not
@@ -38,7 +41,7 @@ import { proxyHeaderFor, proxyNames, type ProxyFrom } from "../api/postgres/prox
 import { ADDRESS_NOT_ALLOWED, ApiError, USER_DISABLED } from "../api/error.ts";
 import type { PgApiServer, ShareSocket } from "../api/postgres/server.ts";
 import { USER_REMOVED, type LiveUsers } from "../duck/users.ts";
-import { McpServer } from "./mcp.ts";
+import { INSTRUCTIONS, McpServer, SERVER_CAPABILITIES, serverInfo } from "./mcp.ts";
 import { Issuer, MCP_PATH, MCP_PROXY_SETTING, RESOURCE_METADATA_PATH, resourceMetadata, resourceMetadataUrl, type Fetcher, type McpSettings } from "./mcp-oauth.ts";
 
 /** the most MCP sessions open at once, every user's together: past it a new session is refused (503), never made by
@@ -63,10 +66,24 @@ export const MAX_BODY = 1024 * 1024;
 export const BATCH_VERSION = "2025-03-26";
 /** the most messages in one batch (and never more requests than MAX_REQUESTS, all of which must be admitted at once) */
 export const MAX_BATCH = 32;
-/** the revision with no session: each POST stands alone */
+/** the revision with no session and no `initialize`: each POST stands alone, its version in its `_meta` */
 export const STATELESS_VERSION = "2026-07-28";
-/** the revisions this endpoint speaks, the one a client asking for none is answered with first */
-export const HTTP_VERSIONS = ["2025-11-25", STATELESS_VERSION, "2025-06-18", "2025-03-26"] as const;
+/** the revisions an `initialize` may agree, the one a client asking for another is answered with first */
+export const LEGACY_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26"] as const;
+/** every revision this endpoint speaks, the newest first: as `server/discover` and UnsupportedProtocolVersion list them */
+export const HTTP_VERSIONS = [STATELESS_VERSION, ...LEGACY_VERSIONS] as const;
+/** 2026-07-28's `_meta` keys a request carries ("Base protocol": "_meta") and a result's own */
+export const META = { version: "io.modelcontextprotocol/protocolVersion", client: "io.modelcontextprotocol/clientInfo",
+  capabilities: "io.modelcontextprotocol/clientCapabilities", server: "io.modelcontextprotocol/serverInfo" } as const;
+/** the methods 2026-07-28 is answered for: what a client needs to find and use the tables (ping, logging/setLevel and the
+ *  rest are not this revision's, or not Mason's: 404 -32601, as "Streamable HTTP": "Protocol Version Header" says) */
+export const MODERN_METHODS = ["server/discover", "tools/list", "tools/call", "resources/list", "resources/templates/list", "resources/read"] as const;
+/** the results 2026-07-28 caches ("Caching"), with how long they stay fresh: the tools and resources change only with a
+ *  release, and are the same for every user ("public") */
+const CACHED = new Set<string>(["server/discover", "tools/list", "resources/list", "resources/templates/list", "resources/read"]);
+export const CACHE_TTL_MS = 300_000;
+/** MCP's error codes of 2026-07-28 ("Base protocol": "Error codes") */
+const HEADER_MISMATCH = -32020, UNSUPPORTED_VERSION = -32022;
 /** the header that carries the client's address through a proxy MASON_MCP_PROXY_FROM names */
 export const FORWARDED_HEADER = "x-forwarded-for";
 
@@ -138,6 +155,71 @@ const quoted = (s: string): string => s.replace(/[^\x20-\x7e]|["\\]/g, "'");
 /** A JSON-RPC message's method and whether it is a request (an id with a method), for what is read before it is handled. */
 const methodOf = (m: unknown): string | null => typeof m === "object" && m !== null && typeof (m as { method?: unknown }).method === "string" ? (m as { method: string }).method : null;
 
+/** A message's `params._meta`, when it has one. */
+function metaOf(m: unknown): Record<string, unknown> | null {
+  const params = typeof m === "object" && m !== null ? (m as { params?: unknown }).params : undefined;
+  const meta = typeof params === "object" && params !== null ? (params as { _meta?: unknown })._meta : undefined;
+  return typeof meta === "object" && meta !== null && !Array.isArray(meta) ? meta as Record<string, unknown> : null;
+}
+
+/** A header value as 2026-07-28 encodes one that is not plain ASCII (`=?base64?…?=`, "Streamable HTTP": "Value encoding"). */
+function headerValue(v: string): string | null {
+  const m = /^=\?base64\?([A-Za-z0-9+/]*={0,2})\?=$/.exec(v);
+  return m === null ? v : Buffer.from(m[1]!, "base64").toString("utf8");
+}
+
+/**
+ * WHAT 2026-07-28 REFUSES OF A REQUEST before it is answered, as its text says: a POST is ONE message ("Streamable
+ * HTTP": "Sending messages"); `_meta` carries the protocol version and the client's capabilities, else -32602
+ * ("Base protocol": "_meta"); a version other than 2026-07-28 in it is UnsupportedProtocolVersion (-32022, 400); the
+ * MCP-Protocol-Version, Mcp-Method and (tools/call, resources/read, prompts/get) Mcp-Name headers present and equal to the
+ * body, else HeaderMismatch (-32020, 400; "Server validation"); a method this revision does not answer here, 404 -32601.
+ */
+export function modernRefusal(msg: unknown, headers: http.IncomingHttpHeaders): { status: number; code: number; message: string; data?: unknown } | null {
+  if (Array.isArray(msg)) return { status: 400, code: -32600, message: `a JSON-RPC batch: under ${STATELESS_VERSION} a POST carries a single JSON-RPC message` };
+  const m = msg as { method?: unknown; params?: unknown };
+  if (typeof m.method !== "string") return { status: 400, code: -32600, message: "not a JSON-RPC 2.0 request: jsonrpc \"2.0\" and a method" };
+  const meta = metaOf(m);
+  const version = meta?.[META.version];
+  if (typeof version !== "string") return { status: 400, code: -32602, message: `the request's params._meta carries no ${META.version}: under ${STATELESS_VERSION} every request names its protocol version` };
+  if (version !== STATELESS_VERSION) return { status: 400, code: UNSUPPORTED_VERSION, message: "Unsupported protocol version", data: { supported: HTTP_VERSIONS, requested: version.slice(0, 40) } };
+  const caps = meta![META.capabilities];
+  if (typeof caps !== "object" || caps === null || Array.isArray(caps)) return { status: 400, code: -32602, message: `the request's params._meta carries no ${META.capabilities} (an object): under ${STATELESS_VERSION} every request names them` };
+  const said = (name: string): string | null => { const v = headers[name]; return typeof v === "string" ? v : null; };
+  const pv = said("mcp-protocol-version");
+  if (pv !== version) return { status: 400, code: HEADER_MISMATCH, message: pv === null ? "Header mismatch: no MCP-Protocol-Version header" : `Header mismatch: MCP-Protocol-Version ${JSON.stringify(pv.slice(0, 40))} is not the body's ${version}` };
+  const method = said("mcp-method");
+  if (method !== m.method) return { status: 400, code: HEADER_MISMATCH, message: method === null ? "Header mismatch: no Mcp-Method header" : `Header mismatch: Mcp-Method ${JSON.stringify(method.slice(0, 60))} is not the body's method ${JSON.stringify(m.method.slice(0, 60))}` };
+  if (m.method === "tools/call" || m.method === "resources/read" || m.method === "prompts/get") {
+    const params = (typeof m.params === "object" && m.params !== null ? m.params : {}) as { name?: unknown; uri?: unknown };
+    const named = m.method === "resources/read" ? params.uri : params.name;
+    const header = said("mcp-name");
+    if (header === null) return { status: 400, code: HEADER_MISMATCH, message: `Header mismatch: no Mcp-Name header (a ${m.method} carries it)` };
+    if (headerValue(header) !== named) return { status: 400, code: HEADER_MISMATCH, message: `Header mismatch: Mcp-Name is not the body's ${m.method === "resources/read" ? "uri" : "name"}` };
+  }
+  if (!(MODERN_METHODS as readonly string[]).includes(m.method)) {
+    return { status: 404, code: -32601, message: `Method not found: ${m.method.slice(0, 60)} (under ${STATELESS_VERSION} this server answers ${MODERN_METHODS.join(", ")})` };
+  }
+  return null;
+}
+
+/** A 2026-07-28 result: `resultType` (every result, "Base protocol": "ResultType"), the server's identity in `_meta`, and a
+ *  cached result's `ttlMs` and `cacheScope` ("Caching"). */
+function modernResult(method: string, result: Record<string, unknown>): Record<string, unknown> {
+  const meta = typeof result._meta === "object" && result._meta !== null ? result._meta as Record<string, unknown> : {};
+  return { resultType: "complete", ...result, _meta: { ...meta, [META.server]: serverInfo() }, ...(CACHED.has(method) ? { ttlMs: CACHE_TTL_MS, cacheScope: "public" } : {}) };
+}
+
+/** McpServer's answer as 2026-07-28 says it: a result made `modernResult`; a resource not found -32602, not 2025-11-25's
+ *  -32002 ("Resources": "Error handling"). */
+function modernAnswer(method: string, answer: unknown): unknown {
+  if (typeof answer !== "object" || answer === null) return answer;
+  const a = answer as { result?: unknown; error?: { code?: unknown } };
+  if (typeof a.result === "object" && a.result !== null) return { ...a, result: modernResult(method, a.result as Record<string, unknown>) };
+  if (a.error?.code === -32002) return { ...a, error: { ...a.error, code: -32602 } };
+  return answer;
+}
+
 export function mcpEndpoint(settings: McpSettings, o: { log: (line: string) => void; fetch?: Fetcher; now?: () => number;
   /** the bounds, MAX_SESSIONS, MAX_USER_SESSIONS and MAX_REQUESTS unless a test names smaller */
   limits?: { sessions?: number; userSessions?: number; requests?: number } }): McpEndpoint {
@@ -162,6 +244,8 @@ export function mcpEndpoint(settings: McpSettings, o: { log: (line: string) => v
   let inFlight = 0;
 
   const send = (res: http.ServerResponse, status: number, headers: Record<string, string>, text?: string): void => {
+    // the client closed the connection (under 2026-07-28, its cancellation): nothing is answered on it
+    if (res.destroyed) return;
     res.writeHead(status, { "cache-control": "no-store", ...(text !== undefined ? { "content-type": "application/json" } : {}), ...headers }).end(text);
   };
 
@@ -273,7 +357,7 @@ export function mcpEndpoint(settings: McpSettings, o: { log: (line: string) => v
       log(`[mcp] ${idle.user}: a session unused ${Math.round(EVICTABLE_IDLE_MS / 60_000)} minutes or more ended: it made way for a new session (at most ${maxSessions} in all)`);
     }
     const s: Session = { id: crypto.randomBytes(24).toString("base64url"), user: who.user, userId: who.id, server: null as unknown as McpServer, usedAt: now(), address: who.address, running: 0, version: null };
-    s.server = new McpServer({ connect: connectAs(() => ({ user: s.user, id: s.userId, address: s.address })), where: "this Mason" }, (l) => log(`[mcp] ${who.user}: ${l}`), HTTP_VERSIONS);
+    s.server = new McpServer({ connect: connectAs(() => ({ user: s.user, id: s.userId, address: s.address })), where: "this Mason" }, (l) => log(`[mcp] ${who.user}: ${l}`), LEGACY_VERSIONS);
     sessions.set(s.id, s);
     return s;
   }
@@ -289,22 +373,26 @@ export function mcpEndpoint(settings: McpSettings, o: { log: (line: string) => v
     return Buffer.concat(chunks).toString("utf8");
   }
 
-  /** The stateless revision's request: an McpServer of its own, as its user; a cancellation reaches the user's others. */
-  async function standalone(who: Who, text: string, messages: unknown[], req: http.IncomingMessage): Promise<unknown> {
+  /** A request of 2026-07-28: an McpServer of its own, as its user, its client named by its `_meta` clientInfo (the
+   *  User-Agent's first word only when a request carries none); the client closing the connection before the answer
+   *  cancels it ("Streamable HTTP": "Cancellation"). A `notifications/cancelled` POST still reaches the user's others. */
+  async function standalone(who: Who, text: string, messages: unknown[], req: http.IncomingMessage, res: http.ServerResponse): Promise<unknown> {
     const key = `${who.user}:${who.id}`;
     const others = standing.get(key);
     if (messages.every((m) => methodOf(m) === "notifications/cancelled")) {
       for (const server of others ?? []) await server.handle(text);
       return null;
     }
-    const server = new McpServer({ connect: connectAs(() => who), where: "this Mason" }, (l) => log(`[mcp] ${who.user}: ${l}`), HTTP_VERSIONS);
-    // no initialize names the client here: its User-Agent's first word does (initialize, when sent, names it instead)
-    server.named(String(req.headers["user-agent"] ?? "").split(/[\s/]/)[0] ?? null);
+    const server = new McpServer({ connect: connectAs(() => who), where: "this Mason" }, (l) => log(`[mcp] ${who.user}: ${l}`), [STATELESS_VERSION]);
+    const client = metaOf(messages[0])?.[META.client] as { name?: unknown } | undefined;
+    server.named(typeof client?.name === "string" ? client.name : String(req.headers["user-agent"] ?? "").split(/[\s/]/)[0] ?? null);
+    const closed = (): void => { if (!res.writableFinished) server.cancelAll("cancelled: the client closed its request"); };
+    res.on("close", closed);
     const set = others ?? new Set<McpServer>();
     set.add(server);
     standing.set(key, set);
     try { return await server.handle(text); }
-    finally { set.delete(server); if (set.size === 0) standing.delete(key); }
+    finally { res.off("close", closed); set.delete(server); if (set.size === 0) standing.delete(key); }
   }
 
   /** `slot.held`: how many JSON-RPC requests this POST counts against MAX_REQUESTS (read and authorized; each of a
@@ -326,10 +414,6 @@ export function mcpEndpoint(settings: McpSettings, o: { log: (line: string) => v
     }
     if (req.method !== "POST") { send(res, 405, { allow: "POST, DELETE" }, body("method", `${req.method} is not served: this endpoint answers each POST with JSON, and sends nothing of its own`, "POST a JSON-RPC message")); return; }
     const header = req.headers["mcp-protocol-version"];
-    if (typeof header === "string" && !HTTP_VERSIONS.includes(header as never)) {
-      send(res, 400, {}, body("protocol_version", `MCP-Protocol-Version ${JSON.stringify(header.slice(0, 40))} is not one this server speaks`, `one of ${HTTP_VERSIONS.join(", ")}`));
-      return;
-    }
     const type = String(req.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase();
     if (type !== "application/json") { send(res, 415, {}, body("content_type", "a message is application/json", "send Content-Type: application/json")); return; }
     const text = await readBody(req);
@@ -338,11 +422,23 @@ export function mcpEndpoint(settings: McpSettings, o: { log: (line: string) => v
     try { msg = JSON.parse(text); }
     catch { send(res, 400, {}, JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "not JSON: one JSON-RPC message a POST" } })); return; }
     const messages = Array.isArray(msg) ? msg : [msg];
+    const rpcId = !Array.isArray(msg) && typeof msg === "object" && msg !== null && (typeof (msg as { id?: unknown }).id === "string" || Number.isInteger((msg as { id?: unknown }).id)) ? (msg as { id: string | number }).id : null;
+    const rpcRefusal = (status: number, code: number, message: string, data?: unknown): void => {
+      log(`[mcp] refused a request of ${who.user} from ${who.address}: ${message}`);
+      send(res, status, {}, JSON.stringify({ jsonrpc: "2.0", id: rpcId, error: { code, message, ...(data !== undefined ? { data } : {}) } }));
+    };
+    // a version this endpoint does not speak: 2026-07-28's UnsupportedProtocolVersion, naming the ones it does
+    // ("Versioning": "Protocol version negotiation"), whatever era the request is of
+    if (typeof header === "string" && !HTTP_VERSIONS.includes(header as never)) {
+      rpcRefusal(400, UNSUPPORTED_VERSION, "Unsupported protocol version", { supported: HTTP_VERSIONS, requested: header.slice(0, 40) });
+      return;
+    }
     const asking = messages.filter((m) => typeof m === "object" && m !== null && "method" in m && "id" in m).length;
     const requests = asking > 0;
     const init = messages.find((m) => methodOf(m) === "initialize") as { params?: { protocolVersion?: unknown } } | undefined;
-    // THE REVISION: the one initialize asks for, else the header's (a request after initialize carries it)
-    const version = init !== undefined ? (typeof init.params?.protocolVersion === "string" ? init.params.protocolVersion : null) : header ?? null;
+    // THE ERA: an initialize is the legacy era's; a request carrying the per-request `_meta` version, or the header
+    // 2026-07-28, is 2026-07-28's ("Versioning": "A dual-era server selects its behavior from how the client opens")
+    const modern = init === undefined && (metaOf(messages[0])?.[META.version] !== undefined || header === STATELESS_VERSION);
     const reply = (answer: unknown, headers: Record<string, string> = {}): void => {
       // notifications and responses alone: accepted, no body; a request the client cancelled is answered no further
       if (!requests || answer === null) { send(res, 202, headers); return; }
@@ -354,13 +450,17 @@ export function mcpEndpoint(settings: McpSettings, o: { log: (line: string) => v
     if (Array.isArray(msg)) {
       const revision = session?.version ?? (typeof header === "string" ? header : null);
       const most = Math.min(MAX_BATCH, maxRequests);
-      const refused = revision !== BATCH_VERSION ? `a JSON-RPC batch: under ${revision ?? HTTP_VERSIONS[0]} a POST carries a single JSON-RPC message (batches are ${BATCH_VERSION}'s alone)`
+      const refused = revision !== BATCH_VERSION ? `a JSON-RPC batch: under ${revision ?? LEGACY_VERSIONS[0]} a POST carries a single JSON-RPC message (batches are ${BATCH_VERSION}'s alone)`
         : messages.length > most ? `a JSON-RPC batch of ${messages.length} messages: at most ${most}` : null;
       if (refused !== null) {
         log(`[mcp] refused a request of ${who.user} from ${who.address}: ${refused}`);
         send(res, 400, {}, JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32600, message: refused } }));
         return;
       }
+    }
+    if (modern && requests) {
+      const refused = modernRefusal(msg, req.headers);
+      if (refused !== null) { rpcRefusal(refused.status, refused.code, refused.message, refused.data); return; }
     }
     // the bound on what runs at once counts requests alone, each of a batch's: a cancellation, a notification or a
     // DELETE always gets through, or a client at the bound could not stop what holds it there
@@ -372,7 +472,13 @@ export function mcpEndpoint(settings: McpSettings, o: { log: (line: string) => v
       inFlight += asking;
       slot.held = asking;
     }
-    if (version === STATELESS_VERSION && session === undefined) { reply(await standalone(who, text, messages, req)); return; }
+    if (modern) {
+      const method = methodOf(msg);
+      if (requests && method === "server/discover") { reply({ jsonrpc: "2.0", id: rpcId, result: modernResult(method, { supportedVersions: HTTP_VERSIONS, capabilities: SERVER_CAPABILITIES, instructions: INSTRUCTIONS }) }); return; }
+      const answer = await standalone(who, text, messages, req, res);
+      reply(requests && method !== null ? modernAnswer(method, answer) : answer);
+      return;
+    }
     let s: Session;
     if (init !== undefined) {
       const made = newSession(who);
@@ -383,7 +489,7 @@ export function mcpEndpoint(settings: McpSettings, o: { log: (line: string) => v
       }
       s = made;
     } else if (typeof sid !== "string") {
-      send(res, 400, {}, body("no_session", `no Mcp-Session-Id: under ${HTTP_VERSIONS[0]} a request belongs to the session initialize opened`,
+      send(res, 400, {}, body("no_session", `no Mcp-Session-Id: under ${LEGACY_VERSIONS[0]} a request belongs to the session initialize opened`,
         `initialize first, and send the Mcp-Session-Id it answered with (or MCP-Protocol-Version: ${STATELESS_VERSION}, which has no session)`));
       return;
     } else if (session === undefined) {

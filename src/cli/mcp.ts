@@ -306,7 +306,12 @@ export const RESOURCES = [
   { uri: "mason://help/mcp", name: "mcp", title: "mason mcp", description: "mason help mcp: this server's tools, and how to add it to a client", mimeType: "text/plain" },
 ] as const;
 
-const INSTRUCTIONS = "Mason serves read-only tables synced from an application's Postgres database, for analytical SQL (scans and aggregates). " +
+/** what this server can do and who it is, as initialize says it (and, over HTTP under MCP 2026-07-28, server/discover
+ *  and every result's `_meta`: src/cli/mcp-http.ts) */
+export const SERVER_CAPABILITIES = { tools: { listChanged: false }, resources: { listChanged: false } } as const;
+export const serverInfo = (): { name: string; title: string; version: string } => ({ name: "mason", title: "Mason", version: version() });
+
+export const INSTRUCTIONS = "Mason serves read-only tables synced from an application's Postgres database, for analytical SQL (scans and aggregates). " +
   "Call tables first, describe a table before querying it, and write Postgres's SQL. Each table says how current it is. " +
   "When a statement is refused, its hint says what to write instead.";
 
@@ -424,8 +429,8 @@ export class McpServer {
         this.applicationName = client === null ? "mason-mcp" : `mason-mcp/${client}`;
         return {
           protocolVersion: this.versions.includes(asked as never) ? asked : this.versions[0],
-          capabilities: { tools: { listChanged: false }, resources: { listChanged: false } },
-          serverInfo: { name: "mason", title: "Mason", version: version() },
+          capabilities: SERVER_CAPABILITIES,
+          serverInfo: serverInfo(),
           instructions: INSTRUCTIONS,
         };
       }
