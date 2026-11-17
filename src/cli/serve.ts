@@ -162,29 +162,31 @@ export const SERVE: CommandSpec = {
                             data:image/png;base64,… or data:image/svg+xml;base64,…, the image at most ${ICON_BYTES_MAX}
                             bytes; it is inline, so the browser makes no request for it; any other value is refused
                             (default unset: no icon)
-    MASON_MCP_URL           an MCP endpoint for a hosted agent (claude.ai, ChatGPT, a team's agent platform): mason mcp's
-                            tools over MCP's Streamable HTTP (revisions 2025-11-25 and 2026-07-28), at ${MCP_PATH} on
-                            MASON_HEALTH_PORT. This is its PUBLIC address, as a client reaches it through the relay in
-                            front (https://mason.example.com/mcp): the resource its metadata names
-                            (/.well-known/oauth-protected-resource) and the audience every token must name exactly —
-                            never the address Mason sees. Set with MASON_MCP_ISSUER and MASON_MCP_JWKS_URL, or none
-                            (default unset: no endpoint)
+    MASON_MCP_URL           an MCP endpoint for a hosted agent (claude.ai, ChatGPT, a team's agent platform): mason
+                            mcp's tools over MCP's Streamable HTTP (revisions 2025-11-25 and 2026-07-28), at
+                            ${MCP_PATH} on MASON_HEALTH_PORT. This is its PUBLIC address, as a client reaches it
+                            through the relay in front (https://mason.example.com/mcp): the resource its metadata
+                            names (/.well-known/oauth-protected-resource) and the audience every token must name
+                            exactly — never the address Mason sees. Set with MASON_MCP_ISSUER and MASON_MCP_JWKS_URL,
+                            or none (default unset: no endpoint)
     MASON_MCP_ISSUER        the OAuth authorization server that signs the endpoint's tokens, as their iss names it
                             (https://auth.example.com); Mason issues no token and runs no sign-in page (required with
                             MASON_MCP_URL)
     MASON_MCP_JWKS_URL      where that server publishes its signing keys, a JWK set, read by Mason (never discovered):
                             each token's signature is checked by them (required with MASON_MCP_URL)
-    MASON_MCP_USER_CLAIM    the token's claim that names the mason user each request runs as, under its role and limits
-                            (default mason_user)
+    MASON_MCP_USER_CLAIM    the token's claim that names the mason user each request runs as, under its role and
+                            limits (default mason_user)
     MASON_MCP_USER_ID_CLAIM  the token's claim that holds that user's id, as mason user list shows it: the user is
                             looked up by both at every request, so a user removed (or removed and added again: a new
                             id) or disabled is refused at once (default mason_user_id)
-    MASON_MCP_PROXY_FROM    the relay or proxy in front of the endpoint: its own addresses, CIDRs comma-separated, read as
-                            MASON_PG_PROXY_FROM is; from one of them alone, the client is the LAST X-Forwarded-For entry
-                            (the one it appended), which a user's address ranges are judged on; from any other address
-                            the header is ignored and the peer judged (default unset: every request's peer)
+    MASON_MCP_PROXY_FROM    the relay or proxy in front of the endpoint: its own addresses, CIDRs comma-separated,
+                            read as the Postgres API's proxy addresses are (below); from one of them alone, the client
+                            is the LAST X-Forwarded-For entry (the one it appended), which a user's address ranges are
+                            judged on; from any other address the header is ignored and the peer judged (default
+                            unset: every request's peer)
     MASON_MCP_PLAIN         1 to say TLS is terminated in front of the endpoint (a relay, a proxy), required when
-                            MASON_HEALTH_HOST is off loopback: a bearer token must never cross a network in clear (default 0)
+                            MASON_HEALTH_HOST is off loopback: a bearer token must never cross a network in clear
+                            (default 0)
     MASON_PG_HOST, MASON_PG_PORT   the Postgres API's address (default 127.0.0.1:5433)
     MASON_PG_TLS_CERT, MASON_PG_TLS_KEY   its certificate, required off loopback; or MASON_PG_SELF_SIGNED_TLS=1
                             for one made in .mason/, or MASON_PG_PLAIN=1 behind a TLS proxy of your own
