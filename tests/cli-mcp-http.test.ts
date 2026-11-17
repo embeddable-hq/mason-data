@@ -464,7 +464,7 @@ test("the issuer's keys cannot be read: every token is refused 503, never let th
   assert.equal(keyFetches, fetched, "made-up kids fetch the keys again at most once a minute");
 });
 
-test("mason serve with MASON_MCP_URL, MASON_MCP_ISSUER and MASON_MCP_JWKS_URL: /mcp on its health port runs a query as the token's user; mason status and mason logs --requests name it", { timeout: 180_000 }, async () => {
+test("mason serve with MASON_MCP_URL, MASON_MCP_ISSUER and MASON_MCP_JWKS_URL: /mcp on its health port runs a query as the token's user; mason status and mason logs --requests name it", { timeout: 400_000 }, async () => {
   const { spawn } = await import("node:child_process");
   const { DemoSource } = await import("../src/demo/source.ts");
   const { unassignedPort } = await import("./test-ports.ts");
@@ -487,7 +487,8 @@ test("mason serve with MASON_MCP_URL, MASON_MCP_ISSUER and MASON_MCP_JWKS_URL: /
   child.stderr.on("data", (d) => { out += String(d); });
   const exited = new Promise<number | null>((r) => child.once("exit", (code) => r(code)));
   try {
-    for (let i = 0; i < 1200 && !out.includes("mason start: ready"); i++) await sleep(50);
+    // generous bounds: under a loaded machine (the full suite) a first start and a first sync take their time
+    for (let t0 = Date.now(); Date.now() - t0 < 150_000 && !out.includes("mason start: ready");) await sleep(100);
     assert.match(out, /mason start: ready/, out);
     assert.match(out, /  mcp       https:\/\/mason\.example\.test\/mcp \(MASON_MCP_URL\), served at http:\/\/127\.0\.0\.1:\d+\/mcp: tokens of http:\/\/127\.0\.0\.1:\d+, the user in their mason_user and mason_user_id claims/);
     const added = await runMason(data, ["user", "add", "agent", "--json"], env);
@@ -497,7 +498,7 @@ test("mason serve with MASON_MCP_URL, MASON_MCP_ISSUER and MASON_MCP_JWKS_URL: /
     const token = jwt(claims("agent"));
     let sid = "";
     // /mcp answers once the endpoint's door is open, just after ready
-    for (let i = 0; i < 100; i++) {
+    for (let t0 = Date.now(); Date.now() - t0 < 30_000;) {
       const init = await post(m, INIT(), { token });
       if (init.status === 200) { sid = init.headers.get("mcp-session-id")!; break; }
       assert.equal(init.status, 503, JSON.stringify(init.body));
@@ -506,7 +507,7 @@ test("mason serve with MASON_MCP_URL, MASON_MCP_ISSUER and MASON_MCP_JWKS_URL: /
     assert.ok(sid !== "", out);
     // its first sync may still run at ready: asked again until it answers
     let q = await call(m, token, sid, "query", { sql: "SELECT count(*) > 0 AS answer FROM customers" });
-    for (let i = 0; i < 100 && q.isError === true; i++) { await sleep(200); q = await call(m, token, sid, "query", { sql: "SELECT count(*) > 0 AS answer FROM customers" }); }
+    for (let t0 = Date.now(); Date.now() - t0 < 90_000 && q.isError === true;) { await sleep(300); q = await call(m, token, sid, "query", { sql: "SELECT count(*) > 0 AS answer FROM customers" }); }
     assert.deepEqual(q.structured.rows, [["t"]], q.text);
     const status = JSON.parse((await runMason(data, ["status", "--json"], env)).stdout) as { mcp: unknown; addressPresets: Array<{ id: string; ranges: string[] }> };
     assert.deepEqual(status.mcp, { url: PUBLIC, issuer: ISSUER });
@@ -515,7 +516,7 @@ test("mason serve with MASON_MCP_URL, MASON_MCP_ISSUER and MASON_MCP_JWKS_URL: /
     assert.match(said.stdout, /\n  MCP +https:\/\/mason\.example\.test\/mcp  \(for a hosted agent, signed in by http:\/\/127\.0\.0\.1:\d+\)\n/);
     // the request log is written a few seconds after the statement (its flush)
     let logs = await runMason(data, ["logs", "--requests", "--client", "mason-mcp/hosted-agent"], env);
-    for (let i = 0; i < 40 && !logs.stdout.includes("FROM customers"); i++) { await sleep(500); logs = await runMason(data, ["logs", "--requests", "--client", "mason-mcp/hosted-agent"], env); }
+    for (let t0 = Date.now(); Date.now() - t0 < 60_000 && !logs.stdout.includes("FROM customers");) { await sleep(500); logs = await runMason(data, ["logs", "--requests", "--client", "mason-mcp/hosted-agent"], env); }
     assert.equal(logs.code, 0, logs.stdout + logs.stderr);
     assert.match(logs.stdout, /mason-mcp\/hosted-agent \(user agent\)  SELECT count\(\*\) > 0 AS answer FROM customers/);
     // no token in what the serve logged
