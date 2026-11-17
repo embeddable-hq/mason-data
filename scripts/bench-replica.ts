@@ -11,6 +11,9 @@
  * time after a warm-up; p50 / p95 are of every statement's wall time, queries/s is completed / seconds. Before a size is
  * measured, every statement's answer from Mason is held equal to Postgres's, so the two are timed on the same answers.
  *
+ * THE COLD MODE is the published run: `node scripts/bench-replica.ts --cold …` (scripts/bench-replica-cold.ts, its own
+ * options under `--cold --help`; docs/BENCHMARK.md "The cold mode"). What follows is the warm mode.
+ *
  *   node scripts/bench-replica.ts                          # its own Postgres 18 container (bench-pg), removed at the end
  *   node scripts/bench-replica.ts --postgres postgres://…  # a Postgres someone started (its user needs CREATEDB)
  *     --sizes 1M,10M,50M  --clients 1,8,32,128  --seconds 30  --warmup 5  --runs 2  --timeout 120 (a statement's limit, s)
@@ -226,7 +229,7 @@ export function parseCount(s: string): number {
   return Math.round(Number(m[1]) * (m[2]!.toLowerCase() === "m" ? 1e6 : m[2]!.toLowerCase() === "k" ? 1e3 : 1));
 }
 /** an option the run cannot take: said by its message alone (anything else is said with its stack) */
-class Usage extends Error {}
+export class Usage extends Error {}
 function parseArgs(argv: string[]): Options {
   const o: Options = { sizes: [1e6, 1e7, 5e7], clients: [1, 8, 32, 128], seconds: 30, warmup: 5, runs: 2, postgres: null,
     out: path.join(REPO, "tests/fixtures/bench-replica.json"), label: os.hostname(), memory: null, work: os.tmpdir(), reserveGb: 60, keepPostgres: false, timeoutSeconds: null,
@@ -413,7 +416,7 @@ export const median = (xs: readonly number[]): number => {
   const s = [...xs].sort((a, b) => a - b);
   return s.length === 0 ? NaN : s.length % 2 === 1 ? s[(s.length - 1) / 2]! : (s[s.length / 2 - 1]! + s[s.length / 2]!) / 2;
 };
-const round = (x: number, d: number): number => Number.isFinite(x) ? Number(x.toFixed(d)) : x;
+export const round = (x: number, d: number): number => Number.isFinite(x) ? Number(x.toFixed(d)) : x;
 
 type Stats = RunStats & { codes: Record<string, number> };
 /** one run's statistics: the mix (every statement) and each statement */
@@ -444,12 +447,12 @@ const disagree = (runs: readonly RunStats[]): boolean => {
 
 // --------------------------------------------------------------------------------------------- Postgres
 
-function docker(args: string[]): string {
+export function docker(args: string[]): string {
   const r = spawnSync("docker", args, { encoding: "utf8" });
   if (r.status !== 0) throw new Error(`docker ${args[0]}: ${(r.stderr || r.stdout).trim()}`);
   return r.stdout.trim();
 }
-function freePort(): Promise<number> {
+export function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const s = net.createServer();
     s.on("error", reject);
@@ -528,7 +531,7 @@ const withDb = (url: string, db: string): string => { const u = new URL(url); u.
 const whereOf = (url: string): string => { const u = new URL(url); return `${u.hostname}:${u.port || "5432"}`; };
 
 /** the database of one size: made by `dataSql`, or reused when its marker says it holds exactly this */
-async function ensureData(adminUrl: string, rows: number, log: (l: string) => void): Promise<{ url: string; generatedSeconds: number | null }> {
+export async function ensureData(adminUrl: string, rows: number, log: (l: string) => void): Promise<{ url: string; generatedSeconds: number | null }> {
   const db = `bench_replica_${rows}`;
   const url = withDb(adminUrl, db);
   const admin = new pg.Client({ connectionString: adminUrl });
@@ -558,7 +561,7 @@ async function ensureData(adminUrl: string, rows: number, log: (l: string) => vo
   return { url, generatedSeconds: round((performance.now() - t0) / 1000, 1) };
 }
 
-async function postgresFacts(url: string): Promise<{ version: string; settings: Record<string, string> }> {
+export async function postgresFacts(url: string): Promise<{ version: string; settings: Record<string, string> }> {
   const c = new pg.Client({ connectionString: url });
   await c.connect();
   try {
@@ -781,7 +784,7 @@ async function plannedSql(conn: pg.ClientConfig, rows: number, file: string, log
 
 // --------------------------------------------------------------------------------------------- the run
 
-const fmtRows = (n: number): string => n >= 1e6 && n % 1e6 === 0 ? `${n / 1e6}M` : n >= 1e3 && n % 1e3 === 0 ? `${n / 1e3}k` : String(n);
+export const fmtRows = (n: number): string => n >= 1e6 && n % 1e6 === 0 ? `${n / 1e6}M` : n >= 1e3 && n % 1e3 === 0 ? `${n / 1e3}k` : String(n);
 const ms = (x: number): string => !Number.isFinite(x) ? "-" : x >= 1000 ? `${(x / 1000).toFixed(2)} s` : x >= 10 ? `${x.toFixed(0)} ms` : `${x.toFixed(1)} ms`;
 const secs = (x: number): string => x >= 120 ? `${(x / 60).toFixed(0)} min` : `${x.toFixed(0)} s`;
 
@@ -1115,7 +1118,12 @@ if (process.argv[2] === "--client-worker") {
       (e: unknown) => { process.stderr.write(`bench-replica client process: ${(e as Error).stack ?? String(e)}\n`); process.exitCode = 1; });
   });
 } else if (process.argv[1] !== undefined && path.resolve(process.argv[1]) === SCRIPT) {
-  main().then((code) => { process.exitCode = code; }, (e: unknown) => {
+  // --cold is a mode of its own (scripts/bench-replica-cold.ts), with its own options and --help
+  const argv = process.argv.slice(2);
+  const run = argv.includes("--cold")
+    ? import("./bench-replica-cold.ts").then((m) => m.mainCold(argv.filter((a) => a !== "--cold")))
+    : main();
+  run.then((code) => { process.exitCode = code; }, (e: unknown) => {
     process.stderr.write(`bench-replica: ${e instanceof Usage ? e.message : (e as Error).stack ?? String(e)}\n`);
     process.exitCode = e instanceof Usage ? 2 : 1;
   });

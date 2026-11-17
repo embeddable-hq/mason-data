@@ -4212,14 +4212,36 @@ A tuned Postgres would close part of the gap, not 23×.
 
 ### Mason against a Postgres read replica
 
-**Decision.** `scripts/bench-replica.ts` sweeps each axis until Postgres's p95 of a six-statement mix reaches a target
-(`--target-postgres-seconds`; a minute for a published run): rows at 8 clients about √10 a step (`nextSize`), then
-clients at the largest size under the target, doubling (`clientSteps`) to 1,024. Each engine is measured with the other
-stopped. docs/MEASUREMENTS.md ("When is Mason faster?") and the README's headline numbers are rendered from its fixture; `docs/BENCHMARK.md` has the method
-in full (a replica's settings and indexes for the container's memory, answers compared before timing, the median of
-runs).
+**Decision (2026-11-17, #1121).** The published run is the cold mode (`node scripts/bench-replica.ts --cold`,
+`scripts/bench-replica-cold.ts`). Three queries (a count over every row, a sum by month over a join, a lookup by primary
+key) at 1 M, 10 M and 100 M rows, sent once by 1 client or by 10 at the same moment. Before every run the engine is
+restarted and the OS page cache dropped. A cell's number is the median of 3 runs of the slowest client. Postgres and
+Mason (the `mason-data` image) each run in a container with the same `--cpus`, `--memory` and `--memory-swap`. The
+client is pgbench, timed by its per-transaction log. docs/BENCHMARK.md "The cold mode" has the method in full.
 
-**Why.** A grid compares sizes someone picked; a replica's owner asks where Postgres stops being usable. An idle engine
+**Why.**
+- **The reader's question.** A reader asks how long one query takes the first time, with one user and with ten. The
+  warm mode's p95 over a mix of six queries does not answer that, and it hides which query was slow.
+- **Equal resources.** In the warm mode Postgres ran in a container with a memory limit, while Mason ran in the script's
+  process with no limit on its page cache. A cgroup v2 limit counts the page cache, so a container each with the same
+  limits gives both the same cache. Mason is the image a deployment runs, so its engine gets what it gets in production
+  (half the container).
+- **Cold is the hard case, and repeatable.** A warm cache measures the machine's RAM against the table's size. A
+  restart and a dropped page cache make every run start from the disk, so 3 runs agree.
+- **The lookup trap.** A pgbench script that picks each client's row inside the SQL (`CASE :client_id WHEN 0 THEN …`)
+  made Mason's lookup look many times slower than it is, because its engine does not push that filter down. Each client
+  is sent its row as a plain literal (`\if :client_id = …` in the script), and a test holds the script to it.
+- **One engine at a time.** Mason is stopped while Postgres is measured. Postgres must stay up while Mason is measured,
+  because a Mason start reads its source's catalog, so it is restarted first and left idle.
+
+**Before (the warm mode, kept).** `scripts/bench-replica.ts` without `--cold` sweeps each axis until Postgres's p95 of a six-statement mix reaches a target
+(`--target-postgres-seconds`; a minute for its main run): rows at 8 clients about √10 a step (`nextSize`), then
+clients at the largest size under the target, doubling (`clientSteps`) to 1,024. Each engine is measured with the other
+stopped. It was the published run until #1121, and its renderer is kept, held by `tests/fixtures/bench-replica-warm.json`;
+`docs/BENCHMARK.md` "The warm mode" has the method in full (a replica's settings and indexes for the container's memory,
+answers compared before timing, the median of runs).
+
+**Why it swept.** A grid compares sizes someone picked; a replica's owner asks where Postgres stops being usable. An idle engine
 keeps its buffers and takes the other's page cache, which on a 15 GiB machine is the comparison itself.
 `max_connections` is raised past the clients so the sweep measures answers, not refusals (a replica's default is 100).
 
