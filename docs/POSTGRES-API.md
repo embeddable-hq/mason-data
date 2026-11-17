@@ -545,7 +545,8 @@ MASON_MCP_PLAIN=1                                     # TLS is terminated in fro
   fetch fails (every token 503 meanwhile). A user holds at most 32 sessions and the endpoint 1,000 (a new one past that is
   503 with `Retry-After`, never made by ending a session in use). The health port takes a request's headers within 10 s
   and its body within 30 s, closes an idle connection after 5 s, holds at most 1,024 connections and runs at most 256 MCP
-  requests at once; a tool call's own time is not limited by these (docs/DESIGN.md "An MCP server over HTTPS").
+  requests at once, each request of a JSON-RPC batch counted (a batch is taken under MCP 2025-03-26 alone, the one
+  revision that has them, of at most 32 messages; a body is at most 1 MiB); a tool call's own time is not limited by these (docs/DESIGN.md "An MCP server over HTTPS").
 
 ## What a tool sees
 

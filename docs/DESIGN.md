@@ -2501,6 +2501,10 @@ together, or the start is refused naming what is missing. The owner's spec (2026
   — so a burst of tokens, valid or not, costs the issuer one request a minute; **while fetches fail the wait doubles**,
   1, 2, 4, 8 minutes, **bounded at 10** (`BACKOFF_MAX_MS`), and every token meanwhile is 503 without a fetch. Before,
   a key was trusted for an hour after its removal, and 53 requests against a failing JWKS made 28 fetches.
+  **The keys' life, the wait between fetches and the back-off are timed on a monotonic clock** (`performance.now()`),
+  never the wall clock (the second review of PR 1125, 2026-11-17): with the wall clock stepped back an hour, a key the
+  issuer removed was accepted for that whole hour, and a back-off would have held every token at 503 until the clock
+  caught up. A token's `exp`, `nbf` and `iat` are wall-clock times, and are read on the wall clock.
 - **The user, looked up at every request.** One claim names the `mason user` (`MASON_MCP_USER_CLAIM`, default
   `mason_user`), another holds its id (`MASON_MCP_USER_ID_CLAIM`, default `mason_user_id`): the 16 hex digits `mason user
   add` made and `mason user list` shows (`mason user check` answers it too, for the operator's sign-in page). The users
@@ -2562,12 +2566,24 @@ together, or the start is refused naming what is missing. The owner's spec (2026
   settings): a request's headers within **10 s**, its body within **30 s**, an idle keep-alive connection closed after
   **5 s**, at most **1,024 connections** (one past it is closed at once), and at most **256 JSON-RPC requests running**
   on /mcp (`MAX_REQUESTS`: past it 503 with Retry-After; a cancellation and a DELETE are never held to it, or a client at
-  the bound could not stop what holds it there). Node's `requestTimeout` times the request alone, never the answer, and
+  the bound could not stop what holds it there), **each request of a JSON-RPC batch counted**: a batch is admitted whole
+  or refused whole (503), never in part. A body is at most 1 MiB (`MAX_BODY`). Node's `requestTimeout` times the request alone, never the answer, and
   an answer is written once its query ends, so **a tool call that runs for minutes is answered whole** (the test runs one
   twice the request timeout). **/healthz under the cap**: /mcp's running requests alone stay far under the connection
   cap, so a platform's health check is answered beside them; connections that send nothing are closed within 10 s, so
   only a flood that keeps opening connections faster than that can hold the cap, and while it does a health check can be
   refused — that is not guaranteed against, and a platform that health-checks the port should allow for a retry.
+
+- **A JSON-RPC batch, by the revision** (the second review of PR 1125, 2026-11-17: a batch counted as one request,
+  so with the bound at 4 a batch of 40 queries ran all 40 at once, and one of 8,000 grew the process by about 0.7 GB).
+  The revisions disagree: **2025-03-26** says a server "MUST support receiving JSON-RPC batches"; **2025-06-18** removed
+  batching ("the body of the POST request MUST be a single JSON-RPC request, notification, or response"), and
+  **2025-11-25** and **2026-07-28** say the same. So a batch is taken under **2025-03-26 alone** (`BATCH_VERSION`: the
+  session's agreed revision, else the `MCP-Protocol-Version` header), of at most **32 messages** (`MAX_BATCH`, and
+  never more requests than `MAX_REQUESTS`), each request in it counted against `MAX_REQUESTS`; under any other revision
+  it is refused **400** with JSON-RPC's `-32600` (Invalid Request), as those revisions forbid it. Refusing batches
+  everywhere would have broken a revision Mason says it speaks; counting them everywhere would accept what three of the
+  four forbid. A batch of notifications alone (cancellations) is never held to the bound.
 
 **Left out.** `Origin` is not checked (MCP asks it of a server against DNS rebinding, which reaches a server that trusts
 the network or a cookie; this one trusts only a bearer token sent in a header). No server-sent events: every answer is

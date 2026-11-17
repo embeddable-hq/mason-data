@@ -581,6 +581,64 @@ test("the health port's limits: a tool call longer than its request timeout is a
   for (const c of silent) c.destroy();
 });
 
+test("a JSON-RPC batch counts each of its requests against MAX_REQUESTS, all admitted at once or none; it is 2025-03-26's alone (later revisions take one message a POST) and of at most MAX_BATCH messages; a batch of cancellations gets through at the bound", async () => {
+  assert.ok(httpModule !== null, "src/cli/mcp-http.ts");
+  const m = await mount({}, { limits: { requests: 4 } });
+  const token = jwt(claims("analyst"));
+  // a 2025-03-26 session (whose client may send no MCP-Protocol-Version)
+  const init = await post(m, INIT("2025-03-26"), { token });
+  assert.equal(init.status, 200, JSON.stringify(init.body));
+  const old = init.headers.get("mcp-session-id")!;
+  assert.equal((await post(m, { jsonrpc: "2.0", method: "notifications/initialized" }, { token, session: old })).status, 202);
+  const ping = () => ({ jsonrpc: "2.0", id: ids++, method: "ping" });
+  // more requests than may run at once: refused whole, none run
+  const five = await post(m, Array.from({ length: 5 }, ping), { token, session: old });
+  assert.equal(five.status, 400, JSON.stringify(five.body));
+  assert.deepEqual([five.body!.id, (five.body!.error as { code: number }).code], [null, -32600]);
+  assert.match((five.body!.error as { message: string }).message, /a JSON-RPC batch of 5 messages: at most 4/);
+  // one query and a batch of three: four running, the bound
+  const single = post(m, { jsonrpc: "2.0", id: 7301, method: "tools/call", params: longQuery(7301) }, { token, session: old });
+  await sleep(300);
+  const batch = post(m, [7302, 7303, 7304].map((id) => ({ jsonrpc: "2.0", id, method: "tools/call", params: longQuery(id) })), { token, session: old });
+  await sleep(500);
+  // past it: one request more, alone or in a batch, is 503, and a batch that would cross it is refused whole
+  for (const message of [ping(), [ping()], [{ jsonrpc: "2.0", method: "notifications/progress", params: {} }, ping()]]) {
+    const over = await post(m, message, { token, session: old });
+    assert.equal(over.status, 503, JSON.stringify(message));
+    assert.equal((over.body!.error as { code: string }).code, "busy");
+  }
+  // a batch of cancellations is no request: it gets through at the bound, and stops all four
+  const t0 = Date.now();
+  const cancel = await post(m, [7301, 7302, 7303, 7304].map((requestId) => ({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId } })), { token, session: old });
+  assert.equal(cancel.status, 202);
+  assert.deepEqual([(await single).status, (await batch).status], [202, 202], "answered no further");
+  assert.ok(Date.now() - t0 < 10_000, "cancelled at the bound");
+  // the bound freed: a batch of four runs, each answered
+  const four = await post(m, Array.from({ length: 4 }, ping), { token, session: old });
+  assert.equal(four.status, 200, JSON.stringify(four.body));
+  assert.equal((four.body as unknown as unknown[]).length, 4);
+  // under 2025-11-25 and 2026-07-28 a POST is one message: a batch is refused, whatever the header says
+  const sid = await session(m, token);
+  for (const [what, how] of [["2025-11-25", { session: sid }], ["2025-11-25, its session's header", { session: sid, headers: { "mcp-protocol-version": "2025-11-25" } }],
+    ["2025-11-25's session, the header 2025-03-26", { session: sid, headers: { "mcp-protocol-version": "2025-03-26" } }], ["2026-07-28", { headers: STATELESS }]] as const) {
+    const r = await post(m, [ping(), ping()], { token, ...how });
+    assert.equal(r.status, 400, `${what}: ${JSON.stringify(r.body)}`);
+    assert.equal((r.body!.error as { code: number }).code, -32600, what);
+    assert.match((r.body!.error as { message: string }).message, /a POST carries a single JSON-RPC message \(batches are 2025-03-26's alone\)/, what);
+  }
+  // MAX_BATCH, under the default bound: 32 messages answered, 33 refused whole
+  const wide = await mount({});
+  const wi = await post(wide, INIT("2025-03-26"), { token });
+  const wsid = wi.headers.get("mcp-session-id")!;
+  const b32 = await post(wide, Array.from({ length: 32 }, ping), { token, session: wsid });
+  assert.equal(b32.status, 200, JSON.stringify(b32.body));
+  assert.equal((b32.body as unknown as unknown[]).length, 32);
+  const b33 = await post(wide, Array.from({ length: 33 }, ping), { token, session: wsid });
+  assert.equal(b33.status, 400);
+  assert.match((b33.body!.error as { message: string }).message, /a JSON-RPC batch of 33 messages: at most 32/);
+  assert.deepEqual([httpModule.MAX_BATCH, httpModule.BATCH_VERSION], [32, "2025-03-26"]);
+});
+
 test("mason serve with MASON_MCP_URL, MASON_MCP_ISSUER and MASON_MCP_JWKS_URL: /mcp on its health port runs a query as the token's user; mason status and mason logs --requests name it", { timeout: 400_000 }, async () => {
   const { spawn } = await import("node:child_process");
   const { DemoSource } = await import("../src/demo/source.ts");

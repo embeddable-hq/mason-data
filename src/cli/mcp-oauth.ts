@@ -18,7 +18,10 @@
  * The keys are cached for at most KEYS_TTL_MS (5 minutes; a shorter `Cache-Control: max-age` honoured), so a key the
  * issuer removed is refused within it, and never used past it: no grace. At most MAX_KEYS. ONE fetch at a time, and at
  * most one every REFRESH_MIN_MS whatever asks — keys past their life, a `kid` they lack — backing off to BACKOFF_MAX_MS
- * while fetches fail, so a stream of tokens, made-up kids or none valid, costs the issuer one request a minute at most. Every answer of the JWKS
+ * while fetches fail, so a stream of tokens, made-up kids or none valid, costs the issuer one request a minute at most.
+ * The keys' life, the wait between fetches and the back-off are timed on a MONOTONIC clock (`performance.now()`): a wall
+ * clock stepped back would keep a removed key for as long as the step. `exp`, `nbf` and `iat` are wall-clock times, read
+ * on the wall clock. Every answer of the JWKS
  * URL is untrusted: no redirect followed, bounded in size and time. A TOKEN NEVER REACHES a log line, an error or an
  * answer: what is said of one is what is wrong with it.
  *
@@ -173,6 +176,7 @@ export type TokenCheck = { user: string; id: string } | { status: 401 | 503; rea
 /** what fetching takes: the global fetch, or a test's */
 export type Fetcher = (url: string, init: { redirect: "manual"; signal: AbortSignal; headers: Record<string, string> }) => Promise<Response>;
 
+/** `at` and `until` on the monotonic clock (`Issuer.mono`), never the wall clock */
 interface Keys { byKid: Map<string, crypto.KeyObject & { jwk: Record<string, unknown> }>; at: number; until: number }
 
 /** The life `Cache-Control` gives an answer, in ms: `max-age`'s, 0 for `no-store` / `no-cache`, null when it says none. */
@@ -200,20 +204,25 @@ function part(text: string, what: string): Record<string, unknown> | string {
 export class Issuer {
   private readonly settings: McpSettings;
   private readonly fetcher: Fetcher;
+  /** the wall clock, in ms: what `exp`, `nbf` and `iat` are read against */
   private readonly now: () => number;
+  /** a monotonic clock, in ms: what the keys' life, the wait between fetches and the back-off are timed on, so a wall
+   *  clock stepped back never stretches them */
+  private readonly mono: () => number;
   private readonly log: (line: string) => void;
   private keys: Keys | null = null;
   private fetching: Promise<Keys | string> | null = null;
-  /** when the next fetch may start: REFRESH_MIN_MS after the last one, longer while they fail (`failures`) */
+  /** when the next fetch may start (`mono`): REFRESH_MIN_MS after the last one, longer while they fail (`failures`) */
   private nextFetchAt = -Infinity;
   /** fetches failed in a row */
   private failures = 0;
   private lastProblem: string | null = null;
 
-  constructor(settings: McpSettings, o: { fetch?: Fetcher; now?: () => number; log: (line: string) => void }) {
+  constructor(settings: McpSettings, o: { fetch?: Fetcher; now?: () => number; mono?: () => number; log: (line: string) => void }) {
     this.settings = settings;
     this.fetcher = o.fetch ?? ((url, init) => fetch(url, init));
     this.now = o.now ?? Date.now;
+    this.mono = o.mono ?? (() => performance.now());
     this.log = o.log;
   }
 
@@ -240,7 +249,7 @@ export class Issuer {
     let keys = await this.current();
     if (typeof keys === "string") return { status: 503, reason: keys };
     let key = keys.byKid.get(header.kid);
-    if (key === undefined && this.now() >= this.nextFetchAt) {
+    if (key === undefined && this.mono() >= this.nextFetchAt) {
       keys = await this.refresh();
       if (typeof keys === "string") return { status: 503, reason: keys };
       key = keys.byKid.get(header.kid);
@@ -287,7 +296,7 @@ export class Issuer {
 
   /** the keys to judge by: cached within their life, else fetched — or, a fetch not due yet, why there are none */
   private async current(): Promise<Keys | string> {
-    if (this.keys !== null && this.now() < this.keys.until) return this.keys;
+    if (this.keys !== null && this.mono() < this.keys.until) return this.keys;
     // fail closed: keys past their life are never used again, whatever a fetch does
     this.keys = null;
     return this.refresh();
@@ -298,16 +307,16 @@ export class Issuer {
    *  as they stand */
   private refresh(): Promise<Keys | string> {
     if (this.fetching !== null) return this.fetching;
-    if (this.now() < this.nextFetchAt) return Promise.resolve(this.keys ?? this.lastProblem ?? "its keys are not fetched yet");
+    if (this.mono() < this.nextFetchAt) return Promise.resolve(this.keys ?? this.lastProblem ?? "its keys are not fetched yet");
     this.fetching = this.fetchKeys().then((k) => {
       if (typeof k === "string") {
         this.failures++;
-        this.nextFetchAt = this.now() + Math.min(REFRESH_MIN_MS * 2 ** (this.failures - 1), BACKOFF_MAX_MS);
+        this.nextFetchAt = this.mono() + Math.min(REFRESH_MIN_MS * 2 ** (this.failures - 1), BACKOFF_MAX_MS);
         // fail closed: keys that cannot be fetched again are not used past their life (current drops them then); the
         // ones still within it keep judging until it ends
         if (k !== this.lastProblem) this.log(`[mcp] the authorization server's keys could not be read, so every token is refused: ${k}`);
         this.lastProblem = k;
-        return this.keys !== null && this.now() < this.keys.until ? this.keys : k;
+        return this.keys !== null && this.mono() < this.keys.until ? this.keys : k;
       } else {
         this.failures = 0;
         // from the moment the keys were read, so their life (never under REFRESH_MIN_MS) never ends before a fetch is due
@@ -346,7 +355,7 @@ export class Issuer {
     if (byKid.size === 0) return `its keys (${this.settings.jwks}) hold no signing key Mason can read (RSA of 2048 bits or more, EC, or Ed25519 / Ed448, each with a kid)`;
     // the answer's own life when shorter than KEYS_TTL_MS, never under REFRESH_MIN_MS (no fetch is made sooner anyway)
     const life = Math.max(REFRESH_MIN_MS, Math.min(KEYS_TTL_MS, cacheLife(cacheControl) ?? KEYS_TTL_MS));
-    const fetchedAt = this.now();
+    const fetchedAt = this.mono();
     return { byKid, at: fetchedAt, until: fetchedAt + life };
   }
 

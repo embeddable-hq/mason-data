@@ -345,19 +345,20 @@ test("the issuer's keys are untrusted: a redirect not followed, an answer too la
   assert.ok(plain !== null && "problems" in plain && /MASON_MCP_JWKS_URL is http:\/\/auth\.example\.test\/…: https:\/\//.test(plain.problems.join("; ")));
 });
 
-/** An issuer on a clock the test moves, its JWKS answer the test's (`answer`), counting its fetches; each fetch takes
- *  `slowMs` (real time) so concurrent checks overlap it. */
-function clockedIssuer(answer: () => Response, slowMs = 0): { issuer: Issuer; fetches: () => number; tick: (ms: number) => void } {
+/** An issuer on clocks the test moves, its JWKS answer the test's (`answer`), counting its fetches; each fetch takes
+ *  `slowMs` (real time) so concurrent checks overlap it. `tick` is time passing (the wall clock and the monotonic one
+ *  both); `step` moves the wall clock alone, as a clock set back or forward does. */
+function clockedIssuer(answer: () => Response, slowMs = 0): { issuer: Issuer; fetches: () => number; tick: (ms: number) => void; step: (ms: number) => void } {
   assert.ok(oauth !== null, "src/cli/mcp-oauth.ts");
   const s = mcpSettings({ MASON_MCP_URL: RESOURCE, MASON_MCP_ISSUER: ISSUER, MASON_MCP_JWKS_URL: JWKS_AT }, "127.0.0.1");
   assert.ok(s !== null && !("problems" in s));
-  let at = Date.now(), n = 0;
-  const issuer = new oauth.Issuer(s, { log: () => undefined, now: () => at, fetch: async () => {
+  let at = Date.now(), mono = 1_000_000, n = 0;
+  const issuer = new oauth.Issuer(s, { log: () => undefined, now: () => at, mono: () => mono, fetch: async () => {
     n++;
     if (slowMs > 0) await new Promise((r) => setTimeout(r, slowMs));
     return answer();
   } });
-  return { issuer, fetches: () => n, tick: (ms) => { at += ms; } };
+  return { issuer, fetches: () => n, tick: (ms) => { at += ms; mono += ms; }, step: (ms) => { at += ms; } };
 }
 /** a token that stays within its exp however far the test's clock moves */
 const lasting = (kid = "r1"): string => bearer({ alg: "RS256", kid }, valid({ exp: Math.floor(Date.now() / 1000) + 86_400 }), rsaKey.privateKey);
@@ -438,6 +439,36 @@ test("a key the issuer removes is refused within KEYS_TTL_MS (5 minutes), sooner
     assert.ok("status" in r && r.status === 503, JSON.stringify(r));
   }
   assert.equal(f.fetches(), 2, "one fetch after the life ended, then the back-off");
+});
+
+test("the keys' life and the back-off are timed on a monotonic clock: with the wall clock stepped back an hour, a removed key is still refused within its life, and a failing JWKS is asked again when its wait is up", async () => {
+  assert.ok(oauth !== null, "src/cli/mcp-oauth.ts");
+  const both = { keys: [jwk(rsaKey.publicKey, "r1", { use: "sig" }), jwk(edKey.publicKey, "ed")] };
+  const edOnly = { keys: [jwk(edKey.publicKey, "ed")] };
+  for (const [what, cacheControl, life] of [["no Cache-Control", null, oauth.KEYS_TTL_MS], ["max-age=90", "max-age=90", 90_000]] as const) {
+    let published: unknown = both;
+    const c = clockedIssuer(() => new Response(JSON.stringify(published), { status: 200, headers: cacheControl === null ? {} : { "cache-control": cacheControl } }));
+    assert.ok("user" in await c.issuer.check(lasting()), what);
+    published = edOnly;
+    // the wall clock set back an hour, then the key's life passing: refused at its end, never an hour later
+    c.step(-60 * MIN);
+    c.tick(life - 1_000);
+    assert.ok("user" in await c.issuer.check(lasting()), `${what}: within its life`);
+    c.tick(1_000);
+    const after = await c.issuer.check(lasting());
+    assert.ok("status" in after && after.status === 401, `${what}, the wall clock stepped back: ${JSON.stringify(after)}`);
+  }
+  // a failing JWKS: its wait (a minute, then two) is timed on the monotonic clock, whatever the wall clock does
+  const down = clockedIssuer(() => new Response("", { status: 500 }));
+  assert.equal(statusOf(await down.issuer.check(lasting())), 503);
+  assert.equal(down.fetches(), 1);
+  down.step(-60 * MIN);
+  down.tick(MIN);
+  assert.equal(statusOf(await down.issuer.check(lasting())), 503);
+  assert.equal(down.fetches(), 2, "asked again a minute on, the wall clock stepped back an hour");
+  down.step(+60 * MIN);
+  assert.equal(statusOf(await down.issuer.check(lasting())), 503);
+  assert.equal(down.fetches(), 2, "the wall clock stepped forward an hour: no fetch before the two minutes' wait is up");
 });
 
 test("the MCP endpoint's client address: a named proxy's LAST X-Forwarded-For entry alone; an entry the client forged in front of it, and a header from a peer not named, never believed", () => {

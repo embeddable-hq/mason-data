@@ -52,12 +52,17 @@ export const IDLE_MS = 3_600_000;
 /** at MAX_SESSIONS, a session unused this long, running nothing, may make way for another user's new one: it is
  *  abandoned in all but name (a client that still holds it opens a new one at its 404) */
 export const EVICTABLE_IDLE_MS = 600_000;
-/** the most /mcp JSON-RPC requests answered at once, every user's together: past it 503 with Retry-After (a notification
- *  — a cancellation — and a DELETE are never held to it). Far under the health port's connection cap (serve.ts
+/** the most /mcp JSON-RPC requests answered at once, every user's together, each request of a batch counted: past it 503
+ *  with Retry-After (a notification — a cancellation — and a DELETE are never held to it). Far under the health port's connection cap (serve.ts
  *  HEALTH_LIMITS), so /mcp's running requests alone never hold every connection /healthz needs */
 export const MAX_REQUESTS = 256;
 /** the largest message body read */
 export const MAX_BODY = 1024 * 1024;
+/** the one revision whose POST may carry a JSON-RPC batch: 2025-03-26 says a server MUST receive one; 2025-06-18,
+ *  2025-11-25 and 2026-07-28 say a POST's body MUST be a single message, so a batch under them is refused (400) */
+export const BATCH_VERSION = "2025-03-26";
+/** the most messages in one batch (and never more requests than MAX_REQUESTS, all of which must be admitted at once) */
+export const MAX_BATCH = 32;
 /** the revision with no session: each POST stands alone */
 export const STATELESS_VERSION = "2026-07-28";
 /** the revisions this endpoint speaks, the one a client asking for none is answered with first */
@@ -87,7 +92,9 @@ export interface McpEndpoint {
 /** Who a request is: the token's user and id, and the client's address (`clientOf`). */
 interface Who { user: string; id: string; address: string }
 
-interface Session { id: string; user: string; userId: string; server: McpServer; usedAt: number; address: string; running: number }
+interface Session { id: string; user: string; userId: string; server: McpServer; usedAt: number; address: string; running: number;
+  /** the revision its initialize agreed (null until it answered) */
+  version: string | null }
 
 /**
  * THE CLIENT'S ADDRESS OF A REQUEST: the peer's, or behind a proxy `proxyFrom` names the LAST entry of its
@@ -265,7 +272,7 @@ export function mcpEndpoint(settings: McpSettings, o: { log: (line: string) => v
       endSession(idle, `made way for a new session: unused ${Math.round(EVICTABLE_IDLE_MS / 60_000)} minutes or more`);
       log(`[mcp] ${idle.user}: a session unused ${Math.round(EVICTABLE_IDLE_MS / 60_000)} minutes or more ended: it made way for a new session (at most ${maxSessions} in all)`);
     }
-    const s: Session = { id: crypto.randomBytes(24).toString("base64url"), user: who.user, userId: who.id, server: null as unknown as McpServer, usedAt: now(), address: who.address, running: 0 };
+    const s: Session = { id: crypto.randomBytes(24).toString("base64url"), user: who.user, userId: who.id, server: null as unknown as McpServer, usedAt: now(), address: who.address, running: 0, version: null };
     s.server = new McpServer({ connect: connectAs(() => ({ user: s.user, id: s.userId, address: s.address })), where: "this Mason" }, (l) => log(`[mcp] ${who.user}: ${l}`), HTTP_VERSIONS);
     sessions.set(s.id, s);
     return s;
@@ -300,8 +307,9 @@ export function mcpEndpoint(settings: McpSettings, o: { log: (line: string) => v
     finally { set.delete(server); if (set.size === 0) standing.delete(key); }
   }
 
-  /** `slot.held`: this request counts against MAX_REQUESTS (a JSON-RPC request, read and authorized), freed when it ends */
-  async function serveMcp(req: http.IncomingMessage, res: http.ServerResponse, slot: { held: boolean }): Promise<void> {
+  /** `slot.held`: how many JSON-RPC requests this POST counts against MAX_REQUESTS (read and authorized; each of a
+   *  batch's), freed when it ends */
+  async function serveMcp(req: http.IncomingMessage, res: http.ServerResponse, slot: { held: number }): Promise<void> {
     const who = await authorize(req, res);
     if (who === null) return;
     if (run === null || closed) { send(res, 503, { "retry-after": "5" }, body("starting", "Mason is not answering yet", "try again once mason serve's /healthz says ready")); return; }
@@ -330,7 +338,8 @@ export function mcpEndpoint(settings: McpSettings, o: { log: (line: string) => v
     try { msg = JSON.parse(text); }
     catch { send(res, 400, {}, JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "not JSON: one JSON-RPC message a POST" } })); return; }
     const messages = Array.isArray(msg) ? msg : [msg];
-    const requests = messages.some((m) => typeof m === "object" && m !== null && "method" in m && "id" in m);
+    const asking = messages.filter((m) => typeof m === "object" && m !== null && "method" in m && "id" in m).length;
+    const requests = asking > 0;
     const init = messages.find((m) => methodOf(m) === "initialize") as { params?: { protocolVersion?: unknown } } | undefined;
     // THE REVISION: the one initialize asks for, else the header's (a request after initialize carries it)
     const version = init !== undefined ? (typeof init.params?.protocolVersion === "string" ? init.params.protocolVersion : null) : header ?? null;
@@ -340,15 +349,28 @@ export function mcpEndpoint(settings: McpSettings, o: { log: (line: string) => v
       send(res, 200, headers, JSON.stringify(answer));
     };
     if (init !== undefined && messages.length !== 1) { send(res, 400, {}, body("initialize", "initialize is sent alone", "POST initialize by itself")); return; }
-    // the bound on what runs at once counts requests alone: a cancellation, a notification or a DELETE always gets
-    // through, or a client at the bound could not stop what holds it there
+    // A BATCH: only under the revision that has one (the session's, else the header's), of at most MAX_BATCH messages,
+    // and never of more requests than may run at once
+    if (Array.isArray(msg)) {
+      const revision = session?.version ?? (typeof header === "string" ? header : null);
+      const most = Math.min(MAX_BATCH, maxRequests);
+      const refused = revision !== BATCH_VERSION ? `a JSON-RPC batch: under ${revision ?? HTTP_VERSIONS[0]} a POST carries a single JSON-RPC message (batches are ${BATCH_VERSION}'s alone)`
+        : messages.length > most ? `a JSON-RPC batch of ${messages.length} messages: at most ${most}` : null;
+      if (refused !== null) {
+        log(`[mcp] refused a request of ${who.user} from ${who.address}: ${refused}`);
+        send(res, 400, {}, JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32600, message: refused } }));
+        return;
+      }
+    }
+    // the bound on what runs at once counts requests alone, each of a batch's: a cancellation, a notification or a
+    // DELETE always gets through, or a client at the bound could not stop what holds it there
     if (requests) {
-      if (inFlight >= maxRequests) {
+      if (inFlight + asking > maxRequests) {
         send(res, 503, { "retry-after": "5" }, body("busy", `this Mason answers ${maxRequests} MCP requests at once, its most`, "try again shortly"));
         return;
       }
-      inFlight++;
-      slot.held = true;
+      inFlight += asking;
+      slot.held = asking;
     }
     if (version === STATELESS_VERSION && session === undefined) { reply(await standalone(who, text, messages, req)); return; }
     let s: Session;
@@ -375,6 +397,10 @@ export function mcpEndpoint(settings: McpSettings, o: { log: (line: string) => v
     try { answer = await s.server.handle(text); }
     finally { s.running--; s.usedAt = now(); }
     if (init !== undefined && (typeof answer !== "object" || answer === null || !("result" in answer))) endSession(s, "its initialize failed");
+    else if (init !== undefined) {
+      const agreed = (answer as { result?: { protocolVersion?: unknown } }).result?.protocolVersion;
+      s.version = typeof agreed === "string" ? agreed : null;
+    }
     reply(answer, sessions.has(s.id) ? { "mcp-session-id": s.id } : {});
   }
 
@@ -389,12 +415,12 @@ export function mcpEndpoint(settings: McpSettings, o: { log: (line: string) => v
         return true;
       }
       if (p !== MCP_PATH) return false;
-      const slot = { held: false };
+      const slot = { held: 0 };
       serveMcp(req, res, slot).catch((e: unknown) => {
         log(`[mcp] a request failed: ${(e as Error).message}`);
         if (!res.headersSent) send(res, 500, {}, body("failed", "the request failed", "mason serve's log says why"));
         else res.destroy();
-      }).finally(() => { if (slot.held) inFlight--; });
+      }).finally(() => { inFlight -= slot.held; });
       return true;
     },
     async attach(r) {
