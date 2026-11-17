@@ -1,156 +1,312 @@
 {
+  "mode": "cold",
   "environment": {
-    "label": "m7g.xlarge, 4 vCPU, 15 GiB RAM, EBS gp3",
-    "date": "2026-10-27T13:17:11.334Z",
+    "label": "m7g.xlarge, 4 vCPU, 16 GiB RAM",
+    "date": "2026-11-17T10:52:45.148Z",
     "machine": {
       "cpus": 4,
-      "cpuModel": "AWS Graviton3",
+      "cpuModel": "unknown",
       "ramBytes": 16426983424,
-      "memoryBytes": 16426983424,
       "os": "Linux 7.0.0-1011-aws",
       "arch": "arm64",
-      "node": "v24.20.0"
+      "node": "v26.13.1"
+    },
+    "limits": {
+      "cpus": 4,
+      "memoryBytes": 8589934592
     },
     "postgres": {
-      "version": "PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit",
-      "where": "Docker (postgres:18) on the same machine",
-      "containerMemoryBytes": 8212447232,
+      "image": "postgres:18",
+      "version": "PostgreSQL 18.7 (Debian 18.7-1.pgdg13+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit",
       "settings": {
-        "effective_cache_size": "5874MB",
+        "effective_cache_size": "6GB",
         "effective_io_concurrency": "200",
         "hash_mem_multiplier": "2",
         "jit": "on",
-        "maintenance_work_mem": "979MB",
-        "max_connections": "1074",
+        "maintenance_work_mem": "1GB",
+        "max_connections": "300",
         "max_parallel_workers": "4",
         "max_parallel_workers_per_gather": "2",
         "max_worker_processes": "12",
         "random_page_cost": "1.1",
-        "shared_buffers": "1958MB",
+        "shared_buffers": "2GB",
         "work_mem": "32MB"
       }
     },
     "mason": {
-      "commit": "a12bb860",
-      "duckdb": "v2.0.0",
-      "memoryLimit": "7832MiB",
-      "memoryLimitBytes": 8212447232,
-      "copyParallel": 3,
-      "storeJsonPaths": true
+      "image": "ghcr.io/embeddable-hq/mason-data:0.23.0",
+      "imageId": "sha256:e71045e62df538988375cf26ef17fb54c035aa1c16853395507529dd2fa2caad",
+      "version": "0.23.0",
+      "engineMemory": "4096MiB",
+      "settings": {
+        "sync": "off",
+        "MASON_STATEMENT_TIMEOUT": "0",
+        "MASON_PG_SELF_SIGNED_TLS": "1",
+        "MASON_PROJECT_READONLY": "1"
+      }
+    },
+    "client": {
+      "image": "postgres:18",
+      "pgbench": "pgbench (PostgreSQL) 18.7 (Debian 18.7-1.pgdg13+2)",
+      "command": "pgbench -n -c <clients> -j <clients> -t 1 -f <script> --log"
     },
     "method": {
       "sizes": [
         1000000,
         10000000,
-        50000000
+        100000000
       ],
       "clients": [
         1,
-        8,
-        32,
-        128
+        10
       ],
-      "seconds": 30,
-      "warmupSeconds": 5,
-      "runs": 2,
-      "statementTimeoutSeconds": 300,
-      "clientProcess": "one Node process apart from Mason's, N node-postgres clients on its event loop",
-      "targetPostgresSeconds": 60,
-      "maxClients": 1024,
-      "sweepClients": 8,
-      "isolation": "each engine measured with the other stopped: Mason closed while Postgres ran, Postgres's container stopped while Mason ran"
-    }
+      "runs": 3,
+      "settleSeconds": 10,
+      "timeZone": "UTC"
+    },
+    "disk": "EBS gp3, 125 MB/s, 3000 IOPS"
   },
-  "queries": [
+  "data": {
+    "version": 1,
+    "keys": "uuid",
+    "indexes": [
+      "customers (id), its primary key",
+      "orders (id), its primary key",
+      "orders (tenant_id, created_at)",
+      "orders (created_at)"
+    ]
+  },
+  "statements": [
     {
-      "name": "status",
-      "title": "orders and revenue by status, every row",
-      "sql": "SELECT status, count(*) AS orders, sum(amount) AS revenue FROM public.orders GROUP BY status ORDER BY status"
+      "name": "count_by_status",
+      "title": "Count by status, every order",
+      "sql": "SELECT status, count(*) FROM orders GROUP BY status ORDER BY status"
     },
     {
-      "name": "daily_tenant",
-      "title": "one tenant's orders per day, last 90 days",
-      "sql": "SELECT date_trunc('day', created_at) AS day, count(*) AS orders, sum(amount) AS revenue FROM public.orders WHERE tenant_id = 42 AND created_at >= timestamptz '2026-07-03 00:00:00+00' AND created_at < timestamptz '2026-10-01 00:00:00+00' GROUP BY 1 ORDER BY 1"
+      "name": "revenue_by_month",
+      "title": "Revenue by month, orders joined to customers",
+      "sql": "SELECT date_trunc('month', o.created_at) AS month, date_trunc('year', c.created_at) AS signup_year, sum(o.amount) AS revenue FROM orders o JOIN customers c ON c.id = o.customer_id GROUP BY 1, 2 ORDER BY 1, 2"
     },
     {
-      "name": "top_customers",
-      "title": "top 20 customers by amount, joined to customers",
-      "sql": "SELECT c.id, c.name, sum(o.amount) AS total FROM public.orders o JOIN public.customers c ON c.id = o.customer_id GROUP BY c.id, c.name ORDER BY total DESC, c.id LIMIT 20"
-    },
-    {
-      "name": "json_source",
-      "title": "orders by a JSON field (payload ->> 'source')",
-      "sql": "SELECT payload ->> 'source' AS source, count(*) AS orders FROM public.orders GROUP BY 1 ORDER BY 1"
-    },
-    {
-      "name": "window_count",
-      "title": "paid orders in a 30-day window",
-      "sql": "SELECT count(*) FROM public.orders WHERE status = 'paid' AND created_at >= timestamptz '2026-09-01 00:00:00+00' AND created_at < timestamptz '2026-10-01 00:00:00+00'"
-    },
-    {
-      "name": "point_lookup",
-      "title": "one order by its primary key",
-      "sql": "SELECT id, tenant_id, customer_id, status, amount, created_at, payload, note FROM public.orders WHERE id = $1"
+      "name": "lookup",
+      "title": "One order by its primary key",
+      "sql": "SELECT * FROM orders WHERE id = '<id>'"
     }
   ],
   "sizes": [
     {
       "rows": 1000000,
       "customers": 50000,
-      "generatedSeconds": 11,
-      "postgresBytes": 362471424,
-      "copySeconds": 2.8,
-      "copyTables": {
-        "public.customers": 0.135,
-        "public.orders": 2.104
+      "generatedSeconds": 13.6,
+      "postgresBytes": 376160256,
+      "masonBytes": 92728660,
+      "syncSeconds": 57.4,
+      "lookupIds": [
+        "59a78c2b-41e8-4ef5-97a1-a4d08a18c10a",
+        "50ee6bc3-459f-4648-9add-3482362da984",
+        "b3c31ea3-51d6-44ed-bf3f-600cce2564d6",
+        "c033246e-165e-49f1-9ef1-8c82d6303dcb",
+        "079afb25-a2c2-46c5-8275-04974437a88c",
+        "4c5d1414-d2b1-4cf7-9e58-7b6c67a6f763",
+        "fdaeff20-8825-4171-a071-1c1b87442117",
+        "693808ff-bb50-4083-b1c2-10f1d3393f73",
+        "7c1f36df-ce62-4b48-a22c-1d7320f74d70",
+        "4826055c-523f-43fa-916b-1dd8ecd73c07"
+      ],
+      "answers": {
+        "count_by_status": {
+          "postgres": "f94818c84fcbca8aaff8ce660d086140",
+          "mason": "f94818c84fcbca8aaff8ce660d086140"
+        },
+        "revenue_by_month": {
+          "postgres": "6030588c0c23d98d4c07ed34d84df68f",
+          "mason": "6030588c0c23d98d4c07ed34d84df68f"
+        },
+        "lookup 59a78c2b-41e8-4ef5-97a1-a4d08a18c10a": {
+          "postgres": "4782778b47acc2127efd9d71362b2400",
+          "mason": "4782778b47acc2127efd9d71362b2400"
+        },
+        "lookup 50ee6bc3-459f-4648-9add-3482362da984": {
+          "postgres": "a37a0bb47a1f07e16928bb8f3ce4e9aa",
+          "mason": "a37a0bb47a1f07e16928bb8f3ce4e9aa"
+        },
+        "lookup b3c31ea3-51d6-44ed-bf3f-600cce2564d6": {
+          "postgres": "3cf052fab107cae5f3ad2ea2983bd58e",
+          "mason": "3cf052fab107cae5f3ad2ea2983bd58e"
+        },
+        "lookup c033246e-165e-49f1-9ef1-8c82d6303dcb": {
+          "postgres": "f02310048af478fed98907c6d92061e9",
+          "mason": "f02310048af478fed98907c6d92061e9"
+        },
+        "lookup 079afb25-a2c2-46c5-8275-04974437a88c": {
+          "postgres": "84e79bbbace89516bc631afb5b8b6428",
+          "mason": "84e79bbbace89516bc631afb5b8b6428"
+        },
+        "lookup 4c5d1414-d2b1-4cf7-9e58-7b6c67a6f763": {
+          "postgres": "2eafcb9df38fb3586426483cb7dc1e18",
+          "mason": "2eafcb9df38fb3586426483cb7dc1e18"
+        },
+        "lookup fdaeff20-8825-4171-a071-1c1b87442117": {
+          "postgres": "62f7a85d5e280fe07849d219b5d15c7e",
+          "mason": "62f7a85d5e280fe07849d219b5d15c7e"
+        },
+        "lookup 693808ff-bb50-4083-b1c2-10f1d3393f73": {
+          "postgres": "18d3cf663a447698e5d3b2690055ac28",
+          "mason": "18d3cf663a447698e5d3b2690055ac28"
+        },
+        "lookup 7c1f36df-ce62-4b48-a22c-1d7320f74d70": {
+          "postgres": "8515bde2dfa9b85cb72ed913ac7de843",
+          "mason": "8515bde2dfa9b85cb72ed913ac7de843"
+        },
+        "lookup 4826055c-523f-43fa-916b-1dd8ecd73c07": {
+          "postgres": "aac2c4454129a4b79bbbf5879e27612c",
+          "mason": "aac2c4454129a4b79bbbf5879e27612c"
+        }
       },
-      "masonFileBytes": 84153756,
-      "jsonPathReadySeconds": 17.9,
-      "answersEqual": true,
-      "differences": []
-    },
-    {
-      "rows": 3000000,
-      "customers": 150000,
-      "generatedSeconds": 51,
-      "postgresBytes": 1086971904,
-      "copySeconds": 8.2,
-      "copyTables": {
-        "public.customers": 0.206,
-        "public.orders": 6.76
-      },
-      "masonFileBytes": 216453672,
-      "jsonPathReadySeconds": 25.6,
       "answersEqual": true,
       "differences": []
     },
     {
       "rows": 10000000,
       "customers": 500000,
-      "generatedSeconds": 197.8,
-      "postgresBytes": 3622690816,
-      "copySeconds": 20.8,
-      "copyTables": {
-        "public.customers": 0.661,
-        "public.orders": 16.537
+      "generatedSeconds": 227.3,
+      "postgresBytes": 3760111616,
+      "masonBytes": 897233492,
+      "syncSeconds": 73.8,
+      "lookupIds": [
+        "5e547942-7486-4966-8295-f42cceefc168",
+        "9c91c012-c02d-4d9f-86a5-ee02883ad1cf",
+        "62885cbe-e4b2-4d82-b44c-e4824b824cb3",
+        "41b4cb46-916e-4f59-bf4b-3551ab1d9c96",
+        "5216f952-59c9-4fee-aab5-430023e693fb",
+        "c5e5ad91-7304-47b4-9621-859cd764f95e",
+        "bb92d313-87f7-406c-9bf8-27c94561d17a",
+        "059c26d7-a950-4f09-8f00-1b8c4338f18b",
+        "5774aa9e-e4eb-428e-a8cc-ef322ab26363",
+        "897485ba-1500-427e-840c-a721893b94f9"
+      ],
+      "answers": {
+        "count_by_status": {
+          "postgres": "f25450a4582c8052bf246e48c10ddd6e",
+          "mason": "f25450a4582c8052bf246e48c10ddd6e"
+        },
+        "revenue_by_month": {
+          "postgres": "73288c5f5ad8ae9b832b85409ccba7d4",
+          "mason": "73288c5f5ad8ae9b832b85409ccba7d4"
+        },
+        "lookup 5e547942-7486-4966-8295-f42cceefc168": {
+          "postgres": "a92a9cda1df93593efb24c45d973f25e",
+          "mason": "a92a9cda1df93593efb24c45d973f25e"
+        },
+        "lookup 9c91c012-c02d-4d9f-86a5-ee02883ad1cf": {
+          "postgres": "d98ea896e2079792fdafa081893bf077",
+          "mason": "d98ea896e2079792fdafa081893bf077"
+        },
+        "lookup 62885cbe-e4b2-4d82-b44c-e4824b824cb3": {
+          "postgres": "5b116744faa33c391f9035e0b28afc03",
+          "mason": "5b116744faa33c391f9035e0b28afc03"
+        },
+        "lookup 41b4cb46-916e-4f59-bf4b-3551ab1d9c96": {
+          "postgres": "4f3acd2c1c4ef9f5906b9ab511bca739",
+          "mason": "4f3acd2c1c4ef9f5906b9ab511bca739"
+        },
+        "lookup 5216f952-59c9-4fee-aab5-430023e693fb": {
+          "postgres": "cac189f3403c99e3d8a935aff9086e77",
+          "mason": "cac189f3403c99e3d8a935aff9086e77"
+        },
+        "lookup c5e5ad91-7304-47b4-9621-859cd764f95e": {
+          "postgres": "19f27d30ee70bcb133f0f1f80385e30d",
+          "mason": "19f27d30ee70bcb133f0f1f80385e30d"
+        },
+        "lookup bb92d313-87f7-406c-9bf8-27c94561d17a": {
+          "postgres": "a48ab621b3a0ebd8e6504ec067844460",
+          "mason": "a48ab621b3a0ebd8e6504ec067844460"
+        },
+        "lookup 059c26d7-a950-4f09-8f00-1b8c4338f18b": {
+          "postgres": "0db4f58622949e07e61f042326c0b143",
+          "mason": "0db4f58622949e07e61f042326c0b143"
+        },
+        "lookup 5774aa9e-e4eb-428e-a8cc-ef322ab26363": {
+          "postgres": "f3d9e7f09ff28507c9d9fa5879135fd4",
+          "mason": "f3d9e7f09ff28507c9d9fa5879135fd4"
+        },
+        "lookup 897485ba-1500-427e-840c-a721893b94f9": {
+          "postgres": "8b106e9ba06d5422ea56fadc30b10c00",
+          "mason": "8b106e9ba06d5422ea56fadc30b10c00"
+        }
       },
-      "masonFileBytes": 659566939,
-      "jsonPathReadySeconds": 77.4,
       "answersEqual": true,
       "differences": []
     },
     {
-      "rows": 30000000,
-      "customers": 1500000,
-      "generatedSeconds": 852.2,
-      "postgresBytes": 10871595008,
-      "copySeconds": 134,
-      "copyTables": {
-        "public.customers": 1.2,
-        "public.orders": 82.594
+      "rows": 100000000,
+      "customers": 5000000,
+      "generatedSeconds": 3213.2,
+      "postgresBytes": 37632614400,
+      "masonBytes": 8909545446,
+      "syncSeconds": 567.9,
+      "lookupIds": [
+        "2c3af174-613f-44c7-92e2-278e324eba69",
+        "1c407104-4962-42a5-b1ae-674c4a135d64",
+        "88f68da2-9231-4478-9f01-636f6ac14580",
+        "4f2c0cbd-3667-4aed-aaf6-a969c0055884",
+        "62e1f8f2-cc3e-4100-9c02-35cb3194d2c5",
+        "554a4a2e-f59f-4d9c-a042-b43e6c95784f",
+        "3d235d7e-b133-4b5a-9445-76f9a7658436",
+        "8741f21a-5b12-42a6-b480-86697aec2b94",
+        "b748605f-dec2-42ae-b05b-689402fafaf5",
+        "d91bd831-6e58-44b1-b7ae-cb9f291289ea"
+      ],
+      "answers": {
+        "count_by_status": {
+          "postgres": "7cff386648a0b9c6259b4c5222324dab",
+          "mason": "7cff386648a0b9c6259b4c5222324dab"
+        },
+        "revenue_by_month": {
+          "postgres": "997bac30180d44429b8171714e22ca0e",
+          "mason": "997bac30180d44429b8171714e22ca0e"
+        },
+        "lookup 2c3af174-613f-44c7-92e2-278e324eba69": {
+          "postgres": "f3980aab9778aa633eca140290ed2232",
+          "mason": "f3980aab9778aa633eca140290ed2232"
+        },
+        "lookup 1c407104-4962-42a5-b1ae-674c4a135d64": {
+          "postgres": "682c5364f8f5458c5e0373641ffe8af5",
+          "mason": "682c5364f8f5458c5e0373641ffe8af5"
+        },
+        "lookup 88f68da2-9231-4478-9f01-636f6ac14580": {
+          "postgres": "d5d37de3653e3840bf2f4bd2245984a5",
+          "mason": "d5d37de3653e3840bf2f4bd2245984a5"
+        },
+        "lookup 4f2c0cbd-3667-4aed-aaf6-a969c0055884": {
+          "postgres": "e642344416bbcbe7ccd72f6d21631a67",
+          "mason": "e642344416bbcbe7ccd72f6d21631a67"
+        },
+        "lookup 62e1f8f2-cc3e-4100-9c02-35cb3194d2c5": {
+          "postgres": "2a350e76aa232613652f504efa55128b",
+          "mason": "2a350e76aa232613652f504efa55128b"
+        },
+        "lookup 554a4a2e-f59f-4d9c-a042-b43e6c95784f": {
+          "postgres": "fb9a83fa6afab9f14ead204cce840c26",
+          "mason": "fb9a83fa6afab9f14ead204cce840c26"
+        },
+        "lookup 3d235d7e-b133-4b5a-9445-76f9a7658436": {
+          "postgres": "6d9340ce3f9707e21e4add19e73a82c4",
+          "mason": "6d9340ce3f9707e21e4add19e73a82c4"
+        },
+        "lookup 8741f21a-5b12-42a6-b480-86697aec2b94": {
+          "postgres": "b7408dd2252be9af7d1a21d69cc0d626",
+          "mason": "b7408dd2252be9af7d1a21d69cc0d626"
+        },
+        "lookup b748605f-dec2-42ae-b05b-689402fafaf5": {
+          "postgres": "0d92f62400ead6fb776ca02afc774614",
+          "mason": "0d92f62400ead6fb776ca02afc774614"
+        },
+        "lookup d91bd831-6e58-44b1-b7ae-cb9f291289ea": {
+          "postgres": "56933c6e5d0e1d19682abc8d33a9fda1",
+          "mason": "56933c6e5d0e1d19682abc8d33a9fda1"
+        }
       },
-      "masonFileBytes": 1976533256,
-      "jsonPathReadySeconds": 213.2,
       "answersEqual": true,
       "differences": []
     }
@@ -159,1881 +315,697 @@
   "cells": [
     {
       "rows": 1000000,
-      "clients": 8,
+      "clients": 1,
       "engine": "postgres",
-      "query": "mix",
-      "seconds": 30,
-      "p50Ms": 30.48,
-      "p95Ms": 2063.28,
-      "qps": 15.87,
-      "completed": 978,
-      "errors": 0,
-      "errorCodes": {},
+      "statement": "count_by_status",
+      "slowestMs": 1212.076,
+      "meanMs": 1212.076,
       "runs": [
         {
-          "p50Ms": 30.74,
-          "p95Ms": 2044.49,
-          "qps": 15.97,
-          "completed": 492,
-          "errors": 0,
-          "loadAvg": [
-            1.2,
-            1.76,
-            1.9
+          "slowestMs": 1212.076,
+          "meanMs": 1212.076,
+          "spanMs": 1212.076,
+          "clientsMs": [
+            1212.076
           ],
-          "clientLoopDelayP99Ms": 5.5,
-          "clientCpuPct": 1
+          "readyMs": 1884,
+          "readBytes": 289263616,
+          "at": "2026-11-17T10:54:13.527Z"
         },
         {
-          "p50Ms": 30.22,
-          "p95Ms": 2082.07,
-          "qps": 15.77,
-          "completed": 486,
-          "errors": 0,
-          "loadAvg": [
-            6.29,
-            3.56,
-            2.55
+          "slowestMs": 1222.843,
+          "meanMs": 1222.843,
+          "spanMs": 1222.843,
+          "clientsMs": [
+            1222.843
           ],
-          "clientLoopDelayP99Ms": 5.7,
-          "clientCpuPct": 1
-        }
-      ],
-      "slowest": {
-        "query": "top_customers",
-        "p50Ms": 1985.92
-      }
-    },
-    {
-      "rows": 1000000,
-      "clients": 8,
-      "engine": "postgres",
-      "query": "status",
-      "seconds": 30,
-      "p50Ms": 312.84,
-      "p95Ms": 553.75,
-      "qps": 2.66,
-      "completed": 164,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 307.67,
-          "p95Ms": 563.86,
-          "qps": 2.69,
-          "completed": 83,
-          "errors": 0
+          "readyMs": 693,
+          "readBytes": 289226752,
+          "at": "2026-11-17T10:55:00.256Z"
         },
         {
-          "p50Ms": 318,
-          "p95Ms": 543.64,
-          "qps": 2.63,
-          "completed": 81,
-          "errors": 0
+          "slowestMs": 1196.293,
+          "meanMs": 1196.293,
+          "spanMs": 1196.293,
+          "clientsMs": [
+            1196.293
+          ],
+          "readyMs": 677,
+          "readBytes": 289243136,
+          "at": "2026-11-17T10:55:13.120Z"
         }
       ]
     },
     {
       "rows": 1000000,
-      "clients": 8,
-      "engine": "postgres",
-      "query": "daily_tenant",
-      "seconds": 30,
-      "p50Ms": 3,
-      "p95Ms": 5.26,
-      "qps": 2.63,
-      "completed": 162,
-      "errors": 0,
-      "errorCodes": {},
+      "clients": 1,
+      "engine": "mason",
+      "statement": "count_by_status",
+      "slowestMs": 65.815,
+      "meanMs": 65.815,
       "runs": [
         {
-          "p50Ms": 2.98,
-          "p95Ms": 5.4,
-          "qps": 2.63,
-          "completed": 81,
-          "errors": 0
+          "slowestMs": 64.315,
+          "meanMs": 64.315,
+          "spanMs": 64.315,
+          "clientsMs": [
+            64.315
+          ],
+          "readyMs": 5170,
+          "readBytes": 7163904,
+          "idleReadBytes": 0,
+          "at": "2026-11-17T10:54:31.600Z"
         },
         {
-          "p50Ms": 3.03,
-          "p95Ms": 5.12,
-          "qps": 2.63,
-          "completed": 81,
-          "errors": 0
+          "slowestMs": 65.815,
+          "meanMs": 65.815,
+          "spanMs": 65.815,
+          "clientsMs": [
+            65.815
+          ],
+          "readyMs": 4522,
+          "readBytes": 7098368,
+          "idleReadBytes": 131072,
+          "at": "2026-11-17T10:54:48.140Z"
+        },
+        {
+          "slowestMs": 66.52,
+          "meanMs": 66.52,
+          "spanMs": 66.52,
+          "clientsMs": [
+            66.52
+          ],
+          "readyMs": 5230,
+          "readBytes": 7163904,
+          "idleReadBytes": 0,
+          "at": "2026-11-17T10:55:31.014Z"
         }
       ]
     },
     {
       "rows": 1000000,
-      "clients": 8,
+      "clients": 10,
       "engine": "postgres",
-      "query": "top_customers",
-      "seconds": 30,
-      "p50Ms": 1985.92,
-      "p95Ms": 2290.25,
-      "qps": 2.63,
-      "completed": 162,
-      "errors": 0,
-      "errorCodes": {},
+      "statement": "count_by_status",
+      "slowestMs": 1236.689,
+      "meanMs": 1216.9,
       "runs": [
         {
-          "p50Ms": 1998.92,
-          "p95Ms": 2319.18,
-          "qps": 2.63,
-          "completed": 81,
-          "errors": 0
+          "slowestMs": 1236.689,
+          "meanMs": 1216.9,
+          "spanMs": 1236.712,
+          "clientsMs": [
+            1236.689,
+            1211.656,
+            1211.024,
+            1212.496,
+            1214.768,
+            1229.72,
+            1213.677,
+            1214.637,
+            1210.804,
+            1213.528
+          ],
+          "readyMs": 669,
+          "readBytes": 289345536,
+          "at": "2026-11-17T10:55:43.109Z"
         },
         {
-          "p50Ms": 1972.92,
-          "p95Ms": 2261.32,
-          "qps": 2.63,
-          "completed": 81,
-          "errors": 0
+          "slowestMs": 1298.674,
+          "meanMs": 1270.806,
+          "spanMs": 1298.717,
+          "clientsMs": [
+            1230.169,
+            1294.28,
+            1284.398,
+            1298.284,
+            1273.243,
+            1298.674,
+            1293.386,
+            1246.401,
+            1258.728,
+            1230.5
+          ],
+          "readyMs": 686,
+          "readBytes": 289349632,
+          "at": "2026-11-17T10:56:30.737Z"
+        },
+        {
+          "slowestMs": 1231.217,
+          "meanMs": 1216.046,
+          "spanMs": 1231.223,
+          "clientsMs": [
+            1231.217,
+            1213.034,
+            1214.022,
+            1209.852,
+            1209.979,
+            1227.859,
+            1216.972,
+            1210.572,
+            1209.783,
+            1217.169
+          ],
+          "readyMs": 687,
+          "readBytes": 289349632,
+          "at": "2026-11-17T10:56:43.763Z"
         }
       ]
     },
     {
       "rows": 1000000,
-      "clients": 8,
-      "engine": "postgres",
-      "query": "json_source",
-      "seconds": 30,
-      "p50Ms": 679.49,
-      "p95Ms": 822.99,
-      "qps": 2.63,
-      "completed": 162,
-      "errors": 0,
-      "errorCodes": {},
+      "clients": 10,
+      "engine": "mason",
+      "statement": "count_by_status",
+      "slowestMs": 211.45,
+      "meanMs": 194.858,
       "runs": [
         {
-          "p50Ms": 675.99,
-          "p95Ms": 838.99,
-          "qps": 2.63,
-          "completed": 81,
-          "errors": 0
+          "slowestMs": 206.722,
+          "meanMs": 181.65,
+          "spanMs": 206.802,
+          "clientsMs": [
+            199.689,
+            204.864,
+            164.484,
+            206.722,
+            152.599,
+            174.69,
+            191.686,
+            152.807,
+            205.324,
+            163.639
+          ],
+          "readyMs": 5515,
+          "readBytes": 7163904,
+          "idleReadBytes": 0,
+          "at": "2026-11-17T10:56:01.567Z"
         },
         {
-          "p50Ms": 682.98,
-          "p95Ms": 806.99,
-          "qps": 2.63,
-          "completed": 81,
-          "errors": 0
+          "slowestMs": 211.45,
+          "meanMs": 194.858,
+          "spanMs": 211.495,
+          "clientsMs": [
+            173.74,
+            193.652,
+            211.45,
+            209.724,
+            189.647,
+            186.787,
+            204.639,
+            204.921,
+            208.356,
+            165.666
+          ],
+          "readyMs": 4542,
+          "readBytes": 7098368,
+          "idleReadBytes": 131072,
+          "at": "2026-11-17T10:56:18.411Z"
+        },
+        {
+          "slowestMs": 212.141,
+          "meanMs": 196.339,
+          "spanMs": 212.235,
+          "clientsMs": [
+            211.355,
+            211.827,
+            196.881,
+            211.951,
+            189.831,
+            212.141,
+            187.209,
+            206.471,
+            181.395,
+            154.331
+          ],
+          "readyMs": 5472,
+          "readBytes": 7163904,
+          "idleReadBytes": 0,
+          "at": "2026-11-17T10:57:02.034Z"
         }
       ]
     },
     {
       "rows": 1000000,
-      "clients": 8,
+      "clients": 1,
       "engine": "postgres",
-      "query": "window_count",
-      "seconds": 30,
-      "p50Ms": 18.37,
-      "p95Ms": 28.48,
-      "qps": 2.66,
-      "completed": 164,
-      "errors": 0,
-      "errorCodes": {},
+      "statement": "revenue_by_month",
+      "slowestMs": 1983.142,
+      "meanMs": 1983.142,
       "runs": [
         {
-          "p50Ms": 18.3,
-          "p95Ms": 28.99,
-          "qps": 2.69,
-          "completed": 83,
-          "errors": 0
+          "slowestMs": 1992.519,
+          "meanMs": 1992.519,
+          "spanMs": 1992.519,
+          "clientsMs": [
+            1992.519
+          ],
+          "readyMs": 686,
+          "readBytes": 356724736,
+          "at": "2026-11-17T10:57:14.353Z"
         },
         {
-          "p50Ms": 18.44,
-          "p95Ms": 27.98,
-          "qps": 2.63,
-          "completed": 81,
-          "errors": 0
+          "slowestMs": 1983.142,
+          "meanMs": 1983.142,
+          "spanMs": 1983.142,
+          "clientsMs": [
+            1983.142
+          ],
+          "readyMs": 683,
+          "readBytes": 356605952,
+          "at": "2026-11-17T10:58:02.169Z"
+        },
+        {
+          "slowestMs": 1981.974,
+          "meanMs": 1981.974,
+          "spanMs": 1981.974,
+          "clientsMs": [
+            1981.974
+          ],
+          "readyMs": 672,
+          "readBytes": 356605952,
+          "at": "2026-11-17T10:58:15.839Z"
         }
       ]
     },
     {
       "rows": 1000000,
-      "clients": 8,
-      "engine": "postgres",
-      "query": "point_lookup",
-      "seconds": 30,
-      "p50Ms": 3.23,
-      "p95Ms": 7.89,
-      "qps": 2.66,
-      "completed": 164,
-      "errors": 0,
-      "errorCodes": {},
+      "clients": 1,
+      "engine": "mason",
+      "statement": "revenue_by_month",
+      "slowestMs": 154.079,
+      "meanMs": 154.079,
       "runs": [
         {
-          "p50Ms": 3.43,
-          "p95Ms": 8.79,
-          "qps": 2.69,
-          "completed": 83,
-          "errors": 0
+          "slowestMs": 153.992,
+          "meanMs": 153.992,
+          "spanMs": 153.992,
+          "clientsMs": [
+            153.992
+          ],
+          "readyMs": 5230,
+          "readBytes": 26292224,
+          "idleReadBytes": 0,
+          "at": "2026-11-17T10:57:33.273Z"
         },
         {
-          "p50Ms": 3.03,
-          "p95Ms": 7,
-          "qps": 2.63,
-          "completed": 81,
-          "errors": 0
+          "slowestMs": 154.079,
+          "meanMs": 154.079,
+          "spanMs": 154.079,
+          "clientsMs": [
+            154.079
+          ],
+          "readyMs": 4554,
+          "readBytes": 26357760,
+          "idleReadBytes": 131072,
+          "at": "2026-11-17T10:57:49.993Z"
+        },
+        {
+          "slowestMs": 156.356,
+          "meanMs": 156.356,
+          "spanMs": 156.356,
+          "clientsMs": [
+            156.356
+          ],
+          "readyMs": 5223,
+          "readBytes": 27443200,
+          "idleReadBytes": 0,
+          "at": "2026-11-17T10:58:34.618Z"
         }
       ]
     },
     {
       "rows": 1000000,
-      "clients": 8,
-      "engine": "mason",
-      "query": "mix",
-      "seconds": 30,
-      "p50Ms": 73.62,
-      "p95Ms": 139.67,
-      "qps": 104.22,
-      "completed": 6265,
-      "errors": 0,
-      "errorCodes": {},
+      "clients": 10,
+      "engine": "postgres",
+      "statement": "revenue_by_month",
+      "slowestMs": 3613.991,
+      "meanMs": 3437.15,
       "runs": [
         {
-          "p50Ms": 73.36,
-          "p95Ms": 142.96,
-          "qps": 104.05,
-          "completed": 3129,
-          "errors": 0,
-          "loadAvg": [
-            4.71,
-            2.61,
-            2.18
+          "slowestMs": 3746.119,
+          "meanMs": 3623.509,
+          "spanMs": 3746.119,
+          "clientsMs": [
+            3662.357,
+            3568.343,
+            3637.208,
+            3667.209,
+            3505.301,
+            3746.119,
+            3604.3,
+            3599.315,
+            3580.532,
+            3664.407
           ],
-          "clientLoopDelayP99Ms": 7.6,
-          "clientCpuPct": 4
+          "readyMs": 679,
+          "readBytes": 356700160,
+          "at": "2026-11-17T10:58:46.814Z"
         },
         {
-          "p50Ms": 73.88,
-          "p95Ms": 136.37,
-          "qps": 104.38,
-          "completed": 3136,
-          "errors": 0,
-          "loadAvg": [
-            5.29,
-            3.06,
-            2.36
+          "slowestMs": 3581.161,
+          "meanMs": 3437.15,
+          "spanMs": 3581.19,
+          "clientsMs": [
+            3421.268,
+            3480.994,
+            3408.557,
+            3542.59,
+            3560.833,
+            3218.54,
+            3581.161,
+            3239.521,
+            3554.59,
+            3363.447
           ],
-          "clientLoopDelayP99Ms": 7.8,
-          "clientCpuPct": 4
-        }
-      ],
-      "slowest": {
-        "query": "json_source",
-        "p50Ms": 113.61
-      }
-    },
-    {
-      "rows": 1000000,
-      "clients": 8,
-      "engine": "mason",
-      "query": "status",
-      "seconds": 30,
-      "p50Ms": 83.47,
-      "p95Ms": 121,
-      "qps": 17.33,
-      "completed": 1042,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 83.25,
-          "p95Ms": 120.34,
-          "qps": 17.29,
-          "completed": 520,
-          "errors": 0
+          "readyMs": 671,
+          "readBytes": 356704256,
+          "at": "2026-11-17T10:59:37.551Z"
         },
         {
-          "p50Ms": 83.69,
-          "p95Ms": 121.67,
-          "qps": 17.37,
-          "completed": 522,
-          "errors": 0
+          "slowestMs": 3613.991,
+          "meanMs": 3417.995,
+          "spanMs": 3614.028,
+          "clientsMs": [
+            3250.124,
+            3257.533,
+            3578.829,
+            3613.991,
+            3522.026,
+            3394.595,
+            3445.105,
+            3390.551,
+            3328.545,
+            3398.654
+          ],
+          "readyMs": 724,
+          "readBytes": 356700160,
+          "at": "2026-11-17T10:59:52.890Z"
         }
       ]
     },
     {
       "rows": 1000000,
-      "clients": 8,
+      "clients": 10,
       "engine": "mason",
-      "query": "daily_tenant",
-      "seconds": 30,
-      "p50Ms": 50.25,
-      "p95Ms": 87.94,
-      "qps": 17.4,
-      "completed": 1046,
-      "errors": 0,
-      "errorCodes": {},
+      "statement": "revenue_by_month",
+      "slowestMs": 541.575,
+      "meanMs": 501.651,
       "runs": [
         {
-          "p50Ms": 49.49,
-          "p95Ms": 91.05,
-          "qps": 17.36,
-          "completed": 522,
-          "errors": 0
+          "slowestMs": 542.516,
+          "meanMs": 484.859,
+          "spanMs": 542.527,
+          "clientsMs": [
+            482.999,
+            535.207,
+            420.016,
+            500.035,
+            385.895,
+            542.516,
+            535.11,
+            510.036,
+            436.865,
+            499.914
+          ],
+          "readyMs": 5478,
+          "readBytes": 27697152,
+          "idleReadBytes": 0,
+          "at": "2026-11-17T10:59:07.758Z"
         },
         {
-          "p50Ms": 51.01,
-          "p95Ms": 84.83,
-          "qps": 17.44,
-          "completed": 524,
-          "errors": 0
+          "slowestMs": 541.575,
+          "meanMs": 501.651,
+          "spanMs": 541.638,
+          "clientsMs": [
+            483.646,
+            527.829,
+            500.912,
+            520.1,
+            541.575,
+            539.29,
+            449.972,
+            541.436,
+            455.568,
+            456.185
+          ],
+          "readyMs": 4521,
+          "readBytes": 26722304,
+          "idleReadBytes": 131072,
+          "at": "2026-11-17T10:59:24.928Z"
+        },
+        {
+          "slowestMs": 540.031,
+          "meanMs": 501.941,
+          "spanMs": 540.04,
+          "clientsMs": [
+            540.031,
+            536.935,
+            522.197,
+            466.133,
+            468.208,
+            505.163,
+            532.01,
+            462.086,
+            479.269,
+            507.376
+          ],
+          "readyMs": 5533,
+          "readBytes": 27172864,
+          "idleReadBytes": 0,
+          "at": "2026-11-17T11:00:13.776Z"
         }
       ]
     },
     {
       "rows": 1000000,
-      "clients": 8,
-      "engine": "mason",
-      "query": "top_customers",
-      "seconds": 30,
-      "p50Ms": 107.98,
-      "p95Ms": 152.62,
-      "qps": 17.4,
-      "completed": 1046,
-      "errors": 0,
-      "errorCodes": {},
+      "clients": 1,
+      "engine": "postgres",
+      "statement": "lookup",
+      "slowestMs": 32.793,
+      "meanMs": 32.793,
       "runs": [
         {
-          "p50Ms": 108,
-          "p95Ms": 155.7,
-          "qps": 17.36,
-          "completed": 522,
-          "errors": 0
+          "slowestMs": 33.651,
+          "meanMs": 33.651,
+          "spanMs": 33.651,
+          "clientsMs": [
+            33.651
+          ],
+          "readyMs": 677,
+          "readBytes": 5025792,
+          "at": "2026-11-17T11:00:26.354Z"
         },
         {
-          "p50Ms": 107.97,
-          "p95Ms": 149.53,
-          "qps": 17.44,
-          "completed": 524,
-          "errors": 0
+          "slowestMs": 32.793,
+          "meanMs": 32.793,
+          "spanMs": 32.793,
+          "clientsMs": [
+            32.793
+          ],
+          "readyMs": 682,
+          "readBytes": 4907008,
+          "at": "2026-11-17T11:01:12.461Z"
+        },
+        {
+          "slowestMs": 32.697,
+          "meanMs": 32.697,
+          "spanMs": 32.697,
+          "clientsMs": [
+            32.697
+          ],
+          "readyMs": 684,
+          "readBytes": 4907008,
+          "at": "2026-11-17T11:01:24.158Z"
         }
       ]
     },
     {
       "rows": 1000000,
-      "clients": 8,
+      "clients": 1,
       "engine": "mason",
-      "query": "json_source",
-      "seconds": 30,
-      "p50Ms": 113.61,
-      "p95Ms": 160.5,
-      "qps": 17.37,
-      "completed": 1044,
-      "errors": 0,
-      "errorCodes": {},
+      "statement": "lookup",
+      "slowestMs": 132.695,
+      "meanMs": 132.695,
       "runs": [
         {
-          "p50Ms": 116.61,
-          "p95Ms": 166.8,
-          "qps": 17.39,
-          "completed": 523,
-          "errors": 0
+          "slowestMs": 132.015,
+          "meanMs": 132.015,
+          "spanMs": 132.015,
+          "clientsMs": [
+            132.015
+          ],
+          "readyMs": 5481,
+          "readBytes": 21807104,
+          "idleReadBytes": 0,
+          "at": "2026-11-17T11:00:43.544Z"
         },
         {
-          "p50Ms": 110.61,
-          "p95Ms": 154.19,
-          "qps": 17.34,
-          "completed": 521,
-          "errors": 0
+          "slowestMs": 133.645,
+          "meanMs": 133.645,
+          "spanMs": 133.645,
+          "clientsMs": [
+            133.645
+          ],
+          "readyMs": 4533,
+          "readBytes": 21745664,
+          "idleReadBytes": 131072,
+          "at": "2026-11-17T11:01:00.253Z"
+        },
+        {
+          "slowestMs": 132.695,
+          "meanMs": 132.695,
+          "spanMs": 132.695,
+          "clientsMs": [
+            132.695
+          ],
+          "readyMs": 5481,
+          "readBytes": 21807104,
+          "idleReadBytes": 0,
+          "at": "2026-11-17T11:01:41.278Z"
         }
       ]
     },
     {
       "rows": 1000000,
-      "clients": 8,
-      "engine": "mason",
-      "query": "window_count",
-      "seconds": 30,
-      "p50Ms": 44.02,
-      "p95Ms": 85.82,
-      "qps": 17.35,
-      "completed": 1043,
-      "errors": 0,
-      "errorCodes": {},
+      "clients": 10,
+      "engine": "postgres",
+      "statement": "lookup",
+      "slowestMs": 36.815,
+      "meanMs": 35.328,
       "runs": [
         {
-          "p50Ms": 42.12,
-          "p95Ms": 86.97,
-          "qps": 17.33,
-          "completed": 521,
-          "errors": 0
+          "slowestMs": 37.679,
+          "meanMs": 36.283,
+          "spanMs": 37.736,
+          "clientsMs": [
+            35.257,
+            35.298,
+            37.441,
+            35.464,
+            35.446,
+            37.507,
+            37.295,
+            35.272,
+            36.173,
+            37.679
+          ],
+          "readyMs": 624,
+          "readBytes": 5206016,
+          "at": "2026-11-17T11:01:53.390Z"
         },
         {
-          "p50Ms": 45.93,
-          "p95Ms": 84.67,
-          "qps": 17.37,
-          "completed": 522,
-          "errors": 0
+          "slowestMs": 36.002,
+          "meanMs": 35.328,
+          "spanMs": 36.006,
+          "clientsMs": [
+            35.449,
+            35.026,
+            36.002,
+            35.778,
+            34.996,
+            35.253,
+            35.369,
+            34.908,
+            34.97,
+            35.529
+          ],
+          "readyMs": 664,
+          "readBytes": 5210112,
+          "at": "2026-11-17T11:02:39.659Z"
+        },
+        {
+          "slowestMs": 36.815,
+          "meanMs": 35.155,
+          "spanMs": 36.827,
+          "clientsMs": [
+            36.618,
+            34.505,
+            35.218,
+            34.43,
+            34.435,
+            35.425,
+            34.384,
+            35.251,
+            36.815,
+            34.47
+          ],
+          "readyMs": 681,
+          "readBytes": 5210112,
+          "at": "2026-11-17T11:02:51.381Z"
         }
       ]
     },
     {
       "rows": 1000000,
-      "clients": 8,
+      "clients": 10,
       "engine": "mason",
-      "query": "point_lookup",
-      "seconds": 30,
-      "p50Ms": 43.69,
-      "p95Ms": 80.46,
-      "qps": 17.37,
-      "completed": 1044,
-      "errors": 0,
-      "errorCodes": {},
+      "statement": "lookup",
+      "slowestMs": 202.818,
+      "meanMs": 195.566,
       "runs": [
         {
-          "p50Ms": 40.41,
-          "p95Ms": 80.94,
-          "qps": 17.33,
-          "completed": 521,
-          "errors": 0
-        },
-        {
-          "p50Ms": 46.98,
-          "p95Ms": 79.98,
-          "qps": 17.41,
-          "completed": 523,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 3000000,
-      "clients": 8,
-      "engine": "postgres",
-      "query": "mix",
-      "seconds": 30,
-      "p50Ms": 814.17,
-      "p95Ms": 7607.65,
-      "qps": 3.55,
-      "completed": 231,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 790.03,
-          "p95Ms": 7367.42,
-          "qps": 3.68,
-          "completed": 123,
-          "errors": 0,
-          "loadAvg": [
-            2.22,
-            3.29,
-            2.65
+          "slowestMs": 195.965,
+          "meanMs": 188.048,
+          "spanMs": 196.043,
+          "clientsMs": [
+            195.654,
+            184.564,
+            183.374,
+            183.698,
+            192.192,
+            195.375,
+            184.044,
+            183.029,
+            182.583,
+            195.965
           ],
-          "clientLoopDelayP99Ms": 5.6,
-          "clientCpuPct": 1
+          "readyMs": 5502,
+          "readBytes": 32833536,
+          "idleReadBytes": 0,
+          "at": "2026-11-17T11:02:10.597Z"
         },
         {
-          "p50Ms": 838.31,
-          "p95Ms": 7847.88,
-          "qps": 3.42,
-          "completed": 108,
-          "errors": 0,
-          "loadAvg": [
-            6.48,
-            4.66,
-            3.25
+          "slowestMs": 202.818,
+          "meanMs": 195.813,
+          "spanMs": 202.915,
+          "clientsMs": [
+            202.795,
+            191.667,
+            191.645,
+            191.849,
+            199.964,
+            202.611,
+            191.587,
+            191.158,
+            192.039,
+            202.818
           ],
-          "clientLoopDelayP99Ms": 5.4,
-          "clientCpuPct": 1
-        }
-      ],
-      "slowest": {
-        "query": "top_customers",
-        "p50Ms": 7379.75
-      }
-    },
-    {
-      "rows": 3000000,
-      "clients": 8,
-      "engine": "postgres",
-      "query": "status",
-      "seconds": 30,
-      "p50Ms": 948.14,
-      "p95Ms": 2322.9,
-      "qps": 0.57,
-      "completed": 37,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 871.34,
-          "p95Ms": 2026.03,
-          "qps": 0.6,
-          "completed": 20,
-          "errors": 0
+          "readyMs": 4505,
+          "readBytes": 32768000,
+          "idleReadBytes": 131072,
+          "at": "2026-11-17T11:02:27.438Z"
         },
         {
-          "p50Ms": 1024.95,
-          "p95Ms": 2619.77,
-          "qps": 0.54,
-          "completed": 17,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 3000000,
-      "clients": 8,
-      "engine": "postgres",
-      "query": "daily_tenant",
-      "seconds": 30,
-      "p50Ms": 4.71,
-      "p95Ms": 8.57,
-      "qps": 0.61,
-      "completed": 40,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 5.36,
-          "p95Ms": 8.57,
-          "qps": 0.63,
-          "completed": 21,
-          "errors": 0
-        },
-        {
-          "p50Ms": 4.06,
-          "p95Ms": 8.56,
-          "qps": 0.6,
-          "completed": 19,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 3000000,
-      "clients": 8,
-      "engine": "postgres",
-      "query": "top_customers",
-      "seconds": 30,
-      "p50Ms": 7379.75,
-      "p95Ms": 7879.09,
-      "qps": 0.63,
-      "completed": 41,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 7184.92,
-          "p95Ms": 7722.8,
-          "qps": 0.63,
-          "completed": 21,
-          "errors": 0
-        },
-        {
-          "p50Ms": 7574.58,
-          "p95Ms": 8035.37,
-          "qps": 0.63,
-          "completed": 20,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 3000000,
-      "clients": 8,
-      "engine": "postgres",
-      "query": "json_source",
-      "seconds": 30,
-      "p50Ms": 2718.88,
-      "p95Ms": 3180.78,
-      "qps": 0.61,
-      "completed": 40,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 2602.7,
-          "p95Ms": 3061.92,
-          "qps": 0.66,
-          "completed": 22,
-          "errors": 0
-        },
-        {
-          "p50Ms": 2835.05,
-          "p95Ms": 3299.63,
-          "qps": 0.57,
-          "completed": 18,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 3000000,
-      "clients": 8,
-      "engine": "postgres",
-      "query": "window_count",
-      "seconds": 30,
-      "p50Ms": 65.91,
-      "p95Ms": 100.52,
-      "qps": 0.55,
-      "completed": 36,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 63.19,
-          "p95Ms": 105.33,
-          "qps": 0.57,
-          "completed": 19,
-          "errors": 0
-        },
-        {
-          "p50Ms": 68.64,
-          "p95Ms": 95.71,
-          "qps": 0.54,
-          "completed": 17,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 3000000,
-      "clients": 8,
-      "engine": "postgres",
-      "query": "point_lookup",
-      "seconds": 30,
-      "p50Ms": 2.1,
-      "p95Ms": 3.99,
-      "qps": 0.57,
-      "completed": 37,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 1.47,
-          "p95Ms": 3.99,
-          "qps": 0.6,
-          "completed": 20,
-          "errors": 0
-        },
-        {
-          "p50Ms": 2.74,
-          "p95Ms": 3.98,
-          "qps": 0.54,
-          "completed": 17,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 3000000,
-      "clients": 8,
-      "engine": "mason",
-      "query": "mix",
-      "seconds": 30,
-      "p50Ms": 185.58,
-      "p95Ms": 419.57,
-      "qps": 38.89,
-      "completed": 2346,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 188.95,
-          "p95Ms": 415.85,
-          "qps": 38.92,
-          "completed": 1175,
-          "errors": 0,
-          "loadAvg": [
-            5.37,
-            4.02,
-            2.94
+          "slowestMs": 203.343,
+          "meanMs": 195.566,
+          "spanMs": 203.66,
+          "clientsMs": [
+            203.343,
+            191.26,
+            190.15,
+            190.352,
+            202.494,
+            202.982,
+            191.512,
+            189.784,
+            190.725,
+            203.055
           ],
-          "clientLoopDelayP99Ms": 7.5,
-          "clientCpuPct": 2
-        },
-        {
-          "p50Ms": 182.21,
-          "p95Ms": 423.29,
-          "qps": 38.85,
-          "completed": 1171,
-          "errors": 0,
-          "loadAvg": [
-            6.25,
-            4.38,
-            3.1
-          ],
-          "clientLoopDelayP99Ms": 7.4,
-          "clientCpuPct": 2
-        }
-      ],
-      "slowest": {
-        "query": "top_customers",
-        "p50Ms": 357.19
-      }
-    },
-    {
-      "rows": 3000000,
-      "clients": 8,
-      "engine": "mason",
-      "query": "status",
-      "seconds": 30,
-      "p50Ms": 223.24,
-      "p95Ms": 349.18,
-      "qps": 6.48,
-      "completed": 391,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 231.48,
-          "p95Ms": 332.43,
-          "qps": 6.49,
-          "completed": 196,
-          "errors": 0
-        },
-        {
-          "p50Ms": 215,
-          "p95Ms": 365.92,
-          "qps": 6.47,
-          "completed": 195,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 3000000,
-      "clients": 8,
-      "engine": "mason",
-      "query": "daily_tenant",
-      "seconds": 30,
-      "p50Ms": 110.55,
-      "p95Ms": 236.21,
-      "qps": 6.46,
-      "completed": 390,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 113.85,
-          "p95Ms": 246.27,
-          "qps": 6.53,
-          "completed": 197,
-          "errors": 0
-        },
-        {
-          "p50Ms": 107.25,
-          "p95Ms": 226.15,
-          "qps": 6.4,
-          "completed": 193,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 3000000,
-      "clients": 8,
-      "engine": "mason",
-      "query": "top_customers",
-      "seconds": 30,
-      "p50Ms": 357.19,
-      "p95Ms": 487.34,
-      "qps": 6.46,
-      "completed": 390,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 354.94,
-          "p95Ms": 499.93,
-          "qps": 6.46,
-          "completed": 195,
-          "errors": 0
-        },
-        {
-          "p50Ms": 359.44,
-          "p95Ms": 474.74,
-          "qps": 6.47,
-          "completed": 195,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 3000000,
-      "clients": 8,
-      "engine": "mason",
-      "query": "json_source",
-      "seconds": 30,
-      "p50Ms": 300.96,
-      "p95Ms": 447.61,
-      "qps": 6.45,
-      "completed": 389,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 292.68,
-          "p95Ms": 434.44,
-          "qps": 6.43,
-          "completed": 194,
-          "errors": 0
-        },
-        {
-          "p50Ms": 309.24,
-          "p95Ms": 460.77,
-          "qps": 6.47,
-          "completed": 195,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 3000000,
-      "clients": 8,
-      "engine": "mason",
-      "query": "window_count",
-      "seconds": 30,
-      "p50Ms": 103.97,
-      "p95Ms": 234.2,
-      "qps": 6.52,
-      "completed": 393,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 112.02,
-          "p95Ms": 237.29,
-          "qps": 6.49,
-          "completed": 196,
-          "errors": 0
-        },
-        {
-          "p50Ms": 95.92,
-          "p95Ms": 231.12,
-          "qps": 6.54,
-          "completed": 197,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 3000000,
-      "clients": 8,
-      "engine": "mason",
-      "query": "point_lookup",
-      "seconds": 30,
-      "p50Ms": 95.93,
-      "p95Ms": 211.57,
-      "qps": 6.52,
-      "completed": 393,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 99.75,
-          "p95Ms": 203.07,
-          "qps": 6.53,
-          "completed": 197,
-          "errors": 0
-        },
-        {
-          "p50Ms": 92.11,
-          "p95Ms": 220.07,
-          "qps": 6.5,
-          "completed": 196,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 10000000,
-      "clients": 8,
-      "engine": "postgres",
-      "query": "mix",
-      "seconds": 180,
-      "p50Ms": 2011.37,
-      "p95Ms": 37878.1,
-      "qps": 0.96,
-      "completed": 365,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 3497.62,
-          "p95Ms": 37931.65,
-          "qps": 0.95,
-          "completed": 182,
-          "errors": 0,
-          "loadAvg": [
-            1.69,
-            2.91,
-            3.01
-          ],
-          "clientLoopDelayP99Ms": 5.4,
-          "clientCpuPct": 0
-        },
-        {
-          "p50Ms": 525.11,
-          "p95Ms": 37824.56,
-          "qps": 0.97,
-          "completed": 183,
-          "errors": 0,
-          "loadAvg": [
-            7.15,
-            7.61,
-            6.03
-          ],
-          "clientLoopDelayP99Ms": 5.4,
-          "clientCpuPct": 1
-        }
-      ],
-      "slowest": {
-        "query": "top_customers",
-        "p50Ms": 19050.41
-      }
-    },
-    {
-      "rows": 10000000,
-      "clients": 8,
-      "engine": "postgres",
-      "query": "status",
-      "seconds": 180,
-      "p50Ms": 8496.24,
-      "p95Ms": 10096.56,
-      "qps": 0.16,
-      "completed": 61,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 8329.89,
-          "p95Ms": 10052.75,
-          "qps": 0.16,
-          "completed": 30,
-          "errors": 0
-        },
-        {
-          "p50Ms": 8662.58,
-          "p95Ms": 10140.37,
-          "qps": 0.16,
-          "completed": 31,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 10000000,
-      "clients": 8,
-      "engine": "postgres",
-      "query": "daily_tenant",
-      "seconds": 180,
-      "p50Ms": 23.42,
-      "p95Ms": 35.91,
-      "qps": 0.16,
-      "completed": 60,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 25.62,
-          "p95Ms": 35.94,
-          "qps": 0.16,
-          "completed": 30,
-          "errors": 0
-        },
-        {
-          "p50Ms": 21.22,
-          "p95Ms": 35.88,
-          "qps": 0.16,
-          "completed": 30,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 10000000,
-      "clients": 8,
-      "engine": "postgres",
-      "query": "top_customers",
-      "seconds": 180,
-      "p50Ms": 19050.41,
-      "p95Ms": 42762.18,
-      "qps": 0.16,
-      "completed": 61,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 19230.24,
-          "p95Ms": 42524.59,
-          "qps": 0.16,
-          "completed": 31,
-          "errors": 0
-        },
-        {
-          "p50Ms": 18870.58,
-          "p95Ms": 42999.76,
-          "qps": 0.16,
-          "completed": 30,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 10000000,
-      "clients": 8,
-      "engine": "postgres",
-      "query": "json_source",
-      "seconds": 180,
-      "p50Ms": 10719.6,
-      "p95Ms": 12137.23,
-      "qps": 0.16,
-      "completed": 61,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 10456.66,
-          "p95Ms": 11867.37,
-          "qps": 0.16,
-          "completed": 31,
-          "errors": 0
-        },
-        {
-          "p50Ms": 10982.55,
-          "p95Ms": 12407.08,
-          "qps": 0.16,
-          "completed": 30,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 10000000,
-      "clients": 8,
-      "engine": "postgres",
-      "query": "window_count",
-      "seconds": 180,
-      "p50Ms": 280.01,
-      "p95Ms": 533.76,
-      "qps": 0.16,
-      "completed": 61,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 234.85,
-          "p95Ms": 554.09,
-          "qps": 0.16,
-          "completed": 30,
-          "errors": 0
-        },
-        {
-          "p50Ms": 325.17,
-          "p95Ms": 513.43,
-          "qps": 0.16,
-          "completed": 31,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 10000000,
-      "clients": 8,
-      "engine": "postgres",
-      "query": "point_lookup",
-      "seconds": 180,
-      "p50Ms": 12.46,
-      "p95Ms": 54.83,
-      "qps": 0.16,
-      "completed": 61,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 16.74,
-          "p95Ms": 64.04,
-          "qps": 0.16,
-          "completed": 30,
-          "errors": 0
-        },
-        {
-          "p50Ms": 8.19,
-          "p95Ms": 45.62,
-          "qps": 0.16,
-          "completed": 31,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 10000000,
-      "clients": 8,
-      "engine": "mason",
-      "query": "mix",
-      "seconds": 180,
-      "p50Ms": 610.23,
-      "p95Ms": 1350.21,
-      "qps": 12.09,
-      "completed": 4369,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 626.03,
-          "p95Ms": 1359.97,
-          "qps": 12.05,
-          "completed": 2177,
-          "errors": 0,
-          "loadAvg": [
-            14.89,
-            8.95,
-            5.47
-          ],
-          "clientLoopDelayP99Ms": 7.8,
-          "clientCpuPct": 1
-        },
-        {
-          "p50Ms": 594.43,
-          "p95Ms": 1340.45,
-          "qps": 12.13,
-          "completed": 2192,
-          "errors": 0,
-          "loadAvg": [
-            6.91,
-            8.01,
-            5.77
-          ],
-          "clientLoopDelayP99Ms": 7.8,
-          "clientCpuPct": 1
-        }
-      ],
-      "slowest": {
-        "query": "top_customers",
-        "p50Ms": 1135.57
-      }
-    },
-    {
-      "rows": 10000000,
-      "clients": 8,
-      "engine": "mason",
-      "query": "status",
-      "seconds": 180,
-      "p50Ms": 715.58,
-      "p95Ms": 1121.53,
-      "qps": 2.01,
-      "completed": 727,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 725.89,
-          "p95Ms": 1137.93,
-          "qps": 2,
-          "completed": 362,
-          "errors": 0
-        },
-        {
-          "p50Ms": 705.26,
-          "p95Ms": 1105.12,
-          "qps": 2.02,
-          "completed": 365,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 10000000,
-      "clients": 8,
-      "engine": "mason",
-      "query": "daily_tenant",
-      "seconds": 180,
-      "p50Ms": 362.63,
-      "p95Ms": 754.34,
-      "qps": 2.01,
-      "completed": 727,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 353.81,
-          "p95Ms": 773.17,
-          "qps": 2.01,
-          "completed": 363,
-          "errors": 0
-        },
-        {
-          "p50Ms": 371.46,
-          "p95Ms": 735.5,
-          "qps": 2.01,
-          "completed": 364,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 10000000,
-      "clients": 8,
-      "engine": "mason",
-      "query": "top_customers",
-      "seconds": 180,
-      "p50Ms": 1135.57,
-      "p95Ms": 1649.81,
-      "qps": 2.01,
-      "completed": 728,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 1140.86,
-          "p95Ms": 1652.85,
-          "qps": 2.01,
-          "completed": 363,
-          "errors": 0
-        },
-        {
-          "p50Ms": 1130.27,
-          "p95Ms": 1646.77,
-          "qps": 2.02,
-          "completed": 365,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 10000000,
-      "clients": 8,
-      "engine": "mason",
-      "query": "json_source",
-      "seconds": 180,
-      "p50Ms": 981.19,
-      "p95Ms": 1398.47,
-      "qps": 2.02,
-      "completed": 729,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 997.47,
-          "p95Ms": 1449.82,
-          "qps": 2.01,
-          "completed": 363,
-          "errors": 0
-        },
-        {
-          "p50Ms": 964.92,
-          "p95Ms": 1347.12,
-          "qps": 2.03,
-          "completed": 366,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 10000000,
-      "clients": 8,
-      "engine": "mason",
-      "query": "window_count",
-      "seconds": 180,
-      "p50Ms": 355.79,
-      "p95Ms": 769.96,
-      "qps": 2.02,
-      "completed": 729,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 356.02,
-          "p95Ms": 766.92,
-          "qps": 2.01,
-          "completed": 363,
-          "errors": 0
-        },
-        {
-          "p50Ms": 355.56,
-          "p95Ms": 773.01,
-          "qps": 2.03,
-          "completed": 366,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 10000000,
-      "clients": 8,
-      "engine": "mason",
-      "query": "point_lookup",
-      "seconds": 180,
-      "p50Ms": 297.6,
-      "p95Ms": 653.79,
-      "qps": 2.02,
-      "completed": 729,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 272.14,
-          "p95Ms": 664.34,
-          "qps": 2.01,
-          "completed": 363,
-          "errors": 0
-        },
-        {
-          "p50Ms": 323.06,
-          "p95Ms": 643.24,
-          "qps": 2.03,
-          "completed": 366,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 30000000,
-      "clients": 8,
-      "engine": "postgres",
-      "query": "mix",
-      "seconds": 180,
-      "p50Ms": 9971.03,
-      "p95Ms": 258456.14,
-      "qps": 0.09,
-      "completed": 97,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 69773.46,
-          "p95Ms": 268063.26,
-          "qps": 0.05,
-          "completed": 16,
-          "errors": 0,
-          "loadAvg": [
-            3.05,
-            3.06,
-            4.03
-          ],
-          "clientLoopDelayP99Ms": 6.2,
-          "clientCpuPct": 0
-        },
-        {
-          "p50Ms": 600.12,
-          "p95Ms": 273721.31,
-          "qps": 0.09,
-          "completed": 26,
-          "errors": 0,
-          "loadAvg": [
-            7.03,
-            7.07,
-            6.82
-          ],
-          "clientLoopDelayP99Ms": 6.2,
-          "clientCpuPct": 0
-        },
-        {
-          "p50Ms": 19257.4,
-          "p95Ms": 248849.02,
-          "qps": 0.09,
-          "completed": 27,
-          "errors": 0,
-          "loadAvg": [
-            10.9,
-            11.38,
-            9.45
-          ],
-          "clientLoopDelayP99Ms": 6.3,
-          "clientCpuPct": 0
-        },
-        {
-          "p50Ms": 684.65,
-          "p95Ms": 210489.46,
-          "qps": 0.11,
-          "completed": 28,
-          "errors": 0,
-          "loadAvg": [
-            6.59,
-            9.71,
-            9.71
-          ],
-          "clientLoopDelayP99Ms": 6.2,
-          "clientCpuPct": 0
-        }
-      ],
-      "slowest": {
-        "query": "top_customers",
-        "p50Ms": 132997.64
-      }
-    },
-    {
-      "rows": 30000000,
-      "clients": 8,
-      "engine": "postgres",
-      "query": "status",
-      "seconds": 180,
-      "p50Ms": 31797.11,
-      "p95Ms": 71176.65,
-      "qps": 0.01,
-      "completed": 16,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 69773.46,
-          "p95Ms": 226388.68,
-          "qps": 0.01,
-          "completed": 2,
-          "errors": 0
-        },
-        {
-          "p50Ms": 9146.51,
-          "p95Ms": 25342.28,
-          "qps": 0.01,
-          "completed": 4,
-          "errors": 0
-        },
-        {
-          "p50Ms": 38369.41,
-          "p95Ms": 52024.52,
-          "qps": 0.01,
-          "completed": 4,
-          "errors": 0
-        },
-        {
-          "p50Ms": 25224.81,
-          "p95Ms": 90328.78,
-          "qps": 0.02,
-          "completed": 6,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 30000000,
-      "clients": 8,
-      "engine": "postgres",
-      "query": "daily_tenant",
-      "seconds": 180,
-      "p50Ms": 40.3,
-      "p95Ms": 72.94,
-      "qps": 0.02,
-      "completed": 18,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 38.51,
-          "p95Ms": 57.96,
-          "qps": 0.01,
-          "completed": 3,
-          "errors": 0
-        },
-        {
-          "p50Ms": 42.1,
-          "p95Ms": 249.13,
-          "qps": 0.02,
-          "completed": 6,
-          "errors": 0
-        },
-        {
-          "p50Ms": 25.04,
-          "p95Ms": 49.68,
-          "qps": 0.02,
-          "completed": 5,
-          "errors": 0
-        },
-        {
-          "p50Ms": 45.81,
-          "p95Ms": 87.92,
-          "qps": 0.02,
-          "completed": 4,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 30000000,
-      "clients": 8,
-      "engine": "postgres",
-      "query": "top_customers",
-      "seconds": 180,
-      "p50Ms": 132997.64,
-      "p95Ms": 260614.27,
-      "qps": 0.02,
-      "completed": 21,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 120900.78,
-          "p95Ms": 268063.26,
-          "qps": 0.01,
-          "completed": 4,
-          "errors": 0
-        },
-        {
-          "p50Ms": 245705.99,
-          "p95Ms": 281214.67,
-          "qps": 0.02,
-          "completed": 6,
-          "errors": 0
-        },
-        {
-          "p50Ms": 145094.49,
-          "p95Ms": 253165.28,
-          "qps": 0.02,
-          "completed": 7,
-          "errors": 0
-        },
-        {
-          "p50Ms": 91153.66,
-          "p95Ms": 210634.56,
-          "qps": 0.02,
-          "completed": 4,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 30000000,
-      "clients": 8,
-      "engine": "postgres",
-      "query": "json_source",
-      "seconds": 180,
-      "p50Ms": 72984.04,
-      "p95Ms": 82690.48,
-      "qps": 0.01,
-      "completed": 11,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 202389.85,
-          "p95Ms": 222129.2,
-          "qps": 0.01,
-          "completed": 3,
-          "errors": 0
-        },
-        {
-          "p50Ms": 46391.31,
-          "p95Ms": 55819.87,
-          "qps": 0.01,
-          "completed": 2,
-          "errors": 0
-        },
-        {
-          "p50Ms": 88174.32,
-          "p95Ms": 103058.35,
-          "qps": 0.01,
-          "completed": 3,
-          "errors": 0
-        },
-        {
-          "p50Ms": 57793.77,
-          "p95Ms": 62322.61,
-          "qps": 0.01,
-          "completed": 3,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 30000000,
-      "clients": 8,
-      "engine": "postgres",
-      "query": "window_count",
-      "seconds": 180,
-      "p50Ms": 452.17,
-      "p95Ms": 958.36,
-      "qps": 0.01,
-      "completed": 15,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 243.37,
-          "p95Ms": 472.25,
-          "qps": 0.01,
-          "completed": 2,
-          "errors": 0
-        },
-        {
-          "p50Ms": 430.72,
-          "p95Ms": 807.72,
-          "qps": 0.01,
-          "completed": 4,
-          "errors": 0
-        },
-        {
-          "p50Ms": 691.89,
-          "p95Ms": 1821.95,
-          "qps": 0.01,
-          "completed": 4,
-          "errors": 0
-        },
-        {
-          "p50Ms": 473.61,
-          "p95Ms": 1108.99,
-          "qps": 0.02,
-          "completed": 5,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 30000000,
-      "clients": 8,
-      "engine": "postgres",
-      "query": "point_lookup",
-      "seconds": 180,
-      "p50Ms": 12.56,
-      "p95Ms": 22.89,
-      "qps": 0.01,
-      "completed": 16,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 10.36,
-          "p95Ms": 16.5,
-          "qps": 0.01,
-          "completed": 2,
-          "errors": 0
-        },
-        {
-          "p50Ms": 12,
-          "p95Ms": 29.6,
-          "qps": 0.01,
-          "completed": 4,
-          "errors": 0
-        },
-        {
-          "p50Ms": 13.54,
-          "p95Ms": 28.37,
-          "qps": 0.01,
-          "completed": 4,
-          "errors": 0
-        },
-        {
-          "p50Ms": 13.12,
-          "p95Ms": 17.41,
-          "qps": 0.02,
-          "completed": 6,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 30000000,
-      "clients": 8,
-      "engine": "mason",
-      "query": "mix",
-      "seconds": 180,
-      "p50Ms": 1845.05,
-      "p95Ms": 4528.55,
-      "qps": 3.8,
-      "completed": 1383,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 1862.52,
-          "p95Ms": 4442.9,
-          "qps": 3.78,
-          "completed": 686,
-          "errors": 0,
-          "loadAvg": [
-            5.58,
-            7.13,
-            6.66
-          ],
-          "clientLoopDelayP99Ms": 7.8,
-          "clientCpuPct": 1
-        },
-        {
-          "p50Ms": 1827.59,
-          "p95Ms": 4614.19,
-          "qps": 3.82,
-          "completed": 697,
-          "errors": 0,
-          "loadAvg": [
-            7.03,
-            7.09,
-            6.74
-          ],
-          "clientLoopDelayP99Ms": 7.8,
-          "clientCpuPct": 1
-        }
-      ],
-      "slowest": {
-        "query": "top_customers",
-        "p50Ms": 3962.74
-      }
-    },
-    {
-      "rows": 30000000,
-      "clients": 8,
-      "engine": "mason",
-      "query": "status",
-      "seconds": 180,
-      "p50Ms": 2146.7,
-      "p95Ms": 3754.98,
-      "qps": 0.64,
-      "completed": 231,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 2283.01,
-          "p95Ms": 3985.18,
-          "qps": 0.63,
-          "completed": 114,
-          "errors": 0
-        },
-        {
-          "p50Ms": 2010.38,
-          "p95Ms": 3524.79,
-          "qps": 0.64,
-          "completed": 117,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 30000000,
-      "clients": 8,
-      "engine": "mason",
-      "query": "daily_tenant",
-      "seconds": 180,
-      "p50Ms": 956.89,
-      "p95Ms": 2465.17,
-      "qps": 0.63,
-      "completed": 229,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 1003.25,
-          "p95Ms": 2319.17,
-          "qps": 0.63,
-          "completed": 114,
-          "errors": 0
-        },
-        {
-          "p50Ms": 910.53,
-          "p95Ms": 2611.17,
-          "qps": 0.63,
-          "completed": 115,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 30000000,
-      "clients": 8,
-      "engine": "mason",
-      "query": "top_customers",
-      "seconds": 180,
-      "p50Ms": 3962.74,
-      "p95Ms": 5800.4,
-      "qps": 0.64,
-      "completed": 231,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 3882.09,
-          "p95Ms": 5659.08,
-          "qps": 0.63,
-          "completed": 115,
-          "errors": 0
-        },
-        {
-          "p50Ms": 4043.39,
-          "p95Ms": 5941.72,
-          "qps": 0.64,
-          "completed": 116,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 30000000,
-      "clients": 8,
-      "engine": "mason",
-      "query": "json_source",
-      "seconds": 180,
-      "p50Ms": 2839.09,
-      "p95Ms": 4754.4,
-      "qps": 0.63,
-      "completed": 229,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 2760.97,
-          "p95Ms": 4579.38,
-          "qps": 0.63,
-          "completed": 114,
-          "errors": 0
-        },
-        {
-          "p50Ms": 2917.2,
-          "p95Ms": 4929.41,
-          "qps": 0.63,
-          "completed": 115,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 30000000,
-      "clients": 8,
-      "engine": "mason",
-      "query": "window_count",
-      "seconds": 180,
-      "p50Ms": 1046.16,
-      "p95Ms": 2589.48,
-      "qps": 0.64,
-      "completed": 232,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 1029.57,
-          "p95Ms": 2553.66,
-          "qps": 0.63,
-          "completed": 115,
-          "errors": 0
-        },
-        {
-          "p50Ms": 1062.76,
-          "p95Ms": 2625.31,
-          "qps": 0.64,
-          "completed": 117,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 30000000,
-      "clients": 8,
-      "engine": "mason",
-      "query": "point_lookup",
-      "seconds": 180,
-      "p50Ms": 993.71,
-      "p95Ms": 2088.38,
-      "qps": 0.64,
-      "completed": 231,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 1088.06,
-          "p95Ms": 2261.47,
-          "qps": 0.63,
-          "completed": 114,
-          "errors": 0
-        },
-        {
-          "p50Ms": 899.36,
-          "p95Ms": 1915.3,
-          "qps": 0.64,
-          "completed": 117,
-          "errors": 0
+          "readyMs": 5489,
+          "readBytes": 32829440,
+          "idleReadBytes": 0,
+          "at": "2026-11-17T11:03:08.583Z"
         }
       ]
     },
@@ -2041,296 +1013,42 @@
       "rows": 10000000,
       "clients": 1,
       "engine": "postgres",
-      "query": "mix",
-      "seconds": 30,
-      "p50Ms": 535.73,
-      "p95Ms": 5481.16,
-      "qps": 0.55,
-      "completed": 34,
-      "errors": 0,
-      "errorCodes": {},
+      "statement": "count_by_status",
+      "slowestMs": 21182.354,
+      "meanMs": 21182.354,
       "runs": [
         {
-          "p50Ms": 1001.01,
-          "p95Ms": 5597.77,
-          "qps": 0.52,
-          "completed": 16,
-          "errors": 0,
-          "loadAvg": [
-            2.26,
-            7.02,
-            9.03
+          "slowestMs": 21182.354,
+          "meanMs": 21182.354,
+          "spanMs": 21182.354,
+          "clientsMs": [
+            21182.354
           ],
-          "clientLoopDelayP99Ms": 5.1,
-          "clientCpuPct": 0
+          "readyMs": 1039,
+          "readBytes": 2905260032,
+          "at": "2026-11-17T11:08:39.928Z"
         },
         {
-          "p50Ms": 70.45,
-          "p95Ms": 5364.55,
-          "qps": 0.59,
-          "completed": 18,
-          "errors": 0,
-          "loadAvg": [
-            3.5,
-            5.85,
-            8.35
+          "slowestMs": 21209.973,
+          "meanMs": 21209.973,
+          "spanMs": 21209.973,
+          "clientsMs": [
+            21209.973
           ],
-          "clientLoopDelayP99Ms": 5.2,
-          "clientCpuPct": 0
-        }
-      ],
-      "slowest": {
-        "query": "top_customers",
-        "p50Ms": 5475.23
-      }
-    },
-    {
-      "rows": 10000000,
-      "clients": 1,
-      "engine": "postgres",
-      "query": "status",
-      "seconds": 30,
-      "p50Ms": 993.2,
-      "p95Ms": 1001.25,
-      "qps": 0.1,
-      "completed": 6,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 1007,
-          "p95Ms": 1012.86,
-          "qps": 0.1,
-          "completed": 3,
-          "errors": 0
+          "readyMs": 660,
+          "readBytes": 2905333760,
+          "at": "2026-11-17T11:09:46.988Z"
         },
         {
-          "p50Ms": 979.41,
-          "p95Ms": 989.64,
-          "qps": 0.1,
-          "completed": 3,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 10000000,
-      "clients": 1,
-      "engine": "postgres",
-      "query": "daily_tenant",
-      "seconds": 30,
-      "p50Ms": 8.32,
-      "p95Ms": 8.82,
-      "qps": 0.1,
-      "completed": 6,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 9.65,
-          "p95Ms": 10.06,
-          "qps": 0.1,
-          "completed": 3,
-          "errors": 0
-        },
-        {
-          "p50Ms": 7,
-          "p95Ms": 7.58,
-          "qps": 0.1,
-          "completed": 3,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 10000000,
-      "clients": 1,
-      "engine": "postgres",
-      "query": "top_customers",
-      "seconds": 30,
-      "p50Ms": 5475.23,
-      "p95Ms": 5481.16,
-      "qps": 0.1,
-      "completed": 6,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 5588.28,
-          "p95Ms": 5597.77,
-          "qps": 0.1,
-          "completed": 3,
-          "errors": 0
-        },
-        {
-          "p50Ms": 5362.19,
-          "p95Ms": 5364.55,
-          "qps": 0.1,
-          "completed": 3,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 10000000,
-      "clients": 1,
-      "engine": "postgres",
-      "query": "json_source",
-      "seconds": 30,
-      "p50Ms": 3696.45,
-      "p95Ms": 3699.83,
-      "qps": 0.1,
-      "completed": 6,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 3691.85,
-          "p95Ms": 3696.19,
-          "qps": 0.1,
-          "completed": 3,
-          "errors": 0
-        },
-        {
-          "p50Ms": 3701.06,
-          "p95Ms": 3703.47,
-          "qps": 0.1,
-          "completed": 3,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 10000000,
-      "clients": 1,
-      "engine": "postgres",
-      "query": "window_count",
-      "seconds": 30,
-      "p50Ms": 70.06,
-      "p95Ms": 70.5,
-      "qps": 0.08,
-      "completed": 5,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 70.18,
-          "p95Ms": 70.56,
-          "qps": 0.06,
-          "completed": 2,
-          "errors": 0
-        },
-        {
-          "p50Ms": 69.93,
-          "p95Ms": 70.45,
-          "qps": 0.1,
-          "completed": 3,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 10000000,
-      "clients": 1,
-      "engine": "postgres",
-      "query": "point_lookup",
-      "seconds": 30,
-      "p50Ms": 1.77,
-      "p95Ms": 1.81,
-      "qps": 0.08,
-      "completed": 5,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 2.02,
-          "p95Ms": 2.08,
-          "qps": 0.06,
-          "completed": 2,
-          "errors": 0
-        },
-        {
-          "p50Ms": 1.51,
-          "p95Ms": 1.53,
-          "qps": 0.1,
-          "completed": 3,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 10000000,
-      "clients": 1,
-      "engine": "mason",
-      "query": "mix",
-      "seconds": 30,
-      "p50Ms": 91.19,
-      "p95Ms": 235.03,
-      "qps": 10.8,
-      "completed": 652,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 91.55,
-          "p95Ms": 236.88,
-          "qps": 10.78,
-          "completed": 325,
-          "errors": 0,
-          "loadAvg": [
-            2.42,
-            6.4,
-            8.73
+          "slowestMs": 21143.879,
+          "meanMs": 21143.879,
+          "spanMs": 21143.879,
+          "clientsMs": [
+            21143.879
           ],
-          "clientLoopDelayP99Ms": 6.9,
-          "clientCpuPct": 1
-        },
-        {
-          "p50Ms": 90.84,
-          "p95Ms": 233.19,
-          "qps": 10.83,
-          "completed": 327,
-          "errors": 0,
-          "loadAvg": [
-            3.18,
-            6.15,
-            8.56
-          ],
-          "clientLoopDelayP99Ms": 6.8,
-          "clientCpuPct": 1
-        }
-      ],
-      "slowest": {
-        "query": "top_customers",
-        "p50Ms": 232.84
-      }
-    },
-    {
-      "rows": 10000000,
-      "clients": 1,
-      "engine": "mason",
-      "query": "status",
-      "seconds": 30,
-      "p50Ms": 93.27,
-      "p95Ms": 99.65,
-      "qps": 1.79,
-      "completed": 108,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 93.56,
-          "p95Ms": 98.53,
-          "qps": 1.79,
-          "completed": 54,
-          "errors": 0
-        },
-        {
-          "p50Ms": 92.98,
-          "p95Ms": 100.76,
-          "qps": 1.79,
-          "completed": 54,
-          "errors": 0
+          "readyMs": 626,
+          "readBytes": 2905333760,
+          "at": "2026-11-17T11:10:20.045Z"
         }
       ]
     },
@@ -2338,28 +1056,231 @@
       "rows": 10000000,
       "clients": 1,
       "engine": "mason",
-      "query": "daily_tenant",
-      "seconds": 30,
-      "p50Ms": 10.82,
-      "p95Ms": 15.47,
-      "qps": 1.81,
-      "completed": 109,
-      "errors": 0,
-      "errorCodes": {},
+      "statement": "count_by_status",
+      "slowestMs": 234.09,
+      "meanMs": 234.09,
       "runs": [
         {
-          "p50Ms": 11.23,
-          "p95Ms": 16.59,
-          "qps": 1.79,
-          "completed": 54,
-          "errors": 0
+          "slowestMs": 232.109,
+          "meanMs": 232.109,
+          "spanMs": 232.109,
+          "clientsMs": [
+            232.109
+          ],
+          "readyMs": 4951,
+          "readBytes": 65097728,
+          "idleReadBytes": 0,
+          "at": "2026-11-17T11:09:17.960Z"
         },
         {
-          "p50Ms": 10.42,
-          "p95Ms": 14.36,
-          "qps": 1.82,
-          "completed": 55,
-          "errors": 0
+          "slowestMs": 234.09,
+          "meanMs": 234.09,
+          "spanMs": 234.09,
+          "clientsMs": [
+            234.09
+          ],
+          "readyMs": 4507,
+          "readBytes": 64897024,
+          "idleReadBytes": 131072,
+          "at": "2026-11-17T11:09:34.752Z"
+        },
+        {
+          "slowestMs": 236.386,
+          "meanMs": 236.386,
+          "spanMs": 236.386,
+          "clientsMs": [
+            236.386
+          ],
+          "readyMs": 4786,
+          "readBytes": 65597440,
+          "idleReadBytes": 0,
+          "at": "2026-11-17T11:10:57.655Z"
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 10,
+      "engine": "postgres",
+      "statement": "count_by_status",
+      "slowestMs": 21721.178,
+      "meanMs": 21545.514,
+      "runs": [
+        {
+          "slowestMs": 21721.178,
+          "meanMs": 21545.514,
+          "spanMs": 21721.232,
+          "clientsMs": [
+            21669.652,
+            21721.178,
+            21431.947,
+            21490.555,
+            21580.211,
+            21530.659,
+            21478.697,
+            21479.709,
+            21640.87,
+            21431.658
+          ],
+          "readyMs": 682,
+          "readBytes": 2905337856,
+          "at": "2026-11-17T11:11:09.962Z"
+        },
+        {
+          "slowestMs": 21777.631,
+          "meanMs": 21609.742,
+          "spanMs": 21777.682,
+          "clientsMs": [
+            21712.173,
+            21420.365,
+            21554.624,
+            21546.766,
+            21440.516,
+            21720.614,
+            21777.631,
+            21726.212,
+            21775.244,
+            21423.271
+          ],
+          "readyMs": 682,
+          "readBytes": 2905350144,
+          "at": "2026-11-17T11:12:19.420Z"
+        },
+        {
+          "slowestMs": 21448.567,
+          "meanMs": 21343.311,
+          "spanMs": 21448.576,
+          "clientsMs": [
+            21430.027,
+            21252.533,
+            21446.711,
+            21377.87,
+            21400.443,
+            21186.301,
+            21400.626,
+            21186.357,
+            21303.673,
+            21448.567
+          ],
+          "readyMs": 836,
+          "readBytes": 2905333760,
+          "at": "2026-11-17T11:12:53.270Z"
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 10,
+      "engine": "mason",
+      "statement": "count_by_status",
+      "slowestMs": 967.278,
+      "meanMs": 840.751,
+      "runs": [
+        {
+          "slowestMs": 967.278,
+          "meanMs": 814.495,
+          "spanMs": 967.328,
+          "clientsMs": [
+            944.255,
+            777.343,
+            967.278,
+            932.385,
+            718.584,
+            893.451,
+            850.497,
+            615.429,
+            482.403,
+            963.329
+          ],
+          "readyMs": 4975,
+          "readBytes": 65609728,
+          "idleReadBytes": 0,
+          "at": "2026-11-17T11:11:48.709Z"
+        },
+        {
+          "slowestMs": 962.167,
+          "meanMs": 840.751,
+          "spanMs": 962.261,
+          "clientsMs": [
+            711.035,
+            942.347,
+            953.11,
+            962.167,
+            832.192,
+            930.074,
+            758.092,
+            908.17,
+            497.132,
+            913.196
+          ],
+          "readyMs": 4532,
+          "readBytes": 65150976,
+          "idleReadBytes": 131072,
+          "at": "2026-11-17T11:12:06.372Z"
+        },
+        {
+          "slowestMs": 1018.188,
+          "meanMs": 895.98,
+          "spanMs": 1018.237,
+          "clientsMs": [
+            1014.734,
+            913.962,
+            636.145,
+            759.986,
+            886.889,
+            965.615,
+            1018.188,
+            951.639,
+            983.81,
+            828.828
+          ],
+          "readyMs": 4987,
+          "readBytes": 65859584,
+          "idleReadBytes": 0,
+          "at": "2026-11-17T11:13:31.536Z"
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 1,
+      "engine": "postgres",
+      "statement": "revenue_by_month",
+      "slowestMs": 24043.873,
+      "meanMs": 24043.873,
+      "runs": [
+        {
+          "slowestMs": 24308.88,
+          "meanMs": 24308.88,
+          "spanMs": 24308.88,
+          "clientsMs": [
+            24308.88
+          ],
+          "readyMs": 679,
+          "readBytes": 2962280448,
+          "at": "2026-11-17T11:13:44.706Z"
+        },
+        {
+          "slowestMs": 23519.911,
+          "meanMs": 23519.911,
+          "spanMs": 23519.911,
+          "clientsMs": [
+            23519.911
+          ],
+          "readyMs": 630,
+          "readBytes": 2962276352,
+          "at": "2026-11-17T11:14:56.595Z"
+        },
+        {
+          "slowestMs": 24043.873,
+          "meanMs": 24043.873,
+          "spanMs": 24043.873,
+          "clientsMs": [
+            24043.873
+          ],
+          "readyMs": 642,
+          "readBytes": 2962272256,
+          "at": "2026-11-17T11:15:32.040Z"
         }
       ]
     },
@@ -2367,28 +1288,231 @@
       "rows": 10000000,
       "clients": 1,
       "engine": "mason",
-      "query": "top_customers",
-      "seconds": 30,
-      "p50Ms": 232.84,
-      "p95Ms": 243.38,
-      "qps": 1.81,
-      "completed": 109,
-      "errors": 0,
-      "errorCodes": {},
+      "statement": "revenue_by_month",
+      "slowestMs": 978.689,
+      "meanMs": 978.689,
       "runs": [
         {
-          "p50Ms": 234.98,
-          "p95Ms": 244.13,
-          "qps": 1.79,
-          "completed": 54,
-          "errors": 0
+          "slowestMs": 978.689,
+          "meanMs": 978.689,
+          "spanMs": 978.689,
+          "clientsMs": [
+            978.689
+          ],
+          "readyMs": 4986,
+          "readBytes": 251060224,
+          "idleReadBytes": 0,
+          "at": "2026-11-17T11:14:25.964Z"
         },
         {
-          "p50Ms": 230.71,
-          "p95Ms": 242.63,
-          "qps": 1.82,
-          "completed": 55,
-          "errors": 0
+          "slowestMs": 982.692,
+          "meanMs": 982.692,
+          "spanMs": 982.692,
+          "clientsMs": [
+            982.692
+          ],
+          "readyMs": 4563,
+          "readBytes": 251502592,
+          "idleReadBytes": 131072,
+          "at": "2026-11-17T11:14:43.564Z"
+        },
+        {
+          "slowestMs": 974.557,
+          "meanMs": 974.557,
+          "spanMs": 974.557,
+          "clientsMs": [
+            974.557
+          ],
+          "readyMs": 5005,
+          "readBytes": 250425344,
+          "idleReadBytes": 0,
+          "at": "2026-11-17T11:16:12.832Z"
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 10,
+      "engine": "postgres",
+      "statement": "revenue_by_month",
+      "slowestMs": 43908.624,
+      "meanMs": 42963.247,
+      "runs": [
+        {
+          "slowestMs": 43908.624,
+          "meanMs": 42963.247,
+          "spanMs": 43908.716,
+          "clientsMs": [
+            43669.864,
+            43908.624,
+            43184.894,
+            43287.677,
+            43871.305,
+            40895.88,
+            43487.191,
+            42284.826,
+            41412.31,
+            43629.903
+          ],
+          "readyMs": 644,
+          "readBytes": 3287244800,
+          "at": "2026-11-17T11:16:25.806Z"
+        },
+        {
+          "slowestMs": 43714.951,
+          "meanMs": 42661.414,
+          "spanMs": 43715.001,
+          "clientsMs": [
+            43381.699,
+            41735.443,
+            43319.703,
+            43463.118,
+            40254.579,
+            43714.951,
+            43234.69,
+            42829.657,
+            42123.637,
+            42556.665
+          ],
+          "readyMs": 668,
+          "readBytes": 3197878272,
+          "at": "2026-11-17T11:18:03.141Z"
+        },
+        {
+          "slowestMs": 43943.667,
+          "meanMs": 43063.573,
+          "spanMs": 43943.735,
+          "clientsMs": [
+            43719.76,
+            41889.81,
+            43479.773,
+            43853.909,
+            43646.523,
+            43382.809,
+            43877.822,
+            43215.793,
+            43943.667,
+            39625.861
+          ],
+          "readyMs": 880,
+          "readBytes": 3253108736,
+          "at": "2026-11-17T11:18:58.970Z"
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 10,
+      "engine": "mason",
+      "statement": "revenue_by_month",
+      "slowestMs": 3731.398,
+      "meanMs": 3412.054,
+      "runs": [
+        {
+          "slowestMs": 3731.398,
+          "meanMs": 3412.054,
+          "spanMs": 3731.49,
+          "clientsMs": [
+            3595.781,
+            3019.523,
+            3029.799,
+            3384.564,
+            3031.559,
+            3494.713,
+            3612.005,
+            3731.398,
+            3528.443,
+            3692.755
+          ],
+          "readyMs": 4970,
+          "readBytes": 259350528,
+          "idleReadBytes": 1679360,
+          "at": "2026-11-17T11:17:26.823Z"
+        },
+        {
+          "slowestMs": 3689.555,
+          "meanMs": 3209.494,
+          "spanMs": 3689.566,
+          "clientsMs": [
+            2829.058,
+            3257.136,
+            2510.085,
+            3560.032,
+            3245.022,
+            3689.555,
+            3675.123,
+            3680.077,
+            3519.794,
+            2129.058
+          ],
+          "readyMs": 4537,
+          "readBytes": 254173184,
+          "idleReadBytes": 131072,
+          "at": "2026-11-17T11:17:47.282Z"
+        },
+        {
+          "slowestMs": 3742.071,
+          "meanMs": 3463.603,
+          "spanMs": 3742.118,
+          "clientsMs": [
+            3064.782,
+            3490.026,
+            3689.999,
+            3742.071,
+            3591.65,
+            3516.985,
+            3074.215,
+            3741.42,
+            3066.915,
+            3657.965
+          ],
+          "readyMs": 5001,
+          "readBytes": 260595712,
+          "idleReadBytes": 2072576,
+          "at": "2026-11-17T11:19:59.833Z"
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 1,
+      "engine": "postgres",
+      "statement": "lookup",
+      "slowestMs": 34.794,
+      "meanMs": 34.794,
+      "runs": [
+        {
+          "slowestMs": 34.471,
+          "meanMs": 34.471,
+          "spanMs": 34.471,
+          "clientsMs": [
+            34.471
+          ],
+          "readyMs": 667,
+          "readBytes": 5038080,
+          "at": "2026-11-17T11:20:15.753Z"
+        },
+        {
+          "slowestMs": 34.794,
+          "meanMs": 34.794,
+          "spanMs": 34.794,
+          "clientsMs": [
+            34.794
+          ],
+          "readyMs": 687,
+          "readBytes": 5033984,
+          "at": "2026-11-17T11:21:03.195Z"
+        },
+        {
+          "slowestMs": 35.15,
+          "meanMs": 35.15,
+          "spanMs": 35.15,
+          "clientsMs": [
+            35.15
+          ],
+          "readyMs": 664,
+          "readBytes": 5038080,
+          "at": "2026-11-17T11:21:14.868Z"
         }
       ]
     },
@@ -2396,705 +1520,887 @@
       "rows": 10000000,
       "clients": 1,
       "engine": "mason",
-      "query": "json_source",
-      "seconds": 30,
-      "p50Ms": 196.15,
-      "p95Ms": 202.78,
-      "qps": 1.82,
-      "completed": 110,
-      "errors": 0,
-      "errorCodes": {},
+      "statement": "lookup",
+      "slowestMs": 757.169,
+      "meanMs": 757.169,
       "runs": [
         {
-          "p50Ms": 195.39,
-          "p95Ms": 202.78,
-          "qps": 1.82,
-          "completed": 55,
-          "errors": 0
+          "slowestMs": 757.169,
+          "meanMs": 757.169,
+          "spanMs": 757.169,
+          "clientsMs": [
+            757.169
+          ],
+          "readyMs": 5507,
+          "readBytes": 190423040,
+          "idleReadBytes": 0,
+          "at": "2026-11-17T11:20:32.961Z"
         },
         {
-          "p50Ms": 196.92,
-          "p95Ms": 202.77,
-          "qps": 1.82,
-          "completed": 55,
-          "errors": 0
+          "slowestMs": 761.04,
+          "meanMs": 761.04,
+          "spanMs": 761.04,
+          "clientsMs": [
+            761.04
+          ],
+          "readyMs": 4547,
+          "readBytes": 190218240,
+          "idleReadBytes": 131072,
+          "at": "2026-11-17T11:20:50.341Z"
+        },
+        {
+          "slowestMs": 756.393,
+          "meanMs": 756.393,
+          "spanMs": 756.393,
+          "clientsMs": [
+            756.393
+          ],
+          "readyMs": 5496,
+          "readBytes": 190418944,
+          "idleReadBytes": 0,
+          "at": "2026-11-17T11:21:32.028Z"
         }
       ]
     },
     {
       "rows": 10000000,
+      "clients": 10,
+      "engine": "postgres",
+      "statement": "lookup",
+      "slowestMs": 38.323,
+      "meanMs": 36.712,
+      "runs": [
+        {
+          "slowestMs": 36.823,
+          "meanMs": 36.358,
+          "spanMs": 36.836,
+          "clientsMs": [
+            36.242,
+            36.823,
+            36.369,
+            36.734,
+            36.014,
+            36.431,
+            36.33,
+            36.244,
+            36.204,
+            36.19
+          ],
+          "readyMs": 690,
+          "readBytes": 5251072,
+          "at": "2026-11-17T11:21:44.832Z"
+        },
+        {
+          "slowestMs": 39.554,
+          "meanMs": 37.818,
+          "spanMs": 39.565,
+          "clientsMs": [
+            36.975,
+            38.853,
+            37.268,
+            36.507,
+            37.071,
+            36.797,
+            39.185,
+            39.554,
+            39.212,
+            36.754
+          ],
+          "readyMs": 679,
+          "readBytes": 5246976,
+          "at": "2026-11-17T11:22:32.462Z"
+        },
+        {
+          "slowestMs": 38.323,
+          "meanMs": 36.712,
+          "spanMs": 38.335,
+          "clientsMs": [
+            36.416,
+            36.387,
+            36.959,
+            36.253,
+            38.323,
+            36.203,
+            36.813,
+            37.146,
+            36.455,
+            36.165
+          ],
+          "readyMs": 657,
+          "readBytes": 5246976,
+          "at": "2026-11-17T11:22:44.150Z"
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 10,
+      "engine": "mason",
+      "statement": "lookup",
+      "slowestMs": 824.243,
+      "meanMs": 823.67,
+      "runs": [
+        {
+          "slowestMs": 825.41,
+          "meanMs": 824.661,
+          "spanMs": 825.426,
+          "clientsMs": [
+            824.937,
+            824.367,
+            824.646,
+            824.467,
+            824.209,
+            824.846,
+            824.196,
+            824.926,
+            824.602,
+            825.41
+          ],
+          "readyMs": 5522,
+          "readBytes": 208900096,
+          "idleReadBytes": 0,
+          "at": "2026-11-17T11:22:02.065Z"
+        },
+        {
+          "slowestMs": 824.243,
+          "meanMs": 823.67,
+          "spanMs": 824.25,
+          "clientsMs": [
+            823.537,
+            823.461,
+            824.243,
+            824.16,
+            823.387,
+            823.856,
+            823.541,
+            823.461,
+            824.032,
+            823.019
+          ],
+          "readyMs": 4564,
+          "readBytes": 208699392,
+          "idleReadBytes": 131072,
+          "at": "2026-11-17T11:22:19.575Z"
+        },
+        {
+          "slowestMs": 820.532,
+          "meanMs": 820.107,
+          "spanMs": 820.546,
+          "clientsMs": [
+            819.762,
+            820.218,
+            820.532,
+            819.854,
+            819.985,
+            820.125,
+            819.886,
+            820.337,
+            820.137,
+            820.23
+          ],
+          "readyMs": 5477,
+          "readBytes": 208904192,
+          "idleReadBytes": 0,
+          "at": "2026-11-17T11:23:01.299Z"
+        }
+      ]
+    },
+    {
+      "rows": 100000000,
+      "clients": 1,
+      "engine": "postgres",
+      "statement": "count_by_status",
+      "slowestMs": 216068.104,
+      "meanMs": 216068.104,
+      "runs": [
+        {
+          "slowestMs": 216397.548,
+          "meanMs": 216397.548,
+          "spanMs": 216397.548,
+          "clientsMs": [
+            216397.548
+          ],
+          "readyMs": 1088,
+          "readBytes": 28450795520,
+          "at": "2026-11-17T12:36:09.498Z"
+        },
+        {
+          "slowestMs": 216052.903,
+          "meanMs": 216052.903,
+          "spanMs": 216052.903,
+          "clientsMs": [
+            216052.903
+          ],
+          "readyMs": 635,
+          "readBytes": 28450971648,
+          "at": "2026-11-17T12:40:40.015Z"
+        },
+        {
+          "slowestMs": 216068.104,
+          "meanMs": 216068.104,
+          "spanMs": 216068.104,
+          "clientsMs": [
+            216068.104
+          ],
+          "readyMs": 627,
+          "readBytes": 28450877440,
+          "at": "2026-11-17T12:44:28.406Z"
+        }
+      ]
+    },
+    {
+      "rows": 100000000,
       "clients": 1,
       "engine": "mason",
-      "query": "window_count",
-      "seconds": 30,
-      "p50Ms": 8.41,
-      "p95Ms": 10.91,
-      "qps": 1.79,
-      "completed": 108,
-      "errors": 0,
-      "errorCodes": {},
+      "statement": "count_by_status",
+      "slowestMs": 4066.215,
+      "meanMs": 4066.215,
       "runs": [
         {
-          "p50Ms": 8.27,
-          "p95Ms": 11.13,
-          "qps": 1.79,
-          "completed": 54,
-          "errors": 0
+          "slowestMs": 4066.215,
+          "meanMs": 4066.215,
+          "spanMs": 4066.215,
+          "clientsMs": [
+            4066.215
+          ],
+          "readyMs": 4948,
+          "readBytes": 657092608,
+          "idleReadBytes": 1941504,
+          "at": "2026-11-17T12:40:03.357Z"
         },
         {
-          "p50Ms": 8.55,
-          "p95Ms": 10.68,
-          "qps": 1.79,
-          "completed": 54,
-          "errors": 0
+          "slowestMs": 4045.285,
+          "meanMs": 4045.285,
+          "spanMs": 4045.285,
+          "clientsMs": [
+            4045.285
+          ],
+          "readyMs": 4404,
+          "readBytes": 656019456,
+          "idleReadBytes": 278528,
+          "at": "2026-11-17T12:40:23.906Z"
+        },
+        {
+          "slowestMs": 4238.192,
+          "meanMs": 4238.192,
+          "spanMs": 4238.192,
+          "clientsMs": [
+            4238.192
+          ],
+          "readyMs": 4941,
+          "readBytes": 656474112,
+          "idleReadBytes": 1941504,
+          "at": "2026-11-17T12:48:21.788Z"
         }
       ]
     },
     {
-      "rows": 10000000,
+      "rows": 100000000,
+      "clients": 10,
+      "engine": "postgres",
+      "statement": "count_by_status",
+      "slowestMs": 709685.006,
+      "meanMs": 660077.155,
+      "runs": [
+        {
+          "slowestMs": 709685.006,
+          "meanMs": 660077.155,
+          "spanMs": 709685.013,
+          "clientsMs": [
+            709685.006,
+            699636.621,
+            487287.828,
+            709682.417,
+            487287.823,
+            697810.144,
+            694521.22,
+            709661.915,
+            695536.406,
+            709662.172
+          ],
+          "readyMs": 634,
+          "readBytes": 93135228928,
+          "at": "2026-11-17T12:48:38.142Z"
+        },
+        {
+          "slowestMs": 847865.497,
+          "meanMs": 760406.597,
+          "spanMs": 847865.549,
+          "clientsMs": [
+            845414.876,
+            618254.834,
+            845415.225,
+            477087.316,
+            847865.407,
+            828562.467,
+            619625.578,
+            828559.715,
+            845415.056,
+            847865.497
+          ],
+          "readyMs": 655,
+          "readBytes": 111207952384,
+          "at": "2026-11-17T13:01:31.210Z"
+        },
+        {
+          "slowestMs": 682709.972,
+          "meanMs": 640405.891,
+          "spanMs": 682710.161,
+          "clientsMs": [
+            682707.713,
+            570026.716,
+            681414.5,
+            682709.972,
+            681414.455,
+            569960.716,
+            682708.208,
+            489077.599,
+            681414.601,
+            682624.431
+          ],
+          "readyMs": 969,
+          "readBytes": 89568600064,
+          "at": "2026-11-17T13:15:51.786Z"
+        }
+      ]
+    },
+    {
+      "rows": 100000000,
+      "clients": 10,
+      "engine": "mason",
+      "statement": "count_by_status",
+      "slowestMs": 8449.902,
+      "meanMs": 7297.735,
+      "runs": [
+        {
+          "slowestMs": 8449.902,
+          "meanMs": 7228.931,
+          "spanMs": 8449.918,
+          "clientsMs": [
+            8430.77,
+            6906.948,
+            7236.406,
+            7360.593,
+            8199.26,
+            7778.952,
+            5706.482,
+            4124.034,
+            8095.96,
+            8449.902
+          ],
+          "readyMs": 4983,
+          "readBytes": 654385152,
+          "idleReadBytes": 1941504,
+          "at": "2026-11-17T13:00:45.443Z"
+        },
+        {
+          "slowestMs": 8449.912,
+          "meanMs": 7756.842,
+          "spanMs": 8449.912,
+          "clientsMs": [
+            6911.995,
+            8022.153,
+            8449.912,
+            6911.158,
+            7806.155,
+            8189.191,
+            8448.089,
+            8349.186,
+            7568.525,
+            6912.055
+          ],
+          "readyMs": 4483,
+          "readBytes": 657670144,
+          "idleReadBytes": 2072576,
+          "at": "2026-11-17T13:01:10.545Z"
+        },
+        {
+          "slowestMs": 8432.618,
+          "meanMs": 7297.735,
+          "spanMs": 8432.627,
+          "clientsMs": [
+            8087.553,
+            7820.81,
+            4135.227,
+            8326.534,
+            8432.618,
+            8180.847,
+            6679.7,
+            8365.646,
+            5623.787,
+            7324.633
+          ],
+          "readyMs": 4983,
+          "readBytes": 656019456,
+          "idleReadBytes": 1945600,
+          "at": "2026-11-17T13:27:32.155Z"
+        }
+      ]
+    },
+    {
+      "rows": 100000000,
+      "clients": 1,
+      "engine": "postgres",
+      "statement": "revenue_by_month",
+      "slowestMs": 335058.52,
+      "meanMs": 335058.52,
+      "runs": [
+        {
+          "slowestMs": 334506.501,
+          "meanMs": 334506.501,
+          "spanMs": 334506.501,
+          "clientsMs": [
+            334506.501
+          ],
+          "readyMs": 637,
+          "readBytes": 33754480640,
+          "at": "2026-11-17T13:27:52.740Z"
+        },
+        {
+          "slowestMs": 335058.52,
+          "meanMs": 335058.52,
+          "spanMs": 335058.52,
+          "clientsMs": [
+            335058.52
+          ],
+          "readyMs": 635,
+          "readBytes": 33754492928,
+          "at": "2026-11-17T13:34:48.755Z"
+        },
+        {
+          "slowestMs": 335077.216,
+          "meanMs": 335077.216,
+          "spanMs": 335077.216,
+          "clientsMs": [
+            335077.216
+          ],
+          "readyMs": 644,
+          "readBytes": 33754767360,
+          "at": "2026-11-17T13:40:35.558Z"
+        }
+      ]
+    },
+    {
+      "rows": 100000000,
       "clients": 1,
       "engine": "mason",
-      "query": "point_lookup",
-      "seconds": 30,
-      "p50Ms": 5.96,
-      "p95Ms": 8.41,
-      "qps": 1.79,
-      "completed": 108,
-      "errors": 0,
-      "errorCodes": {},
+      "statement": "revenue_by_month",
+      "slowestMs": 17877.141,
+      "meanMs": 17877.141,
       "runs": [
         {
-          "p50Ms": 6.05,
-          "p95Ms": 8.78,
-          "qps": 1.79,
-          "completed": 54,
-          "errors": 0
-        },
-        {
-          "p50Ms": 5.87,
-          "p95Ms": 8.04,
-          "qps": 1.79,
-          "completed": 54,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 10000000,
-      "clients": 32,
-      "engine": "postgres",
-      "query": "mix",
-      "seconds": 180,
-      "p50Ms": 952.87,
-      "p95Ms": 96612.96,
-      "qps": 0.77,
-      "completed": 704,
-      "errors": 81,
-      "errorCodes": {
-        "53100": 81
-      },
-      "runs": [
-        {
-          "p50Ms": 1371.4,
-          "p95Ms": 88991.49,
-          "qps": 0.77,
-          "completed": 169,
-          "errors": 22,
-          "loadAvg": [
-            3.14,
-            5.46,
-            8.11
+          "slowestMs": 17850.33,
+          "meanMs": 17850.33,
+          "spanMs": 17850.33,
+          "clientsMs": [
+            17850.33
           ],
-          "clientLoopDelayP99Ms": 5.9,
-          "clientCpuPct": 0
+          "readyMs": 4824,
+          "readBytes": 2460725248,
+          "idleReadBytes": 2072576,
+          "at": "2026-11-17T13:33:43.786Z"
         },
         {
-          "p50Ms": 777.51,
-          "p95Ms": 127525.51,
-          "qps": 0.73,
-          "completed": 196,
-          "errors": 17,
-          "loadAvg": [
-            6.61,
-            11.74,
-            13.94
+          "slowestMs": 17881.608,
+          "meanMs": 17881.608,
+          "spanMs": 17881.608,
+          "clientsMs": [
+            17881.608
           ],
-          "clientLoopDelayP99Ms": 5.5,
-          "clientCpuPct": 0
+          "readyMs": 4443,
+          "readBytes": 2465624064,
+          "idleReadBytes": 2215936,
+          "at": "2026-11-17T13:34:18.592Z"
         },
         {
-          "p50Ms": 1128.22,
-          "p95Ms": 71837.54,
-          "qps": 0.79,
-          "completed": 159,
-          "errors": 22,
-          "loadAvg": [
-            20.42,
-            26.24,
-            21.26
+          "slowestMs": 17877.141,
+          "meanMs": 17877.141,
+          "spanMs": 17877.141,
+          "clientsMs": [
+            17877.141
           ],
-          "clientLoopDelayP99Ms": 5.6,
-          "clientCpuPct": 0
-        },
+          "readyMs": 4973,
+          "readBytes": 2465083392,
+          "idleReadBytes": 2224128,
+          "at": "2026-11-17T13:46:27.320Z"
+        }
+      ]
+    },
+    {
+      "rows": 100000000,
+      "clients": 10,
+      "engine": "postgres",
+      "statement": "revenue_by_month",
+      "slowestMs": 2035509.987,
+      "meanMs": 1729497.027,
+      "runs": [
         {
-          "p50Ms": 619.55,
-          "p95Ms": 104234.42,
-          "qps": 0.77,
-          "completed": 180,
-          "errors": 20,
-          "loadAvg": [
-            29.1,
-            31.64,
-            26.14
+          "slowestMs": 2263642.64,
+          "meanMs": 1915111.26,
+          "spanMs": 2263642.64,
+          "clientsMs": [
+            2254562.444,
+            2263353.527,
+            1132817.372,
+            2263642.64,
+            2263574.989,
+            1188904.732,
+            2241347.404,
+            2183387.142,
+            1190843.49,
+            2168678.855
           ],
-          "clientLoopDelayP99Ms": 5.7,
-          "clientCpuPct": 0
-        }
-      ],
-      "slowest": {
-        "query": "top_customers",
-        "p50Ms": 114374.08
-      }
-    },
-    {
-      "rows": 10000000,
-      "clients": 32,
-      "engine": "postgres",
-      "query": "status",
-      "seconds": 180,
-      "p50Ms": 19045.28,
-      "p95Ms": 29253.12,
-      "qps": 0.13,
-      "completed": 117,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 21055.95,
-          "p95Ms": 37022.81,
-          "qps": 0.11,
-          "completed": 25,
-          "errors": 0
+          "readyMs": 634,
+          "readBytes": 188099981312,
+          "at": "2026-11-17T13:46:57.638Z"
         },
         {
-          "p50Ms": 17034.61,
-          "p95Ms": 23027.86,
-          "qps": 0.12,
-          "completed": 33,
-          "errors": 0
-        },
-        {
-          "p50Ms": 21756.72,
-          "p95Ms": 32895.41,
-          "qps": 0.14,
-          "completed": 29,
-          "errors": 0
-        },
-        {
-          "p50Ms": 14159.83,
-          "p95Ms": 25610.82,
-          "qps": 0.13,
-          "completed": 30,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 10000000,
-      "clients": 32,
-      "engine": "postgres",
-      "query": "daily_tenant",
-      "seconds": 180,
-      "p50Ms": 31.7,
-      "p95Ms": 92.27,
-      "qps": 0.15,
-      "completed": 133,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 36.59,
-          "p95Ms": 74.19,
-          "qps": 0.16,
-          "completed": 35,
-          "errors": 0
-        },
-        {
-          "p50Ms": 21.35,
-          "p95Ms": 92.33,
-          "qps": 0.14,
-          "completed": 37,
-          "errors": 0
-        },
-        {
-          "p50Ms": 36.73,
-          "p95Ms": 96.78,
-          "qps": 0.13,
-          "completed": 27,
-          "errors": 0
-        },
-        {
-          "p50Ms": 26.8,
-          "p95Ms": 92.2,
-          "qps": 0.15,
-          "completed": 34,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 10000000,
-      "clients": 32,
-      "engine": "postgres",
-      "query": "top_customers",
-      "seconds": 180,
-      "p50Ms": 114374.08,
-      "p95Ms": 167041.17,
-      "qps": 0.06,
-      "completed": 53,
-      "errors": 81,
-      "errorCodes": {
-        "53100": 81
-      },
-      "runs": [
-        {
-          "p50Ms": 90069.1,
-          "p95Ms": 171463.39,
-          "qps": 0.06,
-          "completed": 14,
-          "errors": 22
-        },
-        {
-          "p50Ms": 127005.75,
-          "p95Ms": 162618.96,
-          "qps": 0.07,
-          "completed": 20,
-          "errors": 17
-        },
-        {
-          "p50Ms": 110807.15,
-          "p95Ms": 178647.17,
-          "qps": 0.02,
-          "completed": 5,
-          "errors": 22
-        },
-        {
-          "p50Ms": 117941.02,
-          "p95Ms": 133339.27,
-          "qps": 0.06,
-          "completed": 14,
-          "errors": 20
-        }
-      ]
-    },
-    {
-      "rows": 10000000,
-      "clients": 32,
-      "engine": "postgres",
-      "query": "json_source",
-      "seconds": 180,
-      "p50Ms": 40963.97,
-      "p95Ms": 58791.48,
-      "qps": 0.2,
-      "completed": 170,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 38532.43,
-          "p95Ms": 59341.42,
-          "qps": 0.21,
-          "completed": 45,
-          "errors": 0
-        },
-        {
-          "p50Ms": 40971.2,
-          "p95Ms": 56612.74,
-          "qps": 0.15,
-          "completed": 40,
-          "errors": 0
-        },
-        {
-          "p50Ms": 40956.74,
-          "p95Ms": 72088.02,
-          "qps": 0.21,
-          "completed": 42,
-          "errors": 0
-        },
-        {
-          "p50Ms": 46140.87,
-          "p95Ms": 58241.54,
-          "qps": 0.19,
-          "completed": 43,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 10000000,
-      "clients": 32,
-      "engine": "postgres",
-      "query": "window_count",
-      "seconds": 180,
-      "p50Ms": 435.75,
-      "p95Ms": 1163.03,
-      "qps": 0.12,
-      "completed": 115,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 681.62,
-          "p95Ms": 1245.53,
-          "qps": 0.11,
-          "completed": 25,
-          "errors": 0
-        },
-        {
-          "p50Ms": 338.87,
-          "p95Ms": 1080.54,
-          "qps": 0.12,
-          "completed": 33,
-          "errors": 0
-        },
-        {
-          "p50Ms": 532.64,
-          "p95Ms": 1522.15,
-          "qps": 0.14,
-          "completed": 28,
-          "errors": 0
-        },
-        {
-          "p50Ms": 200.9,
-          "p95Ms": 650.3,
-          "qps": 0.12,
-          "completed": 29,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 10000000,
-      "clients": 32,
-      "engine": "postgres",
-      "query": "point_lookup",
-      "seconds": 180,
-      "p50Ms": 16.2,
-      "p95Ms": 51.91,
-      "qps": 0.13,
-      "completed": 116,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 13.5,
-          "p95Ms": 25.58,
-          "qps": 0.11,
-          "completed": 25,
-          "errors": 0
-        },
-        {
-          "p50Ms": 15.87,
-          "p95Ms": 83.27,
-          "qps": 0.12,
-          "completed": 33,
-          "errors": 0
-        },
-        {
-          "p50Ms": 16.52,
-          "p95Ms": 52.27,
-          "qps": 0.14,
-          "completed": 28,
-          "errors": 0
-        },
-        {
-          "p50Ms": 16.98,
-          "p95Ms": 51.54,
-          "qps": 0.13,
-          "completed": 30,
-          "errors": 0
-        }
-      ]
-    },
-    {
-      "rows": 10000000,
-      "clients": 32,
-      "engine": "mason",
-      "query": "mix",
-      "seconds": 180,
-      "p50Ms": 2569.8,
-      "p95Ms": 3510.03,
-      "qps": 12.18,
-      "completed": 4429,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 2566.14,
-          "p95Ms": 3507.08,
-          "qps": 12.19,
-          "completed": 2211,
-          "errors": 0,
-          "loadAvg": [
-            22.76,
-            25.69,
-            17.79
+          "slowestMs": 2035509.987,
+          "meanMs": 1729497.027,
+          "spanMs": 2035510.006,
+          "clientsMs": [
+            1048525.974,
+            980128.936,
+            2029968.276,
+            2030534.401,
+            2035509.987,
+            2019036.384,
+            2035251.987,
+            2030797.817,
+            2035044.308,
+            1050172.203
           ],
-          "clientLoopDelayP99Ms": 7.7,
-          "clientCpuPct": 1
+          "readyMs": 628,
+          "readBytes": 157410430976,
+          "at": "2026-11-17T14:48:02.261Z"
         },
         {
-          "p50Ms": 2573.45,
-          "p95Ms": 3512.98,
-          "qps": 12.18,
-          "completed": 2218,
-          "errors": 0,
-          "loadAvg": [
-            7.09,
-            16.35,
-            15.62
+          "slowestMs": 1870951.922,
+          "meanMs": 1623334.263,
+          "spanMs": 1870951.952,
+          "clientsMs": [
+            1870951.922,
+            1869364.067,
+            1835098.114,
+            1865840.79,
+            1262742.449,
+            1869698.937,
+            1258536.479,
+            1870365.298,
+            1265647.362,
+            1265097.214
           ],
-          "clientLoopDelayP99Ms": 7.6,
-          "clientCpuPct": 1
-        }
-      ],
-      "slowest": {
-        "query": "top_customers",
-        "p50Ms": 3029.63
-      }
-    },
-    {
-      "rows": 10000000,
-      "clients": 32,
-      "engine": "mason",
-      "query": "status",
-      "seconds": 180,
-      "p50Ms": 2689.43,
-      "p95Ms": 3425.55,
-      "qps": 2.04,
-      "completed": 740,
-      "errors": 0,
-      "errorCodes": {},
-      "runs": [
-        {
-          "p50Ms": 2749.91,
-          "p95Ms": 3478.18,
-          "qps": 2.03,
-          "completed": 369,
-          "errors": 0
-        },
-        {
-          "p50Ms": 2628.95,
-          "p95Ms": 3372.92,
-          "qps": 2.04,
-          "completed": 371,
-          "errors": 0
+          "readyMs": 1031,
+          "readBytes": 139453800448,
+          "at": "2026-11-17T15:22:10.105Z"
         }
       ]
     },
     {
-      "rows": 10000000,
-      "clients": 32,
+      "rows": 100000000,
+      "clients": 10,
       "engine": "mason",
-      "query": "daily_tenant",
-      "seconds": 180,
-      "p50Ms": 2302.96,
-      "p95Ms": 2954.3,
-      "qps": 2.02,
-      "completed": 737,
-      "errors": 0,
-      "errorCodes": {},
+      "statement": "revenue_by_month",
+      "slowestMs": 668780.432,
+      "meanMs": 647098.697,
       "runs": [
         {
-          "p50Ms": 2315.89,
-          "p95Ms": 2944.64,
-          "qps": 2.03,
-          "completed": 369,
-          "errors": 0
+          "slowestMs": 685972.254,
+          "meanMs": 669956.035,
+          "spanMs": 685972.449,
+          "clientsMs": [
+            683689.101,
+            666608.882,
+            665516.208,
+            684780.655,
+            671696.799,
+            685972.254,
+            667599.387,
+            656634.841,
+            683561.571,
+            633500.65
+          ],
+          "readyMs": 4980,
+          "readBytes": 37145047040,
+          "idleReadBytes": 4530176,
+          "at": "2026-11-17T14:24:58.396Z"
         },
         {
-          "p50Ms": 2290.03,
-          "p95Ms": 2963.97,
-          "qps": 2.02,
-          "completed": 368,
-          "errors": 0
+          "slowestMs": 668780.432,
+          "meanMs": 647098.697,
+          "spanMs": 668780.598,
+          "clientsMs": [
+            578329.893,
+            663392.098,
+            668174.649,
+            608703.491,
+            666207.539,
+            657907.801,
+            663306.139,
+            643936.272,
+            668780.432,
+            652248.654
+          ],
+          "readyMs": 4423,
+          "readBytes": 37060317184,
+          "idleReadBytes": 4853760,
+          "at": "2026-11-17T14:36:41.323Z"
+        },
+        {
+          "slowestMs": 663364.743,
+          "meanMs": 641025.805,
+          "spanMs": 663364.901,
+          "clientsMs": [
+            601888.095,
+            663364.743,
+            619701.515,
+            653144.765,
+            661101.17,
+            662728.328,
+            657075.739,
+            601687.809,
+            649251.466,
+            640314.424
+          ],
+          "readyMs": 5003,
+          "readBytes": 37092544512,
+          "idleReadBytes": 4530176,
+          "at": "2026-11-17T15:53:38.202Z"
         }
       ]
     },
     {
-      "rows": 10000000,
-      "clients": 32,
-      "engine": "mason",
-      "query": "top_customers",
-      "seconds": 180,
-      "p50Ms": 3029.63,
-      "p95Ms": 3846.96,
-      "qps": 2.01,
-      "completed": 732,
-      "errors": 0,
-      "errorCodes": {},
+      "rows": 100000000,
+      "clients": 1,
+      "engine": "postgres",
+      "statement": "lookup",
+      "slowestMs": 21.342,
+      "meanMs": 21.342,
       "runs": [
         {
-          "p50Ms": 3010.75,
-          "p95Ms": 3841.53,
-          "qps": 2.02,
-          "completed": 366,
-          "errors": 0
+          "slowestMs": 21.04,
+          "meanMs": 21.04,
+          "spanMs": 21.04,
+          "clientsMs": [
+            21.04
+          ],
+          "readyMs": 620,
+          "readBytes": 5181440,
+          "at": "2026-11-17T16:04:53.941Z"
         },
         {
-          "p50Ms": 3048.51,
-          "p95Ms": 3852.39,
-          "qps": 2.01,
-          "completed": 366,
-          "errors": 0
+          "slowestMs": 24.392,
+          "meanMs": 24.392,
+          "spanMs": 24.392,
+          "clientsMs": [
+            24.392
+          ],
+          "readyMs": 627,
+          "readBytes": 5185536,
+          "at": "2026-11-17T16:06:05.644Z"
+        },
+        {
+          "slowestMs": 21.342,
+          "meanMs": 21.342,
+          "spanMs": 21.342,
+          "clientsMs": [
+            21.342
+          ],
+          "readyMs": 637,
+          "readBytes": 5189632,
+          "at": "2026-11-17T16:06:17.028Z"
         }
       ]
     },
     {
-      "rows": 10000000,
-      "clients": 32,
+      "rows": 100000000,
+      "clients": 1,
       "engine": "mason",
-      "query": "json_source",
-      "seconds": 180,
-      "p50Ms": 2922.92,
-      "p95Ms": 3751.1,
-      "qps": 2.03,
-      "completed": 737,
-      "errors": 0,
-      "errorCodes": {},
+      "statement": "lookup",
+      "slowestMs": 13237.864,
+      "meanMs": 13237.864,
       "runs": [
         {
-          "p50Ms": 2957.18,
-          "p95Ms": 3720.94,
-          "qps": 2.03,
-          "completed": 368,
-          "errors": 0
+          "slowestMs": 13240.553,
+          "meanMs": 13240.553,
+          "spanMs": 13240.553,
+          "clientsMs": [
+            13240.553
+          ],
+          "readyMs": 5218,
+          "readBytes": 1859244032,
+          "idleReadBytes": 2072576,
+          "at": "2026-11-17T16:05:10.554Z"
         },
         {
-          "p50Ms": 2888.66,
-          "p95Ms": 3781.25,
-          "qps": 2.03,
-          "completed": 369,
-          "errors": 0
+          "slowestMs": 13236.098,
+          "meanMs": 13236.098,
+          "spanMs": 13236.098,
+          "clientsMs": [
+            13236.098
+          ],
+          "readyMs": 4409,
+          "readBytes": 1859158016,
+          "idleReadBytes": 2351104,
+          "at": "2026-11-17T16:05:40.403Z"
+        },
+        {
+          "slowestMs": 13237.864,
+          "meanMs": 13237.864,
+          "spanMs": 13237.864,
+          "clientsMs": [
+            13237.864
+          ],
+          "readyMs": 5486,
+          "readBytes": 1859244032,
+          "idleReadBytes": 2072576,
+          "at": "2026-11-17T16:06:33.967Z"
         }
       ]
     },
     {
-      "rows": 10000000,
-      "clients": 32,
-      "engine": "mason",
-      "query": "window_count",
-      "seconds": 180,
-      "p50Ms": 2287.94,
-      "p95Ms": 2915.72,
-      "qps": 2.04,
-      "completed": 741,
-      "errors": 0,
-      "errorCodes": {},
+      "rows": 100000000,
+      "clients": 10,
+      "engine": "postgres",
+      "statement": "lookup",
+      "slowestMs": 25.452,
+      "meanMs": 24.021,
       "runs": [
         {
-          "p50Ms": 2287.49,
-          "p95Ms": 2829.75,
-          "qps": 2.03,
-          "completed": 369,
-          "errors": 0
+          "slowestMs": 25.452,
+          "meanMs": 24.581,
+          "spanMs": 25.613,
+          "clientsMs": [
+            24.484,
+            24.315,
+            25.437,
+            24.273,
+            24.227,
+            24.278,
+            24.465,
+            25.452,
+            24.342,
+            24.536
+          ],
+          "readyMs": 631,
+          "readBytes": 5464064,
+          "at": "2026-11-17T16:06:59.389Z"
         },
         {
-          "p50Ms": 2288.39,
-          "p95Ms": 3001.68,
-          "qps": 2.04,
-          "completed": 372,
-          "errors": 0
+          "slowestMs": 25.285,
+          "meanMs": 24.021,
+          "spanMs": 25.299,
+          "clientsMs": [
+            24.3,
+            24.267,
+            23.39,
+            23.44,
+            23.377,
+            24.402,
+            23.642,
+            24.519,
+            25.285,
+            23.587
+          ],
+          "readyMs": 623,
+          "readBytes": 5464064,
+          "at": "2026-11-17T16:08:11.762Z"
+        },
+        {
+          "slowestMs": 26.035,
+          "meanMs": 23.971,
+          "spanMs": 26.155,
+          "clientsMs": [
+            23.878,
+            23.641,
+            23.984,
+            23.616,
+            23.751,
+            23.79,
+            26.035,
+            23.762,
+            23.808,
+            23.446
+          ],
+          "readyMs": 624,
+          "readBytes": 5464064,
+          "at": "2026-11-17T16:08:23.164Z"
         }
       ]
     },
     {
-      "rows": 10000000,
-      "clients": 32,
+      "rows": 100000000,
+      "clients": 10,
       "engine": "mason",
-      "query": "point_lookup",
-      "seconds": 180,
-      "p50Ms": 2379.26,
-      "p95Ms": 3005.43,
-      "qps": 2.04,
-      "completed": 742,
-      "errors": 0,
-      "errorCodes": {},
+      "statement": "lookup",
+      "slowestMs": 13484.327,
+      "meanMs": 13483.588,
       "runs": [
         {
-          "p50Ms": 2352.26,
-          "p95Ms": 3000.1,
-          "qps": 2.04,
-          "completed": 370,
-          "errors": 0
+          "slowestMs": 13472.193,
+          "meanMs": 13470.825,
+          "spanMs": 13472.299,
+          "clientsMs": [
+            13466.608,
+            13471.599,
+            13472.089,
+            13472.181,
+            13471.844,
+            13471.924,
+            13466.239,
+            13472.107,
+            13471.465,
+            13472.193
+          ],
+          "readyMs": 5203,
+          "readBytes": 1880449024,
+          "idleReadBytes": 2072576,
+          "at": "2026-11-17T16:07:16.028Z"
         },
         {
-          "p50Ms": 2406.25,
-          "p95Ms": 3010.75,
-          "qps": 2.04,
-          "completed": 372,
-          "errors": 0
+          "slowestMs": 13491.153,
+          "meanMs": 13490.632,
+          "spanMs": 13491.162,
+          "clientsMs": [
+            13490.86,
+            13490.719,
+            13490.625,
+            13491.153,
+            13490.167,
+            13490.386,
+            13490.849,
+            13490.092,
+            13490.882,
+            13490.585
+          ],
+          "readyMs": 4419,
+          "readBytes": 1880371200,
+          "idleReadBytes": 2351104,
+          "at": "2026-11-17T16:07:46.136Z"
+        },
+        {
+          "slowestMs": 13484.327,
+          "meanMs": 13483.588,
+          "spanMs": 13484.38,
+          "clientsMs": [
+            13482.629,
+            13484.208,
+            13483.87,
+            13484.327,
+            13483.082,
+            13483.525,
+            13483.889,
+            13483.299,
+            13483.716,
+            13483.335
+          ],
+          "readyMs": 5512,
+          "readBytes": 1880453120,
+          "idleReadBytes": 2088960,
+          "at": "2026-11-17T16:08:40.105Z"
         }
       ]
     }
   ],
-  "complete": true,
-  "sweeps": {
-    "rows": {
-      "axis": "rows",
-      "rows": null,
-      "clients": 8,
-      "steps": [
-        1000000,
-        3000000,
-        10000000,
-        30000000
-      ],
-      "reached": {
-        "rows": 30000000,
-        "clients": 8
-      },
-      "stopped": null,
-      "at": {
-        "rows": 30000000,
-        "clients": 8,
-        "postgresP95Ms": 258456.14,
-        "postgresQps": 0.09,
-        "slowest": {
-          "query": "top_customers",
-          "p50Ms": 132997.64
-        },
-        "masonP95Ms": 4528.55,
-        "masonQps": 3.8
-      }
-    },
-    "clients": {
-      "axis": "clients",
-      "rows": 10000000,
-      "clients": null,
-      "rowsWhy": "the largest size the rows sweep measured under 60 s",
-      "steps": [
-        1,
-        8,
-        32
-      ],
-      "reached": {
-        "rows": 10000000,
-        "clients": 32
-      },
-      "stopped": null,
-      "at": {
-        "rows": 10000000,
-        "clients": 32,
-        "postgresP95Ms": 96612.96,
-        "postgresQps": 0.77,
-        "slowest": {
-          "query": "top_customers",
-          "p50Ms": 114374.08
-        },
-        "masonP95Ms": 3510.03,
-        "masonQps": 12.18
-      }
-    }
-  }
+  "complete": true
 }

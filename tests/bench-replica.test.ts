@@ -315,8 +315,10 @@ function renderCold(f: ColdFixture): { section: string; headline: string } {
   const mainTable = table(["query", "rows", "clients", "Postgres (s)", "Mason (s)", "Mason is"], ["---", "---:", "---:", "---:", "---:", "---"],
     grid.map(({ s, rows, c, p, m }, i) => [i === 0 || grid[i - 1]!.s !== s ? s.title : "", countText(rows), String(c), secondsText(p.slowestMs), secondsText(m.slowestMs), masonIs(p.slowestMs, m.slowestMs)]));
   const lookupSlower = grid.some(({ s, p, m }) => isLookup(s.sql) && m.slowestMs > p.slowestMs);
+  // the limits and the disk beside the sentence they bear on: a cold read on Postgres is as fast as its disk
+  const limitsText = `${env.limits.cpus} CPUs, ${gibShort(env.limits.memoryBytes)} of memory and no swap`;
   const note = (design: string): string => `Mason is for scans and aggregates${lookupSlower ? `. A lookup through an index is faster on Postgres ([docs/DESIGN.md](${design}) "Heap order, no index")` : ""}.` +
-    ` Cold times on Postgres depend on the disk's throughput${env.disk === null ? "." : `. This disk was ${env.disk}.`}`;
+    ` Cold times on Postgres depend on the disk's throughput. Each engine had ${limitsText}${env.disk === null ? "." : `, on a disk of ${env.disk}.`}`;
 
   const pgVersion = /^PostgreSQL [\d.]+/.exec(env.postgres.version)?.[0] ?? env.postgres.version;
   const masonVersion = /\d+\.\d+\.\d+\S*/.exec(env.mason.version)?.[0] ?? env.mason.version;
@@ -351,7 +353,8 @@ ${note("docs/DESIGN.md")} It was measured on ${env.label}, against ${pgVersion} 
   const pgbenchVersion = /\d+(\.\d+)+/.exec(env.client.pgbench)?.[0] ?? env.client.pgbench;
   const differing = f.sizes.filter((z) => !z.answersEqual);
   const measured = [
-    `- **The machine**: ${env.label}. ${env.machine.cpus} CPUs${env.machine.cpuModel === "unknown" ? "" : ` (${env.machine.cpuModel})`}, ${gib(env.machine.ramBytes)} of RAM, ${env.machine.os} (${env.machine.arch}).`,
+    // the instance as its label names it: the RAM the OS reports is less than the instance's, and would contradict it
+    `- **The machine**: ${env.label}${env.machine.cpuModel === "unknown" ? "" : `, ${env.machine.cpuModel}`}. ${env.machine.os} (${env.machine.arch}).`,
     `- **The disk**: ${env.disk ?? "not said"}. A run's read is what the measured engine's container read from disk while pgbench ran, from its cgroup's \`io.stat\`.` +
       (idle.length === 0 ? "" : ` While Mason was measured, the idle Postgres read at most ${numText(Math.max(...idle) / 1e6)} MB.`),
     `- **The limits**: Postgres and Mason each ran in a container with \`--cpus ${env.limits.cpus} --memory ${flag} --memory-swap ${flag}\`. That is ${env.limits.cpus} CPUs and ${memory} of memory, with no swap. A container's memory counts its page cache, so both had the same cache.`,
@@ -794,13 +797,13 @@ test("the cold renderer: one table of every query × size × clients, the data a
   assert.equal(rows[7], "|  | 100 M | 10 | 120 | 6.00 | 20× faster |");
   assert.equal(rows[8], "| Revenue by month, orders joined to customers | 1 M | 1 | 0.40 | 0.020 | 20× faster |");
   assert.equal(rows[14], "| One order by its primary key | 1 M | 1 | 0.0020 | 0.040 | 20× slower |");
-  assert.match(headline, /\n\nMason is for scans and aggregates\. A lookup through an index is faster on Postgres \(\[docs\/DESIGN\.md\]\(docs\/DESIGN\.md\) "Heap order, no index"\)\. Cold times on Postgres depend on the disk's throughput\. This disk was EBS gp3, 125 MB\/s, 3000 IOPS\. It was measured on a test box, against PostgreSQL 18\.1 and Mason 0\.23\.0, on 2026-11-17\. \[docs\/MEASUREMENTS\.md\]\(docs\/MEASUREMENTS\.md\) has every run and how it was measured\.\n$/);
+  assert.match(headline, /\n\nMason is for scans and aggregates\. A lookup through an index is faster on Postgres \(\[docs\/DESIGN\.md\]\(docs\/DESIGN\.md\) "Heap order, no index"\)\. Cold times on Postgres depend on the disk's throughput\. Each engine had 4 CPUs, 8 GiB of memory and no swap, on a disk of EBS gp3, 125 MB\/s, 3000 IOPS\. It was measured on a test box, against PostgreSQL 18\.1 and Mason 0\.23\.0, on 2026-11-17\. \[docs\/MEASUREMENTS\.md\]\(docs\/MEASUREMENTS\.md\) has every run and how it was measured\.\n$/);
   assert.ok(section.includes(rows.join("\n")), "the section's first table is the README's");
   // every run: the times, and what the measured engine read (GB, and MB/s over the run's time: 100 MB in 0.44 s)
   assert.match(section, /## Every run\n\n[^\n]*\n[^\n]*\n\n\| query \| rows \| clients \| Postgres slowest \(s\) \| Postgres mean \(s\) \| Postgres read, GB \(MB\/s\) \| Mason slowest \(s\) \| Mason mean \(s\) \| Mason read, GB \(MB\/s\) \|\n\|[^\n]*\n\| Count by status, every order \| 1 M \| 1 \| 0\.44, 0\.40, 0\.36 \| 0\.35, 0\.32, 0\.29 \| 0\.10 \(227\), 0\.10 \(250\), 0\.10 \(278\) \| 0\.022, 0\.020, 0\.018 \|/);
   assert.match(section, /## The data and the first sync\n\nThe rows are synthetic[^\n]*\n`generate_series`\. The primary keys are random UUIDs\. The status column has no index, so the count reads every row on both\. Postgres has these indexes: customers \(id\), its primary key, orders \(id\), its primary key, orders \(tenant_id, created_at\) and orders \(created_at\)\./);
   assert.match(section, /\| 100,000,000 \| 5,000,000 \| 35\.0 GiB \| 9\.6 GiB \| 300 \|/);
-  assert.match(section, /<details><summary>How it was measured<\/summary>\n\n- \*\*The machine\*\*: a test box\.[^]*- \*\*The disk\*\*: EBS gp3, 125 MB\/s, 3000 IOPS\. A run's read is what the measured engine's container read from disk while pgbench ran, from its cgroup's `io\.stat`\. While Mason was measured, the idle Postgres read at most 2\.00 MB\.[^]*`--cpus 4 --memory 8g --memory-swap 8g`[^]*Its engine could use at most 4 GiB of the container's memory, half of it\.[^]*`pgbench` 18\.1 from[^]*picked at random from the data, as a quoted literal\. At 1 M rows, ids 00000000-0000-4000-8000-000000000001, [^]*\n\n<\/details>\n$/);
+  assert.match(section, /<details><summary>How it was measured<\/summary>\n\n- \*\*The machine\*\*: a test box, a CPU\. Linux 6\.8 \(arm64\)\.\n[^]*- \*\*The disk\*\*: EBS gp3, 125 MB\/s, 3000 IOPS\. A run's read is what the measured engine's container read from disk while pgbench ran, from its cgroup's `io\.stat`\. While Mason was measured, the idle Postgres read at most 2\.00 MB\.[^]*`--cpus 4 --memory 8g --memory-swap 8g`[^]*Its engine could use at most 4 GiB of the container's memory, half of it\.[^]*`pgbench` 18\.1 from[^]*picked at random from the data, as a quoted literal\. At 1 M rows, ids 00000000-0000-4000-8000-000000000001, [^]*\n\n<\/details>\n$/);
   for (const text of [headline, section]) {
     assert.doesNotMatch(text, /\bcop(y|ies|ied|ying)\b/i, "Mason syncs a table: never \"copy\" where a user reads it");
     assert.doesNotMatch(text, /duckdb/i, "nothing a user reads is named for the engine");
@@ -812,11 +815,15 @@ test("the cold renderer: one table of every query × size × clients, the data a
   }
   // the lookup answered faster on Mason: no note says Postgres is
   const fast = await syntheticCold(1);
-  assert.match(renderReplicaHeadline(fast), /\n\nMason is for scans and aggregates\. Cold times on Postgres depend on the disk's throughput\. This disk was/);
+  assert.match(renderReplicaHeadline(fast), /\n\nMason is for scans and aggregates\. Cold times on Postgres depend on the disk's throughput\. Each engine had 4 CPUs, 8 GiB of memory and no swap, on a disk of /);
   // one run: no median to speak of; no disk said: the sentence without it
   const once = { ...f, environment: { ...f.environment, method: { ...f.environment.method, runs: 1 }, disk: null } };
   assert.match(renderReplicaHeadline(once), /every client had its answer, from one run\./);
-  assert.match(renderReplicaHeadline(once), /Cold times on Postgres depend on the disk's throughput\. It was measured on/);
+  assert.match(renderReplicaHeadline(once), /Cold times on Postgres depend on the disk's throughput\. Each engine had 4 CPUs, 8 GiB of memory and no swap\. It was measured on/);
+  // a CPU model the run did not record is left out, and the machine is its label alone: no RAM beside it
+  const unrecorded = { ...f, environment: { ...f.environment, machine: { ...f.environment.machine, cpuModel: "unknown" } } };
+  const machineLine = /- \*\*The machine\*\*: [^\n]*/.exec(renderReplicaSection(unrecorded))?.[0];
+  assert.equal(machineLine, "- **The machine**: a test box. Linux 6.8 (arm64).");
 });
 
 test("a cold fixture of other data or statements cannot render as this run: the check names it, and the renderer refuses one with no data", async () => {
