@@ -4231,6 +4231,17 @@ name; those an index answers are Postgres's (the point lookup 0.3 ms against 1.9
 the scans, why not measured). Not shown: 10 M+ rows, a page cache smaller than the tables, a write load beside the reads,
 a real database's rows.
 
+**The cold mode (issue 1121, 2026-11-17).** `--cold` (scripts/bench-replica-cold.ts) times each of three queries once,
+at 1 and 10 clients, each run after its engine's container is restarted and the OS page cache dropped, both engines in
+containers of the same `--cpus` and `--memory` (`--memory-swap` the same). **Why.** A warm p95 over a mix answers how a
+busy dashboard feels; a reader first asks how long one query takes, the first time. The sweep ran Mason in its own
+process with no limit on its page cache while Postgres had a container's; under cgroup v2 a container's limit counts its
+page cache, so equal containers give both the same cache. Postgres stays up, idle and restarted first, while Mason is
+measured, because a Mason start reads its source's catalog. The lookup's id is a plain literal per client, chosen by
+pgbench's `\if :client_id`: a literal chosen inside the SQL (`CASE :client_id WHEN …`) stopped Mason's engine pushing the
+filter down in a hand-run of the method, and made the lookup look many times slower than it is. Once its fixture exists
+it is the README's speed table; the sweep stays in docs/MEASUREMENTS.md.
+
 ### DuckDB alone against the oracle
 
 **Decision.** Every oracle run asks each statement, as written, of a plain DuckDB connection over the same copy

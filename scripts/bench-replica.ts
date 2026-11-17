@@ -57,6 +57,10 @@
  * `bench_replica_<rows>` (kept on a --postgres server for the next run; `COMMENT ON TABLE orders` says what they hold).
  * The copy is not polled while statements are measured (the data does not change; a poll is a scan of the source).
  * The fixture is written after each size and at the end, so an interrupted run keeps what it measured.
+ *
+ * THE COLD MODE (`--cold`, scripts/bench-replica-cold.ts; `--cold --help` lists its options): each of three statements
+ * sent once by 1 and by 10 clients at the same moment, each engine in a container of the same CPUs and memory, restarted
+ * and the OS page cache dropped before every run. Its fixture is tests/fixtures/bench-replica-cold.json.
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -226,7 +230,7 @@ export function parseCount(s: string): number {
   return Math.round(Number(m[1]) * (m[2]!.toLowerCase() === "m" ? 1e6 : m[2]!.toLowerCase() === "k" ? 1e3 : 1));
 }
 /** an option the run cannot take: said by its message alone (anything else is said with its stack) */
-class Usage extends Error {}
+export class Usage extends Error {}
 function parseArgs(argv: string[]): Options {
   const o: Options = { sizes: [1e6, 1e7, 5e7], clients: [1, 8, 32, 128], seconds: 30, warmup: 5, runs: 2, postgres: null,
     out: path.join(REPO, "tests/fixtures/bench-replica.json"), label: os.hostname(), memory: null, work: os.tmpdir(), reserveGb: 60, keepPostgres: false, timeoutSeconds: null,
@@ -413,7 +417,7 @@ export const median = (xs: readonly number[]): number => {
   const s = [...xs].sort((a, b) => a - b);
   return s.length === 0 ? NaN : s.length % 2 === 1 ? s[(s.length - 1) / 2]! : (s[s.length / 2 - 1]! + s[s.length / 2]!) / 2;
 };
-const round = (x: number, d: number): number => Number.isFinite(x) ? Number(x.toFixed(d)) : x;
+export const round = (x: number, d: number): number => Number.isFinite(x) ? Number(x.toFixed(d)) : x;
 
 type Stats = RunStats & { codes: Record<string, number> };
 /** one run's statistics: the mix (every statement) and each statement */
@@ -528,7 +532,7 @@ const withDb = (url: string, db: string): string => { const u = new URL(url); u.
 const whereOf = (url: string): string => { const u = new URL(url); return `${u.hostname}:${u.port || "5432"}`; };
 
 /** the database of one size: made by `dataSql`, or reused when its marker says it holds exactly this */
-async function ensureData(adminUrl: string, rows: number, log: (l: string) => void): Promise<{ url: string; generatedSeconds: number | null }> {
+export async function ensureData(adminUrl: string, rows: number, log: (l: string) => void): Promise<{ url: string; generatedSeconds: number | null }> {
   const db = `bench_replica_${rows}`;
   const url = withDb(adminUrl, db);
   const admin = new pg.Client({ connectionString: adminUrl });
@@ -558,7 +562,7 @@ async function ensureData(adminUrl: string, rows: number, log: (l: string) => vo
   return { url, generatedSeconds: round((performance.now() - t0) / 1000, 1) };
 }
 
-async function postgresFacts(url: string): Promise<{ version: string; settings: Record<string, string> }> {
+export async function postgresFacts(url: string): Promise<{ version: string; settings: Record<string, string> }> {
   const c = new pg.Client({ connectionString: url });
   await c.connect();
   try {
@@ -781,11 +785,11 @@ async function plannedSql(conn: pg.ClientConfig, rows: number, file: string, log
 
 // --------------------------------------------------------------------------------------------- the run
 
-const fmtRows = (n: number): string => n >= 1e6 && n % 1e6 === 0 ? `${n / 1e6}M` : n >= 1e3 && n % 1e3 === 0 ? `${n / 1e3}k` : String(n);
+export const fmtRows = (n: number): string => n >= 1e6 && n % 1e6 === 0 ? `${n / 1e6}M` : n >= 1e3 && n % 1e3 === 0 ? `${n / 1e3}k` : String(n);
 const ms = (x: number): string => !Number.isFinite(x) ? "-" : x >= 1000 ? `${(x / 1000).toFixed(2)} s` : x >= 10 ? `${x.toFixed(0)} ms` : `${x.toFixed(1)} ms`;
 const secs = (x: number): string => x >= 120 ? `${(x / 60).toFixed(0)} min` : `${x.toFixed(0)} s`;
 
-function writeFixture(file: string, f: Fixture): void {
+export function writeFixture(file: string, f: unknown): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.tmp-${process.pid}`;
   fs.writeFileSync(tmp, JSON.stringify(f, null, 2) + "\n");
@@ -793,7 +797,7 @@ function writeFixture(file: string, f: Fixture): void {
 }
 
 /** Mason's commit, `+dirty` when src/ differs from it */
-function commit(): string {
+export function commit(): string {
   const r = spawnSync("git", ["rev-parse", "--short=12", "HEAD"], { cwd: REPO, encoding: "utf8" });
   if (r.status !== 0) return "unknown (not a git checkout)";
   const dirty = spawnSync("git", ["status", "--porcelain", "--untracked-files=no", "--", "src"], { cwd: REPO, encoding: "utf8" }).stdout.trim() !== "";
@@ -1087,7 +1091,7 @@ async function main(): Promise<number> {
 }
 
 /** a size's database, dropped (the container's own, during the rows sweep: its disk is the next size's) */
-async function dropData(adminUrl: string, rows: number, log: (l: string) => void): Promise<void> {
+export async function dropData(adminUrl: string, rows: number, log: (l: string) => void): Promise<void> {
   const c = new pg.Client({ connectionString: adminUrl });
   await c.connect();
   try { await c.query(`DROP DATABASE IF EXISTS bench_replica_${rows} WITH (FORCE)`); log(`  dropped bench_replica_${rows} (no longer needed: its disk is the next size's)`); }
@@ -1115,7 +1119,9 @@ if (process.argv[2] === "--client-worker") {
       (e: unknown) => { process.stderr.write(`bench-replica client process: ${(e as Error).stack ?? String(e)}\n`); process.exitCode = 1; });
   });
 } else if (process.argv[1] !== undefined && path.resolve(process.argv[1]) === SCRIPT) {
-  main().then((code) => { process.exitCode = code; }, (e: unknown) => {
+  // --cold: each statement once, after a restart and a dropped page cache (scripts/bench-replica-cold.ts)
+  const argv = process.argv.slice(2);
+  (argv.includes("--cold") ? import("./bench-replica-cold.ts").then((m) => m.coldMain(argv.filter((x) => x !== "--cold"))) : main()).then((code) => { process.exitCode = code; }, (e: unknown) => {
     process.stderr.write(`bench-replica: ${e instanceof Usage ? e.message : (e as Error).stack ?? String(e)}\n`);
     process.exitCode = e instanceof Usage ? 2 : 1;
   });

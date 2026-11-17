@@ -760,8 +760,10 @@ test("the models guard catches the real thing", () => {
  * is Postgres's documentation; a relative import is tsc's and the import guard's). Say what the gone thing WAS instead.
  */
 const PATH_SCANNED = ["src", "tests", "scripts", "docs", ".claude", "README.md", "CLAUDE.md", "cli", "deploy"];
-/** Paths named on purpose that are not files here, each with its reason. None today. */
-const PATH_EXCEPTIONS: ReadonlyMap<string, string> = new Map();
+/** Paths named on purpose that are not files here, each with its reason. */
+const PATH_EXCEPTIONS: ReadonlyMap<string, string> = new Map([
+  ["tests/fixtures/bench-replica-cold.json", "the cold mode's fixture (scripts/bench-replica-cold.ts), written by its first run on a dedicated server (issue 1121): until it lands, the README's speed table is the sweep's; drop this entry with it"],
+]);
 /** Tracked files whose paths are data, not a pointer for a reader, each with its reason */
 const PATH_UNSCANNED: ReadonlyMap<string, string> = new Map([
   ["tests/fixtures/unit-weights.json", "each unit file's time as a CI run measured it (scripts/ci-shards.ts weights): an entry for a file gone costs balance, never coverage, until the next run rewrites it"],

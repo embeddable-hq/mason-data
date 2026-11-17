@@ -5,6 +5,8 @@ a Postgres and on Mason as the tables grow and as more readers ask at once. Its 
 `tests/fixtures/bench-replica.json`, from which [MEASUREMENTS.md](MEASUREMENTS.md) ("When is Mason faster?") and the
 README's headline numbers are rendered;
 docs/DESIGN.md "Mason against a Postgres read replica" says why the sweep is shaped so and what a run does and does not show.
+Its cold mode (`--cold`, [below](#the-cold-mode-each-query-once-after-a-restart-and-a-dropped-page-cache)) times each
+query once, cold, into `tests/fixtures/bench-replica-cold.json`; once that file exists, the README's speed table is its.
 
 ## What it measures
 
@@ -85,6 +87,70 @@ node scripts/bench-replica.ts --label "m7g.xlarge, EBS" --target-postgres-second
 
 The output prints a line per run as it ends, and the fixture is written after each size and at the end, so an
 interrupted run keeps the sizes it finished.
+
+## The cold mode: each query once, after a restart and a dropped page cache
+
+`node scripts/bench-replica.ts --cold` answers a simpler question than the sweep: how long does one query take on each
+engine the first time, with one user and with ten? Its result is `tests/fixtures/bench-replica-cold.json`; once that
+file exists, the README's speed table is rendered from it, and docs/MEASUREMENTS.md gets a section with every run.
+
+- **Three queries**, sent as written to both engines (`COLD_STATEMENTS` in `scripts/bench-replica-cold.ts`): a count
+  over every row (`SELECT status, count(*) FROM orders GROUP BY status ORDER BY status`), a sum by month over a join
+  (revenue by the order's month and the customer's signup year), and one row by its primary key. The session's
+  `TimeZone` is UTC on both (`PGOPTIONS`), since `date_trunc` of a `timestamptz` depends on it.
+- **The same data as the sweep's** (`bench_replica_<rows>`), at `--sizes` (1M, 10M and 100M rows by default).
+- **Each engine in a container of its own, with the same limits**: `--cpus` (4) and `--memory` (8g), with
+  `--memory-swap` equal to it. Under cgroup v2 the limit counts the page cache, so both engines' caches are held to the
+  same size. Postgres is `postgres:18` (`--postgres-image`) with a replica's settings for that memory; Mason is the
+  `mason-data` image (`ghcr.io/embeddable-hq/mason-data:<version>`, `--mason-version`, default this checkout's
+  `cli/package.json`; `--mason-image` for another, such as a local `mason-data:dev`), running `mason serve`, which sizes
+  its engine at half the container's limit. Mason syncs both tables from the bench's Postgres over a Docker network of
+  their own, with `sync: off`, and serves TLS (its listener is off loopback). The bench logs in as a user
+  `mason user add` makes. Every secret (Postgres's password, `MASON_API_KEY`, that user's password) is in a 0600 file
+  given to Docker as `--env-file`, never on a command line or in the output, and the files are removed at the end.
+- **Each run is cold**: the engine's container is restarted, waited for until it answers `SELECT 1 FROM orders LIMIT 0`,
+  then `--settle` seconds (10), and the OS page cache dropped (`sync; echo 3 > /proc/sys/vm/drop_caches`). Mason is
+  stopped while Postgres is measured. Postgres stays up while Mason is measured, because a Mason start reads its
+  source's catalog, but it is idle and restarted first. The fixture says both.
+- **The clients**: `pgbench` from the same `postgres` image, on the host's network, `-n -c N -j N -t 1 --log`, at each
+  of `--clients` (1 and 10): each client sends the query once, and all of them at the same moment. A client's time is
+  its transaction's latency in pgbench's log, which leaves out its connection. For the lookup each client asks for a
+  different row, picked at random once per size and kept in the fixture, and sends it as a plain literal: pgbench's
+  `\if :client_id = 0` … `\elif` chooses the line. A literal chosen inside the SQL (`CASE :client_id WHEN …`) would stop
+  Mason's engine from pushing the filter down, and make Mason look many times slower than it is.
+- **The answers first**: before anything is timed, every query's answer (psql's text, every lookup id) is compared on
+  both engines by its md5, and a difference stops the run.
+- **Each cell** (query × size × clients × engine) runs `--runs` times (3), the engines alternating which goes first.
+  The fixture keeps every run (each client's time, the slowest, the mean), and the README shows the median of the
+  slowest client's time, with "Mason is N× faster" (or slower).
+
+### What it needs
+
+- **Linux, with root or `sudo -n`** to drop the page cache: run it as root, or as a user that may run
+  `sudo -n tee /proc/sys/vm/drop_caches`. It refuses plainly where it cannot (a Mac, or inside a container).
+- **Docker**, and the `postgres:18` and `mason-data` images (pulled when missing).
+- **Disk where Docker keeps its volumes**: about 150 GB free for the 100M size (Postgres's tables and indexes, about 45 GB,
+  Mason's synced data, and what building them writes beside). Each size's data is dropped once it is measured, so the
+  largest size decides. A size the disk cannot hold is refused before its data is made (`--reserve-gb`, 10, is kept free).
+- **Time**: hours, most of it the largest size: making 100M rows (most of an hour), Mason's first sync of them, and 36
+  cold runs a size, each a restart, `--settle` seconds and the query.
+- **Nothing else running**: the run restarts the containers it made (all named `bench-cold-*`) and refuses to start
+  beside an earlier run's.
+
+```bash
+npm install
+# the published run: 3 queries × 1M, 10M and 100M rows × 1 and 10 clients, 3 runs each, on both engines
+node scripts/bench-replica.ts --cold --label "<the machine>" --mason-version <version> --cpus 4 --memory 8g
+# one size
+node scripts/bench-replica.ts --cold --label "<the machine>" --mason-version <version> --sizes 10M
+# a smoke (tests/integration/bench-cold.itest.ts runs this in CI)
+node scripts/bench-replica.ts --cold --sizes 1M --runs 1 --settle 1 --cpus 2 --memory 2g --mason-version main --out /tmp/cold.json
+UPDATE_FIXTURE=1 node --test --test-timeout=300000 --test-force-exit tests/bench-replica.test.ts   # renders the README's table and docs/MEASUREMENTS.md
+```
+
+The output prints a line per run as it ends, and the fixture is written after each size's every run and at the end.
+`--keep` leaves the containers and volumes for a look afterwards (the next run refuses until they are removed);
+`node scripts/bench-replica.ts --cold --help` lists every option.
 
 ## Measuring a layout of the copy (never a published run)
 
