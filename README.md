@@ -23,7 +23,7 @@ A drop-in replacement for your Postgres read replica. Same SQL. Same answers. Se
 - [Use it with your database](#use-it-with-your-database)
   - [Set up a project](#set-up-a-project) · [Choose tables and columns](#choose-tables-and-columns) · [Keep them up to date](#keep-them-up-to-date)
   - [Connect a tool](#connect-a-tool) · [Access control](#access-control) · [Check on it](#check-on-it) · [Run it on a server](#run-it-on-a-server)
-  - [Hosted: Mason read-replica](#hosted-mason-read-replica) · [Change a deployed project](#change-a-deployed-project)
+  - [Hosted: Mason Cloud](#hosted-mason-cloud) · [Change a deployed project](#change-a-deployed-project)
 - [Speed and compatibility](#speed-and-compatibility)
   - [Speed](#speed) · [Compatibility](#compatibility)
 - [Agents](#agents) · [Where to read more](#where-to-read-more) · [Community](#community) · [License](#license)
@@ -281,11 +281,11 @@ docker compose exec mason mason user add metabase
 
 [`deploy/mason-data/README.md`](deploy/mason-data/README.md) walks you through it, with
 [the settings](deploy/mason-data/README.md#settings) to decide. [`deploy/README.md`](deploy/README.md) has guides for
-Fly.io, Kubernetes, Railway and AWS ECS. [Mason read-replica](#hosted-mason-read-replica) can also run it for you.
+Fly.io, Kubernetes, Railway and AWS ECS. [Mason Cloud](#hosted-mason-cloud) can also run it for you.
 
-### Hosted: Mason read-replica
+### Hosted: Mason Cloud
 
-[Mason read-replica](https://masondata.ai) runs Mason for you. It keeps a read replica of your Postgres up to date on a
+[Mason Cloud](https://masondata.ai) runs Mason for you. It keeps a read replica of your Postgres up to date on a
 machine it manages, and you connect your BI tools to it.
 
 It uses the same project folder and the same `mason` command. Sign in once, then deploy:
