@@ -2393,6 +2393,38 @@ scope either way: how long a statement runs depends on rows it cannot read, on P
 `src/cli/user.ts` (`attributesToAdd`); `tests/duck-roles-rows-wire.test.ts`, `tests/cli-roles.test.ts`,
 `tests/duck-row-filter.test.ts`, the oracle's `rowFilterCases`.
 
+### A password checked for a sign-in page: `mason user check` (2026-11-17, issue 1115)
+
+**Decision.** `mason user check <name>` reads a password from stdin and answers `ok`, `wrong`, `disabled` or `removed`
+with the user's id (`--json` `{ user, answer, id }`), an exit code an answer (0, 3, 4, 5: `CommandSpec.answers`, which
+the spec as data lists beside 0, 1 and 2). It is for an operator's own sign-in page in front of Mason (the MCP endpoint
+over HTTPS, issue 1115, signs a hosted agent in through the operator's authorization server, whose page asks Mason
+whether a person's Mason password is right). It judges the password as the listener does — the MAC over the name and
+the id, compared in constant time (`checkPassword`, src/duck/users.ts) — and never the address: the page's browser is
+not the client a user's ranges are about. `removed` is the password of a user of that name that was removed, so an old
+password of a name removed and added again says `removed` with the OLD id, never `wrong`, and never the new user's id.
+
+- **The user's id is its stable identity**, and already was: the 16 hex digits `mason user add` makes and
+  `.mason/users.json` keeps (`id`, required of every entry since users began, so no user exists without one: nothing to
+  migrate), shown by `mason user list` and its `--json`. Disable and enable keep it; remove and add make a new one. So a
+  page or a token that carries the id tells a re-added user from the one it was issued for.
+- **Nothing secret on a line**: the password is stdin's (a hidden prompt at a terminal, src/cli/secret-input.ts), never an
+  argument; a word on the line with a password's shape is refused without being repeated; nothing prints or logs it.
+- **Its line is untrusted** (review of PR 1124): the name is what a person typed into a sign-in page, so `check` reads its
+  line itself, before the spec's parser — `--json`, `--` and one word — and any other option is a wrong line (exit 2):
+  `--help`'s exit 0 would have been `ok` to a page that signs in on exit 0. No word of the line is repeated unless it is
+  exactly a user's name of the file: a password typed on the line, near its shape (`\r` after it, inside a URL, cut
+  short, after `--role`), was printed back in full by the generic refusals. A word that is no user's is answered `wrong`
+  with `user` null, after the same work. The reader takes EVERY line whose verb is `check`, wherever options or `--`
+  put it (`verbAt`, src/cli/command.ts, finds the verb as the spec's parser does): its re-check found
+  `mason user --json check <name>` falling through to `add`, making the page's word a user and exiting 0; `add`
+  is now reached by its own verb alone.
+- **The page must limit attempts**: `check` answers `wrong` as often as it is asked, so a page that lets anyone ask makes
+  it a free oracle. The docs say to count failures by the browser's address, the replica and the user name.
+
+**Where.** src/cli/user.ts (`checkCommand`, `checkSecret`, `CHECK_EXIT`), src/duck/users.ts (`checkPassword`),
+src/cli/command.ts (`CommandSpec.answers`); tests/duck-users.test.ts, tests/cli-commands.test.ts, tests/cli-help.test.ts.
+
 ### An MCP server (2026-10-29)
 
 **Decision.** `mason mcp` is an MCP server on stdio — newline-delimited JSON-RPC, stdout the protocol's alone — that is

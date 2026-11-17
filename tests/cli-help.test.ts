@@ -180,7 +180,7 @@ test("mason <cmd> --help --json, mason help <cmd> --json and mason help --json: 
     assert.deepEqual(spec.json, c.json ? [...c.json] : null, `${c.name}: its --json keys`);
     assert.deepEqual(spec.needs, c.needs ?? null);
     const codes = (spec.exitCodes as Array<{ code: number }>).map((e) => e.code);
-    assert.deepEqual(codes, ["wait", "share", "ui", "login", "replica", "deploy"].includes(c.name) ? [0, 1, 2, 124] : [0, 1, 2], `${c.name}: its exit codes (${TIMEOUT_COMMANDS})`);
+    assert.deepEqual(codes, ["wait", "share", "ui", "login", "replica", "deploy"].includes(c.name) ? [0, 1, 2, 124] : c.name === "user" ? [0, 1, 2, 3, 4, 5] : [0, 1, 2], `${c.name}: its exit codes (${TIMEOUT_COMMANDS}; mason user check's answers)`);
     // the same from its own --help --json and mason help <name> --json: { command, next }
     for (const args of [[c.name, "--help", "--json"], ["help", c.name, "--json"]]) {
       const r = mason(...args);
