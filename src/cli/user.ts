@@ -16,7 +16,7 @@ import { reach } from "./state.ts";
 import { callRun, RunUnreachable } from "./control.ts";
 import { clientLink, connectionUrl, listenerTips, psqlLine, type PostgresLink } from "./pg-url.ts";
 import { isLoopback } from "../api/postgres/plain.ts";
-import { changeUsers, checkPassword, isActive, isDisabled, isUserPassword, keyFingerprint, newUserId, readUsers, underKey, userPassword, userRanges, USER_NAME_RE, USER_NAME_RULE, USERS_FILE, type CheckAnswer, type MasonUser } from "../duck/users.ts";
+import { changeUsers, checkPassword, isActive, isDisabled, keyFingerprint, newUserId, readUsers, underKey, userPassword, userRanges, USER_NAME_RE, USER_NAME_RULE, USERS_FILE, type CheckAnswer, type MasonUser } from "../duck/users.ts";
 import { readHidden, readPiped, type SecretInput, type SecretRead } from "./secret-input.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { out as styleOut, type Style } from "./style.ts";
@@ -129,7 +129,9 @@ export const USER: CommandSpec & { needs: "project" } = {
   id where it is one of its. It is for an operator's own sign-in page in front of Mason. The password is read from
   stdin (at a terminal, asked for and not shown), never from the command line, and is never printed or logged. It
   answers wrong as often as it is asked: a page in front of it must limit attempts (by the browser's address and by
-  the user name). Exit 0 ok, 3 wrong, 4 disabled, 5 removed; 1 or 2 when it could not tell (said). It reads this
+  the user name), and signs in on ok alone. Its line is a sign-in page's, so untrusted: --json, -- and one word; any
+  other option is a wrong line (exit 2, never the help's 0), and no word is repeated unless it is a user's name (a word
+  that is no user's is answered wrong, its user null). It reads the project's API key, which makes every password. Exit 0 ok, 3 wrong, 4 disabled, 5 removed; 1 or 2 when it could not tell (said). It reads this
   project's users alone (no --replica).
 
   --replica <org>/<name> manages the users of a replica on a hosted Mason service instead of this project's (else
@@ -733,6 +735,9 @@ export function addedReport(r: Omit<AddedUser, "replaced"> & { replaced?: boolea
 // ------------------------------------------------------------------ the command
 
 export async function user(argv: string[]): Promise<number> {
+  // check's line is read by its own reader, before the spec's parser: its words come from a sign-in page (untrusted), so
+  // no option of the parser's (--help's exit 0 above all, which is check's ok) applies, and no word is ever repeated
+  if (argv[0] === "check") return checkLine(argv.slice(1));
   const f = parseCommand(USER, argv);
   if (typeof f === "number") return f;
   const json = f.values.json === true;
@@ -742,8 +747,6 @@ export async function user(argv: string[]): Promise<number> {
   if (verb === undefined) return usage("add, list, from, disable, enable, remove or check: mason user add <name> makes a user");
   if (!VERBS.includes(verb)) return usage(`there is no mason user ${verb}: add, list, from, disable, enable, remove or check${didYouMean(verb, VERBS)}`);
   // a word after check's name may be a password, and so may the name itself: refused without repeating it
-  if (verb === "check" && name !== undefined && isUserPassword(name)) return usage("mason user check <name>: that word has a password's shape, not repeated here — the name goes on the command line, the password on stdin alone (a password on the command line is in the shell's history and ps: change it)");
-  if (verb === "check" && rest.length) return usage(`mason user check takes one name, and the password on stdin alone: ${rest.length} more word${rest.length === 1 ? "" : "s"} on the command line, not repeated here (a password there is in the shell's history and ps: change it)`);
   if (verb === "list" ? name !== undefined : verb !== "from" && rest.length) return usage(`mason user ${verb} takes ${verb === "list" ? "no name" : "one name"}: ${[name, ...rest].filter(Boolean).join(" ")} is too many`);
   // the address ranges: --from on add, the positionals of from (or its --any); each read by the one grammar, a wrong one a
   // wrong line before anything is read, written or sent
@@ -768,8 +771,7 @@ export async function user(argv: string[]): Promise<number> {
   if (ranges !== null && "message" in ranges) return failed("user", { ...ranges, usage: USER.usage }, { json });
   // A REPLICA ON A HOSTED MASON SERVICE (--replica, else MASON_REPLICA): its users, asked of the service with the same
   // request the run's /api/users takes, printed by the renderers above; nothing of a project here is read or written
-  if (verb === "check" && typeof f.values.replica === "string") return usage("mason user check reads this project's users alone: run it beside the Mason whose users it checks, without --replica");
-  const replica = verb === "check" ? null : replicaOf(typeof f.values.replica === "string" ? f.values.replica : undefined, USER.usage);
+  const replica = replicaOf(typeof f.values.replica === "string" ? f.values.replica : undefined, USER.usage);
   if (replica !== null && "message" in replica) return failed("user", replica, { json });
   if (replica !== null) {
     const named = role === undefined ? null : roleNameProblem(role);
@@ -812,8 +814,6 @@ export async function user(argv: string[]): Promise<number> {
     out(listText(project.config.name, { users, lastUsedNote, urlNote, requestLogDays }, roles, next));
     return 0;
   }
-
-  if (verb === "check") return checkCommand(file, apiKey, name!, json);
 
   if (verb === "from") {
     const r = setUserFrom(file, name!, ranges?.from ?? null);
@@ -887,12 +887,13 @@ export const CHECK_STDIN_MS = 30_000;
 
 /** The password, from a person (asked, not shown) or the pipe (whole): never the command line. What went wrong is said by
  *  kind, never by value. */
-export async function checkSecret(name: string, input: SecretInput = process.stdin, output: { write(s: string): unknown } = process.stderr,
+export async function checkSecret(name: string | null, input: SecretInput = process.stdin, output: { write(s: string): unknown } = process.stderr,
   stdinMs = CHECK_STDIN_MS): Promise<{ password: string } | Failure> {
   const tty = input.isTTY === true;
-  const again = `mason user check ${name} < password.txt`;
+  // a name is said only when it is a user's (null: any other word, which may be a password)
+  const again = `mason user check ${name ?? "<name>"} < password.txt`;
   let read: SecretRead;
-  try { read = tty ? await readHidden(input, output, `${name}'s password (not shown; Ctrl-C cancels): `, CHECK_MAX) : await readPiped(input, CHECK_MAX, stdinMs); }
+  try { read = tty ? await readHidden(input, output, `${name === null ? "The user's" : `${name}'s`} password (not shown; Ctrl-C cancels): `, CHECK_MAX) : await readPiped(input, CHECK_MAX, stdinMs); }
   catch (e) { return { message: `the password could not be ${tty ? "read at the prompt" : "read from stdin"}`, code: "failed", why: (e as Error).message, fix: `run it again: ${again}` }; }
   if ("value" in read) return { password: read.value };
   const why: Record<typeof read.none, string> = {
@@ -912,17 +913,46 @@ const CHECK_SAID: Readonly<Record<CheckAnswer, (name: string) => string>> = {
   removed: (n) => `That was the password of ${n}, which was removed: it connects no more`,
 };
 
+/**
+ * `mason user check`'s LINE, read here alone: `--json`, `--` (the end of the options) and ONE word, the name. Its words
+ * come from a sign-in page's user-name field, so they are untrusted and may hold a password typed in the wrong place:
+ * an option it does not take (`--help`, `-h`, `--role …`) is a wrong line (exit 2), never the help's exit 0, which is
+ * `ok`; and NO WORD OF THE LINE IS EVER REPEATED — not in a refusal, not in the answer — unless it is exactly the name of
+ * a user of the file (which `mason user list` prints anyway). A name that is no user's is answered `wrong`, its `user`
+ * null, after the same work as any other.
+ */
+async function checkLine(args: readonly string[]): Promise<number> {
+  let json = false, ended = false, options = 0;
+  const words: string[] = [];
+  for (const a of args) {
+    if (!ended && a === "--") { ended = true; continue; }
+    if (!ended && a === "--json") { json = true; continue; }
+    if (!ended && a.startsWith("-")) { options++; continue; }
+    words.push(a);
+  }
+  const wrongLine = (message: string): number => failed("user", { message, code: "usage", why: "mason user check takes one user name, --json, and the password on stdin alone; no word of its line is repeated (it may hold a password)",
+    fix: "mason user check <name> [--json] < password.txt (mason user --help says more)", usage: USER.usage }, { json });
+  if (options > 0) return wrongLine(`mason user check takes no option but --json: ${options} other${options === 1 ? "" : "s"} on the line`);
+  if (words.length !== 1) return wrongLine(words.length === 0 ? "mason user check <name>: which user" : `mason user check takes one name: ${words.length} words on the line`);
+  const w = await reach(USER, json);
+  if (w === null || w.project === null) return 1;
+  return checkCommand(path.join(w.project.dir, USERS_FILE), w.project.config.apiKey, words[0]!, json);
+}
+
 async function checkCommand(file: string, apiKey: string, name: string, json: boolean): Promise<number> {
-  const secret = await checkSecret(name);
-  if ("message" in secret) return failed("user", { ...secret, usage: USER.usage }, { json });
   const list = readUsers(file);
+  // the name is said only when it is a user's of the file: any other word may be a password typed in its place
+  const known = "users" in list && list.users.some((u) => u.name === name);
+  const secret = await checkSecret(known ? name : null);
+  if ("message" in secret) return failed("user", { ...secret, usage: USER.usage }, { json });
   if ("problem" in list) {
     return failed("user", { message: `the list of users cannot be read, so nothing was checked: ${list.problem}`, code: "failed",
       fix: `${file} is the list (mason user writes it): repair it` }, { json });
   }
+  // the same work for every name, a user's or not: one MAC and one comparison
   const r = checkPassword(list.users, apiKey, name, secret.password);
-  const next: NextStep[] = r.answer === "disabled" ? [[`mason user enable ${name}`, "it connects again, with the same password"]] : [["mason user list", "the users, each with its id"]];
-  if (json) out(jsonText(USER, { user: name, answer: r.answer, id: r.id }, next));
-  else out(reportText({ headline: CHECK_SAID[r.answer](name), details: [["answer", r.answer], ["id", r.id ?? "-"]], next }));
+  const next: NextStep[] = r.answer === "disabled" && known ? [[`mason user enable ${name}`, "it connects again, with the same password"]] : [["mason user list", "the users, each with its id"]];
+  if (json) out(jsonText(USER, { user: known ? name : null, answer: r.answer, id: r.id }, next));
+  else out(reportText({ headline: known ? CHECK_SAID[r.answer](name) : "That is not the password of a user of this project", details: [["answer", r.answer], ["id", r.id ?? "-"]], next }));
   return CHECK_EXIT[r.answer];
 }

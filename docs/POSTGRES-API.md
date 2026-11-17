@@ -84,7 +84,13 @@ to connect with; `mason user list` says the users (name, id, when added); `mason
   without being repeated — and is never printed or logged. **A sign-in page in front of it must limit attempts**:
   `check` answers `wrong` as often as it is asked, so the page counts failures by the browser's address, by the replica
   and by the user name, and slows or refuses past a few (a user's password is 128 random bits, but a page that lets
-  anyone ask without a limit is a free oracle for whatever a person typed).
+  anyone ask without a limit is a free oracle for whatever a person typed). **The page signs in on `ok` alone**:
+  `disabled` and `removed` carry an id too, of a user that may not connect. Its line is untrusted (the name is what a
+  person typed): it takes `--json`, `--` and one word, refuses any other option as a wrong line (exit 2: `--help` is
+  never the help's exit 0, which is `ok`), and repeats no word of the line unless it is a user's name — a word that is no
+  user's is answered `wrong` with `user` null. **The page's process holds the project's API key**: `check` reads it from
+  `.mason/config.json` (`MASON_API_KEY` under `mason serve`), and that key makes every user's password, so the page runs
+  where Mason's own files are kept, as Mason's user.
 - **A name is one user**: adding an existing name is refused, with the way out (remove it, then add it: a new
   password; or add another name and remove the old one once the tool uses it). The password is never kept, so it
   cannot be printed again: a lost one is a remove and an add.

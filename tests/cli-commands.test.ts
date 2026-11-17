@@ -2031,13 +2031,33 @@ test("mason user check <name>: the password on stdin, answered ok, wrong, disabl
     const none = await check(undefined);
     assert.equal(none.code, 2);
     assert.equal(JSON.parse(none.stdout).error.message, "no password was read, so nothing was checked");
-    for (const argv of [["user", "check", "metabase", again.password, "--json"], ["user", "check", again.password, "--json"]]) {
-      const a = await run(argv, "");
+    // ITS LINE IS UNTRUSTED (a sign-in page's user-name field): exit 0 is ok alone. --help, -h, any option but --json: a
+    // wrong line (exit 2), never the help's exit 0, the password on stdin right or not
+    for (const argv of [["--help"], ["-h"], ["--help", "--json"], ["-h", "--json"], ["metabase", "--help"], ["metabase", "-h", "--json"], ["metabase", "--replica", "acme/shop", "--json"]]) {
+      const a = await run(["user", "check", ...argv], again.password);
       assert.equal(a.code, 2, argv.join(" "));
-      assert.ok(!`${a.stdout}${a.stderr}`.includes(again.password.slice(-32)), `${argv.join(" ")}: the password repeated`);
     }
-    // a replica's users are not checked here
-    assert.equal((await run(["user", "check", "metabase", "--replica", "acme/shop", "--json"], again.password)).code, 2);
+    // -- ends the options: the word after it is the name
+    const dashed = await run(["user", "check", "--json", "--", "metabase"], again.password);
+    assert.deepEqual([dashed.code, JSON.parse(dashed.stdout).answer, JSON.parse(dashed.stdout).user], [0, "ok", "metabase"]);
+    // NO WORD OF THE LINE IS REPEATED unless it is a user's name: every shape a password typed on the line takes — near
+    // a password's, inside another word, after an option, cut short — is answered or refused without a part of it
+    const [, pid, mac] = /^mason_([0-9a-f]{16})_([0-9a-f]{32})$/.exec(again.password)!;
+    const lines: string[][] = [[`${again.password}\r`], [`${again.password} `], [`metabase=${again.password}`], [`metabase:${again.password}`], [`metabase ${again.password}`],
+      [`postgres://metabase:${again.password}@db.example.test/shop`], ["--role", again.password], [`--set=${again.password}`], ["--from", again.password], ["metabase", "--role", again.password],
+      [again.password.slice(0, -1)], [`${pid}_${mac}`], [mac!], [again.password], ["metabase", again.password], [again.password, "metabase"]];
+    for (const line of lines) {
+      for (const json of [true, false]) {
+        const a = await run(["user", "check", ...line, ...(json ? ["--json"] : [])], `${again.password}\n`);
+        const said = `${a.stdout}${a.stderr}`;
+        assert.notEqual(a.code, 0, `${JSON.stringify(line)}: never ok`);
+        for (const part of [pid!, mac!.slice(0, 12), mac!.slice(-12)]) assert.ok(!said.includes(part), `${JSON.stringify(line)}${json ? " --json" : ""}: a part of the password repeated:\n${said}`);
+      }
+    }
+    // a word that is no user's: wrong, its user null, the line not repeated
+    const stranger = await run(["user", "check", mac!, "--json"], again.password);
+    assert.deepEqual([stranger.code, JSON.parse(stranger.stdout)], [3, { user: null, answer: "wrong", id: null, next: [{ command: "mason user list", what: "the users, each with its id" }] }]);
+    assert.equal((await run(["user", "check", mac!], again.password)).stdout.split("\n")[0], "That is not the password of a user of this project");
     // the user's own help says the exit codes
     assert.match((await run(["user", "--help"])).stdout, /Exit 0 ok, 3 wrong, 4 disabled, 5 removed/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }

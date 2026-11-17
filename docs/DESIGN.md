@@ -2410,6 +2410,12 @@ password of a name removed and added again says `removed` with the OLD id, never
   page or a token that carries the id tells a re-added user from the one it was issued for.
 - **Nothing secret on a line**: the password is stdin's (a hidden prompt at a terminal, src/cli/secret-input.ts), never an
   argument; a word on the line with a password's shape is refused without being repeated; nothing prints or logs it.
+- **Its line is untrusted** (review of PR 1124): the name is what a person typed into a sign-in page, so `check` reads its
+  line itself, before the spec's parser — `--json`, `--` and one word — and any other option is a wrong line (exit 2):
+  `--help`'s exit 0 would have been `ok` to a page that signs in on exit 0. No word of the line is repeated unless it is
+  exactly a user's name of the file: a password typed on the line, near its shape (`\r` after it, inside a URL, cut
+  short, after `--role`), was printed back in full by the generic refusals. A word that is no user's is answered `wrong`
+  with `user` null, after the same work.
 - **The page must limit attempts**: `check` answers `wrong` as often as it is asked, so a page that lets anyone ask makes
   it a free oracle. The docs say to count failures by the browser's address, the replica and the user name.
 
