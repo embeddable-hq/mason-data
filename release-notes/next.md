@@ -23,6 +23,18 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   - `mason remove` takes the references to a removed table out of the other entries, and says so.
   - A reference to a table the file doesn't sync, or to a column it doesn't sync, stops `mason start` with the file, the
     key and the way out. `mason tables --json` shows each table's references in its `entry`.
+- **Short text columns are stored many times smaller, so a dashboard that groups or filters on them reads less.** When
+  Mason syncs a table, it now chooses how to compress each text column from a sample of its values. A column of short
+  or repeated values, such as a status, a type, a country code or a name, is stored with a dictionary. Values of 64 bytes
+  or more that do not repeat, such as JSON documents, are stored as before. On a benchmark of 100 M orders, a status column of six
+  values went from 645 MB to 41 MB, and a count by status read from disk went from 4.03 s to 0.17 s. The answers are
+  the same.
+  - The upgrade reads no table again. A table synced before keeps how it is stored until it is synced again whole, or
+    until Mason compacts it. Mason compacts a table by itself once much of its space is deleted rows.
+  - To apply it to a table now, sync it again whole. With Mason running, run `mason remove <table>`. Wait until
+    `mason logs` shows `dropped <table>'s synced data`, then run `mason add <table>`. The table is not served in
+    between.
+  - Generated tables are stored as before.
 - **`mason login` and `mason logout` name the hosted service Mason Cloud** in their help, with its address
   (https://app.masondata.ai) and `MASON_CLOUD_URL` for another service. What they do is unchanged.
 

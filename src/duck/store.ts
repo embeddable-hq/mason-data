@@ -69,8 +69,10 @@ export const DUCKDB_VERSION = version();
  * `force_compression: zstd`: DuckDB's analyzer never picks ZSTD by itself, and stored a copied table's
  * JSON text column Uncompressed (the test server's 194 M-row table: 0.66 GB a million rows, which would have filled the
  * disk at 125 GB, against 0.26 GB forced; a sample of its text columns 4.5× smaller, the integer, UUID and timestamp
- * columns keeping their own methods, BitPacking and RLE, since forcing only touches what ZSTD can store). The cost of
- * reading a ZSTD column is not measured. tests/duck-wire.test.ts holds a string column to ZSTD.
+ * columns keeping their own methods, BitPacking and RLE, since forcing only touches what ZSTD can store). It is the
+ * DEFAULT: a copy and a compaction give each text column its own method (`USING COMPRESSION`, which wins over it), the
+ * dictionary for short or repeated values, where ZSTD stored a six-value status 16 times larger and read it slower
+ * (src/duck/text-compression.ts, issue 1140). tests/duck-wire.test.ts holds a string column to ZSTD.
  *
  * `lambda_syntax: ENABLE_SINGLE_ARROW`: the rewrite is a Postgres parse tree, printed by Postgres's deparser, which
  * can spell DuckDB's lambda only as `x -> f(x)` (Postgres's `->` operator), never as `lambda x: f(x)`; DuckDB 2.0
