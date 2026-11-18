@@ -21,6 +21,10 @@
  * aggregate, a window, a subquery, a `*`, a lambda or a JSON arrow outside an aggregate, grouping sets, DISTINCT, and a
  * SELECT a subquery or a LATERAL item may correlate. Nothing is refused.
  *
+ * One column's bucket a SELECT, the first key's: grouped by two, the inner groups are pairs, nearly one a row. Every
+ * other key is one inner key, computed a row as the statement computes it. The rewrite marks nothing it plans in UTC,
+ * where the instant's arithmetic costs less than a second GROUP BY.
+ *
  * On the finished tree, after the walk (src/duck/rewrite.ts `rewrite`), so no rule of the rewrite meets the inner query.
  * A truncation is recognised by its form without offsets (`shape`): the rewrite writes the list's and the GROUP BY's
  * alike, each from its own node.
@@ -71,6 +75,22 @@ export function shape(v: unknown): string {
 }
 
 class Bail extends Error {}
+
+/** `Bail` where an expression computed a row in the inner query could not be: a subquery, a window, a `*`, a grouping
+ *  function, a JSON arrow or a lambda, a volatile call */
+function checked(v: unknown): void {
+  if (Array.isArray(v)) { v.forEach(checked); return; }
+  if (!isObject(v)) return;
+  if (isNode(v)) {
+    const k = kindOf(v), b = bodyOf(v);
+    if (k === "SubLink" || k === "GroupingFunc" || k === "A_Star" || k === "WindowDef") throw new Bail();
+    if (k === "A_Expr") { const op = ((b.name ?? []) as unknown[]).map(sval); if (op.includes("->") || op.includes("->>")) throw new Bail(); }
+    if (k === "FuncCall" && (b.over !== undefined || VOLATILE.has(funcName(b)) || ENGINE_AGGREGATES.has(funcName(b)))) throw new Bail();
+    Object.values(b).forEach(checked);
+    return;
+  }
+  Object.values(v).forEach(checked);
+}
 
 /** whether the session's zone, where the statement runs (`current_setting`, which the engine folds to a constant), is one
  *  whose bucket does not decide its units (src/duck/bucket-column.ts `OFF_BOUNDARY_ZONES`) */
@@ -134,13 +154,28 @@ function grouped(s: Body, marks: ReadonlyMap<string, BucketMark>, placeholder: s
     if (t === undefined) throw new Bail();
     return bodyOf(t).val as AstNode;
   };
-  const holdsMark = (v: unknown): boolean => {
-    if (Array.isArray(v)) return v.some(holdsMark);
-    if (!isObject(v)) return false;
-    if (isNode(v) && marks.has(shape(v))) return true;
-    return Object.values(isNode(v) ? bodyOf(v) : v).some(holdsMark);
+  // one column's bucket a statement: grouped by two, the inner groups are pairs of buckets, nearly a group a row (5 M
+  // rows, a month and a week of two columns: 126 ms against 140). The first key's marked column is it, and a mark of
+  // another column is a key like any other
+  const first = (v: unknown): AstNode | null => {
+    if (Array.isArray(v)) { for (const x of v) { const m = first(x); if (m !== null) return m; } return null; }
+    if (!isObject(v)) return null;
+    const m = isNode(v) ? marks.get(shape(v)) : undefined;
+    if (m !== undefined) return m.bucket;
+    return first(Object.values(isNode(v) ? bodyOf(v) : v));
   };
-  if (!groups.some((g) => holdsMark(keyOf(g)))) throw new Bail();
+  const chosen = (() => { for (const g of groups) { const b = first(keyOf(g)); if (b !== null) return shape(b); } return null; })();
+  if (chosen === null) throw new Bail();
+  const markOf = (v: AstNode): BucketMark | undefined => { const m = marks.get(shape(v)); return m !== undefined && shape(m.bucket) === chosen ? m : undefined; };
+  const holdsChosen = (v: unknown): boolean => {
+    if (Array.isArray(v)) return v.some(holdsChosen);
+    if (!isObject(v)) return false;
+    if (isNode(v) && markOf(v) !== undefined) return true;
+    return Object.values(isNode(v) ? bodyOf(v) : v).some(holdsChosen);
+  };
+  // a key that holds no mark of that column is one inner key, computed a row as the statement computes it: never its
+  // columns apart, whose values could be as many as the rows
+  const plainKeys = new Set(groups.map(keyOf).filter((k) => !holdsChosen(k)).map((k) => { checked(k); return shape(k); }));
 
   const derived = `${own}bucketed`;
   const inner: AstNode[] = [];
@@ -191,7 +226,10 @@ function grouped(s: Body, marks: ReadonlyMap<string, BucketMark>, placeholder: s
     if (Array.isArray(v)) return v.map((x) => outer(x, sorting));
     if (!isObject(v)) return v;
     if (!isNode(v)) return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, outer(x, sorting)]));
-    const mark = marks.get(shape(v));
+    // (a bare name of an output in an ORDER BY is that output, below, even where a key has its name)
+    const bare = sorting && kindOf(v) === "ColumnRef" && ((bodyOf(v).fields ?? []) as unknown[]).length === 1;
+    if (!bare && plainKeys.has(shape(v))) return key(v, "g");
+    const mark = markOf(v);
     if (mark !== undefined) {
       // the bucket, NULL in a zone it does not decide the units of; and the truncation of a row with none (NULL where it
       // has one)

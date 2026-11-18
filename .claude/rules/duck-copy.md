@@ -1,8 +1,10 @@
 ---
 paths:
+  - "src/duck/bucket-column.ts"
   - "src/duck/extensions.ts"
   - "src/duck/sync.ts"
   - "src/duck/text-compression.ts"
+  - "tests/duck-bucket-zones.test.ts"
   - "tests/duck-copy-disk.test.ts"
   - "tests/duck-copy-order.test.ts"
   - "tests/duck-copy-retry.test.ts"
@@ -10,6 +12,7 @@ paths:
   - "tests/duck-text-compression.test.ts"
   - "tests/integration/duck-poll.itest.ts"
   - "tests/integration/duck-rewrite.itest.ts"
+  - "tests/integration/duck-time-bucket.itest.ts"
 ---
 
 <!-- Loaded only when a matching file is read or edited (the paths above). CLAUDE.md lists every rules file. -->
@@ -154,6 +157,15 @@ paths:
   never listed (the copy's view of its visible columns, stored JSON paths on or off), and the rewrite reads it only to
   print (`scaleOf`): keys, filters and aggregates stay the engine's DECIMAL. A copy without it is read again once
   (`SCALE_LAYOUT`). Why: Postgres prints `12.5` beside `12.49`, and one DECIMAL scale printed `12.50`.
+- **A timestamptz's 15-minute bucket is a hidden column every write computes** (`src/duck/bucket-column.ts`, issue
+  1146). Beside each `timestamptz` column the copy holds an INTEGER, the value's 15 minutes of UTC (`bucketSql`). It is
+  NULL before 1980, from year 10000, for ±infinity and for NULL. The copy's chunks, the poll's `writeStaged`, the
+  stream's `writeByKey` and `updateCarried` each compute it from the value, and a compaction keeps it. A new write path
+  into a copy names it too, or a GROUP BY of a unit groups that table's rows by a stale bucket. It is never listed. A
+  copy an older Mason made has none, and serves with today's plan until it is synced again whole. A `timestamp` has
+  none: its truncation never reads the session's zone, so grouping by its unit is already the engine's arithmetic.
+  Why: a GROUP BY of a month in a zone other than UTC worked the calendar out once a row; grouped by the bucket first,
+  it works it out once a bucket (duck-rewrite.md "A time's unit grouped by its bucket").
 - **Each text column is compressed by its own values** (`src/duck/text-compression.ts`, issue 1140): `beginCopy` reads
   one sample of the source in the copy's snapshot (`sourceLengthsSql`, then `sourceDistinctSql`: about 100 pages by
   `TABLESAMPLE SYSTEM`, at most 10,000 rows, one row of aggregates back each), and gives each VARCHAR or JSON column

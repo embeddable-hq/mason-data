@@ -1908,6 +1908,12 @@ function* matrix(): Generator<Matrixed> {
     // a float's sum added in another order may move in its last digit: it keeps its plan, added as Postgres adds it
     yield q(`issue 1146: a time's unit beside a sum and an average of a float, in ${zone}`, "SELECT date_trunc('day', at) AS d, sum(f), avg(f), count(*) FROM bucket_edges GROUP BY 1 ORDER BY 1", zone);
     yield q(`issue 1146: a time's unit beside an aggregate that does not add up from parts, in ${zone}`, "SELECT date_trunc('quarter', at), count(DISTINCT v), string_agg(DISTINCT s, ',' ORDER BY s), count(*) FROM bucket_edges GROUP BY 1 ORDER BY 1", zone);
+    // two columns' units (one column's bucket is read, the other's unit computed a row), and keys of no unit
+    yield q(`issue 1146: two columns' units over a join, in ${zone}`, "SELECT date_trunc('month', a.at) AS m, date_trunc('year', b.at) AS y, sum(a.x), count(*) FROM bucket_edges a " +
+      "JOIN bucket_edges b ON b.id = a.id + 7 GROUP BY 1, 2 ORDER BY 1 NULLS FIRST, 2 NULLS FIRST", zone);
+    yield q(`issue 1146: a time's unit beside a key of the time that is no unit, and an output named as a key it is not, in ${zone}`,
+      "SELECT upper(s) AS s, date_trunc('month', at) AS m, extract(dow FROM at) AS dow, count(*), sum(v) FROM bucket_edges WHERE at BETWEEN '1980-01-01' AND '2100-01-01' " +
+      "GROUP BY s, 2, 3 ORDER BY s DESC, m, dow LIMIT 60", zone);
     yield q(`issue 1146: a time's unit grouped by its number and sorted by its count, in ${zone}`, "SELECT date_trunc('hour', at) AS h, count(*) FROM bucket_edges GROUP BY 1 ORDER BY 2 DESC, 1 NULLS FIRST LIMIT 12", zone);
   }
   // ---- issue 464: to_char of a time in a format DuckDB's strftime writes (src/duck/to-char.ts strftimeTemplate), and

@@ -6182,7 +6182,10 @@ class Rewriter {
    * SELECT groups by first (src/duck/bucket-group.ts). Null for anything else: its own path, as before.
    */
   private bucketTrunc(unit: string, unitNode: AstNode, x: AstNode, session: () => AstNode): AstNode | null {
-    if (this.buckets === null || !BUCKET_UNITS.has(unit) || kindOf(x) !== "ColumnRef") return null;
+    // planned in UTC, the truncation is already the instant's arithmetic, which costs less than a second GROUP BY (5 M
+    // rows: a month 18 ms against 25). The plan is exact in any zone either way: only its speed reads the zone it is
+    // made in, as the plan cache keeps a plan by its zone
+    if (this.buckets === null || isUtc(this.timeZone) || !BUCKET_UNITS.has(unit) || kindOf(x) !== "ColumnRef") return null;
     const t = this.typed(x);
     if (t === null || t.node !== "VAR" || t.levelsUp !== 0 || t.relation === undefined || t.type !== TIMESTAMPTZ) return null;
     const hidden = this.buckets.at(t.relation.relid, t.relation.attno);

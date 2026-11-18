@@ -5,12 +5,9 @@
       "sql": "SELECT DATE_TRUNC('month', o.created_at) AS m, count(*) FROM orders o GROUP BY 1 ORDER BY 1 DESC LIMIT 100",
       "plan": [
         "TOP_N (1 key)",
-        "  PROJECTION",
-        "    HASH_GROUP_BY",
-        "      PROJECTION",
-        "        HASH_GROUP_BY",
-        "          PROJECTION",
-        "            TABLE_SCAN public.orders"
+        "  HASH_GROUP_BY",
+        "    PROJECTION",
+        "      TABLE_SCAN public.orders"
       ],
       "calls": [],
       "sends": [
@@ -75,14 +72,12 @@
       "sql": "SELECT date_trunc('month', o.created_at) AS month, date_trunc('year', c.created_at) AS signup_year, sum(o.amount) AS revenue FROM orders o JOIN customers c ON c.id = o.customer_id GROUP BY 1, 2 ORDER BY 1, 2",
       "plan": [
         "ORDER_BY",
-        "  HASH_GROUP_BY",
-        "    PROJECTION",
+        "  PROJECTION",
+        "    HASH_GROUP_BY",
         "      PROJECTION",
-        "        HASH_GROUP_BY",
-        "          PROJECTION",
-        "            HASH_JOIN",
-        "              TABLE_SCAN public.orders",
-        "              TABLE_SCAN public.customers"
+        "        HASH_JOIN",
+        "          TABLE_SCAN public.orders",
+        "          TABLE_SCAN public.customers"
       ],
       "calls": [],
       "sends": [

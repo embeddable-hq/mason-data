@@ -132,7 +132,7 @@ async function unlike(zone: string, statements: readonly string[]): Promise<stri
 }
 
 /** the SQL Mason sends the engine for `sql` (its EXPLAIN's line), in `zone` */
-async function sent(sql: string, zone = "UTC"): Promise<string> {
+async function sent(sql: string, zone = "Asia/Kathmandu"): Promise<string> {
   const c = await client();
   try {
     await c.query(`SET TimeZone = '${zone}'`);
@@ -158,6 +158,12 @@ test("a GROUP BY of each unit of a timestamptz answers as Postgres does in every
       // over a join, its tables' columns qualified; in a WITH query
       "SELECT date_trunc('week', a.at) AS w, count(*), sum(b.v) FROM ev a JOIN ev b ON b.id = a.id + 1 GROUP BY 1 ORDER BY 1",
       "WITH q AS (SELECT date_trunc('quarter', at) AS q, v % 3 AS r, count(*) AS n, avg(x) AS a FROM ev GROUP BY 1, 2) SELECT * FROM q ORDER BY q, r",
+      // two columns' units, as the benchmark's revenue by month (one column's bucket is read, the other's unit a row)
+      "SELECT date_trunc('month', a.at) AS m, date_trunc('year', b.at) AS y, sum(a.x), count(*) FROM ev a JOIN ev b ON b.id = a.id + 7 GROUP BY 1, 2 ORDER BY 1, 2",
+      // a key of no unit, computed a row: an expression of the time, and an output named as a key it is not
+      "SELECT date_trunc('month', at) AS m, extract(dow FROM at) AS dow, count(*), sum(v) FROM ev GROUP BY 1, 2 ORDER BY 1, 2",
+      "SELECT upper(s) AS s, date_trunc('week', at) AS w, count(*) FROM ev GROUP BY s, 2 ORDER BY s DESC, w NULLS FIRST LIMIT 30",
+      "SELECT date_trunc('day', at) AS d, v % 4, max(x) FROM ev GROUP BY date_trunc('day', at), v % 4 HAVING max(x) > 1 ORDER BY 1, 2 LIMIT 50",
       // the rows no bucket holds: before 1980, infinite and NULL, each truncated as before
       ...UNITS.map((u) => `SELECT date_trunc('${u}', at), count(*), sum(v) FROM old GROUP BY 1 ORDER BY 1`),
     ]), [], zone);
@@ -165,12 +171,16 @@ test("a GROUP BY of each unit of a timestamptz answers as Postgres does in every
 });
 
 test("a GROUP BY of a timestamptz's unit groups by its 15-minute bucket first; an aggregate that does not add up from parts keeps the plan", async () => {
-  // the bucket is read, in any zone and in UTC
-  for (const zone of ["Asia/Kathmandu", "UTC"]) {
+  // the bucket is read in a zone other than UTC; planned in UTC, the instant's arithmetic costs less
+  for (const zone of ["Asia/Kathmandu", "America/New_York"]) {
     const sql = await sent("SELECT date_trunc('month', at) AS m, sum(v), count(*), avg(x) FROM ev GROUP BY 1 ORDER BY 1", zone);
     assert.ok(sql.includes(hidden), `the bucket is read in ${zone}: ${sql}`);
   }
+  assert.ok(!(await sent("SELECT date_trunc('month', at) AS m, sum(v) FROM ev GROUP BY 1 ORDER BY 1", "UTC")).includes(hidden), "planned in UTC, as before");
   assert.ok((await sent("SELECT date_trunc('day', a.at), count(*) FROM ev a JOIN ev b ON b.id = a.id GROUP BY 1")).includes(hidden), "over a join");
+  // two columns' units: the first one's bucket alone, the other's unit computed a row
+  const two = await sent("SELECT date_trunc('month', a.at), date_trunc('year', b.at), count(*) FROM ev a JOIN ev b ON b.id = a.id GROUP BY 1, 2");
+  assert.ok(two.includes(`a.${hidden}`) && !two.includes(`b.${hidden}`), `the first column's bucket alone: ${two}`);
   // an aggregate that does not add up from its parts, a window, a minute and a truncation in a zone of its own: as before
   for (const sql of [
     "SELECT date_trunc('month', at), count(DISTINCT v) FROM ev GROUP BY 1",
