@@ -19,8 +19,8 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   Mason syncs a table, it now chooses how to compress each text column from a sample of its values. A column of short
   or repeated values, such as a status, a type, a country code or a name, is stored with a dictionary. Values of 64 bytes
   or more that do not repeat, such as JSON documents, are stored as before. On a benchmark of 100 M orders, a status column of six
-  values went from 645 MB to 41 MB, and a count by status read from disk went from 4.03 s to 0.17 s. The answers are
-  the same.
+  values went from 645 MB to 41 MB. On the README's cold benchmark at that size, a count by status with one client went
+  from 4.03 s to 0.45 s, and the synced data went from 8.29 GiB to 7.11 GiB. The answers are the same.
   - The upgrade reads no table again. A table synced before keeps how it is stored until it is synced again whole, or
     until Mason compacts it. Mason compacts a table by itself once much of its space is deleted rows.
   - To apply it to a table now, sync it again whole. With Mason running, run `mason remove <table>`. Wait until
