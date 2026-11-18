@@ -27,6 +27,15 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
     `mason logs` shows `dropped <table>'s synced data`, then run `mason add <table>`. The table is not served in
     between.
   - Generated tables are stored as before.
+- **The web page's "Connect an AI agent" is shorter and leads with what to paste.** With `mason serve`'s MCP endpoint
+  on, every client uses its address: the box shows it with Copy, one line per client (claude.ai and Claude Desktop,
+  ChatGPT, Claude Code, Cursor) saying where it goes, and one line on signing in. The `mason mcp` way is under it, closed.
+  "New user added" shows the MCP URL beside the Postgres URL, with the same instructions closed under them.
+- **Connects from's hosted-agent choices are now named for the product: "claude.ai" and "ChatGPT on the web"**, under
+  "A hosted agent's servers". Before, they read "Claude (Anthropic)" and "ChatGPT (OpenAI)", and a person using Claude
+  Code chose the first and was refused. Choosing one now says that Claude Code and Cursor connect from your own
+  computer. A user's row reads "from claude.ai's servers (2 ranges)". The ranges are the same.
+  `mason status --json`'s `addressPresets` carry the new labels and each one's short `name`.
 - **`mason login` and `mason logout` name the hosted service Mason Cloud** in their help, with its address
   (https://app.masondata.ai) and `MASON_CLOUD_URL` for another service. What they do is unchanged.
 
