@@ -8676,7 +8676,8 @@ export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(
   r.markWholeReads(own);
   r.walking = true;
   // a GROUP BY of a time's unit grouped by its 15-minute bucket first (src/duck/bucket-group.ts), over the finished walk
-  const tree = bucketGroups(guardFilters(flattenBool(r.walk(own))) as AstNode, r.bucketMarks, r.bucketPlaceholder(), prefix) as AstNode;
+  const tree = bucketGroups(guardFilters(flattenBool(r.walk(own))) as AstNode, r.bucketMarks, r.bucketPlaceholder(), prefix,
+    (n) => { const t = r.typeOf(n as AstNode); return t !== null && FLOATS.has(t); }) as AstNode;
   return { tree, withTies: r.wroteTies, exact, clock: r.clock, jsonReads: [...r.jsonReads.values()], unboundedLateral: r.unboundedLateral, pathParams: [...r.pathParams].sort((a, b) => a - b),
     wholeNumericArrays: [...r.wholeNumericArrays].sort((a, b) => a - b) };
 }

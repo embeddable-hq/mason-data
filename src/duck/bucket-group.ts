@@ -15,7 +15,8 @@
  * truncation's from its bucket, which decides it, or from the row's own truncation where the row has no bucket: before
  * 1980, infinite or NULL), so every group of the statement is a union of inner groups, and an aggregate that adds up from
  * parts answers the same: sum (the sum of sums), count (their sum), min, max, first and any_value (of theirs), avg (the
- * sum of sums over the sum of counts). Anything else keeps the statement as it was, which is exact: another aggregate
+ * sum of sums over the sum of counts), each of a value Postgres types exactly (a sum or an average of a float keeps its
+ * plan: added in another order, its last digit may move). Anything else keeps the statement as it was, which is exact: another aggregate
  * (count(DISTINCT), a median, string_agg, arg_min …: `ENGINE_AGGREGATES` names every one the engine has), an ordered
  * aggregate, a window, a subquery, a `*`, a lambda or a JSON arrow outside an aggregate, grouping sets, DISTINCT, and a
  * SELECT a subquery or a LATERAL item may correlate. Nothing is refused.
@@ -95,10 +96,11 @@ function placed(outer: AstNode, placeholder: string, by: AstNode): AstNode {
 }
 
 /**
- * Every grouped SELECT of `tree` over a marked truncation written as two (the module's header), in place. `marks` by
- * `shape`; `placeholder` the marks' bucket start; `own` the statement's prefix (src/duck/own-names.ts).
+ * Every grouped SELECT of `tree` over a marked truncation written as two (the module's header). `marks` by `shape`;
+ * `placeholder` the marks' bucket start; `own` the statement's prefix (src/duck/own-names.ts); `approximate`, whether an
+ * aggregate's value is a float as Postgres analysed it.
  */
-export function bucketGroups(tree: unknown, marks: ReadonlyMap<string, BucketMark>, placeholder: string, own: string): unknown {
+export function bucketGroups(tree: unknown, marks: ReadonlyMap<string, BucketMark>, placeholder: string, own: string, approximate: (n: AstNode) => boolean): unknown {
   if (marks.size === 0) return tree;
   // a SELECT inside a subquery expression or a LATERAL item may read an outer query's columns, which the inner query
   // could not: left as it is, and so is everything under it
@@ -110,13 +112,13 @@ export function bucketGroups(tree: unknown, marks: ReadonlyMap<string, BucketMar
     const under = correlated || k === "SubLink" || (k === "RangeSubselect" && b.lateral === true) || (k === "RangeFunction" && b.lateral === true);
     const out = { [k]: Object.fromEntries(Object.entries(b).map(([key, x]) => [key, visit(x, under)])) } as AstNode;
     if (k !== "SelectStmt" || correlated) return out;
-    try { return { SelectStmt: grouped(bodyOf(out), marks, placeholder, own) }; } catch (e) { if (e instanceof Bail) return out; throw e; }
+    try { return { SelectStmt: grouped(bodyOf(out), marks, placeholder, own, approximate) }; } catch (e) { if (e instanceof Bail) return out; throw e; }
   };
   return visit(tree, false);
 }
 
 /** one SELECT written as two, or `Bail` where it keeps its form */
-function grouped(s: Body, marks: ReadonlyMap<string, BucketMark>, placeholder: string, own: string): Body {
+function grouped(s: Body, marks: ReadonlyMap<string, BucketMark>, placeholder: string, own: string, approximate: (n: AstNode) => boolean): Body {
   const groups = s.groupClause;
   if (!Array.isArray(groups) || groups.length === 0) throw new Bail();
   if ((s.op !== undefined && s.op !== "SETOP_NONE") || s.distinctClause !== undefined || s.windowClause !== undefined || s.valuesLists !== undefined
@@ -168,6 +170,8 @@ function grouped(s: Body, marks: ReadonlyMap<string, BucketMark>, placeholder: s
     const name = funcName(b);
     if (!MERGED.has(name) || b.agg_distinct === true || b.agg_order !== undefined || b.agg_within_group === true || b.over !== undefined
       || b.func_variadic === true || (b.funcname as unknown[]).length !== 1) throw new Bail();
+    // a sum of doubles added in another order is other doubles: its last digit may move, so it keeps its plan
+    if ((name === "sum" || name === "avg") && approximate(n)) throw new Bail();
     switch (name) {
       case "sum": return call("sum", [part(n)]);
       case "count": case "count_star": return cast(call("sum", [part(n)]), "bigint");

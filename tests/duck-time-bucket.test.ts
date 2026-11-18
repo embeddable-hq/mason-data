@@ -176,6 +176,9 @@ test("a GROUP BY of a timestamptz's unit groups by its 15-minute bucket first; a
     "SELECT date_trunc('month', at), count(DISTINCT v) FROM ev GROUP BY 1",
     "SELECT date_trunc('month', at), string_agg(s, ',' ORDER BY id) FROM ev GROUP BY 1",
     "SELECT date_trunc('month', at), count(*), rank() OVER (ORDER BY count(*)) FROM ev GROUP BY 1",
+    // a float's sum or average, added in another order, may move in its last digit
+    "SELECT date_trunc('month', at), sum(v::float8), count(*) FROM ev GROUP BY 1",
+    "SELECT date_trunc('month', at), avg(x::float4) FROM ev GROUP BY 1",
     "SELECT date_trunc('minute', at), count(*) FROM ev GROUP BY 1",
     "SELECT date_trunc('month', at, 'Asia/Kathmandu'), count(*) FROM ev GROUP BY 1",
   ]) assert.ok(!(await sent(sql)).includes(hidden), `${sql} keeps its plan`);
