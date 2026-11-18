@@ -109,6 +109,13 @@ paths:
       WITHIN GROUP. A sum or avg of a float keeps its plan, because doubles added in another order move in the last
       digit. Anything else (a window, a grouping set, a subquery, a volatile function, DISTINCT, a set operation, a
       `*`) keeps the statement as it was;
+    - the inner keys are the GROUP BY's, made as its keys are read. A list, HAVING or ORDER BY expression that needs
+      another (a column no key holds, or one spelled otherwise) keeps the plan: the outer GROUP BY could not read it;
+    - an ORDER BY item is what Postgres binds it to, never what its form matches: an integer alone is the output at
+      that position and a name alone that is an output's is that output, both kept as they are; anything else is an
+      expression over the input's columns, a name inside it never an output. Why: `ORDER BY 1, 2` of an ICU text came
+      to the post-pass as `s COLLATE en_us`, and its `s` was read as an output it is not; `1 AS one` grouped made
+      `ORDER BY 1` a sort by the constant (PR 1149's review);
     - a row whose bucket is `BUCKET_NONE` (before 1980, infinite, from year 10000) is truncated as before, in the second
       branch. Both branches read the FROM and the WHERE, so a statement whose FROM or WHERE could answer twice
       differently keeps its plan: a volatile call, a LIMIT or OFFSET inside, a sample, a LATERAL item or a function in

@@ -245,11 +245,16 @@ function grouped(s: Body, marks: ReadonlyMap<string, BucketMark>, placeholder: s
   const innerNone: AstNode[] = [];
   const parts: AstNode[] = [];
   const columns = new Map<string, string>();
+  // THE INNER KEYS ARE THE GROUP BY'S: every one is made as its keys are read (`keysRead`), and the outer query groups by
+  // those. An expression of the list, the HAVING or the ORDER BY that needs another is one the outer GROUP BY cannot read
+  // (a column no key holds, spelled otherwise or depending on the key): the statement keeps its plan
+  let keysRead = false;
   // an inner key: one name per form
   const key = (val: AstNode, prefix: string, none: AstNode = val): AstNode => {
     const sig = `${prefix}:${shape(val)}`;
     let name = columns.get(sig);
     if (name === undefined) {
+      if (keysRead) throw new Bail();
       name = `${own}${prefix}${inner.length}`;
       columns.set(sig, name);
       inner.push(res(structuredClone(val), name));
@@ -285,15 +290,13 @@ function grouped(s: Body, marks: ReadonlyMap<string, BucketMark>, placeholder: s
     }
   };
 
-  /** an expression of the outer query: each column read from the inner one, each mark from its bucket, each aggregate
-   *  from its parts. `sorting`: an ORDER BY key, whose bare name of an output is that output */
-  const outer = (v: unknown, sorting: boolean): unknown => {
-    if (Array.isArray(v)) return v.map((x) => outer(x, sorting));
+  /** an expression of the outer query over the input's columns: each key read from the inner one, each mark from its
+   *  bucket, each aggregate from its parts */
+  const outer = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map((x) => outer(x));
     if (!isObject(v)) return v;
-    if (!isNode(v)) return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, outer(x, sorting)]));
-    // (a bare name of an output in an ORDER BY is that output, below, even where a key has its name)
-    const bare = sorting && kindOf(v) === "ColumnRef" && ((bodyOf(v).fields ?? []) as unknown[]).length === 1;
-    if (!bare && plainKeys.has(shape(v))) return key(v, "g");
+    if (!isNode(v)) return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, outer(x)]));
+    if (plainKeys.has(shape(v))) return key(v, "g");
     const mark = markOf(v);
     if (mark !== undefined) {
       // the bucket, NULL in a zone it does not decide the units of (the first branch) and for a row no bucket decides (the
@@ -316,8 +319,6 @@ function grouped(s: Body, marks: ReadonlyMap<string, BucketMark>, placeholder: s
       case "ColumnRef": {
         const f = (b.fields ?? []) as unknown[];
         if (f.some((x) => isNode(x) && kindOf(x) === "A_Star")) throw new Bail();
-        // a bare name of an output in an ORDER BY is that output, in both queries
-        if (sorting && f.length === 1 && outputNames.has(sval(f[0]) ?? "\u0000")) return structuredClone(v);
         return key(v, "c");
       }
       case "FuncCall": {
@@ -330,15 +331,25 @@ function grouped(s: Body, marks: ReadonlyMap<string, BucketMark>, placeholder: s
         break;
       }
     }
-    return { [k]: Object.fromEntries(Object.entries(b).map(([key, x]) => [key, outer(x, sorting)])) };
+    return { [k]: Object.fromEntries(Object.entries(b).map(([key, x]) => [key, outer(x)])) };
   };
 
-  const targetList = targets.map((t) => ({ ResTarget: { ...bodyOf(t), val: outer(bodyOf(t).val, false) } }));
-  const groupClause = (groups as AstNode[]).map((g) => constInt(g) !== null ? g : outer(g, false) as AstNode);
-  const havingClause = s.havingClause === undefined ? undefined : outer(s.havingClause, false);
+  // the GROUP BY first: its keys are the inner ones (a key by number, its output's expression: the GROUP BY keeps the
+  // number, which reads the outer list's)
+  const groupClause = (groups as AstNode[]).map((g) => { const read = outer(keyOf(g)) as AstNode; return constInt(g) !== null ? g : read; });
+  keysRead = true;
+  const targetList = targets.map((t) => ({ ResTarget: { ...bodyOf(t), val: outer(bodyOf(t).val) } }));
+  const havingClause = s.havingClause === undefined ? undefined : outer(s.havingClause);
+  // AN ORDER BY ITEM IS WHAT POSTGRES BINDS IT TO (findTargetlistEntrySQL92, then SQL99), never what its form matches:
+  // an integer constant alone is the output at that position, and a name alone that is an output's is that output — the
+  // outer query has the same list, so each is kept as it is. Anything else is an expression over the input's columns,
+  // at any depth (a name inside an expression is never an output), read from the keys like the list
   const sortClause = s.sortClause === undefined ? undefined : (s.sortClause as AstNode[]).map((x) => {
     if (kindOf(x) !== "SortBy") throw new Bail();
-    return { SortBy: { ...bodyOf(x), node: outer(bodyOf(x).node, true) } };
+    const node = bodyOf(x).node as AstNode;
+    const fields = isNode(node) && kindOf(node) === "ColumnRef" ? (bodyOf(node).fields ?? []) as unknown[] : [];
+    const output = constInt(node) !== null || (fields.length === 1 && outputNames.has(sval(fields[0]) ?? "\u0000"));
+    return { SortBy: { ...bodyOf(x), node: output ? structuredClone(node) : outer(node) } };
   });
   if (inner.length === 0) throw new Bail();
   // the rows a bucket decides, and the rows none does (`BUCKET_NONE`), each grouped

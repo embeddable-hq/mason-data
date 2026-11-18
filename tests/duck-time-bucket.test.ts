@@ -174,6 +174,19 @@ test("a GROUP BY of each unit of a timestamptz answers as Postgres does in every
       "SELECT date_trunc('month', at) AS m, extract(dow FROM at) AS dow, count(*), sum(v) FROM ev GROUP BY 1, 2 ORDER BY 1, 2",
       "SELECT upper(s) AS s, date_trunc('week', at) AS w, count(*) FROM ev GROUP BY s, 2 ORDER BY s DESC, w NULLS FIRST LIMIT 30",
       "SELECT date_trunc('day', at) AS d, v % 4, max(x) FROM ev GROUP BY date_trunc('day', at), v % 4 HAVING max(x) > 1 ORDER BY 1, 2 LIMIT 50",
+      // an ORDER BY item is what Postgres binds it to: by number (an output, a constant one among them), by an output's
+      // name, by a column no output names, qualified, inside an expression, by an aggregate
+      "SELECT date_trunc('month', at) w, s AS status, count(*) FROM ev GROUP BY 1, 2 ORDER BY 1, 2",
+      "SELECT date_trunc('month', at) w, s AS status, count(*) FROM ev GROUP BY 1, 2 ORDER BY w DESC NULLS LAST, status NULLS FIRST",
+      "SELECT date_trunc('month', at) w, count(*) FROM ev GROUP BY 1, s ORDER BY 1, s DESC",
+      "SELECT date_trunc('month', at) w, count(*) FROM ev GROUP BY 1, v ORDER BY v NULLS FIRST, 1",
+      "SELECT date_trunc('month', at) w, count(*) FROM ev GROUP BY 1, ev.v ORDER BY ev.v DESC, 1",
+      "SELECT s AS key, date_trunc('week', at) w, count(*) FROM ev GROUP BY 1, 2 ORDER BY 2, 1",
+      "SELECT date_trunc('month', at) w, upper(s) AS u, count(*) FROM ev GROUP BY 1, s ORDER BY 1, upper(s) DESC, s",
+      "SELECT date_trunc('month', at) w, 1 AS one, count(*) FROM ev GROUP BY 1, 2 ORDER BY 1",
+      "SELECT date_trunc('month', at) w, 1 AS one, count(*) FROM ev GROUP BY 1, 2 ORDER BY 2, 1 DESC",
+      "SELECT 7 AS seven, date_trunc('quarter', at) q, count(*) FROM ev GROUP BY 1, 2 ORDER BY 1, 2",
+      "SELECT date_trunc('month', at) w, s, count(*) FROM ev GROUP BY 1, 2 ORDER BY count(*) DESC, 1, 2",
       // the rows no bucket holds: before 1980, infinite and NULL, each truncated as before
       ...UNITS.map((u) => `SELECT date_trunc('${u}', at), count(*), sum(v) FROM old GROUP BY 1 ORDER BY 1`),
     ]), [], zone);
@@ -188,6 +201,11 @@ test("a GROUP BY of a timestamptz's unit groups by its 15-minute bucket first; a
   }
   assert.ok(!(await sent("SELECT date_trunc('month', at) AS m, sum(v) FROM ev GROUP BY 1 ORDER BY 1", "UTC")).includes(hidden), "planned in UTC, as before");
   assert.ok((await sent("SELECT date_trunc('day', a.at), count(*) FROM ev a JOIN ev b ON b.id = a.id GROUP BY 1")).includes(hidden), "over a join");
+  // sorted by number, by an output's name and by a column no output names, beside a constant key: still by the bucket
+  for (const sql of ["SELECT date_trunc('month', at) w, s AS status, count(*) FROM ev GROUP BY 1, 2 ORDER BY 1, 2",
+    "SELECT date_trunc('month', at) w, count(*) FROM ev GROUP BY 1, v ORDER BY v, 1", "SELECT date_trunc('month', at) w, 1 AS one, count(*) FROM ev GROUP BY 1, 2 ORDER BY 2, 1"]) {
+    assert.ok((await sent(sql)).includes(hidden), `the bucket is read: ${sql}`);
+  }
   // two columns' units: the first one's bucket alone, the other's unit computed a row
   const two = await sent("SELECT date_trunc('month', a.at), date_trunc('year', b.at), count(*) FROM ev a JOIN ev b ON b.id = a.id GROUP BY 1, 2");
   assert.ok(two.includes(`a.${hidden}`) && !two.includes(`b.${hidden}`), `the first column's bucket alone: ${two}`);

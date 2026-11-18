@@ -1914,6 +1914,13 @@ function* matrix(): Generator<Matrixed> {
     yield q(`issue 1146: a time's unit beside a key of the time that is no unit, and an output named as a key it is not, in ${zone}`,
       "SELECT upper(s) AS s, date_trunc('month', at) AS m, extract(dow FROM at) AS dow, count(*), sum(v) FROM bucket_edges WHERE at BETWEEN '1980-01-01' AND '2100-01-01' " +
       "GROUP BY s, 2, 3 ORDER BY s DESC, m, dow LIMIT 60", zone);
+    // an ORDER BY item is what Postgres binds it to (the database's ICU text sorted by number is a COLLATE expression)
+    yield q(`issue 1146: a time's unit and a text key sorted by number, by name and by a column no output names, in ${zone}`,
+      "SELECT date_trunc('month', at) w, s AS status, count(*) FROM bucket_edges GROUP BY 1, 2 ORDER BY 1 NULLS FIRST, 2", zone);
+    yield q(`issue 1146: a time's unit sorted after a key no output names, in ${zone}`,
+      "SELECT date_trunc('month', at) w, count(*) FROM bucket_edges GROUP BY 1, s, v ORDER BY s DESC, v NULLS FIRST, 1 NULLS FIRST", zone);
+    yield q(`issue 1146: a time's unit beside a constant key, sorted by number, in ${zone}`,
+      "SELECT date_trunc('month', at) w, 1 AS one, count(*) FROM bucket_edges GROUP BY 1, 2 ORDER BY 2, 1 NULLS FIRST", zone);
     yield q(`issue 1146: a time's unit grouped by its number and sorted by its count, in ${zone}`, "SELECT date_trunc('hour', at) AS h, count(*) FROM bucket_edges GROUP BY 1 ORDER BY 2 DESC, 1 NULLS FIRST LIMIT 12", zone);
   }
   // ---- issue 464: to_char of a time in a format DuckDB's strftime writes (src/duck/to-char.ts strftimeTemplate), and
