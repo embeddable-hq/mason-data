@@ -527,7 +527,8 @@ under another transaction's write fails its commit, hence swaps on the writer's 
 - **The catalog serves a table the moment its copy commits**, on a connection no copy holds (after a restart it had been
   empty for hours behind a large copy).
 - **An enum array is read as `text[]`**: a passthrough read hands it over as one VARCHAR DuckDB cannot cast.
-- **ZSTD strings, the disk projection**: `.claude/rules/duck-memory.md` "Memory and the machine" (JSON text 0.66 → 0.26 GB/M rows).
+- **ZSTD strings by default, the dictionary for short or repeated text**: `.claude/rules/duck-memory.md` "Memory and the
+  machine" (JSON text 0.66 → 0.26 GB/M rows); "Text compression by column" (a status 645 → 41 MB at 100 M rows).
 
 ## Keeping a copy current
 
@@ -4376,6 +4377,131 @@ old data is not free space, and the new must fit beside it.
 3.0–3.9 s without them, 3.3–5.5 s with them, across three runs. One read of `pg_stats` for every table (a materialized
 CTE) was no faster. The read is made only when asked (issue 890), and the estimate is computed with it, never at a
 read of the run's state.
+
+### Text compression by column (issue 1140, 2026-11-18)
+
+**Decision.** The instance still forces ZSTD (`force_compression`, src/duck/store.ts `INSTANCE_SETTINGS`), as the
+default. But when a table's copy is made, each text column (VARCHAR or JSON) is given its own method in the table's
+definition, `USING COMPRESSION`, which wins over the instance's (src/duck/text-compression.ts `textStorage`):
+- **the dictionary** (`dict_fsst`, the analyzer's own choice for text) when the sample's values average under 64 bytes,
+  or repeat (its distinct values at most an eighth of its values);
+- **ZSTD** for long values that do not repeat, and for a column whose text could reach 16 KiB. For a text, varchar or
+  char, that is a sampled value of 16 KiB or more. For any other type (json, jsonb, citext, xml and the rest), the
+  sample has only each value's size as Postgres stored it, so the dictionary needs every sampled value stored
+  uncompressed and under 2,000 bytes (`dictionaryHolds`). Such a value prints in under 12,000 bytes of text. A value
+  Postgres compressed says nothing of its text's length, and before Postgres 14 the source cannot say which it
+  compressed, so those columns keep ZSTD.
+
+The inputs come from one sample of the source, read in the copy's transaction (`beginCopy`, `textStorageOf`). It reads
+about 100 pages chosen at random (`TABLESAMPLE SYSTEM … REPEATABLE`), and sends back one row of aggregates. It reads
+at most 10,000 rows, and a wide table gives far fewer: about 1,900 rows from 100 pages of a table of 527 pages. Lengths come first, read from each value's header (`octet_length` of a text; `pg_column_size` of a json or
+jsonb, whose text would have to be made whole, with `pg_column_compression` from Postgres 14), so no large value is
+taken out of its TOAST table. Only the long columns the dictionary could hold are then hashed for their distinct values
+(`hashtextextended`, which a FIPS-mode Postgres allows where it refuses `md5`), on the same pages. The rows hashed are
+held to about 16 MiB of text, a stored size counted at six times itself, the most its text can be. A compaction decides again from
+the table's own rows (src/duck/compact.ts `rewrite`): eight runs of row ids, at most a piece's rows, halved when it runs
+out of memory. A column with no value sampled (an empty table) gets no clause and keeps the instance's ZSTD.
+
+**Why the instance keeps ZSTD.** A column's own method holds for every row written to it later, by the poll or the
+stream, through a checkpoint and a restart (the definition is in the file). A table made before this change has no
+clause, so its new rows keep the instance's ZSTD, as before. The other way round, dropping `force_compression`, would
+have stored those tables' new rows by the analyzer, and a JSON column with one large document in a row group is stored
+Uncompressed: an upgrade would have grown every append-only JSON table. Every path that makes a table without a clause (a
+generated table's `CREATE TABLE AS`, a stored JSON path's `ADD COLUMN`) also keeps today's ZSTD. A column given
+`dict_fsst` under the forced instance stores exactly what the analyzer would: the same bytes and times in every shape
+below.
+
+**Why.** On the cold benchmark at 100 M orders, `orders.status` (six values) took 645 MB under ZSTD and 41 MB with the
+analyzer's choice, and "count by status" read cold took 4.03 s against 0.17 s, with the same answer. ZSTD was forced in
+the first place because the analyzer stored a large JSON column Uncompressed (0.66 GB a million rows, against 0.26 GB
+forced). Both hold: the dictionary for what dashboards group and filter on, ZSTD for documents.
+
+**When the analyzer stores text Uncompressed.** The dictionary cannot hold a value of 16 KiB or more (DuckDB 2.0 at
+256 KiB blocks: 16,383 bytes kept it, 16,384 did not). One such value in a row group, and the whole row group is stored
+Uncompressed, a forced `dict_fsst` included (it falls back, it never fails). Documents of 700 bytes with one of 45 KB in a
+hundred took 1,451 MB a million rows Uncompressed, against 312 MB under ZSTD. A sample may miss rare large values in a
+short column, and the cost is not small. A row group holds 122,880 rows, so a large value in one row of 100,000 puts
+one in nearly every row group, and nearly the whole column is stored Uncompressed. The review of PR 1141 measured
+5 M rows of such a short column at 63 MB, against 21 MB under ZSTD. That is the worst case of a text column given the
+dictionary: three times ZSTD's size, never the 51 times a large document stored Uncompressed costs. A compaction
+decides again from the table's own rows, and so sees a large value the source's sample missed only if its own sample
+holds one.
+
+The first version of this rule measured a json or jsonb by its size as stored, and compared that with the 16 KiB
+limit, which applies to the text. The review of PR 1141 found 20,000 jsonb documents of 800 keys and five distinct
+values, 51,892 bytes of text each and 3,383 bytes stored compressed. They were given the dictionary and took 995 MB
+Uncompressed, against 19.3 MB under ZSTD on main. A stored size now gives the dictionary only when no value is
+compressed and every one is small.
+
+**Measured.** DuckDB 2.0.0, 4 threads, a laptop. One column of a million rows of each shape, the
+same rows in the same order for each method. The size is the database file's after a checkpoint. "Fresh scan" is
+`sum(strlen(v))` in a newly opened instance: the engine's own cache is cold, but the OS's page cache is not (it could not
+be dropped here), so a read from disk costs the bytes on top. "Filter" and "group by" are warm, the best of five.
+`dict_fsst` (a column's own, under the forced instance) gave the same bytes and times as the analyzer in every shape.
+Every answer was the same under both methods.
+
+| Shape (avg bytes, distinct) | MB analyzer | MB ZSTD | fresh scan ms | filter ms | group by ms |
+|---|---|---|---|---|---|
+| status (7 B, 6) | 0.8 | 6.8 | 1 / 4 | 1 / 5 | 1 / 7 |
+| country code (2 B, 209) | 1.6 | 6.8 | 1 / 2 | 1 / 2 | 1 / 3 |
+| name (18 B, 8 k) | 2.6 | 8.9 | 1 / 6 | 1 / 6 | 2 / 10 |
+| email (27 B, unique) | 8.7 | 13.1 | 5 / 7 | 7 / 7 | 14 / 16 |
+| hex id (32 B, unique) | 18.4 | 21.8 | 6 / 4 | 5 / 4 | 8 / 9 |
+| URL (43 B, unique) | 10.8 | 13.1 | 5 / 10 | 12 / 18 | 25 / 27 |
+| small JSON (68 B, unique) | 29.6 | 28.1 | 8 / 13 | 18 / 24 | 19 / 26 |
+| free text, random words (113 B, unique) | 62.7 | 55.8 | 10 / 25 | 33 / 48 | 16 / 29 |
+| free text, a sentence or two (175 B, unique) | 34.6 | 38.8 | 10 / 29 | 30 / 52 | 129 / 146 |
+| free text, random words (223 B, unique) | 123.0 | 100.7 | 21 / 53 | 59 / 103 | 18 / 59 |
+| long label (186 B, 40) | 1.3 | 8.9 | 1 / 7 | 1 / 6 | 1 / 13 |
+| text of 220 B, 1,000 values | 4.7 | 51.7 | 1 / 25 | 2 / 64 | 5 / 28 |
+| text of 220 B, 5,000 values | 96.2 | 87.8 | 17 / 48 | 55 / 88 | 15 / 47 |
+| JSON (708 B, unique) | 275.0 | 209.5 | 38 / 117 | 132 / 194 | 112 / 195 |
+| JSON (704 B, 300 values) | 2.6 | 40.9 | 1 / 29 | 1 / 103 | 79 / 108 |
+| JSON (704 B, 1,000 values) | 87.0 | 98.6 | 15 / 54 | 69 / 130 | 93 / 137 |
+| JSON (706 B, 3,000 values) | 230.7 | 158.3 | 33 / 87 | 104 / 164 | 105 / 168 |
+| long JSON (1,734 B, unique) | 682.1 | 518.8 | 197 / 298 | 179 / 406 | 269 / 476 |
+| JSON (1,127 B), one of 45 KB in 100 | 1,451.0 Uncompressed | 312.2 | 193 / 201 | 92 / 255 | 138 / 305 |
+
+So the rule's thresholds. Below 64 bytes the dictionary is 1.2 to 8.5 times smaller, and as fast or faster except on hex
+ids. From 64 bytes, of values that do not repeat, ZSTD is smaller in every shape but one: 5 to 16 % for random words and
+small JSON, 24 % from 700 bytes, and 36 % for the cold benchmark's jsonb (below). Sentences of 175 bytes are the
+exception, 11 % larger. ZSTD reads such a column 1.5 to 3 times slower when it is cached. But a dashboard filters and
+groups on short codes, not on unique documents, and a cold read pays for a column's bytes. So from 64 bytes: ZSTD. Values that repeat are many times smaller in the
+dictionary at any length, until there are too many distinct values for a block's dictionary: 1,000 of 220 B or of 700 B
+still repeat, 3,000 of 700 B and 5,000 of 220 B no longer do. A sample of 10,000 rows sees 1,000 distinct at a tenth,
+3,000 at about three tenths, so the line is an eighth. A smaller sample, from a wide table, sees a larger share
+distinct, so it calls fewer columns repeated.
+
+**The cold benchmark's columns, and why the threshold is 64 bytes.** The rule first gave the dictionary to everything
+under 256 bytes. On the cold benchmark at 100 M orders (`scripts/bench-replica-cold.ts` `coldDataSql`), that made a
+count by status 4.03 s to 0.51 s, but the synced data grew from 8.29 to 8.91 GiB (+7.5 %). Its columns, measured at 2 M
+rows from the same SQL on a laptop, each column in a file of its own (MB, ZSTD against the dictionary; a warm filter
+the best of five):
+
+| Column (avg bytes, distinct) | MB ZSTD | MB dictionary | warm filter ms |
+|---|---|---|---|
+| `orders.status` (7 B, 6) | 12.5 | 1.3 | 5 / 1 |
+| `orders.note` (34 B, 4; 30 % non-null) | 12.8 | 1.3 | 8 / 2 |
+| `orders.payload` jsonb (156 B of text, 176 B stored, unique) | 65.5 | 102.3 | 92 / 67 |
+| `customers.name` (small at 2 M) | 0.8 | 0.8 | 1 / 1 |
+| `customers.email` (small at 2 M) | 0.8 | 1.0 | 1 / 1 |
+
+At 100 M rows the payload costs about 1.8 GB more with the dictionary, against about 1.1 GB the status and the note
+save. That is the box's +0.62 GiB. With the threshold at 64 bytes, the payload keeps ZSTD and the status and note keep
+the dictionary. The price is the payload's warm filter, 92 ms against 67 ms over 2 M rows.
+
+**What it costs a first sync.** Nothing measurable. The sample is two small reads on the source, and a dictionary is
+no slower to write than ZSTD. The real sync of 2 M orders from a local Postgres 18 (a six-value status, an email, a jsonb
+of ~350 bytes), main against this change, three runs alternated: 5.16, 5.51 and 5.62 s against 4.67, 5.23 and 5.37 s.
+The file went from 287.8 to 278.7 MB (the jsonb, ZSTD under both, is most of it), and a count by status in a fresh
+instance from 6–9 ms to 2–3 ms, with the same answer.
+
+**An upgrade.** Nothing is read again. A table synced before keeps its stored method until it is synced again whole or
+compacted (Mason compacts a table by itself once half its blocks are waste: deleted rows, or a row group per checkpoint). Then the rule applies.
+
+**Not done.** A generated table is made by `CREATE TABLE AS`, which takes no clause, so its text keeps the instance's
+ZSTD. A stored JSON path's column too, until its table is compacted. The disk check's `STORED_SHARE` (0.4) was measured
+with ZSTD everywhere, so it now over-estimates a table of short text, which only errs on the safe side.
 
 ### A small table's size: not measured until DuckDB's own checkpoint (issue 815; the owner, 2026-11-11)
 

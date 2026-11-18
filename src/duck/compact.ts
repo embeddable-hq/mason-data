@@ -25,6 +25,7 @@
 import type { DuckConnection } from "./executor.ts";
 import type { KeyChange } from "./stream.ts";
 import { endedTransaction, pgErrorOf } from "./store.ts";
+import { compressionClause, distinctRows, isTextType, lengthSamplesOf, needsDistinct, syncedDistinctSql, syncedLengthsSql, TEXT_SAMPLE_ROWS, textStorage, withDistinct, type TextSample } from "./text-compression.ts";
 
 /** DuckDB's row group: a compacted table holds its rows in row groups of this many (the last one fewer) */
 export const ROW_GROUP_ROWS = 122_880;
@@ -36,8 +37,10 @@ export const COMPACT_MIN_WASTE_BLOCKS = 16;
 /** a piece of the rewrite holds at most this share of the memory limit, by its rows' size on disk times
  *  `COMPACT_ROW_EXPANSION` (as a first sync's chunk holds an eighth of it, src/duck/sync.ts COPY_CHUNK_MEMORY_SHARE) */
 export const COMPACT_MEMORY_SHARE = 1 / 8;
-/** a row in memory against its bytes on disk, at most: forced zstd stores text 2.5 to 4.5 times smaller, and a first
- *  sync measured a jsonb's read at about 5.5 times its bytes (docs/DESIGN.md "Large values out of line") */
+/** a row in memory against its bytes on disk, about: forced zstd stores text 2.5 to 4.5 times smaller, and a first
+ *  sync measured a jsonb's read at about 5.5 times its bytes (docs/DESIGN.md "Large values out of line"). A text column
+ *  stored by the dictionary (src/duck/text-compression.ts) can be smaller still: a piece of such a table may take more
+ *  memory than planned, and halves when it runs out */
 export const COMPACT_ROW_EXPANSION = 8;
 /** a piece is at most this many row groups' rows: a piece commits whole row groups (and one partial one at its end) */
 export const COMPACT_MAX_PIECE_ROWS = 8 * ROW_GROUP_ROWS;
@@ -146,9 +149,13 @@ export async function rewrite(c: DuckConnection, schema: string, table: string, 
   const cols = (await c.runAndReadAll(`SELECT column_name, data_type, is_nullable, column_default FROM duckdb_columns() WHERE database_name = current_database() AND schema_name = $1 AND table_name = $2 ORDER BY column_index`,
     [schema, table])).getRowsJS() as Array<[string, string, boolean, string | null]>;
   if (cols.length === 0) throw new Error(`${schema}.${table} is not a table of the synced data (Mason bug: report it)`);
-  await c.run(`DROP TABLE IF EXISTS ${side}`);
-  await c.run(`CREATE TABLE ${side} (${cols.map(([n, type, nullable, def]) => `${ident(n)} ${type}${nullable ? "" : " NOT NULL"}${def === null ? "" : ` DEFAULT ${def}`}`).join(", ")})`);
   const end = Number((await c.runAndReadAll(`SELECT coalesce(max(rowid), -1) + 1 FROM ${target}`)).getRowsJS()[0]![0]);
+  // EACH TEXT COLUMN'S COMPRESSION decided again, from a sample of the table's own rows (src/duck/text-compression.ts):
+  // a table synced before the rule, or whose values have changed since, is stored by it from here on
+  const texts = cols.filter(([, type]) => isTextType(type)).map(([n]) => n);
+  const samples = texts.length === 0 ? new Map<string, TextSample>() : await sampleOf(c, target, texts, end, firstPiece, said);
+  await c.run(`DROP TABLE IF EXISTS ${side}`);
+  await c.run(`CREATE TABLE ${side} (${cols.map(([n, type, nullable, def]) => `${ident(n)} ${type}${isTextType(type) ? compressionClause(textStorage(samples.get(n))) : ""}${nullable ? "" : " NOT NULL"}${def === null ? "" : ` DEFAULT ${def}`}`).join(", ")})`);
   let n = Math.max(1, Math.floor(firstPiece)), pieces = 0;
   for (let lo = 0; lo < end;) {
     let inTx = false;
@@ -178,6 +185,33 @@ export async function rewrite(c: DuckConnection, schema: string, table: string, 
   const [rows, kept] = (await c.runAndReadAll(`SELECT (SELECT count(*) FROM ${side}), (SELECT count(*) FROM ${target})`)).getRowsJS()[0]!.map(Number) as [number, number];
   if (rows !== kept) throw new Error(`its compaction wrote ${rows} row(s) of its ${kept} (Mason bug: report it, with mason logs): it was not swapped in`);
   return { rows, pieces, pieceRows: n };
+}
+
+/**
+ * A SYNCED TABLE'S TEXT COLUMNS SAMPLED for their compression (src/duck/text-compression.ts): at most a piece's rows,
+ * which the memory holds, and halved at every out-of-memory as a piece is. A sample of one row that does not fit
+ * decides nothing: the columns keep the instance's ZSTD, as before the rule, and the line says so.
+ */
+async function sampleOf(c: DuckConnection, target: string, texts: readonly string[], end: number, firstPiece: number, said: (line: string) => void): Promise<Map<string, TextSample>> {
+  const quoted = texts.map(ident);
+  for (let rows = Math.max(1, Math.min(TEXT_SAMPLE_ROWS, Math.floor(firstPiece)));; rows = Math.max(1, Math.floor(rows / 2))) {
+    try {
+      const samples = lengthSamplesOf(texts, (await c.runAndReadAll(syncedLengthsSql(target, quoted, end, rows))).getRowsJS()[0] ?? []);
+      const long = texts.filter((n) => needsDistinct(samples.get(n)!));
+      if (long.length > 0) {
+        const counted = Math.min(rows, ...long.map((n) => distinctRows(samples.get(n)!)));
+        withDistinct(samples, long, (await c.runAndReadAll(syncedDistinctSql(target, long.map(ident), end, counted))).getRowsJS()[0] ?? []);
+      }
+      return samples;
+    } catch (e) {
+      // OUT OF MEMORY, a read that changed nothing: a smaller sample, as a smaller piece
+      if (pgErrorOf(e, "").fields.code !== "53200") throw e;
+      if (rows === 1) {
+        said("a sample of one row of its text ran out of memory: its text columns keep zstd");
+        return new Map();
+      }
+    }
+  }
 }
 
 /** the side table of `schema.table`, quoted */
