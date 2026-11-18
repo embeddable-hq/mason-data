@@ -91,7 +91,11 @@ paths:
   - **a time's unit grouped by its bucket** (`src/duck/bucket-group.ts`, issue 1146): a GROUP BY whose key holds the
     hour, day, week, month, quarter or year of a synced `timestamptz` column, in the session's zone, is two queries.
     The inner one groups by the column's hidden 15-minute bucket (duck-copy.md) and the other keys, and adds up each
-    aggregate's part. The outer one truncates each bucket's start once and adds the parts up again. It holds because
+    aggregate's part. The outer one truncates each bucket's start once and adds the parts up again. The inner one is two
+    branches, a UNION ALL: the rows whose bucket is not `BUCKET_NONE`, which read the bucket and never the time, and the
+    rows whose bucket is, which read the time. On a table that holds no such row the engine's statistics plan the second
+    branch empty, so a cold query reads the bucket alone. The statistics are read as the statement is planned, in its
+    own transaction (a prepared statement is planned again as it runs), never kept in a plan. It holds because
     every zone has been a multiple of 15 minutes from UTC since 1980, so a bucket never straddles a unit's edge
     (`tests/duck-bucket-zones.test.ts` checks every zone the engine knows). What it is used for is read from speed:
     - not where the plan is made in UTC (`isUtc` of the session's zone): there the instant's arithmetic costs less than a
@@ -104,8 +108,10 @@ paths:
       WITHIN GROUP. A sum or avg of a float keeps its plan, because doubles added in another order move in the last
       digit. Anything else (a window, a grouping set, a subquery, a volatile function, DISTINCT, a set operation, a
       `*`) keeps the statement as it was;
-    - a row whose bucket is NULL (before 1980, infinite, from year 10000) is truncated as before, row by row, in the
-      inner query. The guard is per row, not the column's statistics, so a cached plan never goes stale as rows sync;
+    - a row whose bucket is `BUCKET_NONE` (before 1980, infinite, from year 10000) is truncated as before, in the second
+      branch. Both branches read the FROM and the WHERE, so a statement whose FROM or WHERE could answer twice
+      differently keeps its plan: a volatile call, a LIMIT or OFFSET inside, a sample, a LATERAL item or a function in
+      the FROM, a WITH query with any of these;
     - the zones that changed offset at a minute past midnight since 1980 (`OFF_BOUNDARY_ZONES`: St. John's and Goose
       Bay to 2011, Moncton to 2006, Gaza and Hebron in 2010–11, Casey in 2020–22) are read from the session at run
       time, and there every row is truncated as before. Mason refuses a fixed-offset session zone (22023), so none

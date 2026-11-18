@@ -159,7 +159,9 @@ paths:
   (`SCALE_LAYOUT`). Why: Postgres prints `12.5` beside `12.49`, and one DECIMAL scale printed `12.50`.
 - **A timestamptz's 15-minute bucket is a hidden column every write computes** (`src/duck/bucket-column.ts`, issue
   1146). Beside each `timestamptz` column the copy holds an INTEGER, the value's 15 minutes of UTC (`bucketSql`). It is
-  NULL before 1980, from year 10000, for ±infinity and for NULL. The copy's chunks, the poll's `writeStaged`, the
+  NULL for a NULL, and `BUCKET_NONE` (-1) for a value no bucket decides: before 1980, from year 10000, ±infinity. The
+  column's own statistics are then what says a table holds no such row, so nothing is recorded beside it, and a write
+  that adds one says so in its own transaction. The copy's chunks, the poll's `writeStaged`, the
   stream's `writeByKey` and `updateCarried` each compute it from the value, and a compaction keeps it. A new write path
   into a copy names it too, or a GROUP BY of a unit groups that table's rows by a stale bucket. It is never listed. A
   copy an older Mason made has none, and serves with today's plan until it is synced again whole. A `timestamp` has
