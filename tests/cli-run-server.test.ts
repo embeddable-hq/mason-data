@@ -263,7 +263,7 @@ test("the commands' way in: the run's token as a Bearer header, no cookie and no
   fs.writeFileSync(sourceFile, good.replace("customers: {}", "customers: { colums: [id] }"));
   const refused = await bearer("POST", "/api/pick", { table: "public.orders", picked: true });
   assert.equal(refused.status, 409);
-  assert.match(JSON.parse(refused.text).error, /^mason\/sources\/app\.yml: tables\.customers: unexpected key colums — did you mean `columns`\? — a table takes columns, exclude, key and sync — fix it first$/);
+  assert.match(JSON.parse(refused.text).error, /^mason\/sources\/app\.yml: tables\.customers: unexpected key colums — did you mean `columns`\? — a table takes columns, exclude, key, sync and references — fix it first$/);
   fs.writeFileSync(sourceFile, good);
   assert.equal((await bearer("POST", "/api/pick", { table: "public.customers", picked: false })).status, 200);
 });

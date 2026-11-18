@@ -233,6 +233,9 @@ export interface SourceTable {
   columns: SourceColumnInfo[];
   /** single-column foreign keys out of this table, to another table's single-column primary key or unique index */
   foreignKeys: Array<{ column: string; target: string; targetColumn: string }>;
+  /** every foreign key the table declares, of one column or several, its columns paired in order: what `mason add`
+   *  writes as `references:` (src/cli/source-edit.ts). Absent from a catalog built without it: `foreignKeys` then */
+  references?: Array<{ columns: string[]; target: string; targetColumns: string[] }>;
   /** its unique indexes over plain columns, the primary key's aside (an expression's or a partial one backs no foreign
    *  key): Mason's catalog has them, so a foreign key to one is listed (the BI-tools test of #517) */
   uniqueKeys?: UniqueKey[];
@@ -411,12 +414,16 @@ const TABLES_SQL_BODY = `SELECT json_agg(t ORDER BY t.schema, t.table)::text FRO
           SELECT t.typbasetype, t.typtypmod FROM base JOIN pg_type t ON t.oid = base.oid WHERE t.typtype = 'd')
         SELECT base.oid, base.mod FROM base JOIN pg_type t ON t.oid = base.oid WHERE t.typtype <> 'd') b
       WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped) AS columns,
-    (SELECT coalesce(json_agg(json_build_object('column', a.attname, 'target', tn.nspname || '.' || tc.relname, 'target_column', ta.attname)), '[]'::json)
+    -- every foreign key the table declares, its columns paired in the key's order. Never one Postgres made itself for a
+    -- partition of the table it references (conparentid): that partition is no table Mason lists
+    (SELECT coalesce(json_agg(json_build_object('columns', k.columns, 'target', tn.nspname || '.' || tc.relname, 'target_columns', k.target_columns) ORDER BY f.conname), '[]'::json)
       FROM pg_constraint f
-      JOIN pg_attribute a ON a.attrelid = f.conrelid AND a.attnum = f.conkey[1]
       JOIN pg_class tc ON tc.oid = f.confrelid JOIN pg_namespace tn ON tn.oid = tc.relnamespace
-      JOIN pg_attribute ta ON ta.attrelid = f.confrelid AND ta.attnum = f.confkey[1]
-      WHERE f.conrelid = c.oid AND f.contype = 'f' AND cardinality(f.conkey) = 1) AS foreign_keys
+      CROSS JOIN LATERAL (SELECT json_agg(a.attname ORDER BY u.n) AS columns, json_agg(ta.attname ORDER BY u.n) AS target_columns
+        FROM unnest(f.conkey, f.confkey) WITH ORDINALITY u(k, fk, n)
+        JOIN pg_attribute a ON a.attrelid = f.conrelid AND a.attnum = u.k
+        JOIN pg_attribute ta ON ta.attrelid = f.confrelid AND ta.attnum = u.fk) k
+      WHERE f.conrelid = c.oid AND f.contype = 'f' AND f.conparentid = 0) AS foreign_keys
   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
   WHERE c.relkind IN ('r', 'p') AND NOT c.relispartition
     AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\\_%'
@@ -433,7 +440,7 @@ interface TableRow {
   unique_keys: Array<{ name: string; constraint: boolean; nulls_not_distinct: boolean; columns: string[] }>;
   columns: Array<{ name: string; attnum: number; type: string; domain: boolean; type_kind: string; not_null: boolean; toastable?: boolean; comment: string | null; type_oid: number | string; type_array_oid: number | string;
     default: string | null; identity: string; generated: string; sequence: string | null; collation: { schema: string; name: string } | null }>;
-  foreign_keys: Array<{ column: string; target: string; target_column: string }>;
+  foreign_keys: Array<{ columns: string[]; target: string; target_columns: string[] }>;
 }
 
 /** What a never-analysed table counted to, by oid: a run reads the catalog again whenever it is asked (at most once a
@@ -493,7 +500,8 @@ export async function readTables(pg: Pick<PgConnection, "query">, only: Readonly
         ...(c.default !== null && c.generated === "" ? { default: c.default } : {}), ...(c.identity === "a" || c.identity === "d" ? { identity: c.identity } : {}),
         ...(c.generated === "s" ? { generated: true as const } : {}), ...(c.sequence !== null ? { sequence: c.sequence } : {}),
         ...(c.collation !== null && c.collation !== undefined ? { collation: c.collation } : {}) })),
-      foreignKeys: t.foreign_keys.map((f) => ({ column: f.column, target: f.target, targetColumn: f.target_column })),
+      foreignKeys: t.foreign_keys.filter((f) => f.columns.length === 1).map((f) => ({ column: f.columns[0]!, target: f.target, targetColumn: f.target_columns[0]! })),
+      references: t.foreign_keys.map((f) => ({ columns: f.columns, target: f.target, targetColumns: f.target_columns })),
       uniqueKeys: t.unique_keys.map((u) => ({ name: u.name, columns: u.columns, constraint: u.constraint, nullsNotDistinct: u.nulls_not_distinct })),
       ...(Number(t.row_type_oid) > 0 ? { rowTypeOid: Number(t.row_type_oid) } : {}),
       ...(t.replica_identity === "d" || t.replica_identity === "n" || t.replica_identity === "f" || t.replica_identity === "i" ? { replicaIdentity: t.replica_identity } : {}),

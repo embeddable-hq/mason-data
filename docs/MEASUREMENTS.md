@@ -17,24 +17,24 @@ Mason and Postgres answered the same 3 queries over the same rows. The primary k
 
 | query | rows | clients | Postgres (s) | Mason (s) | Mason is |
 |---|---:|---:|---:|---:|---|
-| Count by status, every order | 1 M | 1 | 1.21 | 0.0686 | 18× faster |
-|  | 1 M | 10 | 1.24 | 0.221 | 5.6× faster |
-|  | 10 M | 1 | 21.2 | 0.238 | 89× faster |
-|  | 10 M | 10 | 21.7 | 0.968 | 22× faster |
-|  | 100 M | 1 | 216 | 4.03 | 54× faster |
-|  | 100 M | 10 | 710 | 8.51 | 83× faster |
-| Revenue by month, orders joined to customers | 1 M | 1 | 1.98 | 0.162 | 12× faster |
-|  | 1 M | 10 | 3.61 | 0.531 | 6.8× faster |
-|  | 10 M | 1 | 24.0 | 0.982 | 24× faster |
-|  | 10 M | 10 | 43.9 | 3.75 | 12× faster |
-|  | 100 M | 1 | 335 | 18.0 | 19× faster |
-|  | 100 M | 10 | 2036 | 39.3 | 52× faster |
-| One order by its primary key | 1 M | 1 | 0.0335 | 0.136 | 4.1× slower |
-|  | 1 M | 10 | 0.0374 | 0.199 | 5.3× slower |
-|  | 10 M | 1 | 0.0346 | 0.770 | 22× slower |
-|  | 10 M | 10 | 0.0393 | 0.885 | 23× slower |
-|  | 100 M | 1 | 0.0233 | 13.3 | 570× slower |
-|  | 100 M | 10 | 0.0278 | 13.5 | 485× slower |
+| Count by status, every order | 1 M | 1 | 1.21 | 0.0576 | 21× faster |
+|  | 1 M | 10 | 1.24 | 0.153 | 8.1× faster |
+|  | 10 M | 1 | 21.2 | 0.0932 | 227× faster |
+|  | 10 M | 10 | 21.7 | 0.241 | 90× faster |
+|  | 100 M | 1 | 216 | 0.452 | 478× faster |
+|  | 100 M | 10 | 710 | 1.22 | 583× faster |
+| Revenue by month, orders joined to customers | 1 M | 1 | 1.98 | 0.160 | 12× faster |
+|  | 1 M | 10 | 3.61 | 0.574 | 6.3× faster |
+|  | 10 M | 1 | 24.0 | 0.965 | 25× faster |
+|  | 10 M | 10 | 43.9 | 3.87 | 11× faster |
+|  | 100 M | 1 | 335 | 17.9 | 19× faster |
+|  | 100 M | 10 | 2036 | 39.2 | 52× faster |
+| One order by its primary key | 1 M | 1 | 0.0345 | 0.131 | 3.8× slower |
+|  | 1 M | 10 | 0.0375 | 0.202 | 5.4× slower |
+|  | 10 M | 1 | 0.0352 | 0.743 | 21× slower |
+|  | 10 M | 10 | 0.0392 | 0.826 | 21× slower |
+|  | 100 M | 1 | 0.0218 | 13.0 | 598× slower |
+|  | 100 M | 10 | 0.0250 | 13.3 | 531× slower |
 
 Mason is for scans and aggregates. A lookup through an index is faster on Postgres ([docs/DESIGN.md](DESIGN.md) "Heap order, no index"). Cold times on Postgres depend on the disk's throughput. Each engine had 4 CPUs, 8 GiB of memory and no swap, on a disk of EBS gp3, 125 MB/s, 3000 IOPS.
 
@@ -45,24 +45,24 @@ Each run's read is what the measured engine read from disk, and the MB/s that is
 
 | query | rows | clients | Postgres slowest (s) | Postgres mean (s) | Postgres read, GB (MB/s) | Mason slowest (s) | Mason mean (s) | Mason read, GB (MB/s) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| Count by status, every order | 1 M | 1 | 1.21, 1.22, 1.20 | 1.21, 1.22, 1.20 | 0.289 (239), 0.289 (237), 0.289 (242) | 0.0696, 0.0683, 0.0686 | 0.0696, 0.0683, 0.0686 | 0.00710 (102), 0.00710 (104), 0.00710 (104) |
-|  | 1 M | 10 | 1.24, 1.30, 1.23 | 1.22, 1.27, 1.22 | 0.289 (234), 0.289 (223), 0.289 (235) | 0.221, 0.236, 0.216 | 0.210, 0.218, 0.201 | 0.00710 (32.2), 0.00710 (30.1), 0.00710 (32.8) |
-|  | 10 M | 1 | 21.2, 21.2, 21.1 | 21.2, 21.2, 21.1 | 2.91 (137), 2.91 (137), 2.91 (137) | 0.238, 0.238, 0.238 | 0.238, 0.238, 0.238 | 0.0654 (275), 0.0652 (274), 0.0652 (274) |
-|  | 10 M | 10 | 21.7, 21.8, 21.4 | 21.5, 21.6, 21.3 | 2.91 (134), 2.91 (133), 2.91 (135) | 0.985, 0.968, 0.959 | 0.847, 0.862, 0.841 | 0.0652 (66.2), 0.0652 (67.3), 0.0657 (68.5) |
-|  | 100 M | 1 | 216, 216, 216 | 216, 216, 216 | 28.5 (131), 28.5 (132), 28.5 (132) | 4.02, 4.03, 4.09 | 4.02, 4.03, 4.09 | 0.651 (162), 0.651 (162), 0.651 (159) |
-|  | 100 M | 10 | 710, 848, 683 | 660, 760, 640 | 93.1 (131), 111 (131), 89.6 (131) | 8.59, 8.51, 8.49 | 7.84, 7.26, 7.26 | 0.653 (76.0), 0.651 (76.5), 0.649 (76.4) |
-| Revenue by month, orders joined to customers | 1 M | 1 | 1.99, 1.98, 1.98 | 1.99, 1.98, 1.98 | 0.357 (179), 0.357 (180), 0.357 (180) | 0.162, 0.164, 0.161 | 0.162, 0.164, 0.161 | 0.0266 (164), 0.0265 (162), 0.0275 (171) |
-|  | 1 M | 10 | 3.75, 3.58, 3.61 | 3.62, 3.44, 3.42 | 0.357 (95.2), 0.357 (100), 0.357 (98.7) | 0.527, 0.556, 0.531 | 0.498, 0.525, 0.516 | 0.0283 (53.6), 0.0281 (50.6), 0.0281 (53.0) |
-|  | 10 M | 1 | 24.3, 23.5, 24.0 | 24.3, 23.5, 24.0 | 2.96 (122), 2.96 (126), 2.96 (123) | 0.990, 0.982, 0.972 | 0.990, 0.982, 0.972 | 0.251 (254), 0.251 (255), 0.249 (256) |
-|  | 10 M | 10 | 43.9, 43.7, 43.9 | 43.0, 42.7, 43.1 | 3.29 (74.9), 3.20 (73.2), 3.25 (74.0) | 3.75, 3.71, 3.89 | 2.53, 2.54, 2.75 | 0.252 (67.1), 0.252 (68.0), 0.256 (65.6) |
-|  | 100 M | 1 | 335, 335, 335 | 335, 335, 335 | 33.8 (101), 33.8 (101), 33.8 (101) | 17.9, 18.0, 18.0 | 17.9, 18.0, 18.0 | 2.46 (137), 2.47 (137), 2.46 (137) |
-|  | 100 M | 10 | 2264, 2036, 1871 | 1915, 1729, 1623 | 188 (83.1), 157 (77.3), 139 (74.5) | 39.8, 39.0, 39.3 | 28.0, 27.5, 27.8 | 2.54 (63.8), 2.51 (64.4), 2.51 (63.9) |
-| One order by its primary key | 1 M | 1 | 0.0337, 0.0335, 0.0331 | 0.0337, 0.0335, 0.0331 | 0.00490 (145), 0.00490 (146), 0.00490 (148) | 0.136, 0.137, 0.134 | 0.136, 0.137, 0.134 | 0.0219 (161), 0.0219 (160), 0.0219 (164) |
-|  | 1 M | 10 | 0.0374, 0.0379, 0.0363 | 0.0357, 0.0359, 0.0355 | 0.00509 (136), 0.00509 (134), 0.00509 (140) | 0.207, 0.199, 0.198 | 0.202, 0.195, 0.193 | 0.0364 (175), 0.0363 (182), 0.0360 (181) |
-|  | 10 M | 1 | 0.0346, 0.0345, 0.0347 | 0.0346, 0.0345, 0.0347 | 0.00503 (146), 0.00503 (146), 0.00504 (145) | 0.768, 0.772, 0.770 | 0.768, 0.772, 0.770 | 0.189 (245), 0.188 (244), 0.189 (245) |
-|  | 10 M | 10 | 0.0393, 0.0387, 0.0395 | 0.0375, 0.0366, 0.0378 | 0.00525 (133), 0.00525 (135), 0.00525 (133) | 0.885, 0.861, 0.909 | 0.884, 0.860, 0.908 | 0.209 (236), 0.209 (242), 0.209 (230) |
-|  | 100 M | 1 | 0.0233, 0.0207, 0.0366 | 0.0233, 0.0207, 0.0366 | 0.00516 (221), 0.00516 (249), 0.00516 (141) | 13.3, 13.3, 13.3 | 13.3, 13.3, 13.3 | 1.86 (140), 1.86 (140), 1.86 (140) |
-|  | 100 M | 10 | 0.0278, 0.0225, 0.0410 | 0.0239, 0.0222, 0.0392 | 0.00541 (195), 0.00542 (240), 0.00542 (132) | 13.5, 13.5, 13.5 | 13.5, 13.5, 13.5 | 1.87 (139), 1.87 (139), 1.87 (139) |
+| Count by status, every order | 1 M | 1 | 1.21, 1.22, 1.20 | 1.21, 1.22, 1.20 | 0.289 (239), 0.289 (237), 0.289 (242) | 0.0576, 0.0560, 0.0586 | 0.0576, 0.0560, 0.0586 | 0.00292 (50.6), 0.00292 (52.0), 0.00292 (49.9) |
+|  | 1 M | 10 | 1.24, 1.30, 1.23 | 1.22, 1.27, 1.22 | 0.289 (234), 0.289 (223), 0.289 (235) | 0.153, 0.141, 0.242 | 0.144, 0.137, 0.224 | 0.00292 (19.1), 0.00292 (20.7), 0.00292 (12.1) |
+|  | 10 M | 1 | 21.2, 21.2, 21.1 | 21.2, 21.2, 21.1 | 2.91 (137), 2.91 (137), 2.91 (137) | 0.0927, 0.0932, 0.0940 | 0.0927, 0.0932, 0.0940 | 0.0155 (167), 0.0160 (172), 0.0157 (167) |
+|  | 10 M | 10 | 21.7, 21.8, 21.4 | 21.5, 21.6, 21.3 | 2.91 (134), 2.91 (133), 2.91 (135) | 0.241, 0.237, 0.247 | 0.225, 0.228, 0.240 | 0.0155 (64.3), 0.0157 (66.4), 0.0160 (64.8) |
+|  | 100 M | 1 | 216, 216, 216 | 216, 216, 216 | 28.5 (131), 28.5 (132), 28.5 (132) | 0.404, 0.455, 0.452 | 0.404, 0.455, 0.452 | 0.140 (345), 0.139 (305), 0.140 (310) |
+|  | 100 M | 10 | 710, 848, 683 | 660, 760, 640 | 93.1 (131), 111 (131), 89.6 (131) | 1.22, 1.21, 1.34 | 1.16, 1.11, 1.33 | 0.141 (116), 0.139 (114), 0.151 (113) |
+| Revenue by month, orders joined to customers | 1 M | 1 | 1.99, 1.98, 1.98 | 1.99, 1.98, 1.98 | 0.357 (179), 0.357 (180), 0.357 (180) | 0.160, 0.159, 0.162 | 0.160, 0.159, 0.162 | 0.0268 (167), 0.0270 (169), 0.0266 (165) |
+|  | 1 M | 10 | 3.75, 3.58, 3.61 | 3.62, 3.44, 3.42 | 0.357 (95.2), 0.357 (100), 0.357 (98.7) | 0.578, 0.574, 0.550 | 0.545, 0.546, 0.514 | 0.0273 (47.2), 0.0262 (45.7), 0.0265 (48.2) |
+|  | 10 M | 1 | 24.3, 23.5, 24.0 | 24.3, 23.5, 24.0 | 2.96 (122), 2.96 (126), 2.96 (123) | 0.967, 0.965, 0.965 | 0.967, 0.965, 0.965 | 0.249 (257), 0.248 (257), 0.249 (258) |
+|  | 10 M | 10 | 43.9, 43.7, 43.9 | 43.0, 42.7, 43.1 | 3.29 (74.9), 3.20 (73.2), 3.25 (74.0) | 3.87, 3.96, 3.62 | 2.71, 2.81, 2.46 | 0.254 (65.6), 0.253 (63.9), 0.251 (69.4) |
+|  | 100 M | 1 | 335, 335, 335 | 335, 335, 335 | 33.8 (101), 33.8 (101), 33.8 (101) | 17.9, 18.1, 17.9 | 17.9, 18.1, 17.9 | 2.45 (137), 2.46 (136), 2.45 (137) |
+|  | 100 M | 10 | 2264, 2036, 1871 | 1915, 1729, 1623 | 188 (83.1), 157 (77.3), 139 (74.5) | 39.1, 39.2, 39.6 | 27.5, 27.6, 27.6 | 2.48 (63.6), 2.50 (63.8), 2.50 (63.2) |
+| One order by its primary key | 1 M | 1 | 0.0341, 0.0346, 0.0345 | 0.0341, 0.0346, 0.0345 | 0.00503 (147), 0.00503 (145), 0.00503 (146) | 0.131, 0.130, 0.131 | 0.131, 0.130, 0.131 | 0.0201 (153), 0.0201 (154), 0.0201 (154) |
+|  | 1 M | 10 | 0.0364, 0.0375, 0.0393 | 0.0359, 0.0372, 0.0373 | 0.00521 (143), 0.00522 (139), 0.00522 (133) | 0.202, 0.208, 0.202 | 0.201, 0.208, 0.202 | 0.0318 (157), 0.0320 (153), 0.0318 (157) |
+|  | 10 M | 1 | 0.0356, 0.0351, 0.0352 | 0.0356, 0.0351, 0.0352 | 0.00517 (145), 0.00517 (147), 0.00517 (147) | 0.748, 0.742, 0.743 | 0.748, 0.742, 0.743 | 0.186 (248), 0.186 (250), 0.186 (250) |
+|  | 10 M | 10 | 0.0392, 0.0397, 0.0380 | 0.0377, 0.0378, 0.0374 | 0.00537 (136), 0.00537 (135), 0.00537 (141) | 0.837, 0.826, 0.815 | 0.837, 0.826, 0.815 | 0.202 (241), 0.202 (244), 0.202 (247) |
+|  | 100 M | 1 | 0.0211, 0.0218, 0.0220 | 0.0211, 0.0218, 0.0220 | 0.00516 (245), 0.00516 (236), 0.00516 (234) | 13.2, 13.0, 13.0 | 13.2, 13.0, 13.0 | 1.82 (138), 1.82 (140), 1.82 (140) |
+|  | 100 M | 10 | 0.0246, 0.0255, 0.0250 | 0.0238, 0.0236, 0.0235 | 0.00546 (221), 0.00546 (213), 0.00546 (218) | 13.4, 13.3, 13.3 | 13.4, 13.3, 13.3 | 1.84 (137), 1.84 (139), 1.84 (139) |
 
 ## The data and the first sync
 
@@ -72,17 +72,17 @@ time from Mason's first start until both tables were synced and served.
 
 | orders | customers | in Postgres | Mason's volume | synced in (s) |
 |---:|---:|---:|---:|---:|
-| 1,000,000 | 50,000 | 0.35 GiB | 0.09 GiB | 55.7 |
-| 10,000,000 | 500,000 | 3.5 GiB | 0.84 GiB | 74.2 |
-| 100,000,000 | 5,000,000 | 35.0 GiB | 8.3 GiB | 562 |
+| 1,000,000 | 50,000 | 0.35 GiB | 0.08 GiB | 55.8 |
+| 10,000,000 | 500,000 | 3.5 GiB | 0.72 GiB | 84.5 |
+| 100,000,000 | 5,000,000 | 35.0 GiB | 7.1 GiB | 555 |
 
 <details><summary>How it was measured</summary>
 
 - **The machine**: m7g.xlarge, 4 vCPU, 16 GiB RAM. Linux 7.0.0-1011-aws (arm64).
-- **The disk**: EBS gp3, 125 MB/s, 3000 IOPS. A run's read is what the measured engine's container read from disk while pgbench ran, from its cgroup's `io.stat`. While Mason was measured, the idle Postgres read at most 4.02 MB.
+- **The disk**: EBS gp3, 125 MB/s, 3000 IOPS. A run's read is what the measured engine's container read from disk while pgbench ran, from its cgroup's `io.stat`. While Mason was measured, the idle Postgres read at most 4.12 MB.
 - **The limits**: Postgres and Mason each ran in a container with `--cpus 4 --memory 8g --memory-swap 8g`. That is 4 CPUs and 8 GiB of memory, with no swap. A container's memory counts its page cache, so both had the same cache.
 - **Postgres**: PostgreSQL 18.7, the `postgres:18` image, with a read replica's settings for that memory: effective_cache_size 6GB, effective_io_concurrency 200, hash_mem_multiplier 2, jit on, maintenance_work_mem 1GB, max_connections 300, max_parallel_workers 4, max_parallel_workers_per_gather 2, max_worker_processes 12, random_page_cost 1.1, shared_buffers 2GB, work_mem 32MB.
-- **Mason**: the `mason-data:pr1136-06326be8` image, built at commit 06326be85161. Its engine could use at most 4 GiB of the container's memory, half of it. It synced both tables from that Postgres, over the containers' own network. Its tables were `sync: off`, so nothing polled the source while it was measured.
+- **Mason**: the `mason-data:main-68891954` image, built at commit 688919542504. Its engine could use at most 4 GiB of the container's memory, half of it. It synced both tables from that Postgres, over the containers' own network. Its tables were `sync: off`, so nothing polled the source while it was measured.
 - **The client**: `pgbench` 18.7 from the `postgres:18` image, in a container of its own on the host's network: `pgbench -n -c <clients> -j <clients> -t 1 -f <script> --log`. Each client sent the query once, and the clients started together. A client's time is from pgbench's log of each transaction. It does not count the connection.
 - **Cold**: before every run, the container measured was restarted. The run waited until it answered `SELECT 1 FROM orders LIMIT 0`, then 10 s more. Then it dropped the OS page cache.
 - **One at a time**: Mason was stopped while Postgres was measured. Postgres stayed up while Mason was measured, because Mason reads its source's catalog when it starts. Postgres was restarted first, and was idle.
@@ -90,7 +90,7 @@ time from Mason's first start until both tables were synced and served.
 - **The order**: each cell ran 3 times, Postgres and Mason taking turns to go first where both were measured.
 - **Two runs**: Postgres's count by status and revenue by month times are from the run of 2026-11-17, where its answers were the same. Its lookup times, and all of Mason's, are from the run of 2026-11-18. The earlier run's cells are copied unchanged, every run and what it read. Before anything was timed, the run of 2026-11-18 checked that its Postgres had the same image, version, settings and limits, and the same answers to those queries.
 - **The answers**: every query's answer was the same on both. They were compared before anything was timed.
-- **The lookup's rows**: each client asked for a different row, picked at random from the data, as a quoted literal. At 1 M rows, ids 8676402a-a67a-4122-8055-367e60c46e6b, 04536a76-01ca-49d7-a74e-cd6ec7a5fe56, 437c9dde-48d0-4523-982d-f414074a45b0, b4cd3e80-7c55-4030-8bfb-b7930e9cb187, 9b287eed-ea4e-4acb-91d1-67da073b8f1f, 72af335a-ef62-4716-a943-54ee9c81e94a, ac5ccf2f-d3d9-4d70-8abc-9e760ff77138, 453ebc57-0eaa-4b9f-90dd-6ba94fb2a4b9, 8be76166-4729-4435-8831-7c2c8decbf15, b52c170f-82d4-44df-93ac-3b7b95854424. At 10 M rows, ids 0387b60c-f504-4672-b5ca-1e50a970ed8f, 86081b28-1d76-427d-911d-c47387d58d4b, 39ce1aa2-52a5-42fa-9b3e-b303a993c1fd, 3aa174c6-d8f2-4eab-9f30-344268e4fe6f, 4df110f2-64f6-4e92-8f42-18687f26d191, ea18d654-258b-49ed-81a1-7d44743a750c, 799ff514-a43f-4ec4-8ea6-2cb4732a076c, f93edcab-d582-4f3f-9f8d-c6899227cf9b, bf61af73-db81-4001-a6e1-804a3f354e43, e80a45fb-49a9-4fc3-b2b6-afb2098849ae. At 100 M rows, ids 59d5dbfe-c473-49b6-9222-1b46b25cd8a2, bf9577cf-e98e-49fa-ad8f-c35e1e1db7b7, da066fc9-a675-4aeb-95c0-07108f7477cd, 79226bc3-2ff9-4d57-ba51-3d0afea93a4a, d6be2839-a9ea-447c-9fb3-a12689f25c7e, cc63bc70-dbce-41f9-8c34-74b59467f545, 662d95fc-1b65-435a-88f6-5999575ef0fb, 93504451-17eb-46b0-881f-60161ade9ae8, 331282c2-f144-4a7d-9254-80366bb85d00, 9d79af86-8b1e-435a-91a9-c35fb4e957c1.
+- **The lookup's rows**: each client asked for a different row, picked at random from the data, as a quoted literal. At 1 M rows, ids 695f3b44-113e-4f4e-8d1b-56f79f962eb4, 1f10f334-678d-4450-8803-2fded3afce04, 06feb238-9e5e-41ca-9531-239b954622ad, c8c288e8-69e8-4a4a-958c-11677eba655c, b82eed1b-d86e-43b7-b692-f652234ecd84, c61fc667-6e88-49f0-b206-46980052a3c2, fe74aa2e-14e5-4137-add6-b89f081c690a, 6767811a-5e18-4233-a8a6-d0540a36c6c7, c0e5ac87-02ed-476d-96f8-f4b677fdf3b1, d00c8480-a799-4a01-90c9-60b8ce16dde4. At 10 M rows, ids 542676d2-37c8-4530-9d39-e54a8911c180, 4ad635a4-5f38-4e6c-9559-f96ca42cb12f, 2f071dd2-d942-457a-a2eb-7f7790741a33, 1905e238-28a1-49cf-8283-fc194ac77d68, f1eea906-0502-4b9f-bf9d-2c40b8b3faf8, 43a717a6-8767-4a95-a2ea-fe5588b1d463, d6fdbae7-7383-46c1-bfb8-b2f2a64a1a7d, 31b83b40-f3b6-4dce-b1fa-31f5b540e8ef, 8d3714e1-38aa-4ced-b394-e4e9af65834a, f03ea8ce-9991-4f36-9120-9da40a8b0fb9. At 100 M rows, ids 3feab41b-e0fb-4929-9306-e05be6519b5b, f9ad01a4-2de7-4042-8538-1604bb1f2140, 49e1493a-9e20-4a63-b2ca-482fec4f6b87, fa25e9e0-83be-408e-bb67-3540f84680e9, aaf4b1d0-5570-4fcb-a263-c2c2d66439d4, 145e3bdd-5fe7-4eb6-b2f3-ef75c393a4fb, 0fff7095-7971-4c7e-b39d-a5081608b1b3, d945ab48-2e0e-499d-8109-facf960f36a6, ef1f00fb-4f50-4e44-b317-f3d3b4062476, 80d59c5b-14ac-4e88-b6b9-5fff6f08dda2.
 - **The queries**, sent as written to both:
 
   - Count by status, every order: `SELECT status, count(*) FROM orders GROUP BY status ORDER BY status`

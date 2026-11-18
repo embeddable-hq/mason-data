@@ -93,6 +93,8 @@ tables:
   orders:                     # a bare name means the `public` schema; write `billing.invoices` for another schema
     columns: [id, customer_id, status, amount, created_at, payload]
     sync: poll 30s            # this table is polled every 30 seconds
+    references:               # its foreign keys: this column holds a customers.id
+      customer_id: customers.id
   customers: {}               # syncs every column
   events:
     exclude: [raw_body]       # syncs every column except these
@@ -104,6 +106,10 @@ tables:
   how the table stays up to date.
 - `mason add` leaves out columns that look like secrets (`password`, `token`, `api_key`, …), and lists them under
   `exclude:`. Name one with `--include` to sync it.
+- `references:` says how a table joins the others. It lists the table's foreign keys, on the table that holds them.
+  `mason add` writes the ones your database declares, between tables the file syncs. When you add the table a foreign
+  key points to later, `mason add` writes it then. You can add a relationship your database doesn't declare by hand.
+  A foreign key of several columns is written as in SQL: `(tenant_id, customer_id): customers (tenant_id, id)`.
 - While Mason runs, `mason add` and `mason remove` take effect at once. A change you make by hand applies at the next
   `mason start`. If an entry has a mistake, Mason names the key and says how to fix it. You never write column types.
 - A column the file leaves out stays out until you confirm it, even if you rename it, its table or its schema on your
@@ -345,26 +351,26 @@ Mason and Postgres answered the same 3 queries over the same rows. The primary k
 
 | query | rows | clients | Postgres (s) | Mason (s) | Mason is |
 |---|---:|---:|---:|---:|---|
-| Count by status, every order | 1 M | 1 | 1.21 | 0.0686 | 18× faster |
-|  | 1 M | 10 | 1.24 | 0.221 | 5.6× faster |
-|  | 10 M | 1 | 21.2 | 0.238 | 89× faster |
-|  | 10 M | 10 | 21.7 | 0.968 | 22× faster |
-|  | 100 M | 1 | 216 | 4.03 | 54× faster |
-|  | 100 M | 10 | 710 | 8.51 | 83× faster |
-| Revenue by month, orders joined to customers | 1 M | 1 | 1.98 | 0.162 | 12× faster |
-|  | 1 M | 10 | 3.61 | 0.531 | 6.8× faster |
-|  | 10 M | 1 | 24.0 | 0.982 | 24× faster |
-|  | 10 M | 10 | 43.9 | 3.75 | 12× faster |
-|  | 100 M | 1 | 335 | 18.0 | 19× faster |
-|  | 100 M | 10 | 2036 | 39.3 | 52× faster |
-| One order by its primary key | 1 M | 1 | 0.0335 | 0.136 | 4.1× slower |
-|  | 1 M | 10 | 0.0374 | 0.199 | 5.3× slower |
-|  | 10 M | 1 | 0.0346 | 0.770 | 22× slower |
-|  | 10 M | 10 | 0.0393 | 0.885 | 23× slower |
-|  | 100 M | 1 | 0.0233 | 13.3 | 570× slower |
-|  | 100 M | 10 | 0.0278 | 13.5 | 485× slower |
+| Count by status, every order | 1 M | 1 | 1.21 | 0.0576 | 21× faster |
+|  | 1 M | 10 | 1.24 | 0.153 | 8.1× faster |
+|  | 10 M | 1 | 21.2 | 0.0932 | 227× faster |
+|  | 10 M | 10 | 21.7 | 0.241 | 90× faster |
+|  | 100 M | 1 | 216 | 0.452 | 478× faster |
+|  | 100 M | 10 | 710 | 1.22 | 583× faster |
+| Revenue by month, orders joined to customers | 1 M | 1 | 1.98 | 0.160 | 12× faster |
+|  | 1 M | 10 | 3.61 | 0.574 | 6.3× faster |
+|  | 10 M | 1 | 24.0 | 0.965 | 25× faster |
+|  | 10 M | 10 | 43.9 | 3.87 | 11× faster |
+|  | 100 M | 1 | 335 | 17.9 | 19× faster |
+|  | 100 M | 10 | 2036 | 39.2 | 52× faster |
+| One order by its primary key | 1 M | 1 | 0.0345 | 0.131 | 3.8× slower |
+|  | 1 M | 10 | 0.0375 | 0.202 | 5.4× slower |
+|  | 10 M | 1 | 0.0352 | 0.743 | 21× slower |
+|  | 10 M | 10 | 0.0392 | 0.826 | 21× slower |
+|  | 100 M | 1 | 0.0218 | 13.0 | 598× slower |
+|  | 100 M | 10 | 0.0250 | 13.3 | 531× slower |
 
-Mason is for scans and aggregates. A lookup through an index is faster on Postgres ([docs/DESIGN.md](docs/DESIGN.md) "Heap order, no index"). Cold times on Postgres depend on the disk's throughput. Each engine had 4 CPUs, 8 GiB of memory and no swap, on a disk of EBS gp3, 125 MB/s, 3000 IOPS. It was measured on m7g.xlarge, 4 vCPU, 16 GiB RAM, against PostgreSQL 18.7 and Mason at commit 06326be85161, on 2026-11-17 and 2026-11-18. [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md) has every run and how it was measured.
+Mason is for scans and aggregates. A lookup through an index is faster on Postgres ([docs/DESIGN.md](docs/DESIGN.md) "Heap order, no index"). Cold times on Postgres depend on the disk's throughput. Each engine had 4 CPUs, 8 GiB of memory and no swap, on a disk of EBS gp3, 125 MB/s, 3000 IOPS. It was measured on m7g.xlarge, 4 vCPU, 16 GiB RAM, against PostgreSQL 18.7 and Mason at commit 688919542504, on 2026-11-17 and 2026-11-18. [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md) has every run and how it was measured.
 <!-- END GENERATED -->
 
 Use Mason for analytical queries, and keep your application's own reads and writes on Postgres. Mason is fast because
