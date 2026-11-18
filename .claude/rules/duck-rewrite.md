@@ -8,6 +8,7 @@ paths:
   - "src/duck/grants.ts"
   - "src/duck/jsonb-order.ts"
   - "src/duck/jsonb.ts"
+  - "src/duck/key-lookup.ts"
   - "src/duck/late.ts"
   - "src/duck/libc-bound.ts"
   - "src/duck/libc-order.ts"
@@ -528,6 +529,16 @@ paths:
   Never `JSON.stringify` a program, nor recurse over one without a memo: a DAG's tree is k^depth. Detector:
   tests/duck-plan-time.test.ts (`numericShapes` at depth 32 within the bound, the record linear), `tests/duck-wire.test.ts`
   "issue 484", tests/pg-numeric.test.ts "a shared program", tests/duck-generated-round11-13-14.test.ts "round 14, a numeric".
+- **A lookup by key on a table with a side table reads the side table** (`routeLookups`, src/duck/key-lookup.ts; issue
+  1148). It routes one table alone in its FROM, with a top-level `key = <constant>` or `key IN (<constants>)`. The
+  conjunct is REPLACED by `rowid IN (<side table> UNION ALL <tail>)`, never kept beside it: kept, DuckDB pushes it into
+  the scan and reads every row group's keys first. A table read through its view of its visible columns becomes a
+  derived table of those columns, under its name. A name a WITH query holds, `ONLY`, column aliases and a column named
+  by its schema are left as they are. **A name is held to the relation Postgres resolved it to** (the analysed range
+  tables' relids, `analysedRelations`), never looked up again in the search path: a bare name is routed only when
+  Postgres read exactly one relation of that name, and it is the one with the side table (the review of PR 1153: the
+  first schema whose table had a side table was taken, and `a.orders` was answered from `public.orders`'s row ids). DETECTOR: `tests/duck-key-lookup.test.ts`, the oracle (every table with a key has
+  a side table there).
 
 ## What a column is
 
@@ -839,3 +850,7 @@ Run each probe that applies: the implementer before each push, and the fresh rev
   answer. The decision: the two operands are compared under the one type Postgres's analysis of the SubLink's operator
   resolved, written together or not at all, the subselect's side over its output columns whatever its form;
   `char-padding-in-sublink-test` (PR 674).
+- A lookup by key on a table with a side table, in each shape a tool sends (`WHERE id = $1`, `id IN (…)`, `o.id = …`
+  under an alias, beside other conjuncts, inside a CTE, a subquery or a UNION arm, `SELECT *` over a table with a hidden
+  column, a CTE named as the table), after inserts, updates and deletes since its build: a row missed or doubled, or a
+  route that still scans every row group (`EXPLAIN ANALYZE`; issue 1148).
