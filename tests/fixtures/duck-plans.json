@@ -87,7 +87,8 @@
         "      PROJECTION",
         "        HASH_JOIN",
         "          TABLE_SCAN public.orders",
-        "          TABLE_SCAN public.customers"
+        "          PROJECTION",
+        "            TABLE_SCAN public.customers"
       ],
       "calls": [],
       "sends": [
@@ -114,14 +115,46 @@
         "            PROJECTION",
         "              HASH_JOIN",
         "                TABLE_SCAN public.orders",
-        "                TABLE_SCAN public.customers",
+        "                PROJECTION",
+        "                  TABLE_SCAN public.customers",
         "        PROJECTION",
         "          PROJECTION",
         "            HASH_GROUP_BY",
         "              PROJECTION",
         "                HASH_JOIN",
-        "                  TABLE_SCAN public.customers",
+        "                  PROJECTION",
+        "                    TABLE_SCAN public.customers",
         "                  EMPTY_RESULT"
+      ],
+      "calls": [],
+      "sends": [
+        "date_trunc",
+        "make_timestamptz",
+        "make_timestamp",
+        "epoch_us",
+        "current_setting"
+      ],
+      "delim_join": false,
+      "full_sort": true
+    },
+    {
+      "name": "a key of the smaller side computed on it first: the customers' quarter and name over a LEFT JOIN",
+      "sql": "SELECT date_trunc('quarter', c.created_at) AS q, lower(c.name) AS n, count(o.id), sum(o.amount) FROM orders o LEFT JOIN customers c ON c.id = o.customer_id GROUP BY 1, 2 ORDER BY 1, 2",
+      "zone": "Asia/Kathmandu",
+      "plan": [
+        "ORDER_BY",
+        "  PROJECTION",
+        "    PROJECTION",
+        "      HASH_GROUP_BY",
+        "        PROJECTION",
+        "          HASH_JOIN",
+        "            PROJECTION",
+        "              HASH_GROUP_BY",
+        "                PROJECTION",
+        "                  PROJECTION",
+        "                    TABLE_SCAN public.orders",
+        "            PROJECTION",
+        "              TABLE_SCAN public.customers"
       ],
       "calls": [],
       "sends": [

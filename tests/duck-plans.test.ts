@@ -152,6 +152,10 @@ const REWRITTEN: Shape[] = [
     "FROM orders o JOIN customers c ON c.id = o.customer_id GROUP BY 1, 2 ORDER BY 1, 2" },
   { name: "a time's unit grouped by its bucket: revenue by month over a join, in Asia/Kathmandu", sql: "SELECT date_trunc('month', o.created_at) AS month, date_trunc('year', c.created_at) AS signup_year, sum(o.amount) AS revenue " +
     "FROM orders o JOIN customers c ON c.id = o.customer_id GROUP BY 1, 2 ORDER BY 1, 2", zone: "Asia/Kathmandu" },
+  // issue 1160: a key over the smaller side of a grouped join computed on that side, before the join: a PROJECTION
+  // under the HASH_JOIN, over the customers, through the null-extended side of a LEFT JOIN
+  { name: "a key of the smaller side computed on it first: the customers' quarter and name over a LEFT JOIN", sql: "SELECT date_trunc('quarter', c.created_at) AS q, lower(c.name) AS n, " +
+    "count(o.id), sum(o.amount) FROM orders o LEFT JOIN customers c ON c.id = o.customer_id GROUP BY 1, 2 ORDER BY 1, 2", zone: "Asia/Kathmandu" },
   { name: "date_trunc histogram: a day in a zone of its own", sql: "SELECT date_trunc('day', o.created_at, 'America/New_York') AS d, count(*) FROM orders o GROUP BY 1 ORDER BY 1" },
   // joinRows (src/duck/late.ts, issue 105): a table preview over joined tables, its rows chosen by row number
   { name: "a top N over joins: a *, sorted by a column's number", sql: "SELECT c.*, o.id FROM customers c LEFT JOIN orders o ON c.id = o.customer_id ORDER BY 1, 2 LIMIT 100" },

@@ -1941,6 +1941,27 @@ function* matrix(): Generator<Matrixed> {
       "SELECT date_trunc('month', at) w, 1 AS one, count(*) FROM bucket_edges GROUP BY 1, 2 ORDER BY 2, 1 NULLS FIRST", zone);
     yield q(`issue 1146: a time's unit grouped by its number and sorted by its count, in ${zone}`, "SELECT date_trunc('hour', at) AS h, count(*) FROM bucket_edges GROUP BY 1 ORDER BY 2 DESC, 1 NULLS FIRST LIMIT 12", zone);
   }
+  // ---- issue 1160: a key over the smaller side of a grouped join computed on that side, before the join
+  // (src/duck/side-first.ts): the shop's 31 customers against its 400 orders, an inner, LEFT, RIGHT and FULL join (the
+  // customers' side null-extended), the key in a HAVING and an ORDER BY by its expression; beside a time's bucket key
+  // (issue 1146) of the larger side; and the instants (±infinity, NULL, before 1970) against the bucket edges
+  for (const zone of ["UTC", "Asia/Kathmandu", "America/New_York", "Pacific/Chatham"]) {
+    yield q(`issue 1160: the customers' signup year beside the orders' month, revenue, in ${zone}`, "SELECT date_trunc('month', o.created_at) AS month, date_trunc('year', c.created_at) AS signup_year, " +
+      "sum(o.amount) AS revenue FROM orders o JOIN customers c ON c.id = o.customer_id GROUP BY 1, 2 ORDER BY 1, 2", zone);
+    yield q(`issue 1160: the customers' week and lowered name over a LEFT JOIN from the orders, in ${zone}`, "SELECT date_trunc('week', c.created_at) AS w, lower(c.name) AS n, count(o.id), " +
+      "sum(o.amount) FROM orders o LEFT JOIN customers c ON c.id = o.customer_id GROUP BY 1, 2 ORDER BY 1 NULLS FIRST, 2 NULLS FIRST", zone);
+    yield q(`issue 1160: the customers' quarter over a RIGHT and a FULL join, in ${zone}`, "SELECT date_trunc('quarter', c.created_at) AS q, c.tenant_id IS NULL AS lone, count(*), max(o.amount) " +
+      "FROM customers c RIGHT JOIN orders o ON o.customer_id = c.id GROUP BY 1, 2 ORDER BY 1 NULLS FIRST, 2", zone);
+    yield q(`issue 1160: the customers' month and tenant over a FULL join, in ${zone}`, "SELECT date_trunc('month', c.created_at) AS m, coalesce(c.tenant_id, 'none') AS t, count(o.id), sum(o.amount) " +
+      "FROM orders o FULL JOIN customers c ON c.id = o.customer_id GROUP BY 1, 2 ORDER BY 1 NULLS FIRST, 2", zone);
+    yield q(`issue 1160: the customers' key in a HAVING and sorted by its expression, in ${zone}`, "SELECT date_trunc('quarter', c.created_at), upper(c.tenant_id), count(*) FROM orders o " +
+      "JOIN customers c ON c.id = o.customer_id GROUP BY date_trunc('quarter', c.created_at), upper(c.tenant_id) HAVING date_trunc('quarter', c.created_at) > '2000-01-01' " +
+      "ORDER BY date_trunc('quarter', c.created_at) DESC, 2", zone);
+    yield q(`issue 1160: an instant's day beside the bucket edges' month, in ${zone}`, "SELECT date_trunc('day', i.at) AS d, date_trunc('month', b.at) AS m, count(*), sum(b.v) " +
+      "FROM bucket_edges b JOIN instants i ON i.id = b.id % 26 + 1 GROUP BY 1, 2 ORDER BY 1 NULLS FIRST, 2 NULLS FIRST", zone);
+    yield q(`issue 1160: an instant's hour and its finiteness over a LEFT JOIN from the bucket edges, in ${zone}`, "SELECT date_trunc('hour', i.at) AS h, isfinite(i.at) AS f, count(b.id), max(b.x) " +
+      "FROM bucket_edges b LEFT JOIN instants i ON i.id = b.id % 40 GROUP BY 1, 2 ORDER BY 1 NULLS FIRST, 2 NULLS FIRST", zone);
+  }
   // ---- issue 464: to_char of a time in a format DuckDB's strftime writes (src/duck/to-char.ts strftimeTemplate), and
   // Metabase's US week grouped by the engine's integer: each side of a clock change, before 1970, a zone's local mean
   // time, a year's end, a leap day, ±infinity and NULL, in zones of daylight saving and of a quarter hour ---------------

@@ -46,6 +46,7 @@ import type { CaseMapping, DuckCollation, StatementCollations } from "./collatio
 import { pgTrim } from "./text.ts";
 import { NUMBERED_EQUALITY, type NumberedLookup, type NumberedRead } from "./reference-keys.ts";
 import { bucketGroups, shape, type BucketMark } from "./bucket-group.ts";
+import { sideFirst } from "./side-first.ts";
 
 /** A parse-tree node (`{ Kind: body }`) and a body, as libpg-query's JSON has them. */
 type Body = Record<string, any>;
@@ -8737,6 +8738,9 @@ export interface RewriteOptions {
    *  hands the same to the late select list and the libc bounds; by default it is chosen here, from the statement and
    *  its analysis */
   own?: string;
+  /** a copied table's rows as the sync counted them, by its schema as written (null where none is) and its name: what
+   *  decides whether a grouped join's key is computed on its side first (src/duck/side-first.ts). Absent: never */
+  rows?: ((schema: string | null, name: string) => number | null) | null;
 }
 
 /** THE HIDDEN BUCKET COLUMN OF A TIMESTAMPTZ (src/duck/bucket-column.ts) a VAR reads, by the catalog's OIDs
@@ -8756,7 +8760,7 @@ export interface ScaleLookup {
 }
 
 export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(), citextHeld = new Set(), typeNames = new Map(), rowTypes = new Map(), timeZone = "UTC", dateStyle = "ISO, MDY", enums = { labels: new Map(), arrays: new Map() }, kept = null,
-  wireBound = false, keyCounts = new Set(), boundPaths = new Map(), scales = null, buckets = null, numbered = null, own: prefix = ownPrefix([stmt, analysis.tree]) }: RewriteOptions):
+  wireBound = false, keyCounts = new Set(), boundPaths = new Map(), scales = null, buckets = null, numbered = null, own: prefix = ownPrefix([stmt, analysis.tree]), rows = null }: RewriteOptions):
   { tree: AstNode; withTies: boolean; exact: ExactColumn[]; clock: { parse?: number; exec?: number }; jsonReads: JsonRead[]; unboundedLateral: boolean; pathParams: number[]; wholeNumericArrays: number[];
     numbers: NumberedRead[] } {
   const r = new Rewriter(analysis, base, collations, userTypes, rowTypes, timeZone, dateStyle, enums, kept, keyCounts, citextHeld, typeNames);
@@ -8789,8 +8793,15 @@ export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(
   r.markWholeReads(own);
   r.referenceJoins(own);
   r.walking = true;
+  const walked = guardFilters(flattenBool(r.walk(own))) as AstNode;
+  // a grouped join's key of one side computed on that side first (src/duck/side-first.ts), over the finished walk; never
+  // the key whose time's bucket the next groups by
+  if (rows !== null) {
+    sideFirst(walked, { own: prefix, rows, typeOf: (n) => r.typeOf(n as AstNode), bucketOf: (n) => r.bucketMarks.get(shape(n))?.bucket ?? null,
+      owner: (n) => { const t = r.typed(n as AstNode); return t?.node === "VAR" && (t.levelsUp ?? 0) === 0 ? t.column?.owner ?? null : null; } });
+  }
   // a GROUP BY of a time's unit grouped by its 15-minute bucket first (src/duck/bucket-group.ts), over the finished walk
-  const tree = bucketGroups(guardFilters(flattenBool(r.walk(own))) as AstNode, r.bucketMarks, r.bucketPlaceholder(), prefix,
+  const tree = bucketGroups(walked, r.bucketMarks, r.bucketPlaceholder(), prefix,
     (n) => { const t = r.typeOf(n as AstNode); return t !== null && FLOATS.has(t); }) as AstNode;
   return { tree, withTies: r.wroteTies, exact, clock: r.clock, jsonReads: [...r.jsonReads.values()], unboundedLateral: r.unboundedLateral, pathParams: [...r.pathParams].sort((a, b) => a - b),
     wholeNumericArrays: [...r.wholeNumericArrays].sort((a, b) => a - b), numbers: [...r.numbersRead.values()] };

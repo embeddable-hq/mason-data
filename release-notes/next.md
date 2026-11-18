@@ -62,6 +62,14 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   - The synced data grows by about 5%, and the first sync takes about 7% longer.
   - The upgrade reads no table again. A table synced before keeps running its queries as before, until it is synced
     again whole.
+- **A group by over a join works out a smaller table's value once a row of that table.** In revenue by order month and
+  customer signup year, the signup year was worked out once for each order. Now it is worked out once for each
+  customer, before the join. On 50 M orders and 2.5 M customers, that query went from 660 ms to 283 ms in
+  `Asia/Kathmandu`, and from 383 ms to 331 ms in UTC. The answers are the same.
+  - It applies when the table is at most half the size of the largest other table in the join, by the rows Mason
+    synced, and no filter limits the other tables.
+  - It applies to a value that cannot fail, such as a time's month or year, a text in lower or upper case, a CASE or a
+    comparison. Anything else is worked out after the join, as before.
 - **The web page's "Connect an AI agent" is shorter and leads with what to paste.** With `mason serve`'s MCP endpoint
   on, every client uses its address: the box shows it with Copy, one line per client (claude.ai and Claude Desktop,
   ChatGPT, Claude Code, Cursor) saying where it goes, and one line on signing in. The `mason mcp` way is under it, closed.
