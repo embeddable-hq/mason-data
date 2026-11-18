@@ -297,6 +297,7 @@ function renderCold(f: ColdFixture): { section: string; headline: string } {
     return c;
   };
   const sizes = uniq(f.cells.map((c) => c.rows)), clients = uniq(f.cells.map((c) => c.clients));
+  const bySize = [...f.sizes].sort((a, b) => a.rows - b.rows);
   const statements = f.statements.filter((s) => f.cells.some((c) => c.statement === s.name));
   const grid = statements.flatMap((s) => sizes.flatMap((rows) => clients.map((c) => ({ s, rows, c, p: cellOf(rows, c, "postgres", s.name), m: cellOf(rows, c, "mason", s.name) }))));
   const runs = env.method.runs;
@@ -312,7 +313,7 @@ function renderCold(f: ColdFixture): { section: string; headline: string } {
   const measuredStatements = statements.filter((st) => !copiedStatements.includes(st));
   const twoRuns = copiedFrom === undefined ? "" :
     `Postgres's ${listText(copiedStatements.map(nameOf))} times are from the run of ${copiedFrom.slice(0, 10)}, where its answers were the same. ` +
-    `${measuredStatements.length === 0 ? "All" : `Its ${listText(measuredStatements.map(nameOf))} times, and all`} of Mason's, are from this run of ${env.date.slice(0, 10)}.`;
+    `${measuredStatements.length === 0 ? "All" : `Its ${listText(measuredStatements.map(nameOf))} times, and all`} of Mason's, are from the run of ${env.date.slice(0, 10)}.`;
 
   const many = clients.filter((c) => c > 1);
   const who = [...(clients.includes(1) ? ["One client sent it"] : []), ...(many.length === 0 ? [] : [`${orText(many.map(String))} clients sent it at the same moment`])].join(", or ");
@@ -341,7 +342,7 @@ function renderCold(f: ColdFixture): { section: string; headline: string } {
 
   const pgVersion = /^PostgreSQL [\d.]+/.exec(env.postgres.version)?.[0] ?? env.postgres.version;
   // an image built from a branch says "dev": then the commit the run recorded, else the image's ref
-  const masonVersion = /\d+\.\d+\.\d+\S*/.exec(env.mason.version)?.[0] ?? (env.mason.commit !== undefined ? `at commit ${env.mason.commit}` : `from the ${env.mason.image} image`);
+  const masonVersion = /\d+\.\d+\.\d+\S*/.exec(env.mason.version)?.[0] ?? (env.mason.commit !== undefined ? `at commit ${env.mason.commit.slice(0, 12)}` : `from the ${env.mason.image} image`);
   const date = env.date.slice(0, 10);
   const headline = `${HEADLINE_START}
 ${lead}
@@ -361,7 +362,7 @@ ${note("docs/DESIGN.md")} It was measured on ${env.label}, against ${pgVersion} 
       perRun(m.runs, "slowestMs"), perRun(m.runs, "meanMs"), reads(m.runs)]));
   const idle = f.cells.filter((c) => c.engine === "mason").flatMap((c) => c.runs.map((r) => r.idleReadBytes ?? NaN)).filter(Number.isFinite);
   const dataTable = table(["orders", "customers", "in Postgres", "Mason's volume", "synced in (s)"], ["---:", "---:", "---:", "---:", "---:"],
-    f.sizes.map((z) => [rowsText(z.rows), rowsText(z.customers), gib(z.postgresBytes), gib(z.masonBytes), numText(z.syncSeconds)]));
+    bySize.map((z) => [rowsText(z.rows), rowsText(z.customers), gib(z.postgresBytes), gib(z.masonBytes), numText(z.syncSeconds)]));
 
   const s = env.postgres.settings;
   const settings = Object.keys(s).sort().map((k) => `${k} ${s[k]}`).join(", ");
@@ -371,7 +372,7 @@ ${note("docs/DESIGN.md")} It was measured on ${env.label}, against ${pgVersion} 
   const engineMemoryText = mib !== null ? `${Number((Number(mib[1]) / 1024).toFixed(1))} GiB` : env.mason.engineMemory;
   const engineMemory = env.mason.engineMemory === "unknown" ? "" : ` Its engine could use at most ${engineMemoryText} of the container's memory, half of it.`;
   const pgbenchVersion = /\d+(\.\d+)+/.exec(env.client.pgbench)?.[0] ?? env.client.pgbench;
-  const differing = f.sizes.filter((z) => !z.answersEqual);
+  const differing = bySize.filter((z) => !z.answersEqual);
   const measured = [
     // the instance as its label names it: the RAM the OS reports is less than the instance's, and would contradict it
     `- **The machine**: ${env.label}${env.machine.cpuModel === "unknown" ? "" : `, ${env.machine.cpuModel}`}. ${env.machine.os} (${env.machine.arch}).`,
@@ -379,18 +380,18 @@ ${note("docs/DESIGN.md")} It was measured on ${env.label}, against ${pgVersion} 
       (idle.length === 0 ? "" : ` While Mason was measured, the idle Postgres read at most ${numText(Math.max(...idle) / 1e6)} MB.`),
     `- **The limits**: Postgres and Mason each ran in a container with \`--cpus ${env.limits.cpus} --memory ${flag} --memory-swap ${flag}\`. That is ${env.limits.cpus} CPUs and ${memory} of memory, with no swap. A container's memory counts its page cache, so both had the same cache.`,
     `- **Postgres**: ${pgVersion}, the \`${env.postgres.image}\` image, with a read replica's settings for that memory: ${settings}.`,
-    `- **Mason**: ${/^\d/.test(masonVersion) ? `${masonVersion}, the` : "the"} \`${env.mason.image}\` image${env.mason.commit !== undefined && !/^\d/.test(masonVersion) ? `, built at commit ${env.mason.commit}` : ""}.${engineMemory} It synced both tables from that Postgres, over the containers' own network. Its tables were \`sync: off\`, so nothing polled the source while it was measured.`,
+    `- **Mason**: ${/^\d/.test(masonVersion) ? `${masonVersion}, the` : "the"} \`${env.mason.image}\` image${env.mason.commit !== undefined && !/^\d/.test(masonVersion) ? `, built at commit ${env.mason.commit.slice(0, 12)}` : ""}.${engineMemory} It synced both tables from that Postgres, over the containers' own network. Its tables were \`sync: off\`, so nothing polled the source while it was measured.`,
     `- **The client**: \`pgbench\` ${pgbenchVersion} from the \`${env.client.image}\` image, in a container of its own on the host's network: \`${env.client.command}\`. Each client sent the query once, and the clients started together. A client's time is from pgbench's log of each transaction. It does not count the connection.`,
     `- **Cold**: before every run, the container measured was restarted. The run waited until it answered \`SELECT 1 FROM orders LIMIT 0\`, then ${env.method.settleSeconds} s more. Then it dropped the OS page cache.`,
     "- **One at a time**: Mason was stopped while Postgres was measured. Postgres stayed up while Mason was measured, because Mason reads its source's catalog when it starts. Postgres was restarted first, and was idle.",
     `- **The time zone**: ${env.method.timeZone} on both, so \`date_trunc\` of a \`timestamptz\` gives the same months.`,
     `- **The order**: each cell ran ${runs === 1 ? "once" : `${runs} times`}${runs === 1 ? "" : `, Postgres and Mason taking turns to go first${twoRuns === "" ? "" : " where both were measured"}`}.`,
     ...(twoRuns === "" ? [] : [`- **Two runs**: ${twoRuns} The earlier run's cells are copied unchanged, every run and what it read` +
-      `${env.postgresFrom === undefined ? "" : ` (\`${env.postgresFrom.file}\`${env.postgresFrom.measuredAt === null ? "" : `, commit ${env.postgresFrom.measuredAt}`})`}.` +
-      " Before anything was timed, this run checked that its Postgres had the same image, version, settings and limits, and the same answers to those queries."]),
+      `${env.postgresFrom === undefined || env.postgresFrom.measuredAt === null ? "" : ` (measured at commit ${env.postgresFrom.measuredAt.slice(0, 12)})`}.` +
+      ` Before anything was timed, the run of ${env.date.slice(0, 10)} checked that its Postgres had the same image, version, settings and limits, and the same answers to those queries.`]),
     "- **The answers**: " + (differing.length === 0 ? "every query's answer was the same on both. They were compared before anything was timed." :
       `answers that differed before anything was timed: ${differing.map((d) => `${rowsText(d.rows)} rows: ${d.differences.join("; ")}`).join(" ")}`),
-    `- **The lookup's rows**: each client asked for a different row, picked at random from the data, as a quoted literal. ${f.sizes.map((z) => `At ${countText(z.rows)} rows, ids ${z.lookupIds.join(", ")}.`).join(" ")}`,
+    `- **The lookup's rows**: each client asked for a different row, picked at random from the data, as a quoted literal. ${bySize.map((z) => `At ${countText(z.rows)} rows, ids ${z.lookupIds.join(", ")}.`).join(" ")}`,
     ...(f.skipped.length === 0 ? [] : [`- **Not measured**: ${f.skipped.map((k) => `${rowsText(k.rows)} rows (${k.why})`).join("; ")}.`]),
     "- **The queries**, sent as written to both:",
     "",
@@ -1006,14 +1007,15 @@ test("--mason-commit names the commit the Mason image was built from: 7 to 40 he
 test("a Mason-alone run renders where its Postgres times came from, in the lead and in how it was measured; Mason built from a branch is named by its commit or image", async () => {
   const f = await syntheticCold();
   const { alone } = await masonAloneCold();
-  const said = "Postgres's count by status and revenue by month times are from the run of 2026-11-17, where its answers were the same. Its lookup times, and all of Mason's, are from this run of 2026-11-18.";
+  const said = "Postgres's count by status and revenue by month times are from the run of 2026-11-17, where its answers were the same. Its lookup times, and all of Mason's, are from the run of 2026-11-18.";
   const headline = renderReplicaHeadline(alone), section = renderReplicaSection(alone);
   assert.ok(headline.split("\n").find((l) => l.startsWith("Mason and Postgres answered"))!.endsWith(said), "the README's lead");
   assert.ok(section.split("\n").find((l) => l.startsWith("Mason and Postgres answered"))!.endsWith(said), "MEASUREMENTS' lead");
-  assert.ok(section.includes(`\n- **The order**: each cell ran 3 times, Postgres and Mason taking turns to go first where both were measured.\n- **Two runs**: ${said} The earlier run's cells are copied unchanged, every run and what it read (\`tests/fixtures/bench-replica.json\`, commit 9cd1f48e2065).`), section);
+  assert.ok(section.includes(`\n- **The order**: each cell ran 3 times, Postgres and Mason taking turns to go first where both were measured.\n- **Two runs**: ${said} The earlier run's cells are copied unchanged, every run and what it read (measured at commit 9cd1f48e2065).`), section);
+  assert.doesNotMatch(section, /tests\/fixtures\/bench-replica\.json`?\)/, "never the file a later run writes over");
   // the words come from the cells' marks: a run that copied the count alone says so
   const countOnly = { ...alone, cells: alone.cells.map(({ copied, ...c }) => c.statement === "revenue_by_month" || copied === undefined ? c : { ...c, copied }) };
-  assert.match(renderReplicaHeadline(countOnly), /Postgres's count by status times are from the run of 2026-11-17, where its answers were the same\. Its revenue by month and lookup times, and all of Mason's, are from this run of 2026-11-18\./);
+  assert.match(renderReplicaHeadline(countOnly), /Postgres's count by status times are from the run of 2026-11-17, where its answers were the same\. Its revenue by month and lookup times, and all of Mason's, are from the run of 2026-11-18\./);
   for (const text of [renderReplicaHeadline(f), renderReplicaSection(f)]) {
     assert.doesNotMatch(text, /times are from the run of|Two runs|where both were measured/, "a run of both engines says nothing of it");
   }
@@ -1025,10 +1027,15 @@ test("a Mason-alone run renders where its Postgres times came from, in the lead 
   const scriptOnly = { ...dev, environment: { ...dev.environment, commit: "fedcba987654" } };
   assert.doesNotMatch(renderReplicaHeadline(scriptOnly) + renderReplicaSection(scriptOnly), /fedcba987654/);
   assert.match(renderReplicaHeadline(scriptOnly), /and Mason from the mason-data:branch image, on 2026-11-17\./);
-  const atCommit = { ...scriptOnly, environment: { ...scriptOnly.environment, mason: { ...scriptOnly.environment.mason, commit: "0123456789ab" } } };
+  const atCommit = { ...scriptOnly, environment: { ...scriptOnly.environment, mason: { ...scriptOnly.environment.mason, commit: "0123456789abcdef0123456789abcdef01234567" } } };
   assert.match(renderReplicaHeadline(atCommit), /and Mason at commit 0123456789ab, on 2026-11-17\./);
   assert.match(renderReplicaSection(atCommit), /- \*\*Mason\*\*: the `mason-data:branch` image, built at commit 0123456789ab\. Its engine/);
-  assert.doesNotMatch(renderReplicaHeadline(atCommit) + renderReplicaSection(atCommit), /Mason dev\b/);
+  assert.doesNotMatch(renderReplicaHeadline(atCommit) + renderReplicaSection(atCommit), /Mason dev\b|0123456789abc/, "never \"dev\"; the commit shortened to 12");
+  // a run that went through its sizes in another order (--resume, --sizes): the page in row order
+  const shuffled = { ...f, sizes: [f.sizes[2]!, f.sizes[0]!, f.sizes[1]!] };
+  const rowsOf = (text: string, re: RegExp): string[] => [...text.matchAll(re)].map((m) => m[1]!);
+  assert.deepEqual(rowsOf(renderReplicaSection(shuffled), /^\| ([\d,]+) \| [\d,]+ \| [\d.]+ GiB/gm), ["1,000,000", "10,000,000", "100,000,000"]);
+  assert.deepEqual(rowsOf(renderReplicaSection(shuffled), /At (\d+ M) rows, ids/g), ["1 M", "10 M", "100 M"]);
 });
 
 test("the cold fixture's check names what a run left out", async () => {
