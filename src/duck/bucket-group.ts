@@ -105,6 +105,14 @@ function checked(v: unknown): void {
   Object.values(v).forEach(checked);
 }
 
+/** whether an expression reads a column anywhere in it */
+function readsColumn(v: unknown): boolean {
+  if (Array.isArray(v)) return v.some(readsColumn);
+  if (!isObject(v)) return false;
+  if (isNode(v) && kindOf(v) === "ColumnRef") return true;
+  return Object.values(isNode(v) ? bodyOf(v) : v).some(readsColumn);
+}
+
 /** `Bail` where a FROM read twice could answer twice differently: anything but a table, a join of them or a subquery */
 function repeatableFrom(items: unknown): void {
   const item = (n: unknown): void => {
@@ -212,6 +220,10 @@ function grouped(s: Body, marks: ReadonlyMap<string, BucketMark>, placeholder: s
     if (t === undefined) throw new Bail();
     return bodyOf(t).val as AstNode;
   };
+  // A CONSTANT KEY KEEPS THE PLAN: a key that reads no column (a literal, a parameter, a cast of one, an expression of
+  // them) needs no inner column, and matched by its form it would take the place of every equal literal of the list, the
+  // HAVING and the ORDER BY, the engine's type modifiers and EXTRACT's field among them (PR 1149's review)
+  if (groups.some((g) => !readsColumn(keyOf(g)))) throw new Bail();
   // one column's bucket a statement: grouped by two, the inner groups are pairs of buckets, nearly a group a row (5 M
   // rows, a month and a week of two columns: 126 ms against 140). The first key's marked column is it, and a mark of
   // another column is a key like any other

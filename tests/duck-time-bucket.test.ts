@@ -187,6 +187,16 @@ test("a GROUP BY of each unit of a timestamptz answers as Postgres does in every
       "SELECT date_trunc('month', at) w, 1 AS one, count(*) FROM ev GROUP BY 1, 2 ORDER BY 2, 1 DESC",
       "SELECT 7 AS seven, date_trunc('quarter', at) q, count(*) FROM ev GROUP BY 1, 2 ORDER BY 1, 2",
       "SELECT date_trunc('month', at) w, s, count(*) FROM ev GROUP BY 1, 2 ORDER BY count(*) DESC, 1, 2",
+      // a constant key beside literals the engine reads as literals: a type modifier, EXTRACT's field, an interval's
+      "SELECT date_trunc('month', at) w, 1 AS one, avg(v)::numeric(10,1) FROM ev GROUP BY 1, 2 ORDER BY 1",
+      "SELECT date_trunc('month', at) w, 2 AS two, sum(x)::numeric(14,2) FROM ev GROUP BY 1, 2 ORDER BY 1",
+      "SELECT date_trunc('month', at) w, 1 AS one, count(*) FROM ev GROUP BY 1, 2 HAVING count(*)::numeric(10,1) > 1 ORDER BY 1",
+      "SELECT date_trunc('month', at) w, 1 AS one, sum(v) FROM ev GROUP BY 1, 2 ORDER BY sum(v)::numeric(10,1), 1",
+      "SELECT date_trunc('month', at) w, 'month' AS g, extract(month from max(at)) FROM ev GROUP BY 1, 2 ORDER BY 1",
+      "SELECT date_trunc('month', at) w, 'month' AS g, count(*) FROM ev GROUP BY 1, 2 ORDER BY extract(month from date_trunc('month', at)), 1",
+      "SELECT date_trunc('month', at) w, 2 AS two, max(at) + INTERVAL '1' MONTH FROM ev GROUP BY 1, 2 ORDER BY 1",
+      // and the same with no constant key, by the bucket
+      "SELECT date_trunc('month', at) w, avg(v)::numeric(10,1), extract(month from max(at)) FROM ev GROUP BY 1 HAVING count(*)::numeric(10,1) > 1 ORDER BY sum(v)::numeric(10,1), 1",
       // the rows no bucket holds: before 1980, infinite and NULL, each truncated as before
       ...UNITS.map((u) => `SELECT date_trunc('${u}', at), count(*), sum(v) FROM old GROUP BY 1 ORDER BY 1`),
     ]), [], zone);
@@ -201,10 +211,16 @@ test("a GROUP BY of a timestamptz's unit groups by its 15-minute bucket first; a
   }
   assert.ok(!(await sent("SELECT date_trunc('month', at) AS m, sum(v) FROM ev GROUP BY 1 ORDER BY 1", "UTC")).includes(hidden), "planned in UTC, as before");
   assert.ok((await sent("SELECT date_trunc('day', a.at), count(*) FROM ev a JOIN ev b ON b.id = a.id GROUP BY 1")).includes(hidden), "over a join");
-  // sorted by number, by an output's name and by a column no output names, beside a constant key: still by the bucket
+  // sorted by number, by an output's name and by a column no output names: still by the bucket
   for (const sql of ["SELECT date_trunc('month', at) w, s AS status, count(*) FROM ev GROUP BY 1, 2 ORDER BY 1, 2",
-    "SELECT date_trunc('month', at) w, count(*) FROM ev GROUP BY 1, v ORDER BY v, 1", "SELECT date_trunc('month', at) w, 1 AS one, count(*) FROM ev GROUP BY 1, 2 ORDER BY 2, 1"]) {
+    "SELECT date_trunc('month', at) w, count(*) FROM ev GROUP BY 1, v ORDER BY v, 1", "SELECT date_trunc('month', at) w, avg(v)::numeric(10,1), count(*) FROM ev GROUP BY 1 ORDER BY 1",
+    "SELECT date_trunc('month', at) w, extract(month from max(at)) FROM ev GROUP BY 1 ORDER BY 1"]) {
     assert.ok((await sent(sql)).includes(hidden), `the bucket is read: ${sql}`);
+  }
+  // a constant key (a literal, a cast of one, a parameter's place) keeps the plan: no literal is read as a key
+  for (const sql of ["SELECT date_trunc('month', at) w, 1 AS one, count(*) FROM ev GROUP BY 1, 2 ORDER BY 2, 1",
+    "SELECT date_trunc('month', at) w, 'month'::text AS g, count(*) FROM ev GROUP BY 1, 2", "SELECT date_trunc('month', at) w, count(*) FROM ev GROUP BY 1, 2 + 3"]) {
+    assert.ok(!(await sent(sql)).includes(hidden), `a constant key keeps its plan: ${sql}`);
   }
   // two columns' units: the first one's bucket alone, the other's unit computed a row
   const two = await sent("SELECT date_trunc('month', a.at), date_trunc('year', b.at), count(*) FROM ev a JOIN ev b ON b.id = a.id GROUP BY 1, 2");
