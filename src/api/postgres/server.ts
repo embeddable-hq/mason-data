@@ -63,6 +63,7 @@ import { heldUntilFirstRows, LIGHT, type Admitted, type Turn } from "../../duck/
 import { copyFacts, type CopyFacts } from "../../duck/explain.ts";
 import { utf8Fatal } from "../../duck/text.ts";
 import { scaledKey } from "../../duck/scale-column.ts";
+import { bucketKey } from "../../duck/bucket-column.ts";
 import type { CopyState } from "../../duck/sync.ts";
 import { explainedText, explainOptions, type ExplainOptions } from "./explain.ts";
 import * as crypto from "node:crypto";
@@ -3179,6 +3180,8 @@ class Server {
       if (t.rowTypeOid !== undefined) out.set(`rowtype:${t.schema ?? "public"}.${t.name}`, t.rowTypeOid);
       // a plain numeric whose own scales the copy holds (src/duck/scale-column.ts), by schema, table and column
       for (const c of t.columns) if (c.scaled !== undefined) out.set(scaledKey(t.schema ?? "public", t.name, c.name, c.scaled), 1);
+      // a timestamptz whose 15-minute buckets the copy holds (src/duck/bucket-column.ts), by schema, table and column
+      for (const c of t.columns) if (c.bucket !== undefined) out.set(bucketKey(t.schema ?? "public", t.name, c.name, c.bucket), 1);
     }
     for (const t of this.options.schema().tables) for (const c of t.columns) {
       if (c.typeOid === undefined || c.spelled === undefined) continue;

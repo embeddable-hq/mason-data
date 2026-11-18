@@ -30,12 +30,13 @@ import { enforceGrants, type RoleGrants } from "./grants.ts";
 import { ownPrefix } from "./own-names.ts";
 import { attributeRefused, expandRowFilters, wallStatistics, wallSwitch, type Walls } from "./row-filter.ts";
 import type { PgAnalysis } from "./analyze.ts";
-import type { ScaleLookup } from "./rewrite.ts";
+import type { BucketLookup, ScaleLookup } from "./rewrite.ts";
 import { scaledOf } from "./scale-column.ts";
+import { bucketOf } from "./bucket-column.ts";
 import { mayKeepRows } from "./admission.ts";
 import { analysedRelations, routeLookups } from "./key-lookup.ts";
 
-const JSON_OID = 114, JSONB_OID = 3802, NUMERIC_OID = 1700;
+const JSON_OID = 114, JSONB_OID = 3802, NUMERIC_OID = 1700, TIMESTAMPTZ_OID = 1184;
 /** pg_catalog.pg_typeof(any): its argument's type named by the catalog (src/duck/rewrite.ts) */
 const PG_TYPEOF = 1619;
 
@@ -88,11 +89,33 @@ async function scaleLookup(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, 
     named: (source, column) => { const dot = source.indexOf("."); return hidden.get(JSON.stringify([source.slice(0, dot), source.slice(dot + 1), column])) ?? null; } };
 }
 
-/** the copies that hold a plain numeric's hidden scale column, `schema.table` (`SCALED_KEY`): a statement that lists one's
- *  columns without naming them reads its view of its visible columns (`hideKept`), stored JSON paths on or off */
+/** THE TIMESTAMPTZ COLUMNS THE STATEMENT READS FROM A TABLE WHOSE COPY HOLDS EACH VALUE'S 15-MINUTE BUCKET
+ *  (src/duck/bucket-column.ts): each such column's hidden bucket column by the catalog's OIDs (Typed.relation), the
+ *  listener saying which copies hold one (`BUCKET_KEY` in `userTypes`); null when it reads none */
+async function bucketLookup(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, types: ReadonlyMap<number, ReadonlyArray<{ type: number; relation?: { relid: number; attno: number } }>>,
+  userTypes: ReadonlyMap<string, number>): Promise<BucketLookup | null> {
+  const hidden = new Map<string, string>();
+  for (const k of userTypes.keys()) { const b = bucketOf(k); if (b !== null) hidden.set(JSON.stringify([b.schema, b.table, b.column]), b.hidden); }
+  if (hidden.size === 0) return null;
+  const wanted = new Map<string, { relid: number; attno: number }>();
+  for (const t of [...types.values()].flat()) if (t.relation !== undefined && t.type === TIMESTAMPTZ_OID) wanted.set(`${t.relation.relid}.${t.relation.attno}`, t.relation);
+  if (wanted.size === 0) return null;
+  const pairs = [...wanted.values()].map((r) => `(${Math.trunc(r.relid)}, ${Math.trunc(r.attno)})`).join(", ");
+  const rows = await catalogRows(catalog, `SELECT c.oid::text, a.attnum::text, n.nspname, c.relname, a.attname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace ` +
+    `JOIN pg_attribute a ON a.attrelid = c.oid WHERE (c.oid::int8, a.attnum::int8) IN (${pairs}) AND c.relkind = 'r' AND NOT a.attisdropped`);
+  const at = new Map(rows.flatMap(([relid, attno, schema, table, column]) => {
+    const name = hidden.get(JSON.stringify([schema, table, column]));
+    return name === undefined ? [] : [[`${relid}.${attno}`, name] as const];
+  }));
+  return at.size === 0 ? null : { at: (relid, attno) => at.get(`${relid}.${attno}`) ?? null };
+}
+
+/** the copies that hold a hidden column of a plain numeric's scale (`SCALED_KEY`) or a timestamptz's bucket
+ *  (`BUCKET_KEY`), `schema.table`: a statement that lists one's columns without naming them reads its view of its
+ *  visible columns (`hideKept`), stored JSON paths on or off */
 function scaledTables(userTypes: ReadonlyMap<string, number>): Set<string> {
   const out = new Set<string>();
-  for (const k of userTypes.keys()) { const s = scaledOf(k); if (s !== null) out.add(`${s.schema}.${s.table}`); }
+  for (const k of userTypes.keys()) { const s = scaledOf(k) ?? bucketOf(k); if (s !== null) out.add(`${s.schema}.${s.table}`); }
   return out;
 }
 
@@ -608,6 +631,9 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   // the plain numerics it reads whose own scales their copy holds (src/duck/scale-column.ts); not a generated table's run
   // (`outputs`), whose stored column holds the engine's DECIMAL as a copy of the column does, no scale beside it
   const scales = outputs ? null : await scaleLookup(catalog, analysis.types, userTypes);
+  // the timestamptz columns it reads whose 15-minute buckets their copy holds (src/duck/bucket-column.ts); not a
+  // generated table's run, whose stored columns hold none
+  const buckets = outputs ? null : await bucketLookup(catalog, analysis.types, userTypes);
   const keyCounts = await distinctKeys(catalog, analysis.tree);
   // WHAT EACH COLLATION OF THE ANALYSIS MEANS (src/duck/collation.ts), resolved before the rewrite reads any: a libc
   // order not read yet is read here, before the plan is made; a collation the source lacks or Mason cannot follow refused
@@ -618,7 +644,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   // its columns read by a `*` included, whichever module writes it (the rewrite, the late select list, the libc bounds)
   const own = ownPrefix([stmt, analysis.tree], walls?.written ?? []);
   const analysed = performance.now();
-  const rewritten = (l = lookup, sc = scales): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, typeNames, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts, boundPaths, scales: sc, own });
+  const rewritten = (l = lookup, sc = scales, bu = buckets): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, typeNames, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts, boundPaths, scales: sc, buckets: bu, own });
   try {
     ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams, wholeNumericArrays } = rewritten());
     // the oracle's (`eager`): every read stored before the plan is made, and the plan made again over them
@@ -629,9 +655,9 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
     // a statement that lists a copy's columns without naming them reads none from a stored column (hideKept): made
     // again with every read its call, the reads still recorded
     // (and none from a plain numeric's hidden scale column, which that view does not list: its values print with the
-    // column's one scale there, `mixed-scale-numeric`)
-    if ((lookup !== null || scales !== null) && exposes(tree)) {
-      ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams, wholeNumericArrays } = rewritten(lookup === null ? null : { at: (relid, attno) => lookup.at(relid, attno), ready: () => null }, null));
+    // column's one scale there, `mixed-scale-numeric`; nor from a timestamptz's hidden bucket, its GROUP BY as before)
+    if ((lookup !== null || scales !== null || buckets !== null) && exposes(tree)) {
+      ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams, wholeNumericArrays } = rewritten(lookup === null ? null : { at: (relid, attno) => lookup.at(relid, attno), ready: () => null }, null, null));
     }
   }
   catch (e) {
