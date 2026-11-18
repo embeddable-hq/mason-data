@@ -37,7 +37,13 @@ const schema: PgSchema = {
   tables: [
     { name: "orders", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "uuid" }, { name: "n", type: "int4" }, { name: "note", type: "text" }] },
     { name: "codes", primaryKey: ["code"], joins: [], columns: [{ name: "code", type: "text" }, { name: "n", type: "int4" }] },
+    // the same names in other schemas (a bare name is the first schema's on the search path that holds one): `a.orders`
+    // has a key of two columns, so no side table; `items` is in `public` without one and in `b` with one
+    { name: "orders", schema: "a", primaryKey: ["id", "k"], joins: [], columns: [{ name: "id", type: "uuid" }, { name: "k", type: "int4" }, { name: "n", type: "int4" }] },
+    { name: "items", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "uuid" }, { name: "n", type: "int4" }] },
+    { name: "items", schema: "b", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "uuid" }, { name: "n", type: "int4" }] },
   ],
+  views: [{ schema: "v", name: "items", definition: "SELECT items.id, items.n FROM public.items WHERE (items.n < 1000)" }],
 };
 /** three row groups and a part, so the table's end can be deleted whole */
 const ROWS = 400_000;
@@ -55,11 +61,25 @@ before(async () => {
   await w.run(`INSERT INTO public.orders SELECT md5(i::VARCHAR)::UUID, i, 'note ' || i, ['a'] FROM range(${ROWS}) r(i)`);
   await w.run(`CREATE TABLE public.codes (code VARCHAR NOT NULL, n INTEGER)`);
   await w.run(`INSERT INTO public.codes SELECT md5(i::VARCHAR), i FROM range(${ROWS}) r(i)`);
+  await w.run("CREATE SCHEMA a");
+  await w.run("CREATE TABLE a.orders (id UUID NOT NULL, k INTEGER NOT NULL, n INTEGER)");
+  await w.run("INSERT INTO a.orders SELECT md5((i * 7)::VARCHAR)::UUID, 1, i + 1000 FROM range(1000) r(i)");
+  await w.run("CREATE TABLE public.items (id UUID NOT NULL, n INTEGER)");
+  await w.run("INSERT INTO public.items SELECT md5(i::VARCHAR)::UUID, i FROM range(2000) r(i) ORDER BY i");
+  // in the other order, so a row id of one names another key's row in the other
+  await w.run("CREATE SCHEMA b");
+  await w.run("CREATE TABLE b.items (id UUID NOT NULL, n INTEGER)");
+  await w.run("INSERT INTO b.items SELECT md5(i::VARCHAR)::UUID, -i FROM range(2000) r(i) ORDER BY i DESC");
   await w.run("CHECKPOINT");
+  await truth.exec(`CREATE SCHEMA a; CREATE TABLE a.orders (id uuid, k integer, n integer, PRIMARY KEY (id, k));
+    INSERT INTO a.orders SELECT md5((i * 7)::text)::uuid, 1, i + 1000 FROM generate_series(0, 999) i;
+    CREATE TABLE items (id uuid PRIMARY KEY, n integer); INSERT INTO items SELECT md5(i::text)::uuid, i FROM generate_series(0, 1999) i;
+    CREATE SCHEMA b; CREATE TABLE b.items (id uuid PRIMARY KEY, n integer); INSERT INTO b.items SELECT md5(i::text)::uuid, -i FROM generate_series(0, 1999) i;
+    CREATE SCHEMA v; CREATE VIEW v.items AS SELECT items.id, items.n FROM public.items WHERE (items.n < 1000)`);
   await truth.exec(`CREATE TABLE orders (id uuid PRIMARY KEY, n integer, note text); CREATE TABLE codes (code text PRIMARY KEY, n integer)`);
   await truth.exec(`INSERT INTO orders SELECT md5(i::text)::uuid, i, 'note ' || i FROM generate_series(0, ${ROWS - 1}) i`);
   await truth.exec(`INSERT INTO codes SELECT md5(i::text), i FROM generate_series(0, ${ROWS - 1}) i`);
-  const copies = (): CopyState[] => ["public.orders", "public.codes"].map((source) => ({ source, phase: "copied", rows: ROWS, bytes: null, seconds: null, copiedAt: null, error: null,
+  const copies = (): CopyState[] => ["public.orders", "public.codes", "a.orders", "public.items", "b.items"].map((source) => ({ source, phase: "copied", rows: ROWS, bytes: null, seconds: null, copiedAt: null, error: null,
     ...(built.has(source) ? { lookup: { column: built.get(source)!, perKey: null, rowGroups: null, measuredAt: null, builtAt: null, seconds: null, entries: null } } : {}) }));
   api = await startPostgresApi({
     port: 0, host: "127.0.0.1", tls: null, database: "app", masonVersion: "test", product: "mason-data",
@@ -274,7 +294,7 @@ test("a table read through its view of its visible columns is routed as a derive
   await w.run("CREATE SCHEMA IF NOT EXISTS __mason_visible.public");
   await w.run(`CREATE OR REPLACE VIEW __mason_visible.public.orders AS SELECT id, n, note FROM "${db}".public.orders`);
   const [a, b] = ((await w.runAndReadAll("SELECT id::VARCHAR FROM public.orders ORDER BY n LIMIT 2 OFFSET 100")).getRowsJS() as Array<[string]>).map(([k]) => k);
-  const ctx = { lookups: new Map([["public.orders", { column: "id", columns: ["id", "n", "note"] }]]), schemas: ["public"], visible: "__mason_visible", own: "__mason_", parse: parseSql };
+  const ctx = { lookups: new Map([["public.orders", { column: "id", columns: ["id", "n", "note"] }]]), relations: new Set(["public.orders"]), visible: "__mason_visible", own: "__mason_", parse: parseSql };
   for (const sql of [`SELECT * FROM __mason_visible.public.orders WHERE id = '${a}'`, `SELECT * FROM __mason_visible.public.orders WHERE n >= 0 AND id = '${a}'`,
     `SELECT o.n, o.note FROM __mason_visible.public.orders AS o WHERE o.id IN ('${a}', '${b}') AND o.n > 0 AND o.note IS NOT NULL ORDER BY o.n`]) {
     const tree = (await parseSql(sql)).stmts![0]!.stmt;
@@ -289,5 +309,53 @@ test("a table read through its view of its visible columns is routed as a derive
   // a column named by the table's schema (which a derived table binds no more), and column aliases: left as they are
   for (const sql of [`SELECT public.orders.n FROM __mason_visible.public.orders WHERE id = '${a}'`, `SELECT x FROM __mason_visible.public.orders AS o(i, x) WHERE i = '${a}'`]) {
     assert.ok(!await l.routeLookups((await parseSql(sql)).stmts![0]!.stmt, ctx), `${sql}: not routed`);
+  }
+});
+
+test("a bare name is the relation Postgres resolved it to, never the first schema whose table has a side table", async () => {
+  await build("b.items", "id");
+  if (!built.has("public.orders")) await build("public.orders", "id");
+  const items = new Map(await Promise.all([10, 1500].map(async (i) => [i, `'${await uuidOf(i)}'`] as const)));
+  const item = (i: number): string => items.get(i)!;
+  const order = await uuidOf(700);
+  const under = async (path: string, sql: string, values: unknown[] = []): Promise<boolean> => {
+    await client.query(`SET search_path = ${path}`);
+    await truth.query(`SET search_path = ${path}`);
+    try { return await same(sql, values); }
+    finally { await client.query("RESET search_path"); await truth.query("RESET search_path"); }
+  };
+  // the first schema's table has no side table, a later one's has
+  for (const sql of [`SELECT id, n FROM items WHERE id = ${item(10)}`, `SELECT n FROM items WHERE id IN (${item(10)}, ${item(1500)}) ORDER BY n`]) {
+    assert.ok(!await under("public, b", sql), `${sql}: public.items has no side table`);
+    assert.ok(await under("b, public", sql), `${sql}: b.items has one`);
+  }
+  assert.ok(!await under("a, public", "SELECT count(*) FROM orders WHERE id = $1", [order]), "a.orders has no side table");
+  assert.ok(!await under("a, public", `SELECT id, n FROM orders WHERE id IN ($1, '${await uuidOf(0)}')`, [order]), "nor by a list");
+  assert.ok(await under("public, a", `SELECT id, n FROM orders WHERE id IN ($1, '${await uuidOf(0)}')`, [order]), "public.orders by a list");
+  assert.ok(await under("public, a", "SELECT count(*) FROM orders WHERE id = $1", [order]), "public.orders has one");
+  // a view of that name in an earlier schema
+  assert.ok(!await under("v, b", `SELECT id, n FROM items WHERE id = ${item(10)}`), "v.items is a view");
+  // qualified: the relation named, wherever the search path points
+  assert.ok(await under("public", `SELECT id, n FROM b.items WHERE id = ${item(10)}`), "b.items, qualified");
+  assert.ok(!await under("b", `SELECT id, n FROM public.items WHERE id = ${item(10)}`), "public.items, qualified");
+  assert.ok(!await under("public", "SELECT count(*) FROM a.orders WHERE id = $1", [order]), "a.orders, qualified");
+  assert.ok(!await under("public", `SELECT id, n FROM v.items WHERE id = ${item(10)}`), "v.items, qualified");
+  // both of one name in the statement: the bare one is the search path's, and each is routed as it resolves
+  assert.ok(await same(`SELECT n FROM b.items WHERE id = ${item(10)} UNION ALL SELECT n FROM public.items WHERE id = ${item(10)} ORDER BY 1`));
+});
+
+test("an empty table's side table is not due again at every check; one that covers none of its rows is", async () => {
+  const l = await lookup();
+  const w = store.writer;
+  await w.run("CREATE TABLE public.empty_one (id UUID NOT NULL)");
+  try {
+    await build("public.empty_one", "id");
+    assert.equal((await l.lookupTail(w, "public.empty_one", target("public.empty_one"), 0, 0))?.due, false, "empty: nothing to cover");
+    await write("public.empty_one", ["INSERT INTO public.empty_one VALUES (md5('1')::UUID)"], "");
+    assert.equal((await l.lookupTail(w, "public.empty_one", target("public.empty_one"), 1, 0.01))?.due, true, "a row it does not cover");
+  } finally {
+    await l.dropLookup(w, "public.empty_one");
+    built.delete("public.empty_one");
+    await w.run("DROP TABLE public.empty_one");
   }
 });

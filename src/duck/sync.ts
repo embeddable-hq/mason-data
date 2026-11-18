@@ -1919,7 +1919,17 @@ export class Sync {
     try {
       const type = (await c.runAndReadAll(`SELECT data_type FROM duckdb_columns() WHERE database_name = current_database() AND schema_name = $1 AND table_name = $2 AND column_name = $3`,
         [t.schema, t.table, column])).getRowsJS()[0]?.[0] as string | undefined;
-      if (type === undefined || !lookupKeyType(type)) return;
+      // a key no side table is built for (its type changed since one was): what it had dropped, so no check queues it again
+      if (type === undefined || !lookupKeyType(type)) {
+        if (this.lookupRows.has(source)) await this.onWriter(async () => {
+          await dropLookup(w, source);
+          this.lookupRows.delete(source);
+          this.lookupBuilt.delete(source);
+          this.lookupViews.delete(source);
+          this.log(`${source}: its side table for lookups by ${column} dropped: its key's type ${type ?? "(none)"} has none (its lookups read the table itself)`);
+        });
+        return;
+      }
       const spread = await keySpread(c, t.schema, t.table, column, type);
       const view = this.lookupViews.get(source);
       this.lookupViews.set(source, { column: null, builtAt: null, seconds: null, entries: null, ...view, perKey: spread?.perKey ?? null, rowGroups: spread?.rowGroups ?? null, measuredAt: new Date().toISOString() });

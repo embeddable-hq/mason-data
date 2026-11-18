@@ -34,6 +34,7 @@
  * table cannot be written in a write's transaction; it needs not be.
  */
 import type { DuckConnection } from "./executor.ts";
+import type { TreeValue } from "./pgtree.ts";
 import { MASON_SCHEMA } from "./store.ts";
 
 /** the ledger: a row per table with a side table (or one being built), its `covered` and its last build (a function:
@@ -147,7 +148,8 @@ export async function lookupTail(c: Pick<DuckConnection, "runAndReadAll">, sourc
   if (r === undefined) return null;
   const end = Number((await c.runAndReadAll(`SELECT coalesce(max(rowid), -1) + 1 FROM ${target} WHERE rowid >= ${r[0]} AND rowid < ${MAX_ROW_ID}`)).getRowsJS()[0]![0]);
   const covered = Number(r[0]), tail = Math.max(0, end - covered);
-  return { covered, tail, due: covered === 0 || tail > Math.max(1, rows) * share };
+  // covering nothing is due only when there is something to cover (an empty table is not built again at every check)
+  return { covered, tail, due: (covered === 0 && end > 0) || tail > Math.max(1, rows) * share };
 }
 
 /**
@@ -228,10 +230,26 @@ function constantValue(n: unknown): boolean {
  *  synced data holds, in order (`CopyState.syncedColumns`: what its view of its visible columns lists) */
 export type Lookups = ReadonlyMap<string, { column: string; columns: readonly string[] | null }>;
 
-/** what the route needs of the statement: the tables with a side table, the schemas a bare name is looked up in, the
- *  catalog of the copies' views of their visible columns (src/duck/kept-route.ts `VISIBLE_CATALOG`), and the prefix
- *  of the names Mason invents for it (src/duck/own-names.ts) */
-export interface LookupContext { lookups: Lookups; schemas: readonly string[]; visible: string; own: string; parse: (sql: string) => Promise<unknown> }
+/** what the route needs of the statement: the tables with a side table; the relations Postgres resolved its names to
+ *  (`schema.name`, `analysedRelations`), which a name is held to, never looked up again in a search path; the catalog
+ *  of the copies' views of their visible columns (src/duck/kept-route.ts `VISIBLE_CATALOG`); and the prefix of the
+ *  names Mason invents for it (src/duck/own-names.ts) */
+export interface LookupContext { lookups: Lookups; relations: ReadonlySet<string>; visible: string; own: string; parse: (sql: string) => Promise<unknown> }
+
+/** THE RELATIONS POSTGRES RESOLVED A STATEMENT'S NAMES TO: the relids of every relation in its analysed tree's range
+ *  tables, at every level (a subquery's, a WITH query's, a sublink's). The planner reads their schemas and names from
+ *  the catalog (`LookupContext.relations`) */
+export function analysedRelations(tree: TreeValue): number[] {
+  const relids = new Set<number>();
+  const visit = (v: TreeValue | undefined): void => {
+    if (Array.isArray(v)) { v.forEach(visit); return; }
+    if (v === null || v === undefined || typeof v !== "object") return;
+    if (v._node === "RANGETBLENTRY" && v.rtekind === "0" && typeof v.relid === "string" && /^\d+$/.test(v.relid)) relids.add(Number(v.relid));
+    for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x);
+  };
+  visit(tree);
+  return [...relids].sort((a, b) => a - b);
+}
 
 interface Found { select: Node; at: number; values: Node[]; alias: string; source: string; column: string; schema: string; table: string;
   /** read through its view of its visible columns (`hideKept`): the columns that view lists, else null */
@@ -306,6 +324,13 @@ const schemaQualified = (v: unknown): boolean => {
   return Object.values(v as Node).some(schemaQualified);
 };
 
+/** the schema of the one relation named `name` among those Postgres resolved the statement's names to; null when it
+ *  read none or more than one of that name */
+function soleSchemaOf(relations: ReadonlySet<string>, name: string): string | null {
+  const schemas = [...relations].flatMap((r) => { const at = r.indexOf("."); return r.slice(at + 1) === name ? [r.slice(0, at)] : []; });
+  return schemas.length === 1 ? schemas[0]! : null;
+}
+
 /** the one conjunct a SELECT may route, or null */
 function lookupIn(select: Node, ctes: ReadonlySet<string>, ctx: LookupContext): Found | null {
   if (select.op !== undefined && select.op !== "SETOP_NONE") return null;
@@ -317,8 +342,12 @@ function lookupIn(select: Node, ctes: ReadonlySet<string>, ctx: LookupContext): 
   if (rv.inh === false || (catalog !== null && catalog !== ctx.visible)) return null;
   // a bare name a WITH query holds is the WITH query (DuckDB binds names without case: src/duck/cte-names.ts)
   if (catalog === null && rv.schemaname === undefined && ctes.has(relname.toLowerCase())) return null;
-  const schema = rv.schemaname !== undefined ? String(rv.schemaname) : ctx.schemas.find((s) => ctx.lookups.has(`${s}.${relname}`));
-  if (schema === undefined) return null;
+  // THE RELATION POSTGRES RESOLVED THE NAME TO (issue 1148's review: a bare name looked up again in the search path
+  // took the first schema whose table had a side table, not the first that holds a relation of that name): a
+  // qualified name only when Postgres read that relation, a bare one only when Postgres read exactly one relation of
+  // that name in the statement. Never resolved anew here
+  const schema = rv.schemaname !== undefined ? String(rv.schemaname) : soleSchemaOf(ctx.relations, relname);
+  if (schema === null || !ctx.relations.has(`${schema}.${relname}`)) return null;
   const source = `${schema}.${relname}`;
   const lookup = ctx.lookups.get(source);
   if (lookup === undefined) return null;

@@ -534,7 +534,10 @@ paths:
   conjunct is REPLACED by `rowid IN (<side table> UNION ALL <tail>)`, never kept beside it: kept, DuckDB pushes it into
   the scan and reads every row group's keys first. A table read through its view of its visible columns becomes a
   derived table of those columns, under its name. A name a WITH query holds, `ONLY`, column aliases and a column named
-  by its schema are left as they are. DETECTOR: `tests/duck-key-lookup.test.ts`, the oracle (every table with a key has
+  by its schema are left as they are. **A name is held to the relation Postgres resolved it to** (the analysed range
+  tables' relids, `analysedRelations`), never looked up again in the search path: a bare name is routed only when
+  Postgres read exactly one relation of that name, and it is the one with the side table (the review of PR 1153: the
+  first schema whose table had a side table was taken, and `a.orders` was answered from `public.orders`'s row ids). DETECTOR: `tests/duck-key-lookup.test.ts`, the oracle (every table with a key has
   a side table there).
 
 ## What a column is

@@ -33,7 +33,7 @@ import type { PgAnalysis } from "./analyze.ts";
 import type { ScaleLookup } from "./rewrite.ts";
 import { scaledOf } from "./scale-column.ts";
 import { mayKeepRows } from "./admission.ts";
-import { routeLookups } from "./key-lookup.ts";
+import { analysedRelations, routeLookups } from "./key-lookup.ts";
 
 const JSON_OID = 114, JSONB_OID = 3802, NUMERIC_OID = 1700;
 /** pg_catalog.pg_typeof(any): its argument's type named by the catalog (src/duck/rewrite.ts) */
@@ -670,7 +670,11 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   // above wrote of a key's comparison is what it routes. Never a statement whose tables are swapped for others below
   if (relations === undefined || relations.size === 0) {
     const lookups = new Map(copies().flatMap((c) => c.lookup?.column != null && c.phase === "copied" ? [[c.source, { column: c.lookup.column, columns: c.syncedColumns ?? null }] as const] : []));
-    await routeLookups(tree, { lookups, schemas: searchSchemas(searchPath), visible: VISIBLE_CATALOG, own, parse: parseSql });
+    // the relations Postgres resolved the statement's names to, by schema and name: a name is held to them
+    const relids = lookups.size === 0 ? [] : analysedRelations(analysis.tree);
+    const relations = new Set(relids.length === 0 ? [] : (await catalogRows(catalog, `SELECT n.nspname || '.' || c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace ` +
+      `WHERE c.oid::int8 IN (${relids.map((r) => Math.trunc(r)).join(", ")})`)).map(([name]) => name!));
+    await routeLookups(tree, { lookups, relations, visible: VISIBLE_CATALOG, own, parse: parseSql });
   }
   // on the finished tree, so no rule above meets it; `masonCalls` below does not count it as a function called
   giveTurns(tree);
