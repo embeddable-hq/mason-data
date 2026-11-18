@@ -15,7 +15,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Failure, FailureCode } from "./command.ts";
 import type { SourceTable } from "./preflight.ts";
-import { addedTables, catalogTable, chooseColumns, clashReason, copiedColumns, declaredReferences, effectiveSync, entryFields, entryName, entryProblems, everyColumnLeavesOut, findEntry, noKeyReason, parseSourceText, sourceFailure, sourceFileNames, sourcesDir,
+import { addedTables, catalogTable, chooseColumns, clashReason, copiedColumns, declaredReferences, editProblem, effectiveSync, entryComments, entryFields, entryName, entryProblems, everyColumnLeavesOut, findEntry, noKeyReason, parseSourceText, sourceFailure, sourceFileNames, sourcesDir,
   referenceKey, referenceProblems, referenceValue, unaddableReason, usableUniqueKey, withEntrySync, withoutTable, withReferences, withTable, type CatalogColumn, type CatalogTable, type EntryFields, type ProjectSource, type SourceFile,
   type Reference, type TableEntry, type WrittenEntry } from "./sources.ts";
 import { BIG_TABLE_ROWS, COSTLY_POLL_ROWS, COSTLY_POLL_SECONDS, syncText, type TableSync } from "../lib/table-sync.ts";
@@ -44,35 +44,45 @@ export interface EditTarget { root: string; file: string; text: string; parsed: 
 /** An entry as one line a person can write: its name and its keys as a flow map (JSON, which YAML reads). */
 const entryLine = (e: TableEntry): string => `${e.name}: ${JSON.stringify(entryFields(e))}`;
 
-/** An entry as the file says it, to compare: every key, its sync and references in the file's words. */
-const entryShape = (e: TableEntry): string => JSON.stringify([e.name, e.table, e.columns, e.exclude, e.key, e.sync ? syncText(e.sync) : null,
-  (e.references ?? []).map((r) => [r.columns, r.to, r.table, r.targetColumns])]);
+/** The refusal of an edit `editProblem` finds wrong: the file named, nothing written, and what to write by hand. */
+const uncheckedEdit = (root: string, file: string, what: string, byHand: string): Refusal =>
+  new Refusal(409, `${path.relative(root, file) || file} could not be edited safely, so nothing was written: ${what}. Edit it by hand: ${byHand}`);
 
 /**
- * EVERY EDIT IS READ BACK BEFORE IT IS WRITTEN (the reviews of PR 1145: a cut that ran on took the next entry, a splice
- * left a stray bracket). `text` is the file as the edit would leave it, and `expected` every entry it must then hold.
- * It must read as a sources file, keep the file's own keys as they were (kind, url, database, sync, publication), and
- * hold exactly the entries expected. Else nothing is written, and the edit is refused with what to write by hand
+ * EVERY EDIT IS READ BACK BEFORE IT IS WRITTEN (src/cli/sources.ts `editProblem`): the file as the edit would leave it
+ * (`text`) must hold exactly the entries `expected`, its own keys as they were, and every comment it had but those of the
+ * lines cut on purpose (`dropped`). Else nothing is written, and the edit is refused with what to write by hand
  * (`byHand`). An edit that cannot be checked never reports success.
  */
-function writeChecked(at: EditTarget, text: string, expected: readonly TableEntry[], byHand: string): void {
-  const rel = path.relative(at.root, at.file) || at.file;
-  const refuse = (what: string): never => {
-    throw new Refusal(409, `${rel} could not be edited safely, so nothing was written: ${what}. Edit it by hand: ${byHand}`);
-  };
-  const now = parseSourceText(text, at.parsed.name, at.file);
-  if ("problems" in now) return refuse(`the edit would leave it unreadable (${now.problems[0]!})`);
-  const own = (f: SourceFile): string => JSON.stringify([f.kind, f.url, f.database, f.sync ? syncText(f.sync) : null, f.publication]);
-  if (own(now) !== own(at.parsed)) return refuse("the edit would change its keys outside tables:");
-  const want = new Map(expected.map((e) => [e.table, entryShape(e)]));
-  for (const e of now.tables) {
-    const w = want.get(e.table);
-    if (w === undefined) return refuse(`the edit would leave an entry tables.${e.name} it should not`);
-    if (w !== entryShape(e)) return refuse(`the edit would leave tables.${e.name} other than it should be`);
-    want.delete(e.table);
-  }
-  for (const t of want.keys()) return refuse(`the edit would lose tables.${entryName(t)}`);
+function writeChecked(at: EditTarget, text: string, expected: readonly TableEntry[], byHand: string, dropped: readonly string[] = []): void {
+  const problem = editProblem({ text: at.text, parsed: at.parsed }, text, expected, dropped);
+  if (problem !== null) throw uncheckedEdit(at.root, at.file, problem, byHand);
   fs.writeFileSync(at.file, text);
+}
+
+/**
+ * THE RUN LEAVES OUT A SECRET-LOOKING COLUMN THAT ARRIVED (src/cli/dev.ts): `exclude:` written on each entry named, that
+ * key's line alone (`withTable`), and the file read back before it is written (`editProblem`), every entry or none. The
+ * refusal, or why the file cannot be read, is thrown: the run says it, and leaves the columns out for this run all the same.
+ */
+export function writeLeftOut(root: string, file: string, name: string, excludes: ReadonlyArray<{ table: string; exclude: string[] }>): void {
+  const before = fs.readFileSync(file, "utf8");
+  const parsed = parseSourceText(before, name, file);
+  if ("problems" in parsed) throw new Error(`it cannot be edited: ${parsed.problems[0]!}`);
+  let text = before;
+  const expected = parsed.tables.map((e) => ((x) => x === undefined ? e : { ...e, exclude: x.exclude })(excludes.find((x) => x.table === e.table)));
+  for (const x of excludes) {
+    const e = expected.find((y) => y.table === x.table);
+    if (e === undefined) throw new Error(`it names no table ${entryName(x.table)}`);
+    const r = withTable(text, e);
+    if ("problem" in r) throw new Error(`it cannot be edited: ${r.problem}`);
+    text = r.text;
+  }
+  const problem = editProblem({ text: before, parsed }, text, expected);
+  if (problem !== null) {
+    throw uncheckedEdit(root, file, problem, expected.filter((e) => excludes.some((x) => x.table === e.table)).map((e) => `write ${entryLine(e)}`).join(", and "));
+  }
+  fs.writeFileSync(file, text);
 }
 
 /** The database an edit is checked against: its catalog (preflight.ts readSourceFacts) and its name; `measured`, with
@@ -532,7 +542,10 @@ export function removeEntries(at: EditTarget, db: EditCatalog, names: readonly s
     out = r.text;
     referencesRemoved.push(...cut.map((x) => ({ table: o.table, columns: x.columns, references: x.table, targetColumns: x.targetColumns })));
   }
+  // the comments of a removed entry's own lines go with it, on purpose; every other comment must stay
+  const dropped: string[] = [];
   for (const e of entries) {
+    dropped.push(...entryComments(out, e.table));
     const r = withoutTable(out, e.table);
     if (r === null) continue;
     if ("problem" in r) throw cant(r.problem);
@@ -544,6 +557,6 @@ export function removeEntries(at: EditTarget, db: EditCatalog, names: readonly s
     return kept.length ? { ...rest, references: kept } : rest;
   });
   writeChecked(at, out, expected, `delete the entries of ${entries.map((e) => `tables.${e.name}`).join(", ")}` +
-    (referencesRemoved.length ? `, and the references to ${entries.length === 1 ? "it" : "them"} in ${[...new Set(referencesRemoved.map((x) => `tables.${entryName(x.table)}.references`))].join(", ")}` : ""));
+    (referencesRemoved.length ? `, and the references to ${entries.length === 1 ? "it" : "them"} in ${[...new Set(referencesRemoved.map((x) => `tables.${entryName(x.table)}.references`))].join(", ")}` : ""), dropped);
   return { removed: [...new Set(gone)], file: at.file, referencesRemoved };
 }

@@ -36,7 +36,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { isMap, isPair, isScalar, isSeq, parseDocument, type Document, type Pair, type YAMLMap } from "yaml";
+import { isMap, isPair, isScalar, isSeq, parseDocument, Parser, type Document, type Pair, type YAMLMap } from "yaml";
 import { databaseNameProblem, DEFAULT_DATABASE } from "../lib/database-name.ts";
 import { appEnvValue, ENV_FILE } from "../lib/dotenv.ts";
 import { closest, didYouMean } from "../lib/did-you-mean.ts";
@@ -1215,12 +1215,8 @@ function withTableLf(text: string, e: WrittenEntry): { text: string } | { proble
   const entries = entryPairs(value);
   const first = entries[0]!.pair.key as Ranged;
   const indent = indentOf(first.range![0]);
-  const same = entries.find((x) => x.table === e.table);
-  if (same) {
-    const k = same.pair.key as Ranged;
-    const to = pairEnd(same.pair);
-    return { text: `${text.slice(0, lineStart(k.range![0]))}${entryText({ ...e, name: same.name }, indent)}${text.slice(to)}` };
-  }
+  // the table's own entry: its keys edited where they are (`withEntryLf`), never written again
+  if (entries.some((x) => x.table === e.table)) return withEntryLf(text, e.table, e);
   const at = pairEnd(entries[entries.length - 1]!.pair);
   return { text: `${text.slice(0, at)}${at > 0 && text[at - 1] !== "\n" ? "\n" : ""}${entryText(e, indent)}${text.slice(at)}` };
 }
@@ -1239,65 +1235,283 @@ export function withEntrySync(text: string, e: Pick<TableEntry, "name" | "table"
 function withEntrySyncLf(text: string, e: Pick<TableEntry, "name" | "table" | "columns" | "exclude" | "key" | "references">, sync: TableSync | null): { text: string } | { problem: string } {
   const r = forEdit(text);
   if ("problem" in r) return r;
-  const { pair, lineStart, lineEnd, pairEnd, indentOf } = r;
-  const map = pair?.value;
+  const map = r.pair?.value;
   if (!isMap(map)) return withTableLf(text, { ...e, sync });
   if ((map as YAMLMap).flow) return { problem: FLOW_MAP };
-  const same = entryPairs(map as YAMLMap).find((x) => x.table === e.table);
-  if (same === undefined) return withTableLf(text, { ...e, sync });
+  if (!entryPairs(map as YAMLMap).some((x) => x.table === e.table)) return withTableLf(text, { ...e, sync });
+  return withEntryLf(text, e.table, { ...e, sync });
+}
+
+/** Every comment of a YAML text, by the parser's own tokens (a `#` in a quoted name or a block scalar is none): where
+ *  it starts, and its text. */
+export function commentsOf(text: string): Array<{ at: number; text: string }> {
+  const out = new Map<number, string>();
+  const walk = (x: unknown): void => {
+    if (x === null || typeof x !== "object") return;
+    const t = x as { type?: unknown; offset?: unknown; source?: unknown };
+    if (t.type === "comment" && typeof t.offset === "number" && typeof t.source === "string") out.set(t.offset, t.source.trimEnd());
+    for (const v of Object.values(x)) walk(v);
+  };
+  for (const token of new Parser().parse(text)) walk(token);
+  return [...out].sort((a, b) => a[0] - b[0]).map(([at, c]) => ({ at, text: c }));
+}
+
+/** The comments of the old text the new one lacks (each counted: two alike need two), but for `dropped`, the comments of
+ *  lines an edit cuts on purpose (a removed table's entry). */
+export function lostComments(before: string, after: string, dropped: readonly string[] = []): string[] {
+  const left = new Map<string, number>();
+  for (const c of [...commentsOf(after).map((x) => x.text), ...dropped]) left.set(c, (left.get(c) ?? 0) + 1);
+  return commentsOf(before).map((x) => x.text).filter((c) => {
+    const n = left.get(c) ?? 0;
+    if (n > 0) left.set(c, n - 1);
+    return n === 0;
+  });
+}
+
+/** The comments `withoutTable` cuts with an entry, its own (`entryCut`). */
+export function entryComments(text: string, table: string): string[] {
+  const r = forEdit(text);
+  return "problem" in r ? [] : entryCut(text, r, table)?.dropped ?? [];
+}
+
+/** An entry as the file says it, to compare: every key, its sync and its references in the file's words. */
+export const entryShape = (e: TableEntry): string => JSON.stringify([e.name, e.table, e.columns, e.exclude, e.key, e.sync ? syncText(e.sync) : null,
+  (e.references ?? []).map((r) => [r.columns, r.to, r.table, r.targetColumns])]);
+
+/**
+ * WHAT IS WRONG WITH AN EDIT, read back before it is written (the reviews of PR 1145: a cut that ran on took the next
+ * entry, a splice left a stray bracket, an entry written again lost its comments), or null. `text` is the file as the edit
+ * would leave it, and `expected` every entry it must then hold. It must read as a sources file, keep the file's own keys
+ * as they were (kind, url, database, sync, publication), hold exactly the entries expected, and keep every comment the
+ * file had but those of the lines it cuts on purpose (`dropped`).
+ */
+export function editProblem(before: { text: string; parsed: SourceFile }, text: string, expected: readonly TableEntry[], dropped: readonly string[] = []): string | null {
+  const now = parseSourceText(text, before.parsed.name, before.parsed.file);
+  if ("problems" in now) return `the edit would leave it unreadable (${now.problems[0]!})`;
+  const own = (f: SourceFile): string => JSON.stringify([f.kind, f.url, f.database, f.sync ? syncText(f.sync) : null, f.publication]);
+  if (own(now) !== own(before.parsed)) return "the edit would change its keys outside tables:";
+  const want = new Map(expected.map((e) => [e.table, entryShape(e)]));
+  for (const e of now.tables) {
+    const w = want.get(e.table);
+    if (w === undefined) return `the edit would leave an entry tables.${e.name} it should not`;
+    if (w !== entryShape(e)) return `the edit would leave tables.${e.name} other than it should be`;
+    want.delete(e.table);
+  }
+  for (const t of want.keys()) return `the edit would lose tables.${entryName(t)}`;
+  const lost = lostComments(before.text, text, dropped);
+  if (lost.length) return `the edit would lose the comment${lost.length === 1 ? "" : "s"} ${lost.join(", ")}`;
+  return null;
+}
+
+/** A splice of the text: [from, to) replaced by `text`. */
+type Splice = { from: number; to: number; text: string };
+
+/** The text with every splice made, each at the positions of the text as read; null when two overlap (a bug: the
+ *  caller's read-back refuses it). Splices at one point are made in the order given. */
+function spliced(text: string, ss: readonly Splice[]): string | null {
+  const sorted = ss.map((s, i) => ({ ...s, i })).sort((a, b) => a.from - b.from || a.to - b.to || a.i - b.i);
+  let out = "", at = 0;
+  for (const s of sorted) {
+    if (s.from < at) return null;
+    out += text.slice(at, s.from) + s.text;
+    at = s.to;
+  }
+  return out + text.slice(at);
+}
+
+/**
+ * THE ONE EDIT OF AN ENTRY THE FILE HAS (the third review of PR 1145: an entry written again from its key line lost every
+ * comment but the one on that line). The entry for `table` is made to say `next`'s keys (`entryFields`) by changing only
+ * the lines it must: a value replaced where it sits, a key's lines cut, a key's lines added after the entry's last, a
+ * reference's line cut or added. Its name, layout and every comment stay. A comment on lines cut or replaced is carried
+ * to a line of its own where they were. An entry written as a flow map (`{ … }`), or with no value, has that value made a
+ * block a key a line, each comment among the keys where it was. An entry left with no key is `{}`, its comments under it.
+ */
+function withEntryLf(text: string, table: string, next: Omit<WrittenEntry, "table" | "name">): { text: string } | { problem: string } {
+  const r = forEdit(text);
+  if ("problem" in r) return r;
+  const { pair, lineStart, lineEnd, pairEnd, indentOf } = r;
+  const map = pair?.value;
+  if (!isMap(map)) return { problem: `it names no table ${entryName(table)}` };
+  if ((map as YAMLMap).flow) return { problem: FLOW_MAP };
+  const same = entryPairs(map as YAMLMap).find((x) => x.table === table);
+  if (same === undefined) return { problem: `it names no table ${entryName(table)}` };
+  const comments = commentsOf(text);
+  const ss: Splice[] = [];
+  const insert = (at: number, s: string): void => { if (s) ss.push({ from: at, to: at, text: at > 0 && text[at - 1] !== "\n" ? `\n${s}` : s }); };
+  const keyOf = (p: Pair): Ranged => p.key as Ranged;
+  const lineOf = (i: number): number => lineStart(i);
+  // the whitespace before a comment, as it was (one space at least)
+  const gap = (at: number): string => /[ \t]*$/.exec(text.slice(lineStart(at), at))![0] || " ";
+  // right after the `:` that follows a key
+  const afterColon = (p: Pair): number => { const i = text.indexOf(":", keyOf(p).range![1]); return i < 0 ? keyOf(p).range![1] : i + 1; };
+  // where a value's own text ends: a block map's or list's at its last item's, a scalar's or flow collection's at its last
+  // character (a block scalar's line break left where it is); `from` when it has no text (`sync:` with nothing after)
+  const nodeEnd = (v: unknown, from: number): number => {
+    if ((isMap(v) || isSeq(v)) && !(v as YAMLMap).flow) return Math.max(from, contentEnd(v, from));
+    const rg = (v as Ranged | null)?.range;
+    if (!rg || rg[1] <= rg[0]) return from;
+    let to = rg[1];
+    while (to > rg[0] && /\s/.test(text[to - 1]!)) to--;
+    return Math.max(from, to);
+  };
+  // the comments in [from, to) as lines of their own: one on its own line as it was written, one after a value at `indent`
+  const carried = (from: number, to: number, indent: string, skip: ReadonlySet<number> = new Set()): string => comments
+    .filter((c) => c.at >= from && c.at < to && !skip.has(c.at))
+    .map((c) => { const before = text.slice(lineStart(c.at), c.at); return before.trim() === "" ? `${before}${c.text}\n` : `${indent}${c.text}\n`; }).join("");
+  const cut = (p: Pair): void => {
+    const from = lineStart(keyOf(p).range![0]), to = pairEnd(p);
+    ss.push({ from, to, text: carried(from, to, indentOf(keyOf(p).range![0])) });
+  };
+  const replace = (p: Pair, inline: string, indent: string): void => {
+    const from = afterColon(p), to = nodeEnd(p.value, from);
+    ss.push({ from, to, text: ` ${inline}` });
+    insert(lineEnd(to), carried(from, to, indent));
+  };
+  const toJS = (v: unknown): unknown => (v as { toJSON?: () => unknown } | null)?.toJSON?.() ?? null;
+  const want = entryFields(next) as Record<string, string | string[] | Record<string, string> | undefined>;
+  const refs = next.references ?? [];
+  const refShape = (xs: readonly Reference[]): string => JSON.stringify(xs.map((x) => [x.columns, x.to, x.targetColumns]));
+  const readRefs = (v: unknown): Reference[] | null => { const x = referencesOf(toJS(v), ""); return Array.isArray(x) ? x : null; };
+  const sameValue = (k: string, v: unknown, w: unknown): boolean => {
+    if (k !== "sync") return JSON.stringify(toJS(v)) === JSON.stringify(w);
+    const s = parseSync(toJS(v));
+    return !("problem" in s) && syncText(s) === w;
+  };
+  const inline = (w: unknown): string => typeof w === "string" ? w : flowList(w as string[]);
+  const fieldLines = (k: string, w: unknown, indent: string): string =>
+    k === "references" ? `${indent}references:\n${referencesText(refs, `${indent}  `)}` : `${indent}${k}: ${inline(w)}\n`;
+  const columnsOf = (k: unknown): string => JSON.stringify(referenceColumns(String(k)));
   const value = same.pair.value as (Ranged & YAMLMap) | null;
   if (isMap(value) && !value.flow && value.items.length > 0) {
-    const own = value.items.find((p) => isScalar(p.key) && p.key.value === "sync");
-    if (own !== undefined) {
-      const k = own.key as Ranged, v = own.value as Ranged | null;
-      // its line cut, unless it is the entry's only key: then the entry is `{}` again
-      if (sync === null && value.items.length === 1) return withTableLf(text, { ...e, name: same.name, sync: null });
-      if (sync === null) return { text: `${text.slice(0, lineStart(k.range![0]))}${text.slice(pairEnd(own as Pair))}` };
-      if (!v?.range) return { problem: `its ${e.name}.sync: has no value to replace` };
-      // a block scalar's range (`sync: >-` and its lines) takes the line break after it: kept, or the next line would join this one
-      let to = v.range[1];
-      while (to > v.range[0] && /[\r\n]/.test(text[to - 1]!)) to--;
-      return { text: `${text.slice(0, v.range[0])}${syncText(sync)}${text.slice(to)}` };
+    const items = value.items as Pair[];
+    const keyIndent = indentOf(keyOf(items[0]!).range![0]);
+    let kept = 0;
+    for (const p of items) {
+      const k = isScalar(p.key) ? String(p.key.value) : null;
+      if (k === null || !(ENTRY_KEYS as readonly string[]).includes(k)) { kept++; continue; }
+      const w = want[k];
+      if (w === undefined) { cut(p); continue; }
+      kept++;
+      if (k !== "references") { if (!sameValue(k, p.value, w)) replace(p, inline(w), `${keyIndent}  `); continue; }
+      const had = readRefs(p.value);
+      if (had !== null && refShape(had) === refShape(refs)) continue;
+      const rv = p.value as (Ranged & YAMLMap) | null;
+      if (isMap(rv) && !rv.flow && rv.items.length > 0) {
+        // a reference a line: the ones no longer named cut, a changed one's value replaced, a new one a line after the last
+        const ritems = rv.items as Pair[];
+        const lineIndent = indentOf(keyOf(ritems[0]!).range![0]);
+        const wanted = new Map(refs.map((x) => [columnsOf(referenceKey(x)), x]));
+        const present = new Set<string>();
+        for (const rp of ritems) {
+          const rk = isScalar(rp.key) ? columnsOf(rp.key.value) : null;
+          const x = rk === null ? undefined : wanted.get(rk);
+          if (x === undefined) { cut(rp); continue; }
+          present.add(rk!);
+          const now = readRefs({ toJSON: () => ({ [String((rp.key as { value: unknown }).value)]: toJS(rp.value) }) });
+          if (now === null || refShape(now) !== refShape([x])) replace(rp, yamlReference(referenceValue(x)), `${lineIndent}  `);
+        }
+        insert(pairEnd(ritems[ritems.length - 1]!), referencesText(refs.filter((x) => !present.has(columnsOf(referenceKey(x)))), lineIndent));
+      } else {
+        // `references: { … }`, `{}` or nothing: that value made a block a reference a line, its comments carried under the key
+        const from = afterColon(p), to = nodeEnd(rv, from);
+        ss.push({ from, to, text: "" });
+        insert(lineEnd(to), `${carried(from, to, `${keyIndent}  `)}${referencesText(refs, `${keyIndent}  `)}`);
+      }
     }
-    if (sync === null) return { text };
-    const first = value.items[0]!.key as Ranged;
-    const indent = indentOf(first.range![0]);
-    const at = pairEnd(value.items[value.items.length - 1] as Pair);
-    return { text: `${text.slice(0, at)}${at > 0 && text[at - 1] !== "\n" ? "\n" : ""}${indent}sync: ${syncText(sync)}\n${text.slice(at)}` };
+    const missing = Object.keys(want).filter((k) => want[k] !== undefined && !items.some((p) => isScalar(p.key) && p.key.value === k));
+    if (missing.length) insert(pairEnd(items[items.length - 1]!), missing.map((k) => fieldLines(k, want[k], keyIndent)).join(""));
+    else if (kept === 0) {
+      // `{}` at the end of the key's line, after an anchor or a tag on it (`customers: &c`), before a comment
+      const ac = afterColon(same.pair);
+      const c = comments.find((x) => x.at >= ac && x.at < lineEnd(ac));
+      let at = c !== undefined ? c.at : lineEnd(ac);
+      while (at > ac && /\s/.test(text[at - 1]!)) at--;
+      ss.push({ from: at, to: at, text: " {}" });
+    }
+  } else {
+    // a flow map (`orders: {}`, `orders: { columns: [id] }`), an alias (`orders: *base`), or no value
+    const from = afterColon(same.pair), to = nodeEnd(value, from);
+    const indent = `${indentOf(keyOf(same.pair).range![0])}  `;
+    const fields = Object.keys(want).filter((k) => want[k] !== undefined);
+    const flowItems = isMap(value) ? value.items as Pair[] : [];
+    const empty = value === null || (isScalar(value) && value.value === null) || (isMap(value) && !flowItems.length);
+    if (!fields.length) {
+      if (empty) return { text };
+      ss.push({ from, to, text: " {}" });
+      insert(lineEnd(to), carried(from, to, indent));
+    } else {
+      // the key's line keeps a comment it had (`orders: {   # c`) unless one follows the value on its last line
+      const inSpan = comments.filter((c) => c.at >= from && c.at < to);
+      const restHasOne = comments.some((c) => c.at >= to && c.at < lineEnd(to));
+      const onKeyLine = inSpan.find((c) => lineOf(c.at) === lineOf(from));
+      const keyLine = onKeyLine !== undefined && !restHasOne ? onKeyLine : undefined;
+      ss.push({ from, to, text: keyLine ? `${gap(keyLine.at)}${keyLine.text}` : "" });
+      // the keys a line each, in the order they were (a new one last), each other comment among them where it was: after
+      // a key's value on its line, it stays after it
+      const units = fields.map((k, i) => {
+        const old = flowItems.find((p) => isScalar(p.key) && p.key.value === k);
+        return { at: old ? keyOf(old).range![0] : Number.MAX_SAFE_INTEGER, i, k, end: old ? nodeEnd(old.value, keyOf(old).range![1]) : -1, text: fieldLines(k, want[k], indent) };
+      });
+      const lines = units.map((u) => ({ at: u.at, i: u.i, text: u.text }));
+      const trailed = new Set<number>();
+      for (const c of inSpan) {
+        if (c === keyLine) continue;
+        const own = text.slice(lineStart(c.at), c.at).trim() === "";
+        const after = own ? undefined : units.find((u) => u.end >= 0 && u.end <= c.at && lineOf(u.end) === lineOf(c.at) && !trailed.has(u.i));
+        if (after !== undefined) {
+          trailed.add(after.i);
+          const l = lines[after.i]!;
+          const nl = l.text.indexOf("\n");
+          l.text = `${l.text.slice(0, nl)}${gap(c.at)}${c.text}${l.text.slice(nl)}`;
+        } else lines.push({ at: c.at, i: -1, text: `${indent}${c.text}\n` });
+      }
+      lines.sort((a, b) => a.at - b.at || a.i - b.i);
+      insert(lineEnd(to), lines.map((l) => l.text).join(""));
+    }
   }
-  if (sync === null) return { text };
-  // a flow map (`orders: {}`, `orders: { columns: [id] }`) or nothing: the entry written again, a comment on its line kept
-  const k = same.pair.key as Ranged, v = value as Ranged | null;
-  // an entry with no value (`orders:   # c`) has an empty scalar placed AT its comment: the comment is read from the key
-  const after = v?.range && v.range[1] > v.range[0] ? v.range[1] : k.range![1];
-  const end = Math.min(lineEnd(after), pairEnd(same.pair));
-  const comment = /(\s+#.*)$/.exec(text.slice(after, end).replace(/\n$/, ""))?.[1] ?? "";
-  const indent = indentOf(k.range![0]);
-  const lines = entryText({ ...e, name: same.name, sync }, indent).split("\n");
-  lines[0] = `${lines[0]}${comment}`;
-  return { text: `${text.slice(0, lineStart(k.range![0]))}${lines.join("\n")}${text.slice(end)}` };
+  const out = spliced(text, ss);
+  return out === null ? { problem: `its tables.${same.name} could not be edited in place` } : { text: out };
 }
 
 /**
  * The file without its entry for `table`: its lines cut, every other byte as it was; the last entry gone leaves
- * `tables: {}`. Null when no entry names that table.
+ * `tables: {}`. Null when no entry names that table. A comment line among them indented no deeper than the entry's key
+ * is not the entry's (`# --- billing ---` between its key and its first key): it stays (`entryCut`).
  */
 export function withoutTable(text: string, table: string): { text: string } | { problem: string } | null {
   return inOwnLineEndings(text, (t) => withoutTableLf(t, table));
 }
 
+/** Where an entry's lines are, the comment lines among them that are not its own (`withoutTable`), and the comments that
+ *  go with it. Null when no block `tables:` map names that table. */
+function entryCut(text: string, r: Exclude<ReturnType<typeof forEdit>, { problem: string }>, table: string): { from: number; to: number; keep: string; dropped: string[] } | null {
+  if (r.pair === null || !isMap(r.pair.value)) return null;
+  const gone = entryPairs(r.pair.value as YAMLMap).find((x) => x.table === table);
+  if (gone === undefined) return null;
+  const at = (gone.pair.key as Ranged).range![0];
+  const from = r.lineStart(at), to = r.pairEnd(gone.pair);
+  const indent = r.indentOf(at).length;
+  const keep: string[] = [], dropped: string[] = [];
+  for (const c of commentsOf(text).filter((x) => x.at >= from && x.at < to)) {
+    const before = text.slice(r.lineStart(c.at), c.at);
+    if (before.trim() === "" && before.length <= indent) keep.push(`${before}${c.text}\n`);
+    else dropped.push(c.text);
+  }
+  return { from, to, keep: keep.join(""), dropped };
+}
+
 function withoutTableLf(text: string, table: string): { text: string } | { problem: string } | null {
   const r = forEdit(text);
   if ("problem" in r) return r;
-  const { pair, lineStart, pairEnd } = r;
+  const { pair } = r;
   if (pair === null || !isMap(pair.value)) return null;
   const map = pair.value as YAMLMap;
   const entries = entryPairs(map);
-  const gone = entries.find((x) => x.table === table);
-  if (!gone) return null;
+  if (!entries.some((x) => x.table === table)) return null;
   if (map.flow) return { problem: FLOW_MAP };
-  const k = gone.pair.key as Ranged;
-  let out = `${text.slice(0, lineStart(k.range![0]))}${text.slice(pairEnd(gone.pair))}`;
+  const cut = entryCut(text, r, table)!;
+  let out = `${text.slice(0, cut.from)}${cut.keep}${text.slice(cut.to)}`;
   if (entries.length === 1) {
     // the last one: `tables: {}`, a comment after the key kept on its line
     const colon = text.indexOf(":", (pair.key as Ranged).range![1]);
@@ -1307,68 +1521,12 @@ function withoutTableLf(text: string, table: string): { text: string } | { probl
 }
 
 /**
- * The file with ONE entry's `references:` set to `refs` (`e`, the entry as the file reads it), and every other byte as it
- * was: a reference `refs` no longer names has its line cut, a new one a line of its own after the last, and a reference
- * kept keeps its line and its comment (`mason add customers` writing the reference `orders` holds to it; `mason remove
- * customers` taking it out). `references:` written as a flow map, or an entry written as one, is written again a key a
- * line, a comment on the entry's key line kept.
+ * The file with ONE entry's `references:` set to `refs` (`e`, the entry as the file reads it), every other byte as it
+ * was (`withEntryLf`): a reference `refs` no longer names has its line cut, its comments kept; a new one a line of its own
+ * after the last (`mason add customers` writing the reference `orders` holds to it; `mason remove customers` taking it out).
  */
 export function withReferences(text: string, e: TableEntry, refs: readonly Reference[]): { text: string } | { problem: string } {
-  return inOwnLineEndings(text, (t) => withReferencesLf(t, e, refs));
-}
-
-function withReferencesLf(text: string, e: TableEntry, refs: readonly Reference[]): { text: string } | { problem: string } {
-  const r = forEdit(text);
-  if ("problem" in r) return r;
-  const { pair, lineStart, lineEnd, pairEnd, indentOf } = r;
-  const map = pair?.value;
-  if (!isMap(map)) return { problem: `it names no table ${e.name}` };
-  if ((map as YAMLMap).flow) return { problem: FLOW_MAP };
-  const same = entryPairs(map as YAMLMap).find((x) => x.table === e.table);
-  if (same === undefined) return { problem: `it names no table ${e.name}` };
-  const next: TableEntry = { ...e, name: same.name, references: [...refs] };
-  if (!refs.length) delete next.references;
-  const columnsOf = (k: unknown): string => JSON.stringify(referenceColumns(String(k)));
-  const wanted = new Map(refs.map((x) => [columnsOf(referenceKey(x)), x]));
-  const end = pairEnd;
-  const value = same.pair.value as (Ranged & YAMLMap) | null;
-  if (isMap(value) && !value.flow && value.items.length > 0) {
-    const own = value.items.find((p) => isScalar(p.key) && p.key.value === "references") as Pair | undefined;
-    const keyIndent = indentOf((value.items[0]!.key as Ranged).range![0]);
-    if (own === undefined) {
-      if (!refs.length) return { text };
-      const at = end(value.items[value.items.length - 1] as Pair);
-      return { text: `${text.slice(0, at)}${at > 0 && text[at - 1] !== "\n" ? "\n" : ""}${keyIndent}references:\n${referencesText(refs, `${keyIndent}  `)}${text.slice(at)}` };
-    }
-    const refMap = own.value as (Ranged & YAMLMap) | null;
-    // its only key, and none left: the entry is `{}` again
-    if (!refs.length && value.items.length === 1) return withTableLf(text, next);
-    if (!refs.length) return { text: `${text.slice(0, lineStart((own.key as Ranged).range![0]))}${text.slice(end(own))}` };
-    if (isMap(refMap) && !refMap.flow && refMap.items.length > 0) {
-      const items = refMap.items as Pair[];
-      const had = new Set(items.map((p) => columnsOf((p.key as { value: unknown }).value)));
-      const lineIndent = indentOf((items[0]!.key as Ranged).range![0]);
-      const added = refs.filter((x) => !had.has(columnsOf(referenceKey(x))));
-      // splices from the end back, so each one's positions are the text's as read
-      const at = end(items[items.length - 1]!);
-      let out = `${text.slice(0, at)}${at > 0 && text[at - 1] !== "\n" ? "\n" : ""}${referencesText(added, lineIndent)}${text.slice(at)}`;
-      for (const p of [...items].reverse()) {
-        if (wanted.has(columnsOf((p.key as { value: unknown }).value))) continue;
-        out = `${out.slice(0, lineStart((p.key as Ranged).range![0]))}${out.slice(end(p))}`;
-      }
-      return { text: out };
-    }
-    // `references: { … }` or `references: {}`: its lines written again, a line per reference
-    return { text: `${text.slice(0, lineStart((own.key as Ranged).range![0]))}${keyIndent}references:\n${referencesText(refs, `${keyIndent}  `)}${text.slice(end(own))}` };
-  }
-  // a flow map (`orders: {}`, `orders: { columns: [id] }`) or nothing: the entry written again, a comment on its line kept
-  const k = same.pair.key as Ranged, v = value as Ranged | null;
-  const after = v?.range && v.range[1] > v.range[0] ? v.range[1] : k.range![1];
-  const to = Math.min(lineEnd(after), pairEnd(same.pair));
-  const comment = /(\s+#.*)$/.exec(text.slice(after, to).replace(/\n$/, ""))?.[1] ?? "";
-  const lines = entryText(next, indentOf(k.range![0])).split("\n");
-  lines[0] = `${lines[0]}${comment}`;
-  return { text: `${text.slice(0, lineStart(k.range![0]))}${lines.join("\n")}${text.slice(to)}` };
+  return inOwnLineEndings(text, (t) => withEntryLf(t, e.table, { ...e, references: [...refs] }));
 }
 
 /** The entry naming a table — by its key, or by schema.table — or why there is none, with the closest name; `usage` when

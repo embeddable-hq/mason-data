@@ -21,6 +21,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   - `mason add` writes the foreign keys your database declares between tables the file syncs. When you add the table a
     foreign key points to, it writes that key on the table that holds it. It says each foreign key it left out, and why.
   - `mason remove` takes the references to a removed table out of the other entries, and says so.
+  - `mason add`, `mason remove` and the `exclude:` Mason writes for a new secret-looking column now change only the
+    lines they must, and keep every comment in the sources file. Before, adding a table again with other columns, or
+    giving a sync to a table written as `{ … }`, wrote its entry again and lost its comments.
   - A reference to a table the file doesn't sync, or to a column it doesn't sync, stops `mason start` with the file, the
     key and the way out. `mason tables --json` shows each table's references in its `entry`.
 - **Short text columns are stored many times smaller, so a dashboard that groups or filters on them reads less.** When
