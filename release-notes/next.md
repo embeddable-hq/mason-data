@@ -51,6 +51,17 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
     `mason logs` shows `dropped <table>'s synced data`, then run `mason add <table>`. The table is not served in
     between.
   - Generated tables are stored as before.
+- **A group by month, week, day or hour of a `timestamptz` column is faster in a time zone other than UTC.** Mason now
+  syncs each such column with a small hidden number beside it: the 15 minutes of UTC its value falls in. A query that
+  groups by a unit of the column groups by that number first, and works out each group's local month once, not once a
+  row. It reads that number and not the time, so a query read from disk reads much less. On 50 M orders in
+  `Asia/Kathmandu`, revenue by month went from 456 ms to 60 ms, and from 5.1 s to 0.6 s with ten clients at once. The
+  answers are the same, in every zone.
+  - In UTC, a query runs as before, since it is already fast there.
+  - A table with a time before 1980 or an infinite one still reads the time of those rows.
+  - The synced data grows by about 5%, and the first sync takes about 7% longer.
+  - The upgrade reads no table again. A table synced before keeps running its queries as before, until it is synced
+    again whole.
 - **The web page's "Connect an AI agent" is shorter and leads with what to paste.** With `mason serve`'s MCP endpoint
   on, every client uses its address: the box shows it with Copy, one line per client (claude.ai and Claude Desktop,
   ChatGPT, Claude Code, Cursor) saying where it goes, and one line on signing in. The `mason mcp` way is under it, closed.

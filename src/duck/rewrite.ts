@@ -45,6 +45,7 @@ import { atTimeZoneOf, isUtc, UTC_NAMES } from "../lib/timezone.ts";
 import type { CaseMapping, DuckCollation, StatementCollations } from "./collation.ts";
 import { pgTrim } from "./text.ts";
 import { NUMBERED_EQUALITY, type NumberedLookup, type NumberedRead } from "./reference-keys.ts";
+import { bucketGroups, shape, type BucketMark } from "./bucket-group.ts";
 
 /** A parse-tree node (`{ Kind: body }`) and a body, as libpg-query's JSON has them. */
 type Body = Record<string, any>;
@@ -295,6 +296,10 @@ class Rewriter {
   boundPaths: ReadonlyMap<number, string> = new Map();
   /** the plain numerics whose copy holds each value's own scale (`scaleOf`) */
   scales: ScaleLookup | null = null;
+  /** the timestamptz columns whose copy holds each value's 15-minute bucket (src/duck/bucket-column.ts); null for none */
+  buckets: BucketLookup | null = null;
+  /** each truncation written of such a column, by its form (src/duck/bucket-group.ts `shape`): what `bucketGroups` reads */
+  readonly bucketMarks = new Map<string, BucketMark>();
   /** the parameters met as a json read's path, or an element or key of one, of a type read as a constant (`foldParam`) */
   readonly pathParams = new Set<number>();
   /** the numeric[] parameters read other than by ANY or ALL with a number (`param`): no list of the engine holds every
@@ -6039,6 +6044,8 @@ class Rewriter {
           // folds to a constant when it plans the statement it runs, so the CASE costs no row anything
           if (argType(1) === TIMESTAMPTZ) {
             const session = (): AstNode => fn("current_setting", [strConst("TimeZone")]);
+            const bucketed = this.bucketTrunc(unit, args[0]!, x, session);
+            if (bucketed !== null) return bucketed;
             const utc = this.truncInstant(unit, this.clone(x), session(), "UTC");
             if (utc !== null && ["microseconds", "milliseconds", "second"].includes(unit)) return utc;
             if (utc !== null) {
@@ -6273,6 +6280,36 @@ class Rewriter {
    * `zoneName` is the zone as a constant (UTC and its aliases: `isUtc`), null for a zone a row holds. ±infinity is
    * itself (Postgres 14+) and NULL is NULL: the CASE's ELSE. null where the unit is not a constant this handles.
    */
+  /**
+   * A TRUNCATION TO A UNIT OF A COLUMN WHOSE COPY HOLDS ITS 15-MINUTE BUCKET (issue 1146, src/duck/bucket-column.ts): an
+   * hour, a day, a week, a month, a quarter or a year of a timestamptz column of this query's table, in the session's
+   * zone. Written as any truncation in the session's zone is (the arithmetic in UTC, the engine's `date_trunc`
+   * elsewhere), and marked with its column's bucket and the same truncation of the bucket's start, which a grouped
+   * SELECT groups by first (src/duck/bucket-group.ts). Null for anything else: its own path, as before.
+   */
+  private bucketTrunc(unit: string, unitNode: AstNode, x: AstNode, session: () => AstNode): AstNode | null {
+    // planned in UTC, the truncation is already the instant's arithmetic, which costs less than a second GROUP BY (5 M
+    // rows: a month 18 ms against 25). The plan is exact in any zone either way: only its speed reads the zone it is
+    // made in, as the plan cache keeps a plan by its zone
+    if (this.buckets === null || isUtc(this.timeZone) || !BUCKET_UNITS.has(unit) || kindOf(x) !== "ColumnRef") return null;
+    const t = this.typed(x);
+    if (t === null || t.node !== "VAR" || t.levelsUp !== 0 || t.relation === undefined || t.type !== TIMESTAMPTZ) return null;
+    const hidden = this.buckets.at(t.relation.relid, t.relation.attno);
+    const owner = t.column?.owner ?? null;
+    if (hidden === null || owner === null) return null;
+    const zoned = (v: AstNode): AstNode => {
+      const inUtc = or(UTC_NAMES.map((z) => op("=", session(), strConst(z))));
+      const utc = this.truncInstant(unit, this.clone(v), session(), "UTC")!;
+      const elsewhere = this.truncInstant(unit, v, session(), null) ?? fn("date_trunc", [this.clone(unitNode), v]);
+      return caseWhen([[inUtc, utc]], elsewhere);
+    };
+    const written = zoned(x);
+    this.bucketMarks.set(shape(written), { bucket: { ColumnRef: { fields: [S(owner), S(hidden)] } }, outer: zoned({ ColumnRef: { fields: [S(this.bucketPlaceholder())] } }) });
+    return written;
+  }
+  /** the name a mark's truncation of a bucket's start reads it by (`bucketTrunc`), replaced where it is placed */
+  bucketPlaceholder(): string { return `${this.own}bucket_start`; }
+
   private truncInstant(unit: string, value: AstNode, zone: AstNode, zoneName: string | null): AstNode | null {
     // a literal Postgres read as a timestamptz is one to DuckDB too (in the session's zone, as Postgres reads it)
     const x = this.typeOf(value) === UNKNOWN ? cast(value, ["timestamptz"]) : value;
@@ -8693,11 +8730,22 @@ export interface RewriteOptions {
   scales?: ScaleLookup | null;
   /** the references whose keys the synced data numbers (src/duck/reference-keys.ts, src/duck/plan.ts `numberedLookup`) */
   numbered?: NumberedLookup | null;
+  /** the timestamptz columns whose copy holds each value's 15-minute bucket (src/duck/bucket-column.ts, src/duck/plan.ts
+   *  `bucketLookup`) */
+  buckets?: BucketLookup | null;
   /** the prefix of every name the rewrite invents (src/duck/own-names.ts `ownPrefix`): src/duck/plan.ts chooses it, and
    *  hands the same to the late select list and the libc bounds; by default it is chosen here, from the statement and
    *  its analysis */
   own?: string;
 }
+
+/** THE HIDDEN BUCKET COLUMN OF A TIMESTAMPTZ (src/duck/bucket-column.ts) a VAR reads, by the catalog's OIDs
+ *  (Typed.relation): its name, or null where the copy holds none */
+export interface BucketLookup { at(relid: number, attno: number): string | null }
+
+/** the units a truncation of a bucketed column is grouped by its bucket for (src/duck/bucket-group.ts): each begins on a
+ *  15-minute boundary of UTC in every zone since 1980. A minute or a second does not */
+const BUCKET_UNITS = new Set(["hour", "day", "week", "month", "quarter", "year"]);
 
 /** THE HIDDEN SCALE COLUMN OF A PLAIN NUMERIC (src/duck/scale-column.ts) a VAR reads, by the catalog's OIDs
  *  (Typed.relation): its name, or null where the copy holds none */
@@ -8708,12 +8756,13 @@ export interface ScaleLookup {
 }
 
 export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(), citextHeld = new Set(), typeNames = new Map(), rowTypes = new Map(), timeZone = "UTC", dateStyle = "ISO, MDY", enums = { labels: new Map(), arrays: new Map() }, kept = null,
-  wireBound = false, keyCounts = new Set(), boundPaths = new Map(), scales = null, numbered = null, own: prefix = ownPrefix([stmt, analysis.tree]) }: RewriteOptions):
+  wireBound = false, keyCounts = new Set(), boundPaths = new Map(), scales = null, buckets = null, numbered = null, own: prefix = ownPrefix([stmt, analysis.tree]) }: RewriteOptions):
   { tree: AstNode; withTies: boolean; exact: ExactColumn[]; clock: { parse?: number; exec?: number }; jsonReads: JsonRead[]; unboundedLateral: boolean; pathParams: number[]; wholeNumericArrays: number[];
     numbers: NumberedRead[] } {
   const r = new Rewriter(analysis, base, collations, userTypes, rowTypes, timeZone, dateStyle, enums, kept, keyCounts, citextHeld, typeNames);
   r.boundPaths = boundPaths;
   r.scales = scales;
+  r.buckets = buckets;
   r.numbered = numbered;
   if (joinsUsing(analysis.tree, new Set([JSONB, JSONB_ARRAY]))) {
     throw new Unrewritable("a JOIN … USING or a NATURAL JOIN on a jsonb column is not supported by Mason (Postgres equates jsonb by its own rules)", "JOIN … ON a.j = b.j", "jsonb-compare");
@@ -8740,7 +8789,9 @@ export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(
   r.markWholeReads(own);
   r.referenceJoins(own);
   r.walking = true;
-  const tree = guardFilters(flattenBool(r.walk(own))) as AstNode;
+  // a GROUP BY of a time's unit grouped by its 15-minute bucket first (src/duck/bucket-group.ts), over the finished walk
+  const tree = bucketGroups(guardFilters(flattenBool(r.walk(own))) as AstNode, r.bucketMarks, r.bucketPlaceholder(), prefix,
+    (n) => { const t = r.typeOf(n as AstNode); return t !== null && FLOATS.has(t); }) as AstNode;
   return { tree, withTies: r.wroteTies, exact, clock: r.clock, jsonReads: [...r.jsonReads.values()], unboundedLateral: r.unboundedLateral, pathParams: [...r.pathParams].sort((a, b) => a - b),
     wholeNumericArrays: [...r.wholeNumericArrays].sort((a, b) => a - b), numbers: [...r.numbersRead.values()] };
 }

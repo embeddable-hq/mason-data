@@ -130,7 +130,7 @@ function psql(url: string, sql: string): string {
 }
 
 /** every table the oracle copies: the shop's, `one`, and the type matrix's (oracle/type-matrix.ts TYPED) */
-const COPIED = [...TABLES, "one", "dup", "dup2", "typed", "mapped", "grouped", "typed_arrays", "plain_n", "castable", "cased", "own_named", "jcased", "jpath", "jcontain", "coll", "coll_top", "coll_rep", "colls", "colls_case", "moods", "defaults", "late", "late_c", ...MERGE_COPIED, "top_a", "top_b", "top_c", "top_n", "top_r", "top_rc", "pnums", "bins", "star_o", "star_b", "instants", "docs", "nullish", "jorder", "keyed", "pairs", "vkeys", "moodlog", "rparent", "rchild", ...LATEST_TABLES];
+const COPIED = [...TABLES, "one", "dup", "dup2", "typed", "mapped", "grouped", "typed_arrays", "plain_n", "castable", "cased", "own_named", "jcased", "jpath", "jcontain", "coll", "coll_top", "coll_rep", "colls", "colls_case", "moods", "defaults", "late", "late_c", ...MERGE_COPIED, "top_a", "top_b", "top_c", "top_n", "top_r", "top_rc", "pnums", "bins", "star_o", "star_b", "instants", "bucket_edges", "docs", "nullish", "jorder", "keyed", "pairs", "vkeys", "moodlog", "rparent", "rchild", ...LATEST_TABLES];
 /** the references the oracle's sources file names (src/duck/reference-keys.ts): a join on each reads hidden integer
  *  keys once they are numbered, and is held to Postgres so (oracle/type-matrix.ts "reference: …") */
 const REFERENCES: Record<string, Array<{ columns: string[]; table: string; targetColumns: string[] }>> = {

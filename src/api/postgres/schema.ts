@@ -51,6 +51,9 @@ export interface PgColumn {
   /** a plain numeric (no precision) whose copy holds each value's own scale in a hidden column (src/duck/scale-column.ts),
    *  that column's name: the rewrite prints each value with it, as Postgres does. Never declared to the catalog */
   scaled?: string | undefined;
+  /** a timestamptz whose copy holds each value's 15-minute bucket in a hidden column (src/duck/bucket-column.ts), that
+   *  column's name: a GROUP BY of a unit of its time groups by it first. Never declared to the catalog */
+  bucket?: string | undefined;
 }
 
 /** A collation of the source (pg_collation), as the catalog declares one it lacks (src/duck/collation.ts SourceCollation) */

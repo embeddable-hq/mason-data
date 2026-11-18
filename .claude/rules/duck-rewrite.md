@@ -1,6 +1,7 @@
 ---
 paths:
   - "src/duck/analyze.ts"
+  - "src/duck/bucket-group.ts"
   - "src/duck/distinct-key.ts"
   - "src/duck/explain.ts"
   - "src/duck/functions.ts"
@@ -35,6 +36,7 @@ paths:
   - "tests/duck-libc-order.test.ts"
   - "tests/duck-plans.test.ts"
   - "tests/duck-row-filter.test.ts"
+  - "tests/duck-time-bucket.test.ts"
   - "tests/duck-wire.test.ts"
   - "tests/integration/duck-oracle.itest.ts"
   - "tests/integration/duck-to-char.itest.ts"
@@ -89,6 +91,41 @@ paths:
     arithmetic ~8; a TIMESTAMP ↔ TIMESTAMPTZ cast is ICU's too, so never "cast, truncate, cast back". The session's
     zone is read where the statement executes (`current_setting('TimeZone')`), never the rewriter's: a prepared
     statement's plan is made at its Parse and run after a later `SET TimeZone`;
+  - **a time's unit grouped by its bucket** (`src/duck/bucket-group.ts`, issue 1146): a GROUP BY whose key holds the
+    hour, day, week, month, quarter or year of a synced `timestamptz` column, in the session's zone, is two queries.
+    The inner one groups by the column's hidden 15-minute bucket (duck-copy.md) and the other keys, and adds up each
+    aggregate's part. The outer one truncates each bucket's start once and adds the parts up again. The inner one is two
+    branches, a UNION ALL: the rows whose bucket is not `BUCKET_NONE`, which read the bucket and never the time, and the
+    rows whose bucket is, which read the time. On a table that holds no such row the engine's statistics plan the second
+    branch empty, so a cold query reads the bucket alone. The statistics are read as the statement is planned, in its
+    own transaction (a prepared statement is planned again as it runs), never kept in a plan. It holds because
+    every zone has been a multiple of 15 minutes from UTC since 1980, so a bucket never straddles a unit's edge
+    (`tests/duck-bucket-zones.test.ts` checks every zone the engine knows). What it is used for is read from speed:
+    - not where the plan is made in UTC (`isUtc` of the session's zone): there the instant's arithmetic costs less than a
+      second GROUP BY. The plan is exact in any zone either way, and the plan cache keeps a plan by its zone;
+    - one column's bucket a SELECT, the first key's. Grouped by two columns' buckets, the inner groups are pairs, nearly
+      a group a row. Every other key, a unit of another column included, is one inner key computed a row, never its
+      columns apart.
+    Each guard keeps the exact answer:
+    - only sum, count, min, max, any_value and avg (a sum over a count) are split, with no DISTINCT, ORDER BY or
+      WITHIN GROUP. A sum or avg of a float keeps its plan, because doubles added in another order move in the last
+      digit. Anything else (a window, a grouping set, a subquery, a volatile function, DISTINCT, a set operation, a
+      `*`) keeps the statement as it was;
+    - the inner keys are the GROUP BY's, made as its keys are read. A list, HAVING or ORDER BY expression that needs
+      another (a column no key holds, or one spelled otherwise) keeps the plan: the outer GROUP BY could not read it;
+    - an ORDER BY item is what Postgres binds it to, never what its form matches: an integer alone is the output at
+      that position and a name alone that is an output's is that output, both kept as they are; anything else is an
+      expression over the input's columns, a name inside it never an output. Why: `ORDER BY 1, 2` of an ICU text came
+      to the post-pass as `s COLLATE en_us`, and its `s` was read as an output it is not; `1 AS one` grouped made
+      `ORDER BY 1` a sort by the constant (PR 1149's review);
+    - a row whose bucket is `BUCKET_NONE` (before 1980, infinite, from year 10000) is truncated as before, in the second
+      branch. Both branches read the FROM and the WHERE, so a statement whose FROM or WHERE could answer twice
+      differently keeps its plan: a volatile call, a LIMIT or OFFSET inside, a sample, a LATERAL item or a function in
+      the FROM, a WITH query with any of these;
+    - the zones that changed offset at a minute past midnight since 1980 (`OFF_BOUNDARY_ZONES`: St. John's and Goose
+      Bay to 2011, Moncton to 2006, Gaza and Hebron in 2010–11, Casey in 2020–22) are read from the session at run
+      time, and there every row is truncated as before. Mason refuses a fixed-offset session zone (22023), so none
+      needs a guard;
   - **a LEFT JOIN of a list's rows ON TRUE is an INNER lateral of a list never empty only where its rows' order
     decides the answer** (`leftLateral`, `markBounds`, `limitBounds`, the functions' `orNull`): DuckDB's LEFT lateral is
     a delimiter join over the whole base, whose LIMIT read every row (37.9 s for a 100-row preview) and whose order

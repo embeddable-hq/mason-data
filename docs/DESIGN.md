@@ -4569,6 +4569,94 @@ compacted (Mason compacts a table by itself once half its blocks are waste: dele
 ZSTD. A stored JSON path's column too, until its table is compacted. The disk check's `STORED_SHARE` (0.4) was measured
 with ZSTD everywhere, so it now over-estimates a table of short text, which only errs on the safe side.
 
+### A time's 15-minute bucket (issue 1146, 2026-11-18)
+
+**Decision.** Beside each `timestamptz` column, a synced table holds an INTEGER: the value's 15 minutes of UTC
+(src/duck/bucket-column.ts). A GROUP BY of a timestamptz column's hour, day, week, month, quarter or year, planned in a
+zone other than UTC, groups by that bucket first (src/duck/bucket-group.ts). It then works out the unit once a bucket,
+instead of once a row. The rules are in duck-copy.md and duck-rewrite.md ("a time's unit grouped by its bucket").
+
+**Why it is exact.** Every zone the engine knows has been a multiple of 15 minutes from UTC since 1980. So a local
+hour, day, week, month, quarter or year starts on a bucket's edge, and a bucket never straddles two units.
+`tests/duck-bucket-zones.test.ts` checks this for every zone the engine knows, so an engine upgrade that changes the
+zone data fails CI. The test also found what the issue missed:
+- Six zones changed offset at a minute past midnight since 1980, off a bucket's edge. They are St. John's (and its
+  names CNT and Canada/Newfoundland) and Goose Bay until 2011, Moncton until 2006, Gaza and Hebron in 2010 and 2011,
+  and Casey from 2020 to 2022. In these zones a bucket can hold both sides of a change.
+- So the plan reads the session's zone where it runs. In those zones (`OFF_BOUNDARY_ZONES`) every row is truncated as
+  before. A zone added to the engine's data with such a change fails the test until it is named.
+- Pacific/Kiritimati's −10:40 ended in 1979, which is the 1980 cutoff.
+
+**A cold query reads the bucket alone** (the owner's decision on PR 1149, 2026-11-18). The issue proposed reading
+the column's earliest value from its statistics as the plan is made, and keeping today's plan when it is before 1980 or
+infinite. But a plan is cached by its text, and a prepared statement keeps its plan, so such a guard goes stale as rows
+sync. The first form of this change truncated each such row itself, and so read the time column as well as the bucket:
+a cold read saved no bytes. Now:
+- The bucket is NULL for a NULL, and `BUCKET_NONE` (-1) for a value no bucket decides: before 1980, from year 10000,
+  ±infinity. Every write path computes it from the row (`bucketSql`), so the write that adds such a row marks it in its
+  own transaction.
+- The inner query is a UNION ALL of two branches. One takes the rows whose bucket is not -1 and reads the bucket. The
+  other takes the rows whose bucket is -1 and reads the time.
+- On a table that holds no -1, the engine's own statistics of the bucket say the second branch's filter is false, and
+  it plans that branch as an empty result. The join beside it reads one vector and stops. So the time is not read.
+- The statistics are read as the statement is planned, in the transaction that runs it. A statement prepared before a
+  row of -1 was committed, and run after, still counted that row (measured on the engine directly). Nothing about the
+  rows is recorded beside them, and nothing a cached plan holds can go stale.
+  `tests/duck-time-bucket.test.ts` plans a statement on a clean table, then writes such a row by insert and by update,
+  and holds the answers to Postgres. A plan whose second branch is always empty fails it.
+- On a table that holds such a row, the second branch reads the time only in the row groups whose bucket's minimum is
+  -1. A deleted row leaves the statistics wide until a compaction rewrites the table, which costs speed, never an answer.
+- The owner suggested a flag kept beside the table and read through a session variable. A variable is set before the
+  statement and folded into it as it is bound, outside the statement's own transaction. So a write committed in between
+  could meet a flag that still said "clean". The bucket's own statistics have no such gap.
+- Both branches read the FROM and the WHERE. A statement whose FROM or WHERE could answer twice differently keeps its
+  plan: a volatile call, a LIMIT or OFFSET, a sample, a LATERAL item or a function in the FROM, a WITH query with one.
+
+**When it is used, by measurement:**
+- **Not when the plan is made in UTC.** There the truncation is already the instant's arithmetic, and the second
+  GROUP BY cost more: a month took 25 ms against 18 at 5 M rows. The plan is exact in any zone either way. The plan
+  cache keeps a plan by its zone, so only a prepared statement can run a plan made in another zone.
+- **One column's bucket a statement**, the first key's. Grouped by two columns' buckets, the inner groups are pairs of
+  buckets, nearly one a row. Every other key, a unit of another column included, is one inner key, computed a row.
+  At 5 M rows (24 rows a bucket) a month and a week of two columns took 139 ms against main's 125. At 50 M rows (240 a
+  bucket) it took 559 ms against 1,000, so it stays.
+- **A sum or an average of a float keeps its plan.** Doubles added in another order can differ in the last digit. The
+  oracle found it ("675" where Postgres has "675.0000000000001").
+
+**A `timestamp` has no bucket.** Its truncation never reads the session's zone. It is the engine's arithmetic, which
+the bucket did not beat in UTC.
+
+**A table synced before has no bucket**, and keeps today's plan until it is synced again whole. Nothing is read again
+on upgrade.
+
+**Measured** on a laptop against main (5026d3da), over a synthetic source synced into a fresh file: 50 M orders with
+two timestamptz columns (a quarter of one NULL), joined to 2.5 M customers. The times are in order, each with its own
+microseconds. Warm, over the Postgres API, min of 2 runs alternating main and head, one client and ten at once. The
+last column is the statement's SQL run in a fresh engine instance over the file, its own buffer cold: the bytes it read
+(the profiler's `total_bytes_read`) and its time. The machine's page cache was not cleared.
+
+| Query | Zone | 1 client, main → head | 10 clients, main → head | read cold, main → head |
+|---|---|---:|---:|---:|
+| Revenue by month | Asia/Kathmandu | 456 → 60 ms | 5,092 → 594 ms | 182.7 → 44.6 MB, 533 → 62 ms |
+| Orders by day | Asia/Kathmandu | 456 → 76 ms | 4,424 → 607 ms | 182.7 → 44.6 MB, 501 → 60 ms |
+| Revenue by month, joined to customers (the cold benchmark's) | Asia/Kathmandu | 1,185 → 775 ms | 12,256 → 7,875 ms | 336.9 → 212.1 MB, 1,275 → 832 ms |
+| Month by status and ship week (two columns) | Asia/Kathmandu | 1,000 → 559 ms | 10,014 → 5,969 ms | 346.6 → 247.7 MB, 1,021 → 564 ms |
+| Revenue by month | UTC | 126 → 134 ms | 1,244 → 1,397 ms | 182.7 → 185.6 MB, 145 → 142 ms |
+| Revenue by month, joined to customers | UTC | 565 → 497 ms | 4,844 → 4,523 ms | 336.9 → 353.1 MB, 499 → 553 ms |
+
+- In UTC both send the engine the same SQL. Timed alone over the two files, alternating, revenue by month took 132 ms
+  at main and 126 at the head with one connection, and 1,435 ms at both with ten. The differences above are noise.
+- **The first sync** took 12.04 s against 11.27 s (+7%, the min of 2).
+- **The synced data** took 584.9 MB against 557.1 MB (+5%). At 5 M rows with rows in random time order, the worst case
+  for the bucket's compression, it took 94.6 MB against 70.0 MB (+35%).
+- A query that also filters on the time (`WHERE created_at >= …`) reads the time for its own filter.
+
+**The benchmark's joined query, and its customer's year.** It groups by `date_trunc('year', c.created_at)` too, which
+the plan works out once a joined row, after the join. Measured by hand on the head's file at 50 M, in Kathmandu, warm:
+main's plan took 1,036 ms, the head's 665 ms, and the same with the year worked out once a customer before the join
+(a subquery over customers) 293 ms, with the same answer. So moving the second column's unit below the join would take
+the query to about a third of main's time. That is a change of its own, not this one.
+
 ### A small table's size: not measured until DuckDB's own checkpoint (issue 815; the owner, 2026-11-11)
 
 **What was wrong.** A copy's size is its distinct blocks (`pragma_storage_info`), and a copy whose rows are all in the

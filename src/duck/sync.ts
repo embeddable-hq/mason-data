@@ -80,6 +80,7 @@ import { PgConnection, formatLsn, parseLsn, pgLiteral, type PgConnectOptions } f
 import { createSlot, currentLsn, dropSlot, readSlot, visibleLsn, type SlotState } from "../cdc/source.ts";
 import { holdOf } from "./held-types.ts";
 import { NUMERIC_TYPE, plainNumeric, scaleColumn, scaleOfText, scaleSql } from "./scale-column.ts";
+import { bucketColumn, bucketed, bucketSql } from "./bucket-column.ts";
 import { columnsKey, layoutOf, numberedFrom, readStored, tablesThere, unnumbered, wholeRead, type Retired, type StoredFacts } from "./reread.ts";
 import { hiddenColumns } from "./hidden-columns.ts";
 import { addCounts, countsText, duckValue, fold, foldInto, noChanges, noCounts, ReplicationStream, type ChangeCounts, type StreamedTable, type TableChanges } from "./stream.ts";
@@ -506,12 +507,13 @@ async function deleteKeys(w: DuckConnection, t: Pick<AddedTable, "key">, target:
 
 /** a poll's staged rows (`where`: a range of them, or all) written by key into the table: their keys deleted, then the
  *  rows inserted. The stage's columns are named by position (`c0`, `c1`, …), the table's order. A plain numeric of
- *  `scaled` (one its table holds a hidden scale column for) is staged as the source's text, and its scale computed from it.
+ *  `scaled` (one its table holds a hidden scale column for) is staged as the source's text, and its scale computed from it;
+ *  a timestamptz of `buckets` (one its table holds a hidden bucket column for) has its bucket computed from its value.
  *  `kept` null writes no stored JSON path: a whole sync's side table, whose paths `fillSide` fills before its swap.
  *  Answers how many of the staged rows' keys the table held before the write (the rows its delete removed): the rows
  *  UPDATED, the rest of the stage ADDED (`PolledTable`) — DuckDB's own count of the delete, so no statement more */
 export async function writeStaged(w: DuckConnection, t: Pick<AddedTable, "key" | "columns" | "source">, target: string, stage: string, where: string, kept: KeptJsonPaths | null,
-  scaled: readonly string[] = [], lookup = false): Promise<number> {
+  scaled: readonly string[] = [], buckets: readonly string[] = [], lookup = false): Promise<number> {
   const named = t.key.map((k) => `c${t.columns.findIndex((c) => c.name === k)}`);
   const held = await deleteKeys(w, t, target, `(SELECT ${named.map(ident).join(", ")} FROM ${stage}${where})`, named);
   // the rows inserted below may take row ids its side table covers (src/duck/key-lookup.ts): what it covers lowered first
@@ -519,8 +521,11 @@ export async function writeStaged(w: DuckConnection, t: Pick<AddedTable, "key" |
   // the table's columns named, its plain numerics' scales and its stored JSON paths computed from the staged text and JSON
   const stored = kept?.stored(t.source, (c) => ident(`c${t.columns.findIndex((x) => x.name === c)}`)) ?? { names: [], values: [] };
   const scales = scaled.map((c) => scaleSql(ident(`c${t.columns.findIndex((x) => x.name === c)}`)));
-  await w.run(`INSERT INTO ${target} (${[...t.columns.map((c) => ident(c.name)), ...scaled.map((c) => ident(scaleColumn(c, t.columns.map((x) => x.name)))), ...stored.names.map(ident)].join(", ")}) ` +
-    `SELECT ${[...t.columns.map((_, i) => ident(`c${i}`)), ...scales, ...stored.values].join(", ")} FROM ${stage}${where}`);
+  // and each timestamptz's 15-minute bucket (src/duck/bucket-column.ts), from the staged value
+  const own = t.columns.map((x) => x.name);
+  const bucketValues = buckets.map((c) => bucketSql(ident(`c${own.indexOf(c)}`)));
+  await w.run(`INSERT INTO ${target} (${[...t.columns.map((c) => ident(c.name)), ...scaled.map((c) => ident(scaleColumn(c, own))), ...buckets.map((c) => ident(bucketColumn(c, own))), ...stored.names.map(ident)].join(", ")}) ` +
+    `SELECT ${[...t.columns.map((_, i) => ident(`c${i}`)), ...scales, ...bucketValues, ...stored.values].join(", ")} FROM ${stage}${where}`);
   return held;
 }
 
@@ -3995,6 +4000,7 @@ export class Sync {
         const cols = t.columns.map((c) => c.name);
         const exact = await this.exactOf(t);
         const scaled = await this.scaledOf(t);
+        const buckets = await this.bucketedOf(t);
         const declared = (c: string): boolean => NUMERIC_TYPE.exec(t.columns.find((x) => x.name === c)?.type ?? "")?.[1] !== undefined;
         const value = (c: string, v: string | null): string => {
           const scale = exact.get(c);
@@ -4016,7 +4022,7 @@ export class Sync {
           partial.set(carried, same);
           same.push({ key, values: change.values });
         }
-        for (const [carried, rows] of partial) fetch.push(...await this.updateCarried(t, target, carried.split("\0"), rows, value, types, scaled));
+        for (const [carried, rows] of partial) fetch.push(...await this.updateCarried(t, target, carried.split("\0"), rows, value, types, scaled, buckets));
         if (fetch.length) {
           source ??= await PgConnection.connect(this.pgOptions());
           const read = await this.sourceRows(source, t, fetch);
@@ -4028,7 +4034,7 @@ export class Sync {
             await w.run(`INSERT OR REPLACE INTO ${MASON_SCHEMA}.catch_up VALUES (${literal(name)}, ${literal(why)}, now())`);
           } else whole.push(...read);
         }
-        delta += await this.writeByKey(t, target, gone, whole, value, scaled);
+        delta += await this.writeByKey(t, target, gone, whole, value, scaled, buckets);
         // a copy whose rows the ledger does not know (none should be: its copy counts them) is counted, once
         const known = this.states.get(name)?.rows ?? null;
         const rows = known === null ? Number((await w.runAndReadAll(`SELECT count(*) FROM ${target}`)).getRowsJS()[0]![0] as bigint) : known + delta;
@@ -4098,7 +4104,7 @@ export class Sync {
    * into 195 M uuid keys at 2.7 GiB took 1.5–1.8 s). Answers the keys DuckDB holds no row of, read whole from the source.
    */
   private async updateCarried(t: AddedTable, target: string, carried: readonly string[], rows: ReadonlyArray<{ key: Array<string | null>; values: Array<string | null | undefined> }>,
-    value: (c: string, v: string | null) => string, types: ReadonlyMap<string, string>, scaled: readonly string[] = []): Promise<Array<Array<string | null>>> {
+    value: (c: string, v: string | null) => string, types: ReadonlyMap<string, string>, scaled: readonly string[] = [], buckets: readonly string[] = []): Promise<Array<Array<string | null>>> {
     const w = this.store.writer;
     const cols = t.columns.map((c) => c.name);
     const set = carried.filter((c) => !t.key.includes(c));
@@ -4111,9 +4117,10 @@ export class Sync {
     }
     const on = t.key.map((k) => `t.${ident(k)} = p.${ident(k)}`).join(" AND ");
     // a stored JSON path of a JSON column it carries, computed from the new value (one it does not carry is unchanged)
-    // and a reference's hidden key whose columns it sets, unnumbered: numbered again before the batch commits
-    // (src/duck/reference-keys.ts `fillIn`)
+    // and a timestamptz it carries, its bucket computed from the new value (src/duck/bucket-column.ts), and a reference's
+    // hidden key whose columns it sets, unnumbered: numbered again before the batch commits (src/duck/reference-keys.ts `fillIn`)
     const assign = [...set.map((c) => `${ident(c)} = p.${ident(c)}`), ...scales.map((c) => `${ident(scaleColumn(c, cols))} = p.${ident(scaleColumn(c, cols))}`),
+      ...set.filter((c) => buckets.includes(c)).map((c) => `${ident(bucketColumn(c, cols))} = ${bucketSql(`p.${ident(c)}`)}`),
       ...this.kept.storedSet(t.source, set, (c) => `p.${ident(c)}`), ...this.numbers.unnumberedSet(t.source, set)];
     const matched = set.length === 0 ? 0 : Number((await w.run(`UPDATE ${target} AS t SET ${assign.join(", ")} FROM ${WRITE_PARTIAL} p WHERE ${on}`)).rowsChanged);
     // only when some row was not there: another scan, to say which
@@ -4141,7 +4148,7 @@ export class Sync {
    * tests/duck-compact.test.ts holds a held set of 300,000 keys through the catch-up's replay.
    */
   private async writeByKey(t: AddedTable, target: string, gone: ReadonlyArray<Array<string | null>>, whole: ReadonlyArray<Array<string | null>>, value: (c: string, v: string | null) => string,
-    scaled: readonly string[] = []): Promise<number> {
+    scaled: readonly string[] = [], buckets: readonly string[] = []): Promise<number> {
     if (gone.length === 0 && whole.length === 0) return 0;
     let delta = 0;
     const w = this.store.writer;
@@ -4167,9 +4174,12 @@ export class Sync {
       await w.run(`DROP TABLE ${WRITE_KEYS}`);
     }
     if (whole.length) {
-      // and its stored JSON paths, computed from the rows' JSON (src/duck/kept.ts)
+      // and its stored JSON paths, computed from the rows' JSON (src/duck/kept.ts), and each timestamptz's bucket from its
+      // value (src/duck/bucket-column.ts)
       const stored = this.kept.stored(t.source, ident);
-      delta += Number((await w.run(`INSERT INTO ${target} (${[list, ...stored.names.map(ident)].join(", ")}) SELECT ${[list, ...stored.values].join(", ")} FROM ${WRITE_ROWS}`)).rowsChanged);
+      const names = [list, ...buckets.map((c) => ident(bucketColumn(c, cols))), ...stored.names.map(ident)];
+      const values = [list, ...buckets.map((c) => bucketSql(ident(c))), ...stored.values];
+      delta += Number((await w.run(`INSERT INTO ${target} (${names.join(", ")}) SELECT ${values.join(", ")} FROM ${WRITE_ROWS}`)).rowsChanged);
       await w.run(`DROP TABLE ${WRITE_ROWS}`);
     }
     return delta;
@@ -5151,6 +5161,9 @@ export class Sync {
     // the plain numerics each table holds a hidden scale column for (src/duck/scale-column.ts)
     const scaleds = new Map<string, string[]>();
     for (const t of tables) scaleds.set(t.source, await this.scaledOf(t, w, tableOf(t)));
+    // and the timestamptz columns it holds a hidden bucket column for (src/duck/bucket-column.ts)
+    const bucketeds = new Map<string, string[]>();
+    for (const t of tables) bucketeds.set(t.source, await this.bucketedOf(t, w, tableOf(t)));
     // the statement running, for the error of one that fails
     let doing = "reading the source's snapshot";
     const named = (e: unknown): unknown => e instanceof Stopping || e instanceof KeyNotHeld || !(e instanceof Error) ? e : new Error(`${doing}: ${e.message}`, { cause: e });
@@ -5226,7 +5239,8 @@ export class Sync {
           }
           doing = `${t.source}: writing its ${staged} changed row(s) by key`;
           // the rows whose key the table held are UPDATED, the rest ADDED (`PolledTable`), as the delete by key counted them
-          const updated = Math.min(staged, await writeStaged(w, t, target, stage, "", into === undefined ? this.kept : null, scaleds.get(t.source), into === undefined && this.lookupRows.has(t.source)));
+          const updated = Math.min(staged, await writeStaged(w, t, target, stage, "", into === undefined ? this.kept : null, scaleds.get(t.source), bucketeds.get(t.source),
+            into === undefined && this.lookupRows.has(t.source)));
           const c1 = Date.now();
           const { rows, deleted, countMs } = await reconcile(t, target, from);
           if (into === undefined) await w.run(this.pollStateSql(t, snapshot, polledAt));
@@ -5282,7 +5296,7 @@ export class Sync {
           try {
             doing = `${t.source}: writing piece ${i + 1} of ${n} of its ${staged} changed row(s) by key`;
             await this.interruptible(lane, () => writeStaged(w, t, target, stage, ` WHERE rowid >= ${i * POLL_PIECE_ROWS} AND rowid < ${(i + 1) * POLL_PIECE_ROWS}`, into === undefined ? this.kept : null, scaleds.get(t.source),
-              into === undefined && this.lookupRows.has(t.source)));
+              bucketeds.get(t.source), into === undefined && this.lookupRows.has(t.source)));
             if (i === n - 1 && into === undefined) {
               await w.run(this.pollStateSql(t, snapshot, polledAt));
             }
@@ -5658,6 +5672,11 @@ export class Sync {
       const scaled = t.columns.filter((c) => p.exact.has(c.name) && plainNumeric(c.type)).map((c) => c.name);
       const scaledNames = scaled.map((c) => `, ${ident(scaleColumn(c, t.columns.map((x) => x.name)))}`).join("");
       const scaledValues = scaled.map((c) => `, ${scaleSql(ident(c))}`).join("");
+      // each timestamptz's 15-minute bucket, from its value (src/duck/bucket-column.ts): the side table's own, so a copy
+      // an older Mason began without them reads on without them
+      const buckets = await this.bucketedOf(t, w, `${t.table}${SIDE_SUFFIX}`);
+      const bucketNames = buckets.map((c) => `, ${ident(bucketColumn(c, t.columns.map((x) => x.name)))}`).join("");
+      const bucketValues = buckets.map((c) => `, ${bucketSql(ident(c))}`).join("");
       const watermark = p.snapshot === null ? null : snapshotXmin(p.snapshot);
       // THE COPY'S FILE: the one its first snapshot sees (`heldFile`), or the one its committed chunks were read from; a
       // chunk that reads another starts the copy over, whichever commits
@@ -5745,7 +5764,7 @@ export class Sync {
                 }
               }
               const where = `ctid >= '(${first},0)'::tid${end === null ? "" : ` AND ctid < '(${end},0)'::tid`}`;
-              const r = await c.run(`INSERT INTO ${side} (${named}${scaledNames}) SELECT ${stored}${scaledValues} FROM ${pq(`SELECT ${read} FROM ${pgFrom} WHERE ${watermark === null ? where : `${where} AND ${xminBeforeSql(watermark)}`}`)}`);
+              const r = await c.run(`INSERT INTO ${side} (${named}${scaledNames}${bucketNames}) SELECT ${stored}${scaledValues}${bucketValues} FROM ${pq(`SELECT ${read} FROM ${pgFrom} WHERE ${watermark === null ? where : `${where} AND ${xminBeforeSql(watermark)}`}`)}`);
               // the table's file, under the lock this transaction's read holds until it ends: a rewrite moved its rows
               const node = Number((await c.runAndReadAll(`SELECT * FROM ${pq(`SELECT pg_relation_filenode(${pgLiteral(pgFrom)}::regclass)::bigint`)}`)).getRowsJS()[0]![0]);
               if (node !== filenode) {
@@ -5898,6 +5917,8 @@ export class Sync {
     const defs = t.columns.map((c) => `${ident(c.name)} ${types.get(c.name)!}${compressionClause(storage.get(c.name) ?? null)}`);
     // each plain numeric's own scales, hidden beside it (src/duck/scale-column.ts)
     for (const c of t.columns) if (exact.has(c.name) && plainNumeric(c.type)) defs.push(`${ident(scaleColumn(c.name, t.columns.map((x) => x.name)))} UTINYINT`);
+    // each timestamptz's 15-minute bucket, hidden beside it (src/duck/bucket-column.ts)
+    for (const c of t.columns) if (bucketed(c.type) && types.get(c.name) === "TIMESTAMP WITH TIME ZONE") defs.push(`${ident(bucketColumn(c.name, t.columns.map((x) => x.name)))} INTEGER`);
     await w.run(`CREATE SCHEMA IF NOT EXISTS ${ident(t.schema)}`);
     await w.run(`CREATE OR REPLACE TABLE ${side} (${defs.join(", ")})`);
     const ceiling = ceilingOf(pages);
@@ -6274,6 +6295,20 @@ export class Sync {
     return plain.filter((x) => held.has(scaleColumn(x, own)));
   }
 
+  /** the timestamptz columns (`bucketed`) a copied table (or its side table, `table`) holds a hidden bucket column for
+   *  (src/duck/bucket-column.ts), in the table's order, on the connection of the caller's transaction: what every write
+   *  of its rows computes. A copy made before the column was held has none: it is written without, and its GROUP BY of
+   *  a time's unit keeps the plan it had, until it is read again whole */
+  private async bucketedOf(t: Pick<AddedTable, "schema" | "table" | "columns">, c: DuckConnection = this.store.writer, table = t.table): Promise<string[]> {
+    const times = t.columns.filter((x) => bucketed(x.type)).map((x) => x.name);
+    if (times.length === 0) return [];
+    const own = t.columns.map((c) => c.name);
+    // the hidden ones alone (src/duck/hidden-columns.ts): a source column may be named like a bucket column
+    const held = new Set(hiddenColumns((await c.runAndReadAll(`SELECT column_name FROM duckdb_columns() WHERE database_name = current_database() AND schema_name = ${literal(t.schema)} ` +
+      `AND table_name = ${literal(table)}`)).getRowsJS().map((r) => String(r[0])), own).filter((h) => h.kind === "bucket").map((h) => h.name));
+    return times.filter((x) => held.has(bucketColumn(x, own)));
+  }
+
   /** the source columns the ledger records for each synced table (`copy_state.columns`, as read and kept since:
    *  `copiedColumns`) and for each copy in progress its side table (`copy_progress.columns`), by `<schema>.<table>`:
    *  what tells a source column from a column Mason added (src/duck/hidden-columns.ts, issue 998) */
@@ -6366,6 +6401,9 @@ export class Sync {
       const columns: PgColumn[] = cols.filter((c) => duckTypes.has(c.name)).map((c) => {
         const col = pgColumn(c, duckTypes.get(c.name)!, now.get(c.name));
         const hidden = scaleColumn(c.name, cols.map((x) => x.name));
+        // (and a timestamptz whose 15-minute buckets the copy holds: src/duck/bucket-column.ts)
+        const bucket = bucketColumn(c.name, cols.map((x) => x.name));
+        if (bucketed(c.type) && duckTypes.has(bucket)) return { ...col, bucket };
         return plainNumeric(c.type) && duckTypes.has(hidden) ? { ...col, scaled: hidden } : col;
       });
       const joins: PgJoin[] = t.foreignKeys.filter((f) => this.tables.has(f.target) && columns.some((c) => c.name === f.column))

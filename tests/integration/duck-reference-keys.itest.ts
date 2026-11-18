@@ -5,7 +5,8 @@
  * what Postgres answers: an order whose customer is missing, an order with no customer (NULL), a customer with no
  * order, a referenced key that is not unique. And it stays right through every write: the first sync, the poll
  * (inserts, a key updated, a customer deleted and inserted again), the stream, and a table synced again whole. A row the
- * numbering has not reached yet is never read as a number: the statement runs on the keys themselves.
+ * numbering has not reached yet is never read as a number: the statement runs on the keys themselves. A table with a
+ * reference and a timestamptz holds both hidden columns, each written by every write (src/duck/bucket-column.ts).
  *
  * What it needs: IT_POSTGRES_URL (`wal_level = logical` for the stream's test, skipped otherwise), psql on PATH. It
  * writes only inside the databases it creates, `it_refkeys_<random>_*`, and drops them at the end.
@@ -21,6 +22,8 @@ import { DuckStore } from "../../src/duck/store.ts";
 import { Sync, type AddedTable, type SyncMode } from "../../src/duck/sync.ts";
 import { connectSource, parseSource, readSourceFacts, type Source } from "../../src/cli/preflight.ts";
 import { startPostgresApi } from "../../src/api/postgres/server.ts";
+import { hiddenColumns } from "../../src/duck/hidden-columns.ts";
+import { bucketColumn, bucketSql } from "../../src/duck/bucket-column.ts";
 
 const adminUrl = process.env.IT_POSTGRES_URL;
 const tag = `it_refkeys_${process.pid}_${Math.floor(Math.random() * 1e6)}`;
@@ -53,7 +56,7 @@ CREATE TABLE events (id int PRIMARY KEY, account_code varchar(20), kind text);
 CREATE TABLE seats (tenant_id int, id int, label text, PRIMARY KEY (tenant_id, id));
 CREATE TABLE bookings (id int PRIMARY KEY, tenant_id int, seat_id int, nights int);
 CREATE TABLE devices (id bigint PRIMARY KEY, model text);
-CREATE TABLE pings (id int PRIMARY KEY, device_id bigint, ms int);
+CREATE TABLE pings (id int PRIMARY KEY, device_id bigint, ms int, seen_at timestamptz);
 CREATE TABLE stores (id serial PRIMARY KEY, city text);
 CREATE TABLE sales (id int PRIMARY KEY, store_id int, total int);
 CREATE TABLE staff (id uuid PRIMARY KEY, boss_id uuid, name text);
@@ -68,7 +71,8 @@ INSERT INTO events SELECT i, CASE WHEN i % 41 = 0 THEN NULL WHEN i % 43 = 0 THEN
 INSERT INTO seats SELECT t, s, 't' || t || 's' || s FROM generate_series(1, 4) t, generate_series(1, 6) s;
 INSERT INTO bookings SELECT i, CASE WHEN i % 29 = 0 THEN NULL ELSE 1 + i % 5 END, 1 + i % 7, i % 4 FROM generate_series(1, 200) i;
 INSERT INTO devices SELECT 7000000000000000000 + i::int8 * 104729 * 1000003, 'm' || (i % 5) FROM generate_series(1, 30) i;
-INSERT INTO pings SELECT i, 7000000000000000000 + (1 + i % 33)::int8 * 104729 * 1000003, i % 90 FROM generate_series(1, 250) i;
+INSERT INTO pings SELECT i, 7000000000000000000 + (1 + i % 33)::int8 * 104729 * 1000003, i % 90, CASE WHEN i % 17 = 0 THEN NULL ELSE timestamptz '2024-03-01 00:00+00' + i * interval '37 minutes' END
+  FROM generate_series(1, 250) i;
 INSERT INTO stores (city) SELECT 'city' || i FROM generate_series(1, 12) i;
 INSERT INTO sales SELECT i, 1 + i % 14, i * 2 FROM generate_series(1, 150) i;
 -- a table that references itself: each one's boss, none, or one who is gone
@@ -158,6 +162,18 @@ async function unnumbered(store: DuckStore, table: string): Promise<number> {
   return n;
 }
 
+/** a table with a reference and a timestamptz (`pings`): both its hidden columns there, each told apart by its kind
+ *  (src/duck/hidden-columns.ts), and every row's bucket the one its value has (its key's number: `unnumbered`) */
+async function bothHidden(store: DuckStore, when: string): Promise<void> {
+  const own = ["id", "device_id", "ms", "seen_at"];
+  const physical = (await store.writer.runAndReadAll(`SELECT column_name FROM duckdb_columns() WHERE schema_name = 'public' AND table_name = 'pings' ORDER BY column_index`)).getRowsJS().map((r) => String(r[0]));
+  const kinds = hiddenColumns(physical, own).map((h) => h.kind).sort();
+  assert.deepEqual(kinds, ["bucket", "number"], `pings holds a bucket and a number, ${when}: ${JSON.stringify(hiddenColumns(physical, own))}`);
+  const bucket = bucketColumn("seen_at", own);
+  const wrong = (await store.writer.runAndReadAll(`SELECT count(*) FROM public.pings WHERE "${bucket}" IS DISTINCT FROM ${bucketSql("seen_at")}`)).getRowsJS()[0]![0];
+  assert.equal(wrong, 0n, `every row of pings has its value's bucket, ${when}`);
+}
+
 /** each join answered as Postgres answers it, and read on the numbers where it is one of `ON_NUMBERS` (`plainNow`:
  *  none is, a row not numbered yet) */
 async function sameAnswers(api: Awaited<ReturnType<typeof listen>>, url: string, logged: string[], when: string, plainNow = false): Promise<void> {
@@ -198,18 +214,21 @@ const WRITES = [
   // a customer deleted, and inserted again; an account code changed on both sides; a booking's seat changed
   "DELETE FROM customers WHERE name = 'c9'; INSERT INTO customers (id, name, region) VALUES ('00000000-0000-4000-8000-000000000009', 'c9 again', 'south'); " +
     "UPDATE accounts SET code = 'acct-new' WHERE code = 'acct-3'; UPDATE events SET account_code = 'acct-new' WHERE id < 20; INSERT INTO accounts VALUES ('gone', 'free'); " +
-    "UPDATE bookings SET seat_id = 6, tenant_id = 4 WHERE id < 10; INSERT INTO devices VALUES (42, 'tiny'); INSERT INTO pings VALUES (900, 42, 5); " +
+    "UPDATE bookings SET seat_id = 6, tenant_id = 4 WHERE id < 10; INSERT INTO devices VALUES (42, 'tiny'); INSERT INTO pings VALUES (900, 42, 5, '2025-01-01 10:20+00'); " +
+    "UPDATE pings SET device_id = 42, seen_at = '2025-06-30 23:59+00' WHERE id < 5; UPDATE pings SET seen_at = NULL WHERE id = 6; " +
     "UPDATE staff SET boss_id = (SELECT id FROM staff WHERE name = 's7') WHERE name IN ('s2', 's3'); INSERT INTO staff VALUES ('00000000-0000-4000-9000-0000000fffff', NULL, 'back')",
 ];
 
 test("a join on each declared reference answers as Postgres does through the first sync and the poll, on the numbers", { skip }, async () => {
   const s = await started("poll", "poll");
   try {
+    await bothHidden(s.store, "after the first sync");
     await sameAnswers(s.api, s.url, s.logged, "after the first sync");
     for (const [i, w] of WRITES.entries()) {
       psql(s.url, w);
       await s.sync.pollNow(TABLES);
       for (const t of ["customers", "orders", "accounts", "events", "seats", "bookings", "devices", "pings", "staff"]) assert.equal(await unnumbered(s.store, t), 0, `${t}: every row the poll wrote is numbered with it`);
+      await bothHidden(s.store, `after the poll's writes ${i + 1}`);
       await sameAnswers(s.api, s.url, s.logged, `after the poll's writes ${i + 1}`);
     }
     // a dense serial's reference gets no hidden key
@@ -290,11 +309,13 @@ test("a store synced before its references were numbered is numbered at the next
 test("the stream numbers the rows it writes: a whole row, a key updated, a row deleted and inserted again", { skip: skip || (!logical && "the test server's wal_level is not logical") }, async () => {
   const s = await started("stream", "replication", { slot: `${tag}_s`, publication: `${tag}_s`, owned: true });
   try {
+    await bothHidden(s.store, "after the first sync");
     await sameAnswers(s.api, s.url, s.logged, "after the first sync");
     for (const [i, w] of WRITES.entries()) {
       psql(s.url, w);
       await s.sync.caughtUp();
       for (const t of ["customers", "orders", "accounts", "events", "seats", "bookings", "devices", "pings", "staff"]) assert.equal(await unnumbered(s.store, t), 0, `${t}: every row the stream wrote is numbered with it`);
+      await bothHidden(s.store, `after the stream's writes ${i + 1}`);
       await sameAnswers(s.api, s.url, s.logged, `after the stream's writes ${i + 1}`);
     }
   } finally { await s.close(); }

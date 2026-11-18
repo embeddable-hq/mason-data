@@ -250,6 +250,23 @@ const INSTANTS: Array<[number, string | null]> = [
   [23, "1999-12-31 23:59:59.999999+00"], [24, "2262-04-11 23:47:16+00"], [25, "2026-03-29 00:30:00+00"], [26, "2026-11-01 04:59:59.999999+00"],
 ];
 
+/** the zones a GROUP BY of a time's unit is held in (issue 1146): UTC, daylight saving, +5:30, +5:45, Lord Howe's
+ *  30-minute change, Chatham's +12:45 / +13:45, and St. John's, whose changes were a minute past midnight until 2011 */
+const BUCKET_ZONES = ["UTC", "America/New_York", "Asia/Kolkata", "Asia/Kathmandu", "Australia/Lord_Howe", "Pacific/Chatham", "America/St_Johns"];
+const BUCKET_EDGES = `WITH zones(z) AS (VALUES ${[...BUCKET_ZONES, "Europe/London", "Antarctica/Casey"].map((z) => `('${z}')`).join(", ")}),
+  q AS (SELECT t FROM generate_series(timestamptz '2023-12-25 00:00+00', timestamptz '2025-01-05 00:00+00', interval '15 minutes') t),
+  changes AS (SELECT q.t FROM q, zones WHERE (q.t AT TIME ZONE zones.z) - (q.t AT TIME ZONE 'UTC') <> ((q.t - interval '15 minutes') AT TIME ZONE zones.z) - ((q.t - interval '15 minutes') AT TIME ZONE 'UTC')),
+  months AS (SELECT (m AT TIME ZONE zones.z) AS t FROM zones, generate_series(timestamp '2024-01-01', timestamp '2025-01-01', interval '1 month') m),
+  edges AS (SELECT t FROM changes UNION SELECT t FROM months)
+  INSERT INTO public.bucket_edges (at) SELECT t FROM (
+    SELECT t + d * interval '1 microsecond' AS t FROM edges, (VALUES (-1), (0), (1)) v(d)
+    UNION ALL SELECT timestamptz '2024-01-01 00:00+00' + g * interval '1 day 19 hours 13 minutes 17.123456 seconds' FROM generate_series(0, 200) g
+    UNION ALL SELECT t::timestamptz FROM (VALUES ('2010-11-07 02:30:30+00'), ('2010-11-07 02:31:30+00'), ('2011-03-13 03:30:30+00'), ('2011-03-13 03:31:30+00'),
+      ('2022-10-01 16:00:30+00'), ('2022-10-01 16:01:30+00'), ('1979-10-01 10:39:59.999999+00'), ('1979-12-31 23:59:59.999999+00'), ('1980-01-01 00:00:00+00'),
+      ('1960-02-29 12:34:56.789+00'), ('9999-12-31 23:59:59.999999+00'), ('infinity'), ('-infinity')) v(t)
+    UNION ALL SELECT NULL) e ORDER BY t;
+  UPDATE public.bucket_edges SET v = CASE WHEN id % 11 = 0 THEN NULL ELSE id % 97 END, x = (id % 1000) / 8.0, f = id / 3.0, s = 's' || (id % 5);`;
+
 /** the table and its rows (the oracle's TimeZone is UTC: a timestamptz literal's offset is folded into UTC); beside it,
  *  `typed_arrays` holds the array types the review found sent as text[] */
 export const TYPED = `${MAPPED_TABLE} CREATE EXTENSION IF NOT EXISTS citext; CREATE TABLE public.typed (id int PRIMARY KEY, ${ALL.map((c) => `${c} ${COLUMNS[c]}`).join(", ")}); ` +
@@ -385,6 +402,11 @@ export const TYPED = `${MAPPED_TABLE} CREATE EXTENSION IF NOT EXISTS citext; CRE
   // of Europe/Berlin's and America/New_York's changes of 2026, a repeated hour's two halves, before 1970, a zone's local
   // mean time (1880), the first instant of a week, a century and a millennium, a microsecond, ±infinity and NULL
   `CREATE TABLE public.instants (id int PRIMARY KEY, at timestamptz); INSERT INTO public.instants VALUES ${INSTANTS.map(([id, v]) => `(${id}, ${v === null ? "NULL" : `'${v}'`})`).join(", ")};` +
+  // A TIME'S 15-MINUTE BUCKET AT ITS EDGES (issue 1146, src/duck/bucket-group.ts): every change of offset of 2024 in the
+  // zones the oracle groups in and each local month's first instant, at and 1 µs either side; rows through the year;
+  // a change a minute past midnight (St. John's 2010 and 2011, Casey 2022); and rows no bucket holds (before 1980,
+  // year 9999's last, ±infinity, NULL). Europe/Amsterdam before 1940 is left out: the engine's zone data is not Postgres's
+  `CREATE TABLE public.bucket_edges (id serial PRIMARY KEY, at timestamptz, v int, x numeric(10,2), f float8, s text); ${BUCKET_EDGES}` +
   // DOCUMENTS A PREVIEW EXPANDS (a LEFT JOIN LATERAL json_each … ON TRUE): objects of several keys, a key twice in a
   // json, an empty object, NULL, an array and a string the tool's CASE passes over; and arrays of other element types
   // (an unnest's padding NULL is of each), empty, NULL, or holding a NULL
@@ -1884,6 +1906,40 @@ function* matrix(): Generator<Matrixed> {
     yield q(`date_trunc of a timestamptz in a zone of its own, in ${zone}`, "SELECT id, date_trunc('hour', at, 'Europe/Berlin'), date_trunc('minute', at, 'Asia/Kathmandu'), date_trunc('day', at, 'America/New_York'), " +
       "date_trunc('month', at, 'UTC'), date_trunc('century', at, 'Europe/Berlin'), date_trunc('week', at, 'utc'), date_trunc('second', at, 'Australia/Lord_Howe'), date_trunc('quarter', at, 'Etc/UTC') FROM instants ORDER BY id", zone);
     yield q(`date_trunc of a date as a timestamptz, in ${zone}`, "SELECT id, date_trunc('week', at::date), date_trunc('hour', at::date) FROM instants WHERE isfinite(at) ORDER BY id", zone);
+  }
+  // ---- issue 1146: a GROUP BY of a time's unit, grouped by its 15-minute bucket first (src/duck/bucket-group.ts), in
+  // each zone: every unit, every aggregate that adds up from parts, at and either side of every change and month's start
+  const BUCKET_UNITS = ["hour", "day", "week", "month", "quarter", "year"];
+  for (const zone of BUCKET_ZONES) {
+    for (const u of BUCKET_UNITS) {
+      yield q(`issue 1146: a GROUP BY of a timestamptz's ${u}, every aggregate, in ${zone}`, `SELECT date_trunc('${u}', at) AS k, count(*), count(v), sum(v), min(v), max(v), avg(v), sum(x), avg(x), ` +
+        `min(x), min(f), max(f), min(at), max(at), count(*) FILTER (WHERE v > 50), sum(v) FILTER (WHERE s <> 's1') FROM bucket_edges GROUP BY 1 ORDER BY 1`, zone);
+    }
+  }
+  for (const zone of ["Asia/Kathmandu", "America/New_York"]) {
+    yield q(`issue 1146: a time's unit grouped beside another key, a HAVING, a WHERE and a LIMIT, in ${zone}`, "SELECT date_trunc('month', at) AS m, s, count(*), sum(v) FROM bucket_edges WHERE id % 3 <> 0 " +
+      "GROUP BY date_trunc('month', at), s HAVING count(*) > 2 ORDER BY m DESC NULLS FIRST, s LIMIT 25", zone);
+    yield q(`issue 1146: a time's unit inside an expression of the list, sorted by the expression, in ${zone}`, "SELECT to_char(date_trunc('day', at), 'YYYY-MM-DD') AS d, max(v) - min(v), count(*) FROM bucket_edges " +
+      "GROUP BY date_trunc('day', at) ORDER BY date_trunc('day', at) NULLS FIRST LIMIT 40", zone);
+    yield q(`issue 1146: a time's unit over a join and in a WITH query, in ${zone}`, "WITH w AS (SELECT date_trunc('week', a.at) AS w, count(*) AS n, sum(b.v) AS t FROM bucket_edges a JOIN bucket_edges b ON b.id = a.id + 1 GROUP BY 1) " +
+      "SELECT * FROM w ORDER BY w NULLS FIRST", zone);
+    // a float's sum added in another order may move in its last digit: it keeps its plan, added as Postgres adds it
+    yield q(`issue 1146: a time's unit beside a sum and an average of a float, in ${zone}`, "SELECT date_trunc('day', at) AS d, sum(f), avg(f), count(*) FROM bucket_edges GROUP BY 1 ORDER BY 1", zone);
+    yield q(`issue 1146: a time's unit beside an aggregate that does not add up from parts, in ${zone}`, "SELECT date_trunc('quarter', at), count(DISTINCT v), string_agg(DISTINCT s, ',' ORDER BY s), count(*) FROM bucket_edges GROUP BY 1 ORDER BY 1", zone);
+    // two columns' units (one column's bucket is read, the other's unit computed a row), and keys of no unit
+    yield q(`issue 1146: two columns' units over a join, in ${zone}`, "SELECT date_trunc('month', a.at) AS m, date_trunc('year', b.at) AS y, sum(a.x), count(*) FROM bucket_edges a " +
+      "JOIN bucket_edges b ON b.id = a.id + 7 GROUP BY 1, 2 ORDER BY 1 NULLS FIRST, 2 NULLS FIRST", zone);
+    yield q(`issue 1146: a time's unit beside a key of the time that is no unit, and an output named as a key it is not, in ${zone}`,
+      "SELECT upper(s) AS s, date_trunc('month', at) AS m, extract(dow FROM at) AS dow, count(*), sum(v) FROM bucket_edges WHERE at BETWEEN '1980-01-01' AND '2100-01-01' " +
+      "GROUP BY s, 2, 3 ORDER BY s DESC, m, dow LIMIT 60", zone);
+    // an ORDER BY item is what Postgres binds it to (the database's ICU text sorted by number is a COLLATE expression)
+    yield q(`issue 1146: a time's unit and a text key sorted by number, by name and by a column no output names, in ${zone}`,
+      "SELECT date_trunc('month', at) w, s AS status, count(*) FROM bucket_edges GROUP BY 1, 2 ORDER BY 1 NULLS FIRST, 2", zone);
+    yield q(`issue 1146: a time's unit sorted after a key no output names, in ${zone}`,
+      "SELECT date_trunc('month', at) w, count(*) FROM bucket_edges GROUP BY 1, s, v ORDER BY s DESC, v NULLS FIRST, 1 NULLS FIRST", zone);
+    yield q(`issue 1146: a time's unit beside a constant key, sorted by number, in ${zone}`,
+      "SELECT date_trunc('month', at) w, 1 AS one, count(*) FROM bucket_edges GROUP BY 1, 2 ORDER BY 2, 1 NULLS FIRST", zone);
+    yield q(`issue 1146: a time's unit grouped by its number and sorted by its count, in ${zone}`, "SELECT date_trunc('hour', at) AS h, count(*) FROM bucket_edges GROUP BY 1 ORDER BY 2 DESC, 1 NULLS FIRST LIMIT 12", zone);
   }
   // ---- issue 464: to_char of a time in a format DuckDB's strftime writes (src/duck/to-char.ts strftimeTemplate), and
   // Metabase's US week grouped by the engine's integer: each side of a clock change, before 1970, a zone's local mean

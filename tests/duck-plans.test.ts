@@ -48,6 +48,7 @@ import { mintToken, tokenProblem } from "../src/duck/token.ts";
 import type { PgColumn, PgSchema } from "../src/api/postgres/schema.ts";
 import type { CopyState } from "../src/duck/sync.ts";
 import { BI_SHAPES } from "./integration/oracle/bi-shapes.ts";
+import { bucketColumn, bucketSql } from "../src/duck/bucket-column.ts";
 
 const UPDATE = process.env.UPDATE_FIXTURE === "1";
 const FIXTURE = path.join(import.meta.dirname, "fixtures", "duck-plans.json");
@@ -62,10 +63,13 @@ const TENANTS = "['acme', 'globex', ''][range % 3 + 1]";
 // EVERY row group defeats DuckDB 2.0's top N pruning even with one key (measured: 9 of 9 row groups for DESC NULLS
 // LAST), which is DuckDB's, not the rewrite's; notes a nullable text; meta a jsonb as the copy holds one (Postgres's
 // text, NULL for every fifth order)
+// each created_at's 15-minute bucket, hidden beside it as the sync holds it (src/duck/bucket-column.ts, issue 1146)
+const CREATED_BUCKET = bucketColumn("created_at", []);
 const ordersDdl = (rows: number): string =>
   `CREATE TABLE public.orders AS SELECT (range + 1)::BIGINT AS id, ${TENANTS} AS tenant_id, CASE WHEN range % 97 = 0 THEN NULL ELSE (range * 7919) % 20000 + 1 END::BIGINT AS customer_id,
      ['paid', 'pending', 'refunded', NULL, '', 'PAID'][range % 6 + 1] AS status, ((range * 37) % 100000 / 100)::DECIMAL(12,2) AS amount,
      TIMESTAMPTZ '2024-12-01 00:00:00+00' + to_seconds(range * 60) AS created_at,
+     ${bucketSql("(TIMESTAMPTZ '2024-12-01 00:00:00+00' + to_seconds(range * 60))")} AS "${CREATED_BUCKET}",
      CASE WHEN range >= ${rows - rows / 20} THEN NULL ELSE TIMESTAMP '2024-12-03 00:00:00' + to_seconds(range * 60) END AS shipped_at,
      CASE WHEN range % 4 = 0 THEN NULL ELSE 'note ' || ((range * 7) % 50000) END AS notes, 0::BIGINT AS changed_seq,
      CASE WHEN range % 5 = 0 THEN NULL ELSE ('{"n": ' || ((range * 37) % 100000 / 100)::DECIMAL(12,2) || ', "tags": ' || CASE range % 3 WHEN 0 THEN '[]' WHEN 1 THEN '["a", "B"]' ELSE '["' || ${TENANTS} || '"]' END
@@ -81,7 +85,7 @@ const DDL = [
   "INSERT INTO public.tenants VALUES ('acme', 'Acme', 'pro', 0), ('globex', 'Globex', 'free', 0), ('', '', NULL, 0)",
   `CREATE TABLE public.customers AS SELECT (range + 1)::BIGINT AS id, ${TENANTS} AS tenant_id, CASE WHEN range % 11 = 0 THEN NULL ELSE 'customer ' || range END AS name,
      CASE WHEN range % 13 = 0 THEN NULL ELSE 'c' || range || '@example.test' END AS email, TIMESTAMPTZ '2023-01-01 00:00:00+00' + to_seconds(range * 3600) AS created_at,
-     0::BIGINT AS changed_seq FROM range(20000)`,
+     0::BIGINT AS changed_seq, ${bucketSql("(TIMESTAMPTZ '2023-01-01 00:00:00+00' + to_seconds(range * 3600))")} AS "${CREATED_BUCKET}" FROM range(20000)`,
   ordersDdl(ORDERS),
   `CREATE TABLE public.order_items AS SELECT (range + 1)::BIGINT AS id, ${TENANTS} AS tenant_id, ((range * 3) % ${ORDERS} + 1)::BIGINT AS order_id,
      ['widget', 'Widget', 'gadget', '', NULL, 'sprocket', 'gizmo', 'widget', '1', '01'][range % 10 + 1] AS product, [1, 2, 0, -1, 7, 1000, 3][range % 7 + 1]::INTEGER AS quantity,
@@ -97,15 +101,17 @@ const DDL = [
 const text = (name: string): PgColumn => ({ name, type: "text" });
 const int8 = (name: string): PgColumn => ({ name, type: "int8" });
 const tstz = (name: string): PgColumn => ({ name, type: "timestamptz" });
+/** a timestamptz whose copy holds its bucket (`CREATED_BUCKET`) */
+const bucketed = (name: string): PgColumn => ({ name, type: "timestamptz", bucket: CREATED_BUCKET });
 const schema: PgSchema = {
   database: "app",
   tables: [
     { name: "tenants", primaryKey: ["id"], joins: [], columns: [text("id"), text("name"), text("plan"), int8("changed_seq")] },
     // email UNIQUE in the catalog, as a source declares it: not the key the copy is written by (KEY_COUNTS' contrasts)
-    { name: "customers", primaryKey: ["id"], joins: [], columns: [int8("id"), text("tenant_id"), text("name"), text("email"), tstz("created_at"), int8("changed_seq")],
+    { name: "customers", primaryKey: ["id"], joins: [], columns: [int8("id"), text("tenant_id"), text("name"), text("email"), bucketed("created_at"), int8("changed_seq")],
       uniqueKeys: [{ name: "customers_email_key", columns: ["email"], constraint: true, nullsNotDistinct: false }] },
     { name: "orders", primaryKey: ["id"], joins: [],
-      columns: [int8("id"), text("tenant_id"), int8("customer_id"), text("status"), { name: "amount", type: "numeric", spelled: "numeric(12,2)" }, tstz("created_at"),
+      columns: [int8("id"), text("tenant_id"), int8("customer_id"), text("status"), { name: "amount", type: "numeric", spelled: "numeric(12,2)" }, bucketed("created_at"),
         { name: "shipped_at", type: "timestamptz", spelled: "timestamp" }, text("notes"), int8("changed_seq"), { name: "meta", type: "jsonb" }] },
     { name: "order_items", primaryKey: ["id"], joins: [],
       columns: [int8("id"), text("tenant_id"), int8("order_id"), text("product"), { name: "quantity", type: "int4" }, { name: "unit_price", type: "numeric", spelled: "numeric(12,2)" }, int8("changed_seq")] },
@@ -140,6 +146,12 @@ const REWRITTEN: Shape[] = [
   { name: "date_trunc histogram: a month in UTC", sql: "SELECT DATE_TRUNC('month', o.created_at) AS m, count(*) FROM orders o GROUP BY 1 ORDER BY 1 DESC LIMIT 100" },
   { name: "date_trunc histogram: a month in Europe/Berlin", sql: "SELECT DATE_TRUNC('month', o.created_at) AS m, count(*) FROM orders o GROUP BY 1 ORDER BY 1 DESC LIMIT 100", zone: "Europe/Berlin" },
   { name: "date_trunc histogram: an hour in Europe/Berlin", sql: "SELECT DATE_TRUNC('hour', o.created_at) AS h, count(*) FROM orders o WHERE o.created_at >= timestamptz '2025-10-01 00:00:00+00' GROUP BY 1 ORDER BY 1", zone: "Europe/Berlin" },
+  // issue 1146: a GROUP BY of a time's unit grouped by its 15-minute bucket first, the unit worked out once a bucket: the
+  // cold benchmark's "Revenue by month" (two tables' times, a join), in UTC and in a zone of +5:45
+  { name: "a time's unit grouped by its bucket: revenue by month over a join, in UTC", sql: "SELECT date_trunc('month', o.created_at) AS month, date_trunc('year', c.created_at) AS signup_year, sum(o.amount) AS revenue " +
+    "FROM orders o JOIN customers c ON c.id = o.customer_id GROUP BY 1, 2 ORDER BY 1, 2" },
+  { name: "a time's unit grouped by its bucket: revenue by month over a join, in Asia/Kathmandu", sql: "SELECT date_trunc('month', o.created_at) AS month, date_trunc('year', c.created_at) AS signup_year, sum(o.amount) AS revenue " +
+    "FROM orders o JOIN customers c ON c.id = o.customer_id GROUP BY 1, 2 ORDER BY 1, 2", zone: "Asia/Kathmandu" },
   { name: "date_trunc histogram: a day in a zone of its own", sql: "SELECT date_trunc('day', o.created_at, 'America/New_York') AS d, count(*) FROM orders o GROUP BY 1 ORDER BY 1" },
   // joinRows (src/duck/late.ts, issue 105): a table preview over joined tables, its rows chosen by row number
   { name: "a top N over joins: a *, sorted by a column's number", sql: "SELECT c.*, o.id FROM customers c LEFT JOIN orders o ON c.id = o.customer_id ORDER BY 1, 2 LIMIT 100" },
@@ -585,6 +597,15 @@ async function shopStore(name: string, logged: string[], ddl: readonly string[] 
   const store = await DuckStore.open(path.join(dir, `${name}.db`), (l) => { logged.push(l); });
   closing.push(() => store.close());
   for (const s of ddl) await store.writer.run(s);
+  // each copy's view of its visible columns, as the sync makes it (src/duck/kept.ts `view`): a statement that lists a
+  // table's columns without naming them reads the copy's own, never its hidden bucket
+  const db = String((await store.writer.runAndReadAll("SELECT current_database()")).getRowsJS()[0]![0]);
+  await store.writer.run("ATTACH IF NOT EXISTS ':memory:' AS __mason_visible");
+  await store.writer.run("CREATE SCHEMA IF NOT EXISTS __mason_visible.public");
+  for (const t of ["orders", "customers"]) {
+    const own = (await store.writer.runAndReadAll(`SELECT column_name FROM duckdb_columns() WHERE database_name = '${db}' AND table_name = '${t}' AND column_name <> '${CREATED_BUCKET}' ORDER BY column_index`)).getRowsJS().map((r) => `"${String(r[0])}"`);
+    if (own.length > 0) await store.writer.run(`CREATE OR REPLACE VIEW __mason_visible.public.${t} AS SELECT ${own.join(", ")} FROM "${db}".public.${t}`);
+  }
   return store;
 }
 /** the shop's copies as the sync counts them (`Sync.state`): what a plan reads of each table's size (src/duck/late.ts
