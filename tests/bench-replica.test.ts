@@ -20,6 +20,7 @@ import type { Cell, Fixture, SweepVerdict } from "../scripts/bench-replica.ts";
 import type { ColdCell, ColdFixture, ColdRun } from "../scripts/bench-replica-cold.ts";
 import { QUERIES, clientSteps, nextSize, reorderSql } from "../scripts/bench-replica.ts";
 import { DuckStore } from "../src/duck/store.ts";
+import { parseSourceText } from "../src/cli/sources.ts";
 
 /** A SQLSTATE a reader of the measurements can place: Postgres's condition name beside the code it recorded (the fixture keeps
  *  the code alone), for the codes a bench has met; any other code is printed as it is. */
@@ -308,7 +309,12 @@ function renderCold(f: ColdFixture): { section: string; headline: string } {
     const pg = f.cells.filter((c) => c.engine === "postgres" && c.statement === st.name), copied = pg.filter((c) => c.copied !== undefined).length;
     if (copied > 0 && copied < pg.length) throw new Error(`the fixture's ${st.name} Postgres cells are copied at some sizes and measured at others: run it again`);
   }
-  const nameOf = (st: { name: string }): string => st.name.replace(/_/g, " ");
+  // a statement run in a time zone of its own is named by its title's first words ("revenue by month in Asia/Kathmandu")
+  const nameOf = (st: { name: string; title: string; timeZone?: string }): string => {
+    if (st.timeZone === undefined) return st.name.replace(/_/g, " ");
+    const head = st.title.split(",")[0]!;
+    return `${head.charAt(0).toLowerCase()}${head.slice(1)}`;
+  };
   const copiedStatements = statements.filter((st) => f.cells.some((c) => c.statement === st.name && c.copied !== undefined));
   const measuredStatements = statements.filter((st) => !copiedStatements.includes(st));
   const twoRuns = copiedFrom === undefined ? "" :
@@ -362,8 +368,11 @@ ${note("docs/DESIGN.md")} It was measured on ${env.label}, against ${pgVersion} 
     grid.map(({ s, rows, c, p, m }, i) => [i === 0 || grid[i - 1]!.s !== s ? s.title : "", countText(rows), String(c), perRun(p.runs, "slowestMs"), perRun(p.runs, "meanMs"), reads(p.runs),
       perRun(m.runs, "slowestMs"), perRun(m.runs, "meanMs"), reads(m.runs)]));
   const idle = f.cells.filter((c) => c.engine === "mason").flatMap((c) => c.runs.map((r) => r.idleReadBytes ?? NaN)).filter(Number.isFinite);
-  const dataTable = table(["orders", "customers", "in Postgres", "Mason's volume", "synced in (s)"], ["---:", "---:", "---:", "---:", "---:"],
-    bySize.map((z) => [rowsText(z.rows), rowsText(z.customers), gib(z.postgresBytes), gib(z.masonBytes), numText(z.syncSeconds)]));
+  // how long Mason's own work after the first sync took, where the run waited for it (a run before it did not)
+  const waited = bySize.every((z) => z.backgroundSeconds !== undefined);
+  const dataTable = table(["orders", "customers", "in Postgres", "Mason's volume", "synced in (s)", ...(waited ? ["then ready in (s)"] : [])], ["---:", "---:", "---:", "---:", "---:", ...(waited ? ["---:"] : [])],
+    bySize.map((z) => [rowsText(z.rows), rowsText(z.customers), gib(z.postgresBytes), gib(z.masonBytes), numText(z.syncSeconds), ...(waited ? [numText(z.backgroundSeconds!)] : [])]));
+  const zoned = statements.filter((st) => st.timeZone !== undefined);
 
   const s = env.postgres.settings;
   const settings = Object.keys(s).sort().map((k) => `${k} ${s[k]}`).join(", ");
@@ -385,7 +394,8 @@ ${note("docs/DESIGN.md")} It was measured on ${env.label}, against ${pgVersion} 
     `- **The client**: \`pgbench\` ${pgbenchVersion} from the \`${env.client.image}\` image, in a container of its own on the host's network: \`${env.client.command}\`. Each client sent the query once, and the clients started together. A client's time is from pgbench's log of each transaction. It does not count the connection.`,
     `- **Cold**: before every run, the container measured was restarted. The run waited until it answered \`SELECT 1 FROM orders LIMIT 0\`, then ${env.method.settleSeconds} s more. Then it dropped the OS page cache.`,
     "- **One at a time**: Mason was stopped while Postgres was measured. Postgres stayed up while Mason was measured, because Mason reads its source's catalog when it starts. Postgres was restarted first, and was idle.",
-    `- **The time zone**: ${env.method.timeZone} on both, so \`date_trunc\` of a \`timestamptz\` gives the same months.`,
+    `- **The time zone**: ${env.method.timeZone} on both, so \`date_trunc\` of a \`timestamptz\` gives the same months.` +
+      (zoned.length === 0 ? "" : ` ${zoned.length === 1 ? "One query" : `${zoned.length} queries`} ran in ${listText([...new Set(zoned.map((st) => st.timeZone!))])} instead, set as each session started.`),
     `- **The order**: each cell ran ${runs === 1 ? "once" : `${runs} times`}${runs === 1 ? "" : `, Postgres and Mason taking turns to go first${twoRuns === "" ? "" : " where both were measured"}`}.`,
     ...(twoRuns === "" ? [] : [`- **Two runs**: ${twoRuns} The earlier run's cells are copied unchanged, every run and what it read` +
       `${env.postgresFrom === undefined || env.postgresFrom.measuredAt === null ? "" : ` (measured at commit ${env.postgresFrom.measuredAt.slice(0, 12)})`}.` +
@@ -396,7 +406,7 @@ ${note("docs/DESIGN.md")} It was measured on ${env.label}, against ${pgVersion} 
     ...(f.skipped.length === 0 ? [] : [`- **Not measured**: ${f.skipped.map((k) => `${rowsText(k.rows)} rows (${k.why})`).join("; ")}.`]),
     "- **The queries**, sent as written to both:",
     "",
-    ...statements.map((st) => `  - ${st.title}: \`${st.sql}\``),
+    ...statements.map((st) => `  - ${st.title}: \`${st.sql}\`${st.timeZone === undefined ? "" : `, in a session whose time zone is ${st.timeZone}`}`),
     "",
     "To rerun: `node scripts/bench-replica.ts --cold` ([BENCHMARK.md](BENCHMARK.md) \"The cold mode\" says how, and how to publish a result here).",
   ].join("\n");
@@ -426,7 +436,9 @@ ${runsTable}
 
 The rows are synthetic: an \`orders\` table with a jsonb payload, and \`customers\`, one for every 20 orders, made by
 \`generate_series\`. ${dataSentences} Postgres has these indexes: ${listText([...f.data.indexes])}. *Synced in* is the
-time from Mason's first start until both tables were synced and served.
+time from Mason's first start until both tables were synced and served.${waited ? `
+*Then ready in* is the time after that until Mason finished its own work on the synced data. It builds a side table to
+find an order by its id, and numbers the keys that join orders to customers. Nothing was timed before it finished.` : ""}
 
 ${dataTable}
 
@@ -645,9 +657,11 @@ test("--order over a real store: the rows in the new order, the same columns and
 const uuidOf = (n: number): string => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 
 /** a cold run's fixture: 1 M, 10 M and 100 M rows, 1 and 10 clients, 3 runs; the scans faster on Mason, the lookup at
- *  `lookupMasonMs` against Postgres's 2 ms; each run reading 100 MB a million rows */
-async function syntheticCold(lookupMasonMs = 40): Promise<ColdFixture> {
-  const { COLD_STATEMENTS, COLD_DATA, coldCell } = await coldModule();
+ *  `lookupMasonMs` against Postgres's 2 ms; each run reading 100 MB a million rows. `without`: statements it did not
+ *  send, as a run before they were added */
+async function syntheticCold(lookupMasonMs = 40, without: readonly string[] = []): Promise<ColdFixture> {
+  const { COLD_STATEMENTS: every, COLD_DATA, coldCell, fixtureStatement } = await coldModule();
+  const COLD_STATEMENTS = every.filter((st) => !without.includes(st.name));
   const sizes = [1e6, 1e7, 1e8], clients = [1, 10];
   const timeOf = (engine: "postgres" | "mason", statement: string, rows: number, c: number): number =>
     statement === "lookup" ? (engine === "postgres" ? 2 : lookupMasonMs) : rows / 1e6 * (engine === "postgres" ? 400 : 20) * (c === 1 ? 1 : 3);
@@ -667,7 +681,7 @@ async function syntheticCold(lookupMasonMs = 40): Promise<ColdFixture> {
       disk: "EBS gp3, 125 MB/s, 3000 IOPS",
     },
     data: { version: COLD_DATA.version, keys: COLD_DATA.keys, indexes: [...COLD_DATA.indexes] },
-    statements: COLD_STATEMENTS.map((s) => ({ name: s.name, title: s.title, sql: s.sql })),
+    statements: COLD_STATEMENTS.map(fixtureStatement),
     sizes: sizes.map((rows) => ({ rows, customers: rows / 20, generatedSeconds: 1, postgresBytes: rows * 376, masonBytes: rows * 103, syncSeconds: rows / 1e6 * 3,
       lookupIds: Array.from({ length: 10 }, (_, i) => uuidOf(i + 1)), answers: {}, answersEqual: true, differences: [] })),
     skipped: [],
@@ -677,15 +691,29 @@ async function syntheticCold(lookupMasonMs = 40): Promise<ColdFixture> {
   };
 }
 
-test("--cold: the issue's three statements, the pgbench script sends one once, and the lookup's ids are quoted UUID literals, one per client", async () => {
-  const { COLD_STATEMENTS, coldScript, statementSql } = await coldModule();
-  assert.deepEqual(COLD_STATEMENTS.map((s) => s.sql), [
-    "SELECT status, count(*) FROM orders GROUP BY status ORDER BY status",
-    "SELECT date_trunc('month', o.created_at) AS month, date_trunc('year', c.created_at) AS signup_year, sum(o.amount) AS revenue FROM orders o JOIN customers c ON c.id = o.customer_id GROUP BY 1, 2 ORDER BY 1, 2",
-    "SELECT * FROM orders WHERE id = '<id>'",
+test("--cold: four statements, the revenue twice (in UTC and in Asia/Kathmandu), the pgbench script sends one once, and the lookup's ids are quoted UUID literals, one per client", async () => {
+  const { COLD_STATEMENTS, coldScript, statementSql, zoneOf, pgbenchArgs } = await coldModule();
+  const revenue = "SELECT date_trunc('month', o.created_at) AS month, date_trunc('year', c.created_at) AS signup_year, sum(o.amount) AS revenue FROM orders o JOIN customers c ON c.id = o.customer_id GROUP BY 1, 2 ORDER BY 1, 2";
+  assert.deepEqual(COLD_STATEMENTS.map((s) => [s.name, s.sql, zoneOf(s)]), [
+    ["count_by_status", "SELECT status, count(*) FROM orders GROUP BY status ORDER BY status", "UTC"],
+    ["revenue_by_month", revenue, "UTC"],
+    // the same SQL in a session 5 hours 45 minutes off UTC: Mason groups a time's unit by its 15-minute bucket (issue 1146)
+    ["revenue_by_month_kathmandu", revenue, "Asia/Kathmandu"],
+    ["lookup", "SELECT * FROM orders WHERE id = '<id>'", "UTC"],
   ]);
   for (const st of COLD_STATEMENTS) assert.doesNotMatch(st.sql, /\bextract\s*\(|:/i, `${st.name}: no extract(), and no colon pgbench would read as a variable`);
-  const [count, , lookup] = COLD_STATEMENTS;
+  // each session in its statement's zone, set as it starts (libpq's PGTZ), outside the time pgbench records; the
+  // password stays in the env file
+  const target = { port: 5433, db: "mason", user: "bench", ssl: "require", env: "/work/secrets/client.env" };
+  const args = (timeZone: string): string[] => pgbenchArgs({ image: "postgres:18", clientDir: "/work/client", idFile: "/work/client.cid", target, clients: 10, uid: 1000, gid: 1000, timeZone });
+  for (const st of COLD_STATEMENTS) {
+    const a = args(zoneOf(st));
+    assert.deepEqual(a.slice(a.indexOf("-e"), a.indexOf("-e") + 3), ["-e", `PGTZ=${zoneOf(st)}`, "postgres:18"], `${st.name}: its session's zone`);
+    assert.deepEqual(a.slice(a.indexOf("--env-file"), a.indexOf("--env-file") + 2), ["--env-file", target.env]);
+    assert.equal(a.at(-1), "host=127.0.0.1 port=5433 dbname=mason user=bench sslmode=require", "no password on the command line");
+  }
+  assert.throws(() => args("UTC'; DROP"), /an IANA name/);
+  const [count, , , lookup] = COLD_STATEMENTS;
   assert.equal(coldScript(count!, 10, []), "SELECT status, count(*) FROM orders GROUP BY status ORDER BY status;\n", "every client sends the same statement, once");
   const ids = Array.from({ length: 10 }, (_, i) => uuidOf(1000 + i));
   assert.equal(coldScript(lookup!, 1, ids), `SELECT * FROM orders WHERE id = '${ids[0]}';\n`);
@@ -802,8 +830,48 @@ test("--cold's options: the published run's defaults, and what it refuses", asyn
   assert.equal(engineMemoryOf("nothing said"), "unknown");
   assert.match(SOURCES_FILE, /^url: \$\{DATABASE_URL\}$/m, "the URL is a variable: the file holds no secret");
   assert.match(SOURCES_FILE, /^sync: off$/m, "never polled: a poll is a full scan of the source beside the measurement");
-  assert.match(SOURCES_FILE, /^ {2}orders: \{\}$/m);
-  assert.match(SOURCES_FILE, /^ {2}customers: \{\}$/m);
+  // orders references customers, written by hand (the data declares no foreign key): its join reads hidden integer keys
+  const read = parseSourceText(SOURCES_FILE, "bench", "/project/sources/bench.yml");
+  assert.ok(!("problems" in read), JSON.stringify(read));
+  assert.deepEqual(read.tables.map((e) => [e.name, e.table, e.sync, e.references ?? null]), [
+    ["orders", "public.orders", null, [{ columns: ["customer_id"], to: "customers", table: "public.customers", targetColumns: ["id"] }]],
+    ["customers", "public.customers", null, null],
+  ]);
+});
+
+test("--cold waits for Mason's work after its first sync, by the lines its log says it with, and fails a restart that redid it or does not run on it", async () => {
+  const { backgroundLeft, sideTableExpected, restartProblems, ROW_GROUP_ROWS, LOOKUP_MIN_ROW_GROUPS, ORDERS_LOOKUP_BUILT, REFERENCE_NUMBERED } = await coldModule();
+  // the script's copies of the engine's numbers, which it does not import (it loads no engine)
+  assert.equal(ROW_GROUP_ROWS, (await import("../src/duck/compact.ts")).ROW_GROUP_ROWS);
+  assert.equal(LOOKUP_MIN_ROW_GROUPS, (await import("../src/duck/key-lookup.ts")).LOOKUP_MIN_ROW_GROUPS);
+  // the lines are the ones Mason writes: their words in the code that logs them
+  const sync = fs.readFileSync(path.join(ROOT, "src/duck/sync.ts"), "utf8"), refs = fs.readFileSync(path.join(ROOT, "src/duck/reference-keys.ts"), "utf8");
+  assert.ok(sync.includes("`${source}: its side table for lookups by ${column} built in ${seconds.toFixed(2)} s,"), "src/duck/sync.ts buildLookup's line");
+  assert.ok(refs.includes("`${r.from.source} (${r.from.columns.join(\", \")}) references ${r.to.source} (${r.to.columns.join(\", \")}): a join on it reads hidden integer keys`"), "src/duck/reference-keys.ts fill's line");
+  const built = "[sync] public.orders: its side table for lookups by id built in 3.21 s, 1,000,000 key(s) (a key's value lies in 9.0 of its 9 row groups): a lookup by id reads it from here";
+  const numbered = "[sync] public.orders (customer_id) references public.customers (id): a join on it reads hidden integer keys";
+  assert.match(built, ORDERS_LOOKUP_BUILT);
+  assert.match(numbered, REFERENCE_NUMBERED);
+  assert.doesNotMatch("[sync] public.customers: its side table for lookups by id built in 0.40 s, 50,000 key(s)", ORDERS_LOOKUP_BUILT, "customers' side table is not orders'");
+  // a side table where orders has more row groups than Mason's bound: 1 M orders have 9; the 100 k smoke has 1
+  assert.deepEqual([1e5, 8 * ROW_GROUP_ROWS, 8 * ROW_GROUP_ROWS + 1, 1e6, 1e8].map(sideTableExpected), [false, false, true, true, true]);
+  const synced = "[sync] public.orders: synced, 1,000,000 rows";
+  assert.equal(backgroundLeft(synced, 1e6).length, 2);
+  assert.match(backgroundLeft(synced, 1e6)[0]!, /^the side table for lookups by orders\.id/);
+  assert.match(backgroundLeft(`${synced}\n${built}`, 1e6)[0]!, /^the numbering of the hidden keys of orders\.customer_id and customers\.id/);
+  assert.deepEqual(backgroundLeft(`${synced}\n${numbered}\n${built}`, 1e6), [], "both said, in either order");
+  assert.deepEqual(backgroundLeft(`${synced}\n${numbered}`, 1e5), [], "no side table expected at 100 k");
+  // after a restart: what the engine ran (its profile), never the SQL Mason planned, which names the hidden keys either way
+  const sent = "  Sent to the engine: SELECT c.region FROM orders AS o JOIN customers AS c ON o.__mason_ref_00000000000a_00000000000b = c.__mason_ref_00000000000a_00000000000a";
+  const onNumbers = `${sent}\n->  Hash Join  (rows=26)\n      Conditions: __mason_ref_00000000000a_00000000000b = __mason_ref_00000000000a_00000000000a`;
+  const onKeys = `${sent}\n->  Hash Join  (rows=29)\n      Conditions: customer_id = id\n      ->  Table Scan on public.orders\n            Projections: customer_id, amount`;
+  const lookupPlan = "  Sent to the engine: SELECT * FROM orders WHERE rowid IN (SELECT rid FROM _mason.\"key_lookup:public.orders\")\n->  Table Scan on _mason.\"key_lookup:public.orders\"  (rows=1)";
+  const plainLookup = "  Sent to the engine: SELECT * FROM orders WHERE id = '…'\n->  Table Scan on public.orders  (rows=1)";
+  assert.deepEqual(restartProblems({ rows: 1e6, log: numbered, lookupPlan, joinPlan: onNumbers }), []);
+  assert.deepEqual(restartProblems({ rows: 1e5, log: numbered, lookupPlan: null, joinPlan: onNumbers }), [], "no side table expected at 100 k: no lookup asked");
+  assert.deepEqual(restartProblems({ rows: 1e6, log: `${numbered}\n${built}`, lookupPlan, joinPlan: onNumbers }), ["it built the side table for lookups by orders.id again"]);
+  assert.deepEqual(restartProblems({ rows: 1e6, log: numbered, lookupPlan: plainLookup, joinPlan: onNumbers }), [`a lookup by orders.id did not read its side table:\n${plainLookup}`]);
+  assert.deepEqual(restartProblems({ rows: 1e6, log: numbered, lookupPlan, joinPlan: onKeys }), [`the join of orders to customers ran on customer_id and id, not on their hidden keys:\n${onKeys}`]);
 });
 
 test("the cold tables give every number three significant digits, under 1 as at 1 and over; the warm renderer's are as they were", () => {
@@ -818,24 +886,33 @@ test("the cold renderer: one table of every query × size × clients, the data a
   const { coldFixtureProblems } = await coldModule();
   assert.deepEqual(coldFixtureProblems(f), []);
   const headline = renderReplicaHeadline(f), section = renderReplicaSection(f);
-  assert.ok(headline.startsWith(`${HEADLINE_START}\nMason and Postgres answered the same 3 queries over the same rows. ` +
+  assert.ok(headline.startsWith(`${HEADLINE_START}\nMason and Postgres answered the same 4 queries over the same rows. ` +
     "The primary keys are random UUIDs. The status column has no index, so the count reads every row on both. " +
     "Each query was sent the first time, after a restart with the page cache dropped. One client sent it, or 10 clients sent it at the same moment. " +
     "Each time is how long until every client had its answer, the median of 3 runs. Mason and Postgres each ran in a container with the same 4 CPUs and 8 GiB of memory.\n\n"), headline.split("\n")[1]);
   const rows = headline.split("\n").filter((l) => l.startsWith("|"));
   assert.equal(rows[0], "| query | rows | clients | Postgres (s) | Mason (s) | Mason is |");
-  assert.equal(rows.length, 2 + 18, "3 queries × 3 sizes × 2 client counts");
+  assert.equal(rows.length, 2 + 24, "4 queries × 3 sizes × 2 client counts");
   assert.equal(rows[2], "| Count by status, every order | 1 M | 1 | 0.400 | 0.0200 | 20× faster |", "the median of 0.44, 0.40 and 0.36, to three significant digits");
   assert.equal(rows[3], "|  | 1 M | 10 | 1.20 | 0.0600 | 20× faster |", "the title on the group's first row alone");
   assert.equal(rows[7], "|  | 100 M | 10 | 120 | 6.00 | 20× faster |");
   assert.equal(rows[8], "| Revenue by month, orders joined to customers | 1 M | 1 | 0.400 | 0.0200 | 20× faster |");
-  assert.equal(rows[14], "| One order by its primary key | 1 M | 1 | 0.00200 | 0.0400 | 20× slower |");
+  assert.equal(rows[14], "| Revenue by month in Asia/Kathmandu, orders joined to customers | 1 M | 1 | 0.400 | 0.0200 | 20× faster |");
+  assert.equal(rows[20], "| One order by its primary key | 1 M | 1 | 0.00200 | 0.0400 | 20× slower |");
   assert.match(headline, /\n\nMason is for scans and aggregates\. A lookup through an index is faster on Postgres \(\[docs\/DESIGN\.md\]\(docs\/DESIGN\.md\) "Heap order, no index"\)\. Cold times on Postgres depend on the disk's throughput\. Each engine had 4 CPUs, 8 GiB of memory and no swap, on a disk of EBS gp3, 125 MB\/s, 3000 IOPS\. It was measured on a test box, against PostgreSQL 18\.1 and Mason 0\.23\.0, on 2026-11-17\. \[docs\/MEASUREMENTS\.md\]\(docs\/MEASUREMENTS\.md\) has every run and how it was measured\.\n$/);
   assert.ok(section.includes(rows.join("\n")), "the section's first table is the README's");
   // every run: the times, and what the measured engine read (GB, and MB/s over the run's time: 100 MB in 0.44 s)
   assert.match(section, /## Every run\n\n[^\n]*\n[^\n]*\n\n\| query \| rows \| clients \| Postgres slowest \(s\) \| Postgres mean \(s\) \| Postgres read, GB \(MB\/s\) \| Mason slowest \(s\) \| Mason mean \(s\) \| Mason read, GB \(MB\/s\) \|\n\|[^\n]*\n\| Count by status, every order \| 1 M \| 1 \| 0\.440, 0\.400, 0\.360 \| 0\.352, 0\.320, 0\.288 \| 0\.100 \(227\), 0\.100 \(250\), 0\.100 \(278\) \| 0\.0220, 0\.0200, 0\.0180 \|/);
   assert.match(section, /## The data and the first sync\n\nThe rows are synthetic[^\n]*\n`generate_series`\. The primary keys are random UUIDs\. The status column has no index, so the count reads every row on both\. Postgres has these indexes: customers \(id\), its primary key, orders \(id\), its primary key, orders \(tenant_id, created_at\) and orders \(created_at\)\./);
-  assert.match(section, /\| 100,000,000 \| 5,000,000 \| 35\.0 GiB \| 9\.6 GiB \| 300 \|/);
+  assert.match(section, /\| 100,000,000 \| 5,000,000 \| 35\.0 GiB \| 9\.6 GiB \| 300 \|\n/, "a run that did not wait for Mason's work after the first sync: no column for it");
+  assert.doesNotMatch(section, /then ready in|Then ready in/);
+  // the session's time zone of the revenue in Asia/Kathmandu, beside its SQL and in how it was measured
+  assert.match(section, /\n {2}- Revenue by month in Asia\/Kathmandu, orders joined to customers: `SELECT date_trunc[^`]*`, in a session whose time zone is Asia\/Kathmandu\n/);
+  assert.match(section, /- \*\*The time zone\*\*: UTC on both, so `date_trunc` of a `timestamptz` gives the same months\. One query ran in Asia\/Kathmandu instead, set as each session started\.\n/);
+  // a run that waited: how long, beside the sync's seconds, and what it waited for
+  const waited = renderReplicaSection({ ...f, sizes: f.sizes.map((z) => ({ ...z, backgroundSeconds: z.rows / 1e6 * 0.5 })) });
+  assert.match(waited, /\| orders \| customers \| in Postgres \| Mason's volume \| synced in \(s\) \| then ready in \(s\) \|\n[^\n]*\n\| 1,000,000 \| 50,000 \| 0\.35 GiB \| 0\.10 GiB \| 3\.00 \| 0\.50 \|\n[^]*\| 100,000,000 \| 5,000,000 \| 35\.0 GiB \| 9\.6 GiB \| 300 \| 50\.0 \|\n/);
+  assert.match(waited, /\*Then ready in\* is the time after that until Mason finished its own work on the synced data\. It builds a side table to\nfind an order by its id, and numbers the keys that join orders to customers\. Nothing was timed before it finished\.\n/);
   assert.match(section, /<details><summary>How it was measured<\/summary>\n\n- \*\*The machine\*\*: a test box, a CPU\. Linux 6\.8 \(arm64\)\.\n[^]*- \*\*The disk\*\*: EBS gp3, 125 MB\/s, 3000 IOPS\. A run's read is what the measured engine's container read from disk while pgbench ran, from its cgroup's `io\.stat`\. While Mason was measured, the idle Postgres read at most 2\.00 MB\.[^]*`--cpus 4 --memory 8g --memory-swap 8g`[^]*Its engine could use at most 4 GiB of the container's memory, half of it\.[^]*`pgbench` 18\.1 from[^]*picked at random from the data, as a quoted literal\. At 1 M rows, ids 00000000-0000-4000-8000-000000000001, [^]*\n\n<\/details>\n$/);
   for (const text of [headline, section]) {
     assert.doesNotMatch(text, /\bcop(y|ies|ied|ying)\b/i, "Mason syncs a table: never \"copy\" where a user reads it");
@@ -899,7 +976,16 @@ test("--engines mason refuses an earlier run that cannot stand beside it, naming
   assert.deepEqual(problems({ ...earlier, mode: "warm" } as unknown as ColdFixture), ["/tmp/earlier.json is not a cold run (mode \"warm\")"]);
   assert.deepEqual(problems({ ...earlier, complete: false }), ["/tmp/earlier.json is of a run that did not end (complete: false)"]);
   assert.deepEqual(problems({ ...earlier, data: { ...earlier.data, keys: "bigint" } as ColdFixture["data"] }), ["/tmp/earlier.json measured other data than this run makes (COLD_DATA)"]);
-  assert.deepEqual(problems({ ...earlier, statements: earlier.statements.slice(1) }), ["/tmp/earlier.json sent other statements than this run sends"]);
+  // a statement it sent otherwise (its SQL, its time zone), or that this run no longer sends, refuses it; one it did not
+  // send (a run before it was added) is measured on Postgres in this run
+  const otherwise = (change: (s: ColdFixture["statements"][number]) => ColdFixture["statements"][number]): ColdFixture => ({ ...earlier, statements: earlier.statements.map(change) });
+  assert.deepEqual(problems(otherwise((s) => s.name === "count_by_status" ? { ...s, sql: `${s.sql} LIMIT 10` } : s)), ["/tmp/earlier.json sent other statements than this run sends"]);
+  assert.deepEqual(problems(otherwise((s) => s.name === "revenue_by_month_kathmandu" ? { ...s, timeZone: "Asia/Kolkata" } : s)), ["/tmp/earlier.json sent other statements than this run sends"]);
+  assert.deepEqual(problems(otherwise((s) => s.name === "revenue_by_month" ? { ...s, timeZone: "UTC" } : s)), [], "UTC written is UTC");
+  assert.deepEqual(problems({ ...earlier, statements: [...earlier.statements, { name: "gone", title: "Gone", sql: "SELECT 1" }] }), ["/tmp/earlier.json sent other statements than this run sends"]);
+  assert.deepEqual(problems({ ...earlier, statements: earlier.statements.slice(1), cells: earlier.cells.filter((c) => c.statement !== "count_by_status") }), [], "a run without the count: measured on Postgres");
+  const before = await syntheticCold(40, ["revenue_by_month_kathmandu"]);
+  assert.deepEqual(problems(before), [], "a run from before the revenue in Asia/Kathmandu");
   assert.deepEqual(problems(earlier, ["--clients", "1,8"]).slice(0, 1), ["/tmp/earlier.json has --clients [1,10], and this run [1,8]"]);
   assert.deepEqual(problems(earlier, ["--runs", "1"]), ["/tmp/earlier.json has --runs 3, and this run 1"]);
   assert.deepEqual(problems(earlier, ["--settle", "2"]), ["/tmp/earlier.json has --settle 10, and this run 2"]);
@@ -924,33 +1010,41 @@ test("--engines mason refuses an earlier run that cannot stand beside it, naming
 });
 
 /** a Mason-alone run's fixture from `syntheticCold()`: its count and revenue Postgres cells copied from the run of
- *  2026-11-17, whose answers this run's Postgres matched; its lookup measured in this run */
+ *  2026-11-17, a run from before the revenue in Asia/Kathmandu, whose answers this run's Postgres matched; its lookup
+ *  and its revenue in Asia/Kathmandu measured in this run */
 async function masonAloneCold(): Promise<{ earlier: ColdFixture; alone: ColdFixture }> {
-  const { earlierPostgresCell, copyable, COLD_STATEMENTS } = await coldModule();
-  const base = await syntheticCold();
-  const answers = Object.fromEntries(COLD_STATEMENTS.map((st) => [st.name, { postgres: `md5-${st.name}`, mason: `md5-${st.name}` }]));
+  const { earlierPostgresCell, copiedFrom, COLD_STATEMENTS } = await coldModule();
+  const base = await syntheticCold(40, ["revenue_by_month_kathmandu"]);
+  const answers = Object.fromEntries(base.statements.map((st) => [st.name, { postgres: `md5-${st.name}`, mason: `md5-${st.name}` }]));
   const earlier: ColdFixture = { ...base, sizes: base.sizes.map((z) => ({ ...z, answers })) };
-  const alone: ColdFixture = { ...earlier, environment: { ...earlier.environment, date: "2026-11-18T09:00:00.000Z",
+  const now = await syntheticCold();
+  const alone: ColdFixture = { ...now, environment: { ...now.environment, date: "2026-11-18T09:00:00.000Z",
       postgresFrom: { date: earlier.environment.date, measuredAt: "9cd1f48e2065", file: "tests/fixtures/bench-replica.json" } },
-    cells: earlier.cells.map((c) => c.engine === "postgres" && copyable(COLD_STATEMENTS.find((st) => st.name === c.statement)!) ? earlierPostgresCell(earlier, c.rows, c.clients, c.statement) : c) };
+    sizes: now.sizes.map((z) => ({ ...z, answers: { ...answers, revenue_by_month_kathmandu: { postgres: "md5-kathmandu", mason: "md5-kathmandu" } } })),
+    cells: now.cells.map((c) => c.engine === "postgres" && copiedFrom(earlier, COLD_STATEMENTS.find((st) => st.name === c.statement)!) ? earlierPostgresCell(earlier, c.rows, c.clients, c.statement) : c) };
   return { earlier, alone };
 }
 
 test("--engines mason copies a Postgres cell only where Postgres's answer is the earlier run's, measures the lookup on both, and marks what it copied", async () => {
-  const { postgresAnswerChanges, earlierPostgresCell, coldFixtureProblems, copyable, COLD_STATEMENTS } = await coldModule();
-  assert.deepEqual(COLD_STATEMENTS.filter(copyable).map((st) => st.name), ["count_by_status", "revenue_by_month"], "the lookup's rows are sampled in each run: measured, never copied");
+  const { postgresAnswerChanges, earlierPostgresCell, coldFixtureProblems, copyable, copiedFrom, COLD_STATEMENTS } = await coldModule();
+  assert.deepEqual(COLD_STATEMENTS.filter(copyable).map((st) => st.name), ["count_by_status", "revenue_by_month", "revenue_by_month_kathmandu"], "the lookup's rows are sampled in each run: measured, never copied");
   const { earlier, alone } = await masonAloneCold();
+  const copied = COLD_STATEMENTS.filter((st) => copiedFrom(earlier, st));
+  assert.deepEqual(copied.map((st) => st.name), ["count_by_status", "revenue_by_month"], "the revenue in Asia/Kathmandu is not in the earlier run: measured on both");
   const size = earlier.sizes[0]!;
-  // the answers to the statements it copies; the lookup's (other rows, sampled in this run) are not compared
-  assert.deepEqual(postgresAnswerChanges(size, { count_by_status: "md5-count_by_status", revenue_by_month: "md5-revenue_by_month", "lookup 0000": "other" }), []);
-  assert.deepEqual(postgresAnswerChanges(size, { count_by_status: "md5-count_by_status", revenue_by_month: "another" }), ["revenue_by_month"]);
-  assert.deepEqual(postgresAnswerChanges({ ...size, answers: {} }, { count_by_status: "x", revenue_by_month: "y" }), ["count_by_status", "revenue_by_month"], "an earlier run with no answer recorded");
+  // the answers to the statements it copies; the lookup's (other rows, sampled in this run) and one the earlier run did
+  // not send are not compared
+  assert.deepEqual(postgresAnswerChanges(size, { count_by_status: "md5-count_by_status", revenue_by_month: "md5-revenue_by_month", revenue_by_month_kathmandu: "new", "lookup 0000": "other" }, copied), []);
+  assert.deepEqual(postgresAnswerChanges(size, { count_by_status: "md5-count_by_status", revenue_by_month: "another" }, copied), ["revenue_by_month"]);
+  assert.deepEqual(postgresAnswerChanges({ ...size, answers: {} }, { count_by_status: "x", revenue_by_month: "y" }, copied), ["count_by_status", "revenue_by_month"], "an earlier run with no answer recorded");
   const cell = earlierPostgresCell(earlier, 1e7, 10, "revenue_by_month");
   const was = earlier.cells.find((c) => c.engine === "postgres" && c.rows === 1e7 && c.clients === 10 && c.statement === "revenue_by_month")!;
   assert.deepEqual(cell, { ...was, copied: { from: "2026-11-17T00:00:00.000Z", answer: "md5-revenue_by_month" } }, "every run, each client's time and what it read, marked");
   assert.throws(() => earlierPostgresCell(earlier, 3e6, 1, "count_by_status"), /no Postgres cell or answer for 3000000 rows/);
   // the fixture: accepted; a copied cell whose answer this run's Postgres did not give, or a copied lookup, is named
   assert.deepEqual(coldFixtureProblems(alone), []);
+  assert.deepEqual(alone.cells.filter((c) => c.engine === "postgres" && c.copied !== undefined).map((c) => c.statement).filter((s, i, a) => a.indexOf(s) === i), ["count_by_status", "revenue_by_month"]);
+  assert.equal(alone.cells.filter((c) => c.engine === "postgres" && c.statement === "revenue_by_month_kathmandu" && c.copied === undefined).length, 6, "measured at every size and client count");
   assert.deepEqual(coldFixtureProblems({ ...alone, sizes: alone.sizes.map((z) => z.rows === 1e6 ? { ...z, answers: { ...z.answers, count_by_status: { postgres: "changed", mason: "changed" } } } : z) }),
     ["1000000 rows, 1 clients, count_by_status, postgres: copied, and Postgres's answer in this run is not the one it had in the run it was copied from",
       "1000000 rows, 10 clients, count_by_status, postgres: copied, and Postgres's answer in this run is not the one it had in the run it was copied from"]);
@@ -1008,7 +1102,8 @@ test("--mason-commit names the commit the Mason image was built from: 7 to 40 he
 test("a Mason-alone run renders where its Postgres times came from, in the lead and in how it was measured; Mason built from a branch is named by its commit or image", async () => {
   const f = await syntheticCold();
   const { alone } = await masonAloneCold();
-  const said = "Postgres's count by status and revenue by month times are from the run of 2026-11-17, where its answers were the same. Its lookup times, and all of Mason's, are from the run of 2026-11-18.";
+  const said = "Postgres's count by status and revenue by month times are from the run of 2026-11-17, where its answers were the same. " +
+    "Its revenue by month in Asia/Kathmandu and lookup times, and all of Mason's, are from the run of 2026-11-18.";
   const headline = renderReplicaHeadline(alone), section = renderReplicaSection(alone);
   assert.ok(headline.split("\n").find((l) => l.startsWith("Mason and Postgres answered"))!.endsWith(said), "the README's lead");
   assert.match(headline, /against PostgreSQL 18\.1 and Mason 0\.23\.0, on 2026-11-17 and 2026-11-18\. \[docs/, "measured on both runs' dates");
@@ -1018,7 +1113,7 @@ test("a Mason-alone run renders where its Postgres times came from, in the lead 
   assert.doesNotMatch(section, /tests\/fixtures\/bench-replica\.json`?\)/, "never the file a later run writes over");
   // the words come from the cells' marks: a run that copied the count alone says so
   const countOnly = { ...alone, cells: alone.cells.map(({ copied, ...c }) => c.statement === "revenue_by_month" || copied === undefined ? c : { ...c, copied }) };
-  assert.match(renderReplicaHeadline(countOnly), /Postgres's count by status times are from the run of 2026-11-17, where its answers were the same\. Its revenue by month and lookup times, and all of Mason's, are from the run of 2026-11-18\./);
+  assert.match(renderReplicaHeadline(countOnly), /Postgres's count by status times are from the run of 2026-11-17, where its answers were the same\. Its revenue by month, revenue by month in Asia\/Kathmandu and lookup times, and all of Mason's, are from the run of 2026-11-18\./);
   for (const text of [renderReplicaHeadline(f), renderReplicaSection(f)]) {
     assert.doesNotMatch(text, /times are from the run of|Two runs|where both were measured/, "a run of both engines says nothing of it");
   }
@@ -1039,6 +1134,20 @@ test("a Mason-alone run renders where its Postgres times came from, in the lead 
   const rowsOf = (text: string, re: RegExp): string[] => [...text.matchAll(re)].map((m) => m[1]!);
   assert.deepEqual(rowsOf(renderReplicaSection(shuffled), /^\| ([\d,]+) \| [\d,]+ \| [\d.]+ GiB/gm), ["1,000,000", "10,000,000", "100,000,000"]);
   assert.deepEqual(rowsOf(renderReplicaSection(shuffled), /At (\d+ M) rows, ids/g), ["1 M", "10 M", "100 M"]);
+});
+
+test("a cold fixture from before a statement was added is a run of the statements it names; one sent otherwise, or out of order, is not", async () => {
+  const { coldFixtureProblems, fixtureStatements } = await coldModule();
+  const before = await syntheticCold(40, ["revenue_by_month_kathmandu"]);
+  assert.deepEqual(fixtureStatements(before)?.map((s) => s.name), ["count_by_status", "revenue_by_month", "lookup"]);
+  assert.deepEqual(coldFixtureProblems(before), [], "no cell of the statement it did not send is asked of it");
+  const now = await syntheticCold();
+  assert.deepEqual(coldFixtureProblems({ ...now, cells: now.cells.filter((c) => !(c.statement === "revenue_by_month_kathmandu" && c.rows === 1e6 && c.clients === 1 && c.engine === "mason")) }),
+    ["1000000 rows, 1 clients, revenue_by_month_kathmandu, mason: 0 cells"], "a statement it names has every cell");
+  const stale = "its statements are not the ones scripts/bench-replica-cold.ts sends now: run it again";
+  assert.ok(coldFixtureProblems({ ...now, statements: [...now.statements].reverse() }).includes(stale), "out of order");
+  assert.ok(coldFixtureProblems({ ...now, statements: now.statements.map(({ timeZone: _t, ...s }) => s) }).includes(stale), "the revenue in Asia/Kathmandu run in UTC");
+  assert.ok(coldFixtureProblems({ ...now, statements: [] }).includes(stale), "no statement");
 });
 
 test("the cold fixture's check names what a run left out", async () => {

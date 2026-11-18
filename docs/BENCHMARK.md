@@ -15,9 +15,10 @@ says why the published run is the cold mode.
 
 ### What it measures
 
-- **Three queries**, sent as written to both (`COLD_STATEMENTS` in `scripts/bench-replica-cold.ts`): a count by status
-  over every order, revenue by month and signup year over orders joined to customers, and one order by its primary
-  key. Neither uses `extract(...)`.
+- **Four queries**, sent as written to both (`COLD_STATEMENTS` in `scripts/bench-replica-cold.ts`): a count by status
+  over every order, revenue by month and signup year over orders joined to customers, the same revenue in a session
+  whose time zone is `Asia/Kathmandu`, and one order by its primary key. None uses `extract(...)`. Kathmandu is 5 hours
+  45 minutes off UTC, so Mason groups its months by a stored 15-minute bucket there, and never in UTC.
 - **Three sizes**: 1 M, 10 M and 100 M orders (`--sizes`).
 - **The data** (`COLD_DATA` and `coldDataSql`) is the warm mode's `orders` and `customers` (below), with two changes. The
   primary keys are random UUIDs: `orders.id` is `gen_random_uuid()`, and a customer's id is `md5('customer' || n)::uuid`,
@@ -25,7 +26,9 @@ says why the published run is the cold mode.
   on both. The other indexes are a read replica's: both primary keys, `orders (tenant_id, created_at)` and
   `orders (created_at)`. `created_at` still rises with the heap's order. The data has its own databases
   (`bench_replica_cold_<rows>`) and marker, so neither mode reuses the other's. The fixture records it (`data`), and a
-  fixture of other data does not render.
+  fixture of other data does not render. The data declares no foreign key. Mason's sources file names one by hand,
+  `customer_id: customers.id` under `orders`'s `references:`, as a user adds a relationship the database leaves out.
+  So the join reads Mason's hidden integer keys.
 - **1 client and 10 clients** (`--clients`). In a run, each client sends the query once, and all clients send it at
   the same moment. A client's time excludes its connection.
 - **3 runs of each cell** (`--runs`). A cell's time is the median over its runs of the slowest client: the time until
@@ -51,6 +54,15 @@ says why the published run is the cold mode.
 - **The same rows.** Both containers are on a Docker network of their own (`bench-replica`). Mason syncs the size's
   database from Postgres by its alias on that network, with every table `sync: off`, so nothing polls the source while
   it is measured. Every query's answer is compared on both before anything is timed.
+- **Mason's own work, finished first.** After `mason wait` says the first sync is done, the run waits until Mason has
+  built the side table it finds an order by its id with, and numbered the hidden keys of the reference. Mason shows
+  neither in `mason status --json` or `/api/state`, so the run reads the line its log says each with. It waits at most
+  an hour, and a failure names the work that never finished. A side table is waited for only where orders has more
+  than 8 of the engine's row groups (from 1 M rows). Below that, Mason may build none, and says nothing when it does
+  not. The fixture records how long the wait took (`backgroundSeconds`), beside the sync's time.
+- **A restart redoes none of it.** The run then restarts Mason once. Mason must say its keys are numbered again, and
+  must not build the side table again. A lookup and the revenue query then run under `EXPLAIN (ANALYZE, VERBOSE)`. What
+  the engine ran must read the side table and the hidden keys. Otherwise the run fails.
 - **Cold, before every run.** Mason is stopped and Postgres restarted. For Mason's run, Mason is started after that.
   The run waits until the engine answers `SELECT 1 FROM orders LIMIT 0`, waits `--settle` seconds more (10), and drops
   the OS page cache.
@@ -58,7 +70,9 @@ says why the published run is the cold mode.
   Mason start reads its source's catalog, but it is idle and was restarted first. The engines take turns going first.
 - **The client** is pgbench from the Postgres image, in a container of its own on the host's network:
   `pgbench -n -c N -j N -t 1 -f <script> --log`. Each client's time is read from pgbench's log of each transaction.
-  Both sessions run in UTC (`PGTZ`), since `date_trunc` of a `timestamptz` depends on the time zone.
+  Both sessions run in UTC, since `date_trunc` of a `timestamptz` depends on the time zone. The revenue in
+  `Asia/Kathmandu` runs in that zone. pgbench sets it with `PGTZ`, as the session starts, so the setting is not in the
+  time it records. The answers are compared under `SET TIME ZONE`, which sets the same setting.
 - **Secrets** (Postgres's password, Mason's API key, the bench user's password from `mason user add --json`) go to
   0600 env files in a 0700 folder. None is on a command line or in the output.
 - **Another run is never touched.** A cold run holds a lock, `/tmp/bench-replica-cold.lock` whatever `$TMPDIR` says,
@@ -92,7 +106,7 @@ says why the published run is the cold mode.
 - **3 GiB of memory or more** for each container (`--memory`, by default half the RAM).
 - **A quiet machine.** Stop anything else that reads the disk or uses the CPU first.
 - **Time.** At 100 M rows, Postgres makes the data in tens of minutes, and Mason's first sync takes about as long. Each
-  of the 36 runs of a size restarts an engine, waits, and drops the page cache.
+  of the 48 runs of a size restarts an engine, waits, and drops the page cache.
 
 ### Running it
 
@@ -108,8 +122,10 @@ earlier run, `--postgres-from` (by default the published `tests/fixtures/bench-r
 time. Postgres still runs as Mason's source, and is restarted before each of Mason's runs. The count and the revenue are
 not measured on Postgres. Their Postgres cells are copied unchanged, once Postgres's answers to them are the earlier
 run's. The data comes from `setseed()` and `random()`, so data made again gives the same answers. The lookup asks for
-rows sampled in this run, since the order ids are random, so it is measured on both engines. Before anything with a side
-effect, the run refuses an earlier run that did not end, or that differs from this one in its data, statements,
+rows sampled in this run, since the order ids are random, so it is measured on both engines. A query the earlier run
+did not send has no cell to copy, so it is measured on both engines too: the revenue in `Asia/Kathmandu`, beside a run
+from before it was added. Before anything with a side
+effect, the run refuses an earlier run that did not end, or that differs from this one in its data, the queries it sent,
 `--clients`, `--runs`, `--settle`, `--cpus`, `--memory`, `--postgres-image`, `--disk` or `--label`, or that lacks a size
 this run measures. Once its Postgres answers, it refuses one of another version or settings, and a size where a copied
 statement's answer is not the earlier run's. The fixture marks each copied cell, and the README and docs/MEASUREMENTS.md
