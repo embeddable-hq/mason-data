@@ -29,3 +29,8 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   - Generated tables are stored as before.
 - **`mason login` and `mason logout` name the hosted service Mason Cloud** in their help, with its address
   (https://app.masondata.ai) and `MASON_CLOUD_URL` for another service. What they do is unchanged.
+
+## What was wrong and is now right
+
+- **The web page's Users list cut "not used in the last 7 days" short, with no way to read it.** Its Last used column
+  is narrower than those words. Now a hover shows them whole, as it does for every other value a list cuts.
