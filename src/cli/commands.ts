@@ -27,7 +27,7 @@ import type { RefusedQuery, SlowQuery } from "./run-server.ts";
 import { entriesOfLines, logLineText } from "../lib/log-buffer.ts";
 import { LogReader, logPath } from "../lib/log-read.ts";
 import { catalogTable, entryName, findEntry, tableNameProblem, type CatalogColumn, type CatalogTable, type ProjectSource } from "./sources.ts";
-import { addEntry, listTables, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type ListedTable, type PickResult, type RemoveResult } from "./source-edit.ts";
+import { addEntry, listTables, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type ListedTable, type PickResult, type ReferenceFact, type RemoveResult } from "./source-edit.ts";
 import { confirmEntries } from "./confirmed.ts";
 import { diskFitNote, type DiskFit, type DiskRoom, type DiskShortage } from "../duck/disk-fit.ts";
 import { connectSource, maskedUrl, parseSource, readSourceFacts, type SourceFacts, type SourceTable } from "./preflight.ts";
@@ -1359,6 +1359,10 @@ const ADD_USAGE = `usage: mason add <table>… [--columns <column>,…] [--inclu
   exclude: [password_hash], since anyone with a user's password can read every synced column. Name one with --columns
   or --include to have it.
 
+  The table's foreign keys are written on its entry as references: (customer_id: customers.id), for each table the
+  file syncs. Adding the table a foreign key points to writes it on the entry that holds it. Each foreign key it does
+  not write is said, with why: most often, the table it points to is not synced yet.
+
   With Mason running the first sync starts at once; mason wait returns when it is done and the table is served. Before
   mason start (mason init && mason add orders && mason start) the entry is written, checked against the database as
   the run checks it, and the first sync begins at mason start. Adding a table again with other columns changes its entry,
@@ -1372,7 +1376,9 @@ const ADD_USAGE = `usage: mason add <table>… [--columns <column>,…] [--inclu
     its entry was written sync: poll 5m under a file whose sync: is replication, or null), pollCost (an estimate of
     what a frequent poll of a big table costs your database, or null), disk (whether its sync fits on disk:
     { table, estimateBytes, freeBytes, reserveBytes, pendingBytes, spillSet, resync, fits }, fits false when added
-    with --yes; { table, unknown } when the free disk could not be read; null when nothing is synced whole) } or
+    with --yes; { table, unknown } when the free disk could not be read; null when nothing is synced whole),
+    referencesWritten (the references it wrote: [{ table (the one that holds it), columns, references (the table it
+    points to), targetColumns }]), referencesLeftOut (the foreign keys it did not write: the same, with reason) } or
     { table, error, disk (on code disk_short: the numbers) }],
     file (the sources file), error (when a table was not added: { code (disk_short: it likely won't fit on disk),
     message, why }), next };
@@ -1542,7 +1548,8 @@ async function addTables(way: AddWay, specs: ReadonlyArray<{ table: string; colu
     const b = r.ok;
     file = b.file;
     results.push({ table: b.table, entry: b.entry, columns: b.columns, exclude: b.exclude, key: b.key, addedKey: b.addedKey, skippedSecrets: b.skippedSecrets, already: b.already,
-      sync: b.sync, bigOff: b.bigOff, notReplicated: b.notReplicated, pollCost: b.pollCost, disk: b.disk ?? null });
+      sync: b.sync, bigOff: b.bigOff, notReplicated: b.notReplicated, pollCost: b.pollCost, disk: b.disk ?? null,
+      referencesWritten: b.referencesWritten ?? [], referencesLeftOut: b.referencesLeftOut ?? [] });
     added.push(b.table);
     if (t.added) wereAdded++;
     if (json) continue;
@@ -1598,7 +1605,25 @@ export function addedLines(b: PickResult, file: string): { line: string; notes: 
     // a secret is readable by anyone with a user's password: left out, and said, with the way to include one
     ...(s.length ? [`left out ${s.join(", ")}: ${s.length === 1 ? "it looks" : "they look"} like ${s.length === 1 ? "a secret" : "secrets"}, ` +
       `which anyone with a user's password could read (--include ${s[0]} adds it)`] : []),
+    // THE FOREIGN KEYS (issue 1143): those written as references, on each entry that holds one; each one not, with why
+    ...referencesNotes(b),
   ] };
+}
+
+/** A foreign key in SQL's words: `orders.customer_id → customers.id`, or `orders (a, b) → customers (c, d)`. */
+export const foreignKeyWords = (f: ReferenceFact): string => {
+  const side = (table: string, cols: readonly string[]): string => cols.length === 1 ? `${entryName(table)}.${cols[0]!}` : `${entryName(table)} (${cols.join(", ")})`;
+  return `${side(f.table, f.columns)} → ${side(f.references, f.targetColumns)}`;
+};
+
+/** What `mason add` says of the references it wrote, on one line, and of each foreign key it did not write. Each names
+ *  the table that holds it, whose entry it is written on. */
+function referencesNotes(b: Pick<PickResult, "referencesWritten" | "referencesLeftOut">): string[] {
+  const written = b.referencesWritten ?? [], left = b.referencesLeftOut ?? [];
+  return [
+    ...(written.length ? [`wrote the database's foreign ${written.length === 1 ? "key" : "keys"} as references: ${written.map(foreignKeyWords).join(", ")}`] : []),
+    ...left.map((f) => `foreign key ${foreignKeyWords(f)} not written as a reference: ${f.reason}`),
+  ];
 }
 
 // ------------------------------------------------------------------ mason remove
@@ -1607,7 +1632,8 @@ const REMOVE_USAGE = `usage: mason remove <table>… [--dry-run] [--json]
 
   Takes tables out of the project: each one's entry in the sources file (mason/sources/<name>.yml) is removed, the
   rest of the file as it was. With Mason running it stops syncing the table and drops its synced data at once; with Mason
-  stopped, what an earlier run synced is dropped at the next mason start. A project deployed as committed
+  stopped, what an earlier run synced is dropped at the next mason start. A reference another entry holds to a removed
+  table (references:) is taken out of that entry, and said. A project deployed as committed
   (MASON_PROJECT_READONLY=1 where Mason runs) is refused, its files left as they are: remove it where the project is
   committed, then deploy.
 
@@ -1618,7 +1644,8 @@ const REMOVE_USAGE = `usage: mason remove <table>… [--dry-run] [--json]
   --dry-run  say which entries would go, and change nothing: the file is read, never written, and neither Mason nor
              the database is asked
   --json     as data: { dryRun, removedTables (the tables, schema.table; on a dry run, the ones that would go), removed
-             (the same, kept until 1.0; not on a dry run), file (the sources file), next }
+             (the same, kept until 1.0; not on a dry run), file (the sources file), referencesRemoved (not on a dry run:
+             [{ table, columns, references, targetColumns }], the references to them taken out of other entries), next }
 `;
 
 export const REMOVE: CommandSpec & { needs: "project" } = {
@@ -1628,7 +1655,7 @@ export const REMOVE: CommandSpec & { needs: "project" } = {
   summary: "take tables out of the sources file: mason remove customers (its synced data is dropped)",
   usage: REMOVE_USAGE,
   options: { json: { type: "boolean" }, "dry-run": { type: "boolean" } },
-  json: ["dryRun", "removedTables", "removed", "file", "next"],
+  json: ["dryRun", "removedTables", "removed", "file", "referencesRemoved", "next"],
 };
 
 export async function remove(argv: string[]): Promise<number> {
@@ -1666,9 +1693,14 @@ function removedAnswer(r: Edited<RemoveResult>, names: readonly string[], runnin
   const b = r.ok;
   const next: NextStep[] = running ? [["mason status", "the tables left"]]
     : [["mason start", "Mason in the background, for this project: it syncs the tables left"], ["mason status", "the tables left"]];
-  if (json) { out(jsonText(REMOVE, { dryRun: false, removed: b.removed, removedTables: b.removed, file: b.file }, next)); return 0; }
+  const referencesRemoved = b.referencesRemoved ?? [];
+  if (json) { out(jsonText(REMOVE, { dryRun: false, removed: b.removed, removedTables: b.removed, file: b.file, referencesRemoved }, next)); return 0; }
   const rel = path.relative(process.cwd(), b.file);
-  out(reportText({ ...removedReport(b.removed, rel.startsWith("..") ? b.file : rel, { running }), next }, styleOut()));
+  const report = removedReport(b.removed, rel.startsWith("..") ? b.file : rel, { running });
+  // the references the entries that stay held to them, taken out with them (issue 1143)
+  const refs = referencesRemoved.length
+    ? [`took out the ${referencesRemoved.length === 1 ? "reference" : "references"} to ${b.removed.length === 1 ? "it" : "them"}: ${referencesRemoved.map(foreignKeyWords).join(", ")}`] : [];
+  out(reportText({ ...report, tips: [...report.tips, ...refs], next }, styleOut()));
   return 0;
 }
 

@@ -922,8 +922,10 @@ left out), `already` (the file said so already, and nothing was written), `sync`
 (why a table under a replication default is polled, or null), `pollCost` (what a frequent poll of a big table costs the
 database, or null), `disk` (whether its sync fits on disk: `{ table, estimateBytes, freeBytes, reserveBytes,
 pendingBytes, spillSet, resync, fits }`, `fits` false when added with `yes`; `{ table, unknown }` when the free disk
-could not be read; null when nothing is synced whole), and `state`, the lean state after the edit. The table's first
-sync starts at once.
+could not be read; null when nothing is synced whole), `referencesWritten` (the foreign keys it wrote as `references:`,
+each `{ table, columns, references, targetColumns }`, on the entry of the table that holds it), `referencesLeftOut`
+(the foreign keys it did not write, the same with `reason`), and `state`, the lean state after the edit. The table's
+first sync starts at once.
 
 | Status | `code` | When |
 |---|---|---|
@@ -935,8 +937,9 @@ sync starts at once.
 ### Remove tables: `POST /api/remove`
 
 `{ "tables": ["orders", "billing.invoices"] }`, each as the file names it or as `schema.table`. The answer is `200`
-with `removed` (the tables whose entries were cut, as `schema.table`), `file` (the sources file, absolute) and
-`state`, the lean state after the edit. The tables' synced data is dropped at once.
+with `removed` (the tables whose entries were cut, as `schema.table`), `file` (the sources file, absolute),
+`referencesRemoved` (the references other entries held to them, taken out: `{ table, columns, references, targetColumns }`)
+and `state`, the lean state after the edit. The tables' synced data is dropped at once.
 
 | Status | `code` | When |
 |---|---|---|

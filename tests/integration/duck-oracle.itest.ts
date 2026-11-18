@@ -349,7 +349,10 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   assert.deepEqual(shop.map((t) => t.source).sort(), ["shop.accounts", "shop.customers", "shop.invoice_lines", "shop.invoices", "shop.order_items", "shop.orders"]);
   const log: string[] = [];
   store = await DuckStore.open(path.join(dir, "duck.db"), (l) => log.push(l));
-  sync = new Sync(store, parsed.source, tag, (l) => log.push(l), 3_600_000, "poll", null, EAGER_JSON ? { json: { eager: true } } : {});
+  // EVERY TABLE WITH A ONE-COLUMN KEY IS LOOKED UP BY IT THROUGH A SIDE TABLE (issue 1148, src/duck/key-lookup.ts): at
+  // the oracle's sizes no key is scattered, so the rule is the oracle's: built after the first sync, kept current by
+  // the rounds' polls (its tail), and built again before the second round (`changes round`)
+  sync = new Sync(store, parsed.source, tag, (l) => log.push(l), 3_600_000, "poll", null, { ...(EAGER_JSON ? { json: { eager: true } } : {}), lookup: { minRowGroups: 0, tailShare: 0 } });
   await sync.open();
   sync.setTables([...added, ...shop, ...other]);
   sync.setViews(facts.views ?? []);
@@ -601,6 +604,8 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   }
   for (const round of [1, 2]) {
     await fixedClock.time(`changes round ${round}`, async () => {
+      // the side tables built again, sorted, before the second round's changes go on top of them
+      if (round === 2) await theSync.checkCompaction();
       psql(dbUrl, mutations(round) + typedMutations(round) + ";\n" + collsMutations(round));
       await theSync.once();
     });
