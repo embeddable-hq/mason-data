@@ -7,9 +7,22 @@
  * two:
  *
  *   SELECT <its list, HAVING, ORDER BY, each aggregate read from its parts, each truncation from its bucket's start>
- *   FROM (SELECT <the bucket>, <the truncation of a row with no bucket>, <every column read outside an aggregate>,
- *                <each aggregate's parts> FROM <its FROM> WHERE <its WHERE> GROUP BY <all but the parts>) AS <own>bucketed
+ *   FROM (SELECT <the bucket>, NULL, <every other key>, <each aggregate's parts>
+ *           FROM <its FROM> WHERE <its WHERE> AND <the bucket> IS DISTINCT FROM BUCKET_NONE GROUP BY <all but the parts>
+ *         UNION ALL
+ *         SELECT NULL, <the row's truncation>, <every other key>, <each aggregate's parts>
+ *           FROM <its FROM> WHERE <its WHERE> AND <the bucket> = BUCKET_NONE GROUP BY <all but the parts>) AS <own>bucketed
  *   GROUP BY <its GROUP BY>
+ *
+ * THE FIRST BRANCH READS THE BUCKET, NEVER THE TIME. The second reads the time of the rows no bucket decides (before
+ * 1980, infinite: src/duck/bucket-column.ts `BUCKET_NONE`). On a table that holds none, the engine's statistics of the
+ * bucket say the second branch's filter is false, and it plans that branch as empty: a cold query reads the bucket and
+ * not the time. The statistics are read as the statement is planned, in its own transaction (a prepared statement is
+ * planned again as it runs), so a row added since never meets a plan that left it out. A table that holds one reads
+ * the time only in the row groups whose bucket's minimum is BUCKET_NONE. In a zone whose bucket does not decide its
+ * units (`offBoundary`, folded to a constant as the statement is bound), the first branch truncates each row instead.
+ * The FROM and WHERE are read twice, so the statement is left as it is where they could answer twice differently: a
+ * volatile call, a LIMIT inside them, a sample, a LATERAL or a function in the FROM.
  *
  * The inner groups are a finer split of the statement's own: each of its keys is computed from the inner columns (a
  * truncation's from its bucket, which decides it, or from the row's own truncation where the row has no bucket: before
@@ -29,7 +42,7 @@
  * A truncation is recognised by its form without offsets (`shape`): the rewrite writes the list's and the GROUP BY's
  * alike, each from its own node.
  */
-import { OFF_BOUNDARY_ZONES } from "./bucket-column.ts";
+import { BUCKET_NONE, OFF_BOUNDARY_ZONES } from "./bucket-column.ts";
 
 type Body = Record<string, unknown>;
 type AstNode = Record<string, unknown>;
@@ -92,6 +105,36 @@ function checked(v: unknown): void {
   Object.values(v).forEach(checked);
 }
 
+/** `Bail` where a FROM read twice could answer twice differently: anything but a table, a join of them or a subquery */
+function repeatableFrom(items: unknown): void {
+  const item = (n: unknown): void => {
+    if (!isNode(n)) throw new Bail();
+    const k = kindOf(n), b = bodyOf(n);
+    if (k === "RangeVar") return;
+    if (k === "JoinExpr") { item(b.larg); item(b.rarg); repeatable(b.quals); return; }
+    if (k === "RangeSubselect" && b.lateral !== true) { repeatable(b.subquery); return; }
+    throw new Bail();
+  };
+  if (!Array.isArray(items)) throw new Bail();
+  items.forEach(item);
+}
+
+/** `Bail` where an expression or query read twice could answer twice differently: a volatile call, a LIMIT or OFFSET
+ *  (which rows it keeps is the engine's choice), a sample, a function in a FROM */
+function repeatable(v: unknown): void {
+  if (Array.isArray(v)) { v.forEach(repeatable); return; }
+  if (!isObject(v)) return;
+  if (isNode(v)) {
+    const k = kindOf(v), b = bodyOf(v);
+    if (k === "FuncCall" && VOLATILE.has(funcName(b))) throw new Bail();
+    if (k === "SelectStmt" && (b.limitCount !== undefined || b.limitOffset !== undefined)) throw new Bail();
+    if (k === "RangeTableSample" || k === "RangeFunction" || k === "RangeTableFunc") throw new Bail();
+    Object.values(b).forEach(repeatable);
+    return;
+  }
+  Object.values(v).forEach(repeatable);
+}
+
 /** whether the session's zone, where the statement runs (`current_setting`, which the engine folds to a constant), is one
  *  whose bucket does not decide its units (src/duck/bucket-column.ts `OFF_BOUNDARY_ZONES`) */
 const offBoundary = (): AstNode => ({ A_Expr: { kind: "AEXPR_IN", name: [S("=")], lexpr: call("lower", [call("current_setting", [{ A_Const: { sval: { sval: "TimeZone" } } }])]),
@@ -122,6 +165,8 @@ function placed(outer: AstNode, placeholder: string, by: AstNode): AstNode {
  */
 export function bucketGroups(tree: unknown, marks: ReadonlyMap<string, BucketMark>, placeholder: string, own: string, approximate: (n: AstNode) => boolean): unknown {
   if (marks.size === 0) return tree;
+  // a WITH query a FROM read twice could read twice: none may answer twice differently
+  try { withQueries(tree).forEach(repeatable); } catch (e) { if (e instanceof Bail) return tree; throw e; }
   // a SELECT inside a subquery expression or a LATERAL item may read an outer query's columns, which the inner query
   // could not: left as it is, and so is everything under it
   const visit = (v: unknown, correlated: boolean): unknown => {
@@ -135,6 +180,19 @@ export function bucketGroups(tree: unknown, marks: ReadonlyMap<string, BucketMar
     try { return { SelectStmt: grouped(bodyOf(out), marks, placeholder, own, approximate) }; } catch (e) { if (e instanceof Bail) return out; throw e; }
   };
   return visit(tree, false);
+}
+
+/** every WITH query of `tree`'s, anywhere in it */
+function withQueries(tree: unknown): unknown[] {
+  const out: unknown[] = [];
+  const walk = (v: unknown): void => {
+    if (Array.isArray(v)) { v.forEach(walk); return; }
+    if (!isObject(v)) return;
+    if (isNode(v) && kindOf(v) === "CommonTableExpr") out.push(bodyOf(v).ctequery);
+    Object.values(isNode(v) ? bodyOf(v) : v).forEach(walk);
+  };
+  walk(tree);
+  return out;
 }
 
 /** one SELECT written as two, or `Bail` where it keeps its form */
@@ -164,8 +222,12 @@ function grouped(s: Body, marks: ReadonlyMap<string, BucketMark>, placeholder: s
     if (m !== undefined) return m.bucket;
     return first(Object.values(isNode(v) ? bodyOf(v) : v));
   };
-  const chosen = (() => { for (const g of groups) { const b = first(keyOf(g)); if (b !== null) return shape(b); } return null; })();
-  if (chosen === null) throw new Bail();
+  const chosenBucket = (() => { for (const g of groups) { const b = first(keyOf(g)); if (b !== null) return b; } return null; })();
+  if (chosenBucket === null) throw new Bail();
+  const chosen = shape(chosenBucket);
+  // its FROM and WHERE are read by both branches: never where they could answer twice differently
+  repeatableFrom(s.fromClause);
+  repeatable(s.whereClause);
   const markOf = (v: AstNode): BucketMark | undefined => { const m = marks.get(shape(v)); return m !== undefined && shape(m.bucket) === chosen ? m : undefined; };
   const holdsChosen = (v: unknown): boolean => {
     if (Array.isArray(v)) return v.some(holdsChosen);
@@ -179,16 +241,19 @@ function grouped(s: Body, marks: ReadonlyMap<string, BucketMark>, placeholder: s
 
   const derived = `${own}bucketed`;
   const inner: AstNode[] = [];
+  // each inner key as the second branch computes it, where it differs (the bucket, NULL; the truncation, the row's)
+  const innerNone: AstNode[] = [];
   const parts: AstNode[] = [];
   const columns = new Map<string, string>();
   // an inner key: one name per form
-  const key = (val: AstNode, prefix: string): AstNode => {
+  const key = (val: AstNode, prefix: string, none: AstNode = val): AstNode => {
     const sig = `${prefix}:${shape(val)}`;
     let name = columns.get(sig);
     if (name === undefined) {
       name = `${own}${prefix}${inner.length}`;
       columns.set(sig, name);
       inner.push(res(structuredClone(val), name));
+      innerNone.push(res(structuredClone(none), name));
     }
     return ref(derived, name);
   };
@@ -231,11 +296,11 @@ function grouped(s: Body, marks: ReadonlyMap<string, BucketMark>, placeholder: s
     if (!bare && plainKeys.has(shape(v))) return key(v, "g");
     const mark = markOf(v);
     if (mark !== undefined) {
-      // the bucket, NULL in a zone it does not decide the units of; and the truncation of a row with none (NULL where it
-      // has one)
-      const usable = (): AstNode => ({ CaseExpr: { args: [{ CaseWhen: { expr: offBoundary(), result: { A_Const: { isnull: true } } } }], defresult: structuredClone(mark.bucket) } });
-      const bucket = key(usable(), "b");
-      const none = key({ CaseExpr: { args: [{ CaseWhen: { expr: { NullTest: { arg: usable(), nulltesttype: "IS_NULL" } }, result: v } }] } }, "e");
+      // the bucket, NULL in a zone it does not decide the units of (the first branch) and for a row no bucket decides (the
+      // second); and the truncation of the row, in that zone and for that row alone (NULL elsewhere: no time is read)
+      const usable: AstNode = { CaseExpr: { args: [{ CaseWhen: { expr: offBoundary(), result: { A_Const: { isnull: true } } } }], defresult: structuredClone(mark.bucket) } };
+      const bucket = key(usable, "b", cast({ A_Const: { isnull: true } }, "integer"));
+      const none = key({ CaseExpr: { args: [{ CaseWhen: { expr: offBoundary(), result: v } }] } }, "e", v);
       return { CaseExpr: { args: [{ CaseWhen: { expr: { NullTest: { arg: structuredClone(bucket), nulltesttype: "IS_NULL" } }, result: none } }],
         defresult: placed(mark.outer, placeholder, bucketStart(bucket)) } };
     }
@@ -276,10 +341,19 @@ function grouped(s: Body, marks: ReadonlyMap<string, BucketMark>, placeholder: s
     return { SortBy: { ...bodyOf(x), node: outer(bodyOf(x).node, true) } };
   });
   if (inner.length === 0) throw new Bail();
-  const innerSelect: Body = {
-    targetList: [...inner, ...parts], fromClause: s.fromClause, ...(s.whereClause !== undefined ? { whereClause: s.whereClause } : {}),
-    groupClause: inner.map((_, i) => intConst(i + 1)), limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE",
+  // the rows a bucket decides, and the rows none does (`BUCKET_NONE`), each grouped
+  const branch = (keys: AstNode[], bucketTest: AstNode): Body => {
+    // an AND of the WHERE's own: one AND, as its SQL reads back (an AND inside an AND is written as one)
+    const w = s.whereClause === undefined ? undefined : structuredClone(s.whereClause) as AstNode;
+    const conjuncts = w === undefined ? [] : kindOf(w) === "BoolExpr" && bodyOf(w).boolop === "AND_EXPR" ? bodyOf(w).args as AstNode[] : [w];
+    const where = conjuncts.length === 0 ? bucketTest : { BoolExpr: { boolop: "AND_EXPR", args: [...conjuncts, bucketTest] } };
+    return { targetList: [...keys, ...parts].map((x) => structuredClone(x)), fromClause: structuredClone(s.fromClause), whereClause: where,
+      groupClause: keys.map((_, i) => intConst(i + 1)), limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE" };
   };
+  const noneConst = (): AstNode => ({ A_Const: { ival: { ival: BUCKET_NONE } } });
+  const decided = branch(inner, { A_Expr: { kind: "AEXPR_DISTINCT", name: [S("=")], lexpr: structuredClone(chosenBucket), rexpr: noneConst() } });
+  const undecided = branch(innerNone, { A_Expr: { kind: "AEXPR_OP", name: [S("=")], lexpr: structuredClone(chosenBucket), rexpr: noneConst() } });
+  const innerSelect: Body = { op: "SETOP_UNION", all: true, larg: decided, rarg: undecided, limitOption: "LIMIT_OPTION_DEFAULT" };
   const out: Body = { ...s, targetList, fromClause: [{ RangeSubselect: { subquery: { SelectStmt: innerSelect }, alias: { aliasname: derived } } }], groupClause };
   delete out.whereClause;
   if (havingClause === undefined) delete out.havingClause; else out.havingClause = havingClause;

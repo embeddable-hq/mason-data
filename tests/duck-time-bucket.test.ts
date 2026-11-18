@@ -27,7 +27,7 @@ import type { PgSchema } from "../src/api/postgres/schema.ts";
 // without that module (scripts/fails-without.ts), where the column is never read and the plan is the one before
 const bucketColumn = (column: string): string => `__mason_bucket_${createHash("sha256").update(column).digest("hex").slice(0, 12)}`;
 const bucketSql = (ts: string): string =>
-  `CAST(CASE WHEN epoch_us(${ts}) >= 315532800000000 AND epoch_us(${ts}) < 253402300800000000 THEN epoch_us(${ts}) // 900000000 END AS INTEGER)`;
+  `CAST(CASE WHEN ${ts} IS NULL THEN NULL WHEN epoch_us(${ts}) >= 315532800000000 AND epoch_us(${ts}) < 253402300800000000 THEN epoch_us(${ts}) // 900000000 ELSE -1 END AS INTEGER)`;
 const hidden = bucketColumn("at");
 
 const API_KEY = "k".repeat(48);
@@ -55,6 +55,9 @@ const EDGES = `WITH zones(z) AS (VALUES ${[...ZONES, "Europe/London", "America/S
     ('2011-03-13 03:30:30+00'), ('2011-03-13 03:31:30+00'), ('2010-11-07 02:30:30+00'), ('2010-11-07 02:31:30+00'), ('2022-10-01 16:00:30+00'), ('2022-10-01 16:01:30+00')) v(t)
   UNION ALL SELECT NULL`;
 
+/** rows every 7 hours 13 minutes through 2024, and some NULL: a table every row of which its bucket decides */
+const CLEAN = "SELECT g, CASE WHEN g % 50 = 0 THEN NULL ELSE TIMESTAMPTZ '2024-01-01 00:00:00+00' + g * INTERVAL '7 hours 13 minutes' END, g % 13 FROM generate_series(1, 1200) AS s(g)";
+
 const schema: PgSchema = {
   database: "app",
   tables: [
@@ -62,6 +65,8 @@ const schema: PgSchema = {
       { name: "v", type: "int4" }, { name: "x", type: "numeric", spelled: "numeric(10,2)" }, { name: "s", type: "text" }] },
     // only rows no bucket holds: before 1980, infinite and NULL
     { name: "old", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "at", type: "timestamptz", bucket: hidden }, { name: "v", type: "int4" }] },
+    // every row's bucket decides it (2024's times and NULL); `late` is so until a test writes a row no bucket decides
+    ...["clean", "late"].map((name): PgSchema["tables"][number] => ({ name, primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "at", type: "timestamptz", bucket: hidden }, { name: "v", type: "int4" }] })),
   ],
 };
 
@@ -81,12 +86,17 @@ before(async () => {
     await w.run(`INSERT INTO public.ev (id, "at", v, x, s) VALUES ${rows.slice(i, i + 1000).map((r) => `(${r.map(value).join(", ")})`).join(", ")}`);
   }
   await w.run(`CREATE TABLE public.old (id INTEGER, "at" TIMESTAMPTZ, v INTEGER, "${hidden}" INTEGER); INSERT INTO public.old (id, "at", v) VALUES ${OLD}`);
-  for (const t of ["ev", "old"]) await w.run(`UPDATE public.${t} SET "${hidden}" = ${bucketSql('"at"')}`);
+  for (const t of ["clean", "late"]) {
+    await truth.exec(`CREATE TABLE ${t} (id integer PRIMARY KEY, at timestamptz, v integer); INSERT INTO ${t} ${CLEAN}`);
+    await w.run(`CREATE TABLE public.${t} (id INTEGER, "at" TIMESTAMPTZ, v INTEGER, "${hidden}" INTEGER); INSERT INTO public.${t} (id, "at", v) ${CLEAN}`);
+  }
+  for (const t of ["ev", "old", "clean", "late"]) await w.run(`UPDATE public.${t} SET "${hidden}" = ${bucketSql('"at"')}`);
   // each copy's view of its visible columns, as the sync makes it (src/duck/kept.ts `view`)
   await w.run("ATTACH IF NOT EXISTS ':memory:' AS __mason_visible");
   await w.run("CREATE SCHEMA IF NOT EXISTS __mason_visible.public");
   await w.run(`CREATE VIEW __mason_visible.public.ev AS SELECT id, "at", v, x, s FROM "${db}".public.ev`);
   await w.run(`CREATE VIEW __mason_visible.public.old AS SELECT id, "at", v FROM "${db}".public.old`);
+  for (const t of ["clean", "late"]) await w.run(`CREATE VIEW __mason_visible.public.${t} AS SELECT id, "at", v FROM "${db}".public.${t}`);
   api = await startPostgresApi({
     port: 0, host: "127.0.0.1", tls: null, database: "app", masonVersion: "test", product: "mason-data",
     authenticate: (password) => { const problem = tokenProblem(API_KEY, password); if (problem !== null) throw new Error(problem); return { filters: [], subject: undefined }; },
@@ -199,4 +209,78 @@ test("a GROUP BY of a timestamptz's unit groups by its 15-minute bucket first; a
     "SELECT date_trunc('month', at), count(*), rank() OVER (ORDER BY count(*), date_trunc('month', at)) FROM ev GROUP BY 1 ORDER BY 1",
     "SELECT * FROM ev ORDER BY id LIMIT 3",
   ]), []);
+});
+
+/** the tables the engine's plan for `sql` scans, each with the columns it reads (its EXPLAIN's projections and filters),
+ *  and whether some part of it is planned empty, in `zone` */
+async function scans(sql: string, zone = "Asia/Kathmandu"): Promise<{ read: Map<string, string[]>; empty: boolean }> {
+  const line = await sent(sql, zone);
+  const engineSql = line.slice(line.indexOf("Sent to the engine:") + "Sent to the engine:".length).trim();
+  const w = store.writer;
+  // as a session's connection reads it (src/duck/store.ts SessionSetup): its zone, and the tables by their schema
+  await w.run(`SET TimeZone = '${zone}'`);
+  await w.run("SET search_path = 'public'");
+  try {
+    const plan = JSON.parse(String((await w.runAndReadAll(`EXPLAIN (FORMAT json) ${engineSql}`)).getRowsJS()[0]![1])) as unknown;
+    const read = new Map<string, string[]>();
+    let empty = false;
+    const walk = (n: unknown): void => {
+      if (Array.isArray(n)) { n.forEach(walk); return; }
+      if (typeof n !== "object" || n === null) return;
+      const o = n as Record<string, unknown>;
+      const info = (o.extra_info ?? {}) as Record<string, unknown>;
+      if (o.name === "EMPTY_RESULT") empty = true;
+      if (typeof info.Table === "string") {
+        const cols = [info.Projections, info.Filters].flat().filter((x): x is string => typeof x === "string").flatMap((x) => x.split("\n"));
+        const t = info.Table.split(".").at(-1)!.replaceAll('"', "");
+        read.set(t, [...(read.get(t) ?? []), ...cols]);
+      }
+      walk(o.children);
+    };
+    walk(plan);
+    return { read, empty };
+  } finally { await w.run("SET TimeZone = 'UTC'"); await w.run("RESET search_path"); }
+}
+const readsTime = (cols: readonly string[] | undefined): boolean => (cols ?? []).some((c) => /(^|[^a-z_])at([^a-z_]|$)/.test(c));
+
+test("a table every row of which its bucket decides is read by its bucket and never its time; one that holds a row none decides reads that row's time", async () => {
+  for (const sql of [
+    "SELECT date_trunc('month', at) AS m, count(*), sum(v) FROM clean GROUP BY 1 ORDER BY 1",
+    "SELECT date_trunc('day', a.at), count(*), max(b.v) FROM clean a JOIN clean b ON b.id = a.id + 1 WHERE a.v > 2 GROUP BY 1 ORDER BY 1",
+    // a WHERE that is an AND already
+    "SELECT date_trunc('week', at) AS w, count(*) FROM clean WHERE v > 2 AND v < 11 GROUP BY 1 ORDER BY 1 NULLS FIRST",
+  ]) {
+    const { read, empty } = await scans(sql);
+    assert.ok(read.has("clean") && !readsTime(read.get("clean")), `${sql}: the bucket alone is read (${JSON.stringify([...read])})`);
+    assert.ok(empty, `${sql}: the rows no bucket decides are planned empty`);
+  }
+  // a zone whose bucket does not decide its units reads the time
+  assert.ok(readsTime((await scans("SELECT date_trunc('month', at), count(*) FROM clean GROUP BY 1", "America/St_Johns")).read.get("clean")), "in St. John's, the time");
+  // a table holding rows no bucket decides reads the time of those
+  const old = await scans("SELECT date_trunc('month', at), count(*) FROM old GROUP BY 1");
+  assert.ok(readsTime(old.read.get("old")), `a table of rows none decides: the time (${JSON.stringify([...old.read])})`);
+  assert.deepEqual(await unlike("Asia/Kathmandu", ["SELECT date_trunc('month', at) AS m, count(*), sum(v) FROM clean GROUP BY 1 ORDER BY 1 NULLS FIRST",
+    "SELECT date_trunc('week', at) AS w, count(*) FROM clean WHERE v > 2 AND v < 11 GROUP BY 1 ORDER BY 1 NULLS FIRST"]), []);
+});
+
+test("a row no bucket decides, written after the same statement was planned on a table that held none, is answered from its time", async () => {
+  const statements = [
+    "SELECT date_trunc('month', at) AS m, count(*), sum(v) FROM late GROUP BY 1 ORDER BY 1 NULLS FIRST",
+    "SELECT date_trunc('year', a.at) AS y, count(*) FROM late a JOIN clean c ON c.id = a.id GROUP BY 1 ORDER BY 1 NULLS FIRST",
+  ];
+  // planned (and the plan kept) while every row's bucket decides it
+  assert.deepEqual(await unlike("Asia/Kathmandu", statements), []);
+  assert.ok((await scans(statements[0]!)).empty, "planned with no row its bucket does not decide");
+  // then a sync writes rows no bucket decides, the bucket with each as every write path computes it: an insert, and an
+  // update of a row's time
+  const w = store.writer;
+  for (const [sql, pgSql] of [
+    [`INSERT INTO public.late (id, "at", v, "${hidden}") SELECT 5000, TIMESTAMPTZ '1975-03-01 00:00:00+00', 7, ${bucketSql("TIMESTAMPTZ '1975-03-01 00:00:00+00'")}`,
+      "INSERT INTO late VALUES (5000, '1975-03-01 00:00:00+00', 7)"],
+    [`UPDATE public.late SET "at" = 'infinity', "${hidden}" = ${bucketSql("TIMESTAMPTZ 'infinity'")} WHERE id = 7`, "UPDATE late SET at = 'infinity' WHERE id = 7"],
+  ] as const) {
+    await w.run(sql);
+    await truth.exec(pgSql);
+    assert.deepEqual(await unlike("Asia/Kathmandu", statements), [], sql);
+  }
 });

@@ -10,8 +10,11 @@
  *
  * So beside each timestamptz column the copy holds one more, hidden, an INTEGER a row: the 15 minutes of UTC its value
  * is in (`epoch / 900 s`). A GROUP BY of `date_trunc(unit, x)` then groups by the bucket first, a few hundred thousand
- * groups, and works out each bucket's local unit once (src/duck/bucket-group.ts). The bucket is NULL for a NULL, an
- * infinite value, a value before 1980-01-01 UTC and one from year 10000 on, and such a row is truncated as before.
+ * groups, and works out each bucket's local unit once (src/duck/bucket-group.ts). The bucket is NULL for a NULL. It is
+ * `BUCKET_NONE` for a value no bucket decides: an infinite one, one before 1980-01-01 UTC and one from year 10000 on.
+ * Such a row is truncated as before, from the value. So a table none of whose rows holds `BUCKET_NONE` is answered
+ * from its buckets alone, and the engine's own statistics of the column say whether it is one, in the statement's
+ * transaction: nothing is recorded beside the rows, and nothing a plan holds goes stale.
  *
  * The one module that names the hidden column and computes its value, in the engine (`bucketSql`: the copy's chunks, the
  * poll's stage, the stream's rows).
@@ -26,6 +29,9 @@ export const BUCKET_MICROS = 900_000_000;
 export const BUCKET_FROM_MICROS = 315_532_800_000_000;
 /** the first instant no bucket is held for: year 10000, so every bucket is an INTEGER */
 export const BUCKET_UNTIL_MICROS = 253_402_300_800_000_000;
+/** the bucket of a value no bucket decides (±infinity, before 1980, from year 10000): below every bucket, so a table's
+ *  minimum says whether it holds one, and the rows a query reads from the value are found by the column alone */
+export const BUCKET_NONE = -1;
 
 /**
  * THE ZONES WHOSE BUCKET DOES NOT DECIDE THEIR LOCAL UNITS: the zones the engine knows that changed their offset at an
@@ -61,11 +67,12 @@ export function bucketColumn(column: string, columns: readonly string[]): string
 }
 
 /** the bucket of a timestamptz `ts` (a SQL expression of the engine's TIMESTAMPTZ), as the engine computes it: its
- *  microseconds from the epoch divided by a bucket's, for a value in [1980, 10000); NULL for anything else (NULL,
- *  ±infinity, whose `epoch_us` is NULL, and a value outside). Every value held is positive, so the engine's integer
- *  division, which truncates, is the floor */
+ *  microseconds from the epoch divided by a bucket's, for a value in [1980, 10000); NULL for a NULL; `BUCKET_NONE` for
+ *  anything else (±infinity, whose `epoch_us` is NULL, and a value outside). Every bucket held is positive, so the
+ *  engine's integer division, which truncates, is the floor */
 export const bucketSql = (ts: string): string =>
-  `CAST(CASE WHEN epoch_us(${ts}) >= ${BUCKET_FROM_MICROS} AND epoch_us(${ts}) < ${BUCKET_UNTIL_MICROS} THEN epoch_us(${ts}) // ${BUCKET_MICROS} END AS INTEGER)`;
+  `CAST(CASE WHEN ${ts} IS NULL THEN NULL WHEN epoch_us(${ts}) >= ${BUCKET_FROM_MICROS} AND epoch_us(${ts}) < ${BUCKET_UNTIL_MICROS} THEN epoch_us(${ts}) // ${BUCKET_MICROS} ` +
+  `ELSE ${BUCKET_NONE} END AS INTEGER)`;
 
 /** how the listener tells the plan a column holds its buckets (`userTypes`, src/api/postgres/server.ts): this prefix,
  *  then the JSON of [schema, table, column, its hidden bucket column's name] (`bucketKey`, `bucketOf`) */

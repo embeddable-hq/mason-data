@@ -57,7 +57,7 @@ async function tablesOf(source: Source, names: readonly string[]): Promise<Added
 // without that module (scripts/fails-without.ts), where no copy holds one
 const bucketColumn = (column: string): string => `__mason_bucket_${createHash("sha256").update(column).digest("hex").slice(0, 12)}`;
 const bucketSql = (ts: string): string =>
-  `CAST(CASE WHEN epoch_us(${ts}) >= 315532800000000 AND epoch_us(${ts}) < 253402300800000000 THEN epoch_us(${ts}) // 900000000 END AS INTEGER)`;
+  `CAST(CASE WHEN ${ts} IS NULL THEN NULL WHEN epoch_us(${ts}) >= 315532800000000 AND epoch_us(${ts}) < 253402300800000000 THEN epoch_us(${ts}) // 900000000 ELSE -1 END AS INTEGER)`;
 
 /** that every row of `table` (or its compaction's side table) holds each timestamptz's bucket as the engine computes it
  *  from the value, and that some row holds one */

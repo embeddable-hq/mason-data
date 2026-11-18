@@ -29,9 +29,14 @@
         "  PROJECTION",
         "    HASH_GROUP_BY",
         "      PROJECTION",
-        "        HASH_GROUP_BY",
+        "        UNION",
+        "          HASH_GROUP_BY",
+        "            PROJECTION",
+        "              TABLE_SCAN public.orders",
         "          PROJECTION",
-        "            TABLE_SCAN public.orders"
+        "            HASH_GROUP_BY",
+        "              PROJECTION",
+        "                EMPTY_RESULT"
       ],
       "calls": [],
       "sends": [
@@ -53,9 +58,14 @@
         "  PROJECTION",
         "    HASH_GROUP_BY",
         "      PROJECTION",
-        "        HASH_GROUP_BY",
+        "        UNION",
+        "          HASH_GROUP_BY",
+        "            PROJECTION",
+        "              TABLE_SCAN public.orders [zone-map filter: created_at >= constant]",
         "          PROJECTION",
-        "            TABLE_SCAN public.orders [zone-map filter: created_at >= constant]"
+        "            HASH_GROUP_BY",
+        "              PROJECTION",
+        "                EMPTY_RESULT"
       ],
       "calls": [],
       "sends": [
@@ -98,12 +108,20 @@
         "ORDER_BY",
         "  HASH_GROUP_BY",
         "    PROJECTION",
-        "      PROJECTION",
-        "        HASH_GROUP_BY",
+        "      UNION",
+        "        PROJECTION",
+        "          HASH_GROUP_BY",
+        "            PROJECTION",
+        "              HASH_JOIN",
+        "                TABLE_SCAN public.orders",
+        "                TABLE_SCAN public.customers",
+        "        PROJECTION",
         "          PROJECTION",
-        "            HASH_JOIN",
-        "              TABLE_SCAN public.orders",
-        "              TABLE_SCAN public.customers"
+        "            HASH_GROUP_BY",
+        "              PROJECTION",
+        "                HASH_JOIN",
+        "                  TABLE_SCAN public.customers",
+        "                  EMPTY_RESULT"
       ],
       "calls": [],
       "sends": [

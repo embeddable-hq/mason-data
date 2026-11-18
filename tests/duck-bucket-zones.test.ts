@@ -67,11 +67,11 @@ test("every aggregate the engine has, and every macro over one, is named in ENGI
   assert.deepEqual([...aggregates, ...macros].filter((n) => !ENGINE_AGGREGATES.has(n)).sort(), []);
 });
 
-test("a timestamptz's bucket: its 15 minutes of UTC from 1980 to year 10000, NULL anywhere else", async () => {
+test("a timestamptz's bucket: its 15 minutes of UTC from 1980 to year 10000, NULL for a NULL, BUCKET_NONE anywhere else", async () => {
   const at = (v: string): string => `${bucketSql(`TIMESTAMPTZ '${v}'`)}`;
   const got = (await rows(`SELECT ${[
     "1979-12-31 23:59:59.999999+00", "1980-01-01 00:00:00+00", "1980-01-01 00:14:59.999999+00", "1980-01-01 00:15:00+00",
     "2024-03-31 01:00:00+00", "9999-12-31 23:59:59.999999+00", "infinity", "-infinity", "1880-06-15 12:00:30+00",
   ].map(at).join(", ")}, ${bucketSql("NULL::TIMESTAMPTZ")}`))[0];
-  assert.deepEqual(got, [null, 350_592, 350_592, 350_593, 1_902_052, 281_558_111, null, null, null, null]);
+  assert.deepEqual(got, [-1, 350_592, 350_592, 350_593, 1_902_052, 281_558_111, -1, -1, -1, null]);
 });
