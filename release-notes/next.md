@@ -27,6 +27,15 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
     `mason logs` shows `dropped <table>'s synced data`, then run `mason add <table>`. The table is not served in
     between.
   - Generated tables are stored as before.
+- **A group by month, week, day or hour of a `timestamptz` column is faster in a time zone other than UTC.** Mason now
+  syncs each such column with a small hidden number beside it: the 15 minutes of UTC its value falls in. A query that
+  groups by a unit of the column groups by that number first, and works out each group's local month once, not once a
+  row. On 5 M rows in `Asia/Kathmandu`, revenue by month went from 57 ms to 18 ms, and from 559 ms to 123 ms with ten
+  clients at once. The answers are the same, in every zone.
+  - In UTC, a query runs as before, since it is already fast there.
+  - The synced data grows a little: 6% on a table of 5 M rows with two such columns, synced in the order of its times.
+  - The upgrade reads no table again. A table synced before keeps running its queries as before, until it is synced
+    again whole.
 - **`mason login` and `mason logout` name the hosted service Mason Cloud** in their help, with its address
   (https://app.masondata.ai) and `MASON_CLOUD_URL` for another service. What they do is unchanged.
 

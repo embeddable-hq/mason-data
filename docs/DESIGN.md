@@ -4503,6 +4503,68 @@ compacted (Mason compacts a table by itself once half its blocks are waste: dele
 ZSTD. A stored JSON path's column too, until its table is compacted. The disk check's `STORED_SHARE` (0.4) was measured
 with ZSTD everywhere, so it now over-estimates a table of short text, which only errs on the safe side.
 
+### A time's 15-minute bucket (issue 1146, 2026-11-18)
+
+**Decision.** Beside each `timestamptz` column, a synced table holds an INTEGER: the value's 15 minutes of UTC
+(src/duck/bucket-column.ts). A GROUP BY of a timestamptz column's hour, day, week, month, quarter or year, planned in a
+zone other than UTC, groups by that bucket first (src/duck/bucket-group.ts). It then works out the unit once a bucket,
+instead of once a row. The rules are in duck-copy.md and duck-rewrite.md ("a time's unit grouped by its bucket").
+
+**Why it is exact.** Every zone the engine knows has been a multiple of 15 minutes from UTC since 1980. So a local
+hour, day, week, month, quarter or year starts on a bucket's edge, and a bucket never straddles two units.
+`tests/duck-bucket-zones.test.ts` checks this for every zone the engine knows, so an engine upgrade that changes the
+zone data fails CI. The test also found what the issue missed:
+- Six zones changed offset at a minute past midnight since 1980, off a bucket's edge. They are St. John's (and its
+  names CNT and Canada/Newfoundland) and Goose Bay until 2011, Moncton until 2006, Gaza and Hebron in 2010 and 2011,
+  and Casey from 2020 to 2022. In these zones a bucket can hold both sides of a change.
+- So the plan reads the session's zone where it runs. In those zones (`OFF_BOUNDARY_ZONES`) every row is truncated as
+  before. A zone added to the engine's data with such a change fails the test until it is named.
+- Pacific/Kiritimati's −10:40 ended in 1979, which is the 1980 cutoff.
+
+**Why the guards are per row, not the column's statistics.** The issue proposed reading the column's earliest value
+from its statistics, and keeping today's plan when it is before 1980 or infinite. But a plan is cached by its text,
+and a prepared statement keeps its plan. A row synced after the plan was made could be before 1980. So the bucket is
+NULL for a value before 1980, from year 10000, for ±infinity and for NULL. The inner query truncates such a row itself.
+This is always exact, and needs no statistics. Its cost is that the query reads the time column as well as its
+bucket. So on a cold read, the bucket saves no bytes. The issue's prototype read the bucket alone (26.4 MB against
+427 MB at 100 M rows).
+
+**When it is used, by measurement** (5 M rows, below):
+- **Not when the plan is made in UTC.** There the truncation is already the instant's arithmetic, and the second
+  GROUP BY cost more: a month took 25 ms against 18. The plan is exact in any zone either way. The plan cache keeps a
+  plan by its zone, so only a prepared statement can run a plan made in another zone.
+- **One column's bucket a statement.** Grouped by two columns' buckets, the inner groups are pairs of buckets, nearly
+  one a row (a month and a week of two columns: 140 ms against 126). Every other key is one inner key, computed a row.
+- **A sum or an average of a float keeps its plan.** Doubles added in another order can differ in the last digit. The
+  oracle found it ("675" where Postgres has "675.0000000000001").
+
+**A `timestamp` has no bucket.** Its truncation never reads the session's zone. It is the engine's arithmetic, which
+the bucket did not beat in UTC.
+
+**A table synced before has no bucket**, and keeps today's plan until it is synced again whole. Nothing is read again
+on upgrade.
+
+**Measured** on a laptop against main at the same commit (68891954), over a synthetic table synced into a fresh file:
+5 M orders with two timestamptz columns (a quarter of one NULL), joined to 250 k customers, rows in time order. Warm,
+over the Postgres API, min of 3 runs alternating main and head, one client and ten at once:
+
+| Query | Zone | main, 1 client | head, 1 client | main, 10 clients | head, 10 clients |
+|---|---|---:|---:|---:|---:|
+| Revenue by month | Asia/Kathmandu | 57 ms | 18 ms | 559 ms | 123 ms |
+| Orders by day | Asia/Kathmandu | 68 ms | 32 ms | 556 ms | 226 ms |
+| Orders by hour | Asia/Kathmandu | 274 ms | 229 ms | 2,520 ms | 2,204 ms |
+| Revenue by month, joined to customers (the cold benchmark's) | Asia/Kathmandu | 116 ms | 103 ms | 1,081 ms | 996 ms |
+| Month by status and ship week (two columns) | Asia/Kathmandu | 125 ms | 139 ms | 1,062 ms | 1,154 ms |
+| Revenue by month | UTC | 16 ms | 16 ms | 149 ms | 151 ms |
+| Revenue by month, joined to customers | UTC | 33 ms | 34 ms | 274 ms | 278 ms |
+
+- The joined query groups by two columns' units: the customer's year is still worked out a row. That is where most of
+  its time goes.
+- At 5 M rows over 6 years, a bucket holds about 24 rows. The gain grows with the rows a bucket holds.
+- **The first sync** took 1.52 s against 1.59 s (the min of 3; within noise).
+- **The synced data** took 45.4 MB against 42.7 MB (+6%), rows in time order. With rows in random time order, the
+  worst case for the bucket's compression, it took 94.6 MB against 70.0 MB (+35%).
+
 ### A small table's size: not measured until DuckDB's own checkpoint (issue 815; the owner, 2026-11-11)
 
 **What was wrong.** A copy's size is its distinct blocks (`pragma_storage_info`), and a copy whose rows are all in the
