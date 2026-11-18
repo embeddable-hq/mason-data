@@ -133,8 +133,8 @@ function refusal(a: Answer, status: number, code: string): { code: string; messa
 const LEAN_TABLE = ["added", "addedColumns", "bytes", "columnCount", "comment", "copy", "copyKey", "error", "estimateBytes", "key", "reason", "rows", "table"];
 /** An added table's entry as the sources file says it, and the columns every column leaves out (issue 884). */
 const ADDED_ENTRY = ["entry", "everyColumnLeavesOut"];
-const PICK_ANSWER = ["addedKey", "already", "bigOff", "columns", "disk", "entry", "exclude", "file", "key", "notReplicated", "pollCost", "skippedSecrets", "state", "sync", "table"];
-const REMOVE_ANSWER = ["file", "removed", "state"];
+const PICK_ANSWER = ["addedKey", "already", "bigOff", "columns", "disk", "entry", "exclude", "file", "key", "notReplicated", "pollCost", "referencesLeftOut", "referencesWritten", "skippedSecrets", "state", "sync", "table"];
+const REMOVE_ANSWER = ["file", "referencesRemoved", "removed", "state"];
 /** `POST /api/sync`'s answer as the sync starts, and a sync by hand as it and `/api/state` `syncByHand` say it (issue 1007) */
 const SYNC_STARTED = ["sync"];
 const SYNC_BY_HAND = ["endedAt", "id", "startedAt", "state", "tables"];
@@ -210,7 +210,8 @@ test("POST /api/pick adds a table: 200 with what was written and the state after
   assert.deepEqual(keys(added), PICK_ANSWER);
   const { state, ...r } = added;
   assert.deepEqual(r, { table: "public.events", file: op.sourceFile, entry: "events", columns: ["tenant_id", "id", "body"], exclude: [], key: ["tenant_id", "id"],
-    addedKey: ["tenant_id", "id"], skippedSecrets: [], already: false, sync: { value: "poll 5m", from: "entry" }, bigOff: false, notReplicated: null, pollCost: null, disk: null });
+    addedKey: ["tenant_id", "id"], skippedSecrets: [], already: false, sync: { value: "poll 5m", from: "entry" }, bigOff: false, notReplicated: null, pollCost: null, disk: null,
+    referencesWritten: [], referencesLeftOut: [] });
   assert.equal((state as { tables: Array<{ table: string; added: boolean }> }).tables.find((t) => t.table === "public.events")!.added, true, "the state after the edit");
   for (const t of (state as { tables: object[] }).tables) assert.ok(!("columns" in t), "the lean state");
   assert.notEqual(fs.readFileSync(op.sourceFile, "utf8"), before);
