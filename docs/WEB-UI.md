@@ -183,7 +183,7 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   table with no primary key.
 - **Users** (`#users`), in this order: the list of users, right under the title (and its read-only line), then the add
   box (the add form; and, where it may be opened, a Temporary cloud tunnel) with the card of what it made beside it,
-  then **Connect a Postgres client or BI tool** and **Connect an MCP client**, so a card that appears moves nothing
+  then **Connect a Postgres client or BI tool** and **Connect an AI agent**, so a card that appears moves nothing
   above it. A person arriving on the page — its address opened, a
   link of the sidebar or another followed — starts with the cursor in the form's **Name**, once the form is written;
   never at a poll's write after that, never at a hash of the page already shown (a tab of the list, a range), never taken from what the person focused since they arrived, never on a touch
@@ -216,13 +216,19 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   (`--control-sm`); and one line, "The password is only shown once", over **I have copied it**. No Database row: the
   URL already carries the database, and the database, host, port and SSL mode are Connect a Postgres client or BI
   tool's on the same page (`mason user add` in a terminal still prints all of them). No psql line: the URL is the same
-  thing, pasted after `psql`. Mason keeps no copy, so it is never shown again. Right under the URL, across the rows'
-  width, a closed section, **Connect an MCP client** (issue 1114): the same two lines as the page's box of that name,
-  built by the same function (`mcpSnippets`), with this user's URL, its password in it — Claude Code's line, then one
-  line saying it saves the password in the shell's history and that the JSON in the client's settings file avoids
-  that, then the JSON — each with **Copy** and "Shown once" under it. They live as the password does: in the page's
-  memory while the dialog is open, dropped at **I have copied it**. The package is pinned to the run's version as the
-  user was added, so a later read never rewrites the dialog. A section's long line scrolls inside its own block, and
+  thing, pasted after `psql`. Mason keeps no copy, so it is never shown again. With `mason serve`'s MCP endpoint on as
+  the user is added (`/api/state` `mcp`), an **MCP URL** row under the URL, the endpoint's address with **Copy**: both
+  addresses up front (issue 1155). Under the last of them, across the rows' width, a closed section, **Connect an AI
+  agent** (issues 1114, 1155): the page's box of that name, built by the same function (`mcpBody`) with this user's URL,
+  its password in it, but for the address, which is the row's. With the endpoint on, the lines per client and the
+  sign-in, which names the user ("If the sign-in page asks for a Mason user, sign in as <name>, with the password
+  above": an operator's sign-in page may check a Mason password with `mason user check`, docs/POSTGRES-API.md), then
+  the `mason mcp` way in its own closed details; off, the `mason mcp` way alone. Its two lines — Claude Code's, then one
+  line saying it saves the password in the shell's history and that the JSON in a client's settings file doesn't, then
+  the JSON — each with **Copy** and "Shown once" under it. They live as the password does: in the page's memory while
+  the dialog is open, dropped at **I have copied it**. The package and the endpoint are the run's as the user was
+  added, so a later read never rewrites the dialog; whether a section is open is the page's (`createOpenSet`), so a
+  rewrite keeps it. A section's long line scrolls inside its own block, and
   the section never widens the dialog. A field the JSON does not carry (no URL) leaves the section out. A temporary
   cloud tunnel's dialog has no such section: it is for a tool in the cloud, which runs no command on a computer of its
   own. Under the rows, a status line: "Waiting for its first query…" until Mason
@@ -233,22 +239,33 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   and SSL mode, each with **Copy**, and the URL with `<user>:<password>` in place, with **Copy** — as `mason status`
   says it, with no psql line (the URL is the same thing, pasted after `psql`). No user's row carries a URL:
   the card shown once when a user is added is the only place its password is copied.
-- **Users**, **Connect an MCP client** (issue 1114), under it, from the same facts (`/api/state` `postgres.shown`,
-  `engine.version`), so it says nothing `/api/state` cannot: **Claude Code**'s line to run, `claude mcp add mason --env
-  MASON_URL="<url>" -- npx -y @mason-data/cli@<version> mcp`, and the JSON for **Claude Desktop, Cursor and other
-  clients**' MCP settings (`npx` as the command, `MASON_URL` in `env`), pretty-printed, each in a block with **Copy**;
-  that a user's name and password go in place of `<user>` and `<password>` and the client's computer needs Node 22.13
-  or later (cli/package.json `engines`, held equal by a test); and that the web versions of ChatGPT and claude.ai can't
-  connect this way yet — unless `mason serve`'s MCP endpoint is on (`/api/state` `mcp`, issue 1115): then its public
-  address (`MASON_MCP_URL`) with **Copy**, and the short steps to add it as a hosted agent's custom connector (paste
-  the URL, only the URL: the OAuth client ID, client secret, bearer token and header fields stay empty; sign in at the
-  issuer, whose user the queries run as), and that a user limited to some addresses connects this way only from the
-  agent's own, its company a choice of **Connects from**, while a desktop app (Claude Code, Cursor, the ChatGPT desktop
-  app's Streamable HTTP server) connects from the person's own computer: that address, or anywhere. **Connects from** offers, after anywhere and
-  only these addresses, each hosted agent's published ranges (`/api/state` `addressPresets`, src/cli/address-presets.ts:
-  "Claude (Anthropic)", "ChatGPT (OpenAI)"), a choice whose option names the company (`preset:<id>`) and sends the
-  ranges the run lists for it, chosen for a user whose ranges are exactly a company's; the box hides behind it as behind
-  anywhere, and a user's row says "from ChatGPT (OpenAI)'s addresses (289 ranges)", never a wall of CIDRs. The URL is in the server's environment, never on its command line (`mason mcp` reads
+- **Users**, **Connect an AI agent** (issues 1114, 1115, 1155), under it, from the same facts (`/api/state`
+  `postgres.shown`, `engine.version`) and `mason serve`'s MCP endpoint (`/api/state` `mcp`), so it says nothing
+  `/api/state` cannot. The owner asked it to be easy and intuitive (2026-11-18): fewer words, no tip said twice, nothing
+  to read before the address. **With the endpoint on**, every client uses its address: one line ("Add this address to
+  your agent, then sign in in your browser."), the address (`MASON_MCP_URL`) with **Copy**, then a line per client
+  saying where it goes — **claude.ai and Claude Desktop**: Customize, then Connectors, then Add custom connector;
+  **ChatGPT**: turn on Developer mode in its settings, then create an app with the address; **Claude Code**: `claude mcp
+  add --transport http mason <url>` with **Copy**, then sign in from `/mcp`; **Cursor**: the server's `url` in
+  `~/.cursor/mcp.json`, with **Copy** — then one line of sign-in (paste only the address, leaving any OAuth client ID,
+  secret, token or header fields empty; sign in as a Mason user), and one line on where each connects from, for
+  Connects from (Claude Code and Cursor from the person's computer; claude.ai, Claude Desktop and ChatGPT from their
+  companies' servers). Under them, a closed **For a client that can't sign in in a browser**: the `mason mcp` way below.
+  **With it off**, the `mason mcp` way alone: **Claude Code**'s line to run, `claude mcp add mason --env
+  MASON_URL="<url>" -- npx -y @mason-data/cli@<version> mcp`, and the JSON for **Claude Desktop, Cursor and others**'
+  MCP settings (`npx` as the command, `MASON_URL` in `env`), pretty-printed, each in a block with **Copy**; that a user's
+  name and password go in place of `<user>` and `<password>` and that it needs Node 22.13 or later (cli/package.json
+  `engines`, held equal by a test); and that claude.ai and ChatGPT on the web can't connect this way yet. **Connects
+  from** offers, after anywhere and only these addresses, each hosted agent's published ranges under **A hosted agent's
+  servers** (an `<optgroup>`; `/api/state` `addressPresets`, src/cli/address-presets.ts), each named for the product
+  that calls from them, "claude.ai" and "ChatGPT on the web" (issue 1155: "Claude (Anthropic)" was taken for Claude
+  Code), a choice whose option names it (`preset:<id>`) and sends the ranges the run lists for it, chosen for a user
+  whose ranges are exactly a company's; the box hides behind it as behind anywhere, and a line says only
+  that agent's connectors connect from them and that Claude Code and Cursor take anywhere or the person's computer's
+  address — in From… in the address box's place, in the add form under its line in the line on roles' place (the box
+  beside the choice is too narrow there); each in one grid cell with what it replaces, unseen while another is chosen,
+  so nothing moves — and a user's row says "from ChatGPT's servers (289
+  ranges)", never a wall of CIDRs. The Postgres URL is in the client's environment, never on its command line (`mason mcp` reads
   `MASON_URL`). The package is pinned to the run's version where it is a release npm has (`0.22.0`: the package's, or
   a release image's), so the client runs the same Mason as the server; a checkout's `dev` or an image of main's
   `main-<sha>` leaves it unpinned. It is shown wherever the box above is (a served run and a read-only page too), with
@@ -663,7 +680,7 @@ under the server's own Host it needs the run's token, which never reaches your m
 - **Connect says what its URL's host is**: the Postgres API's address as the server sees it, often `localhost`, which a
   tool elsewhere replaces with the server's own address. With `MASON_PG_PUBLIC_URL` set (the address a client reaches,
   behind a load balancer or a DNS name: docs/POSTGRES-API.md "The address clients reach"), Connect, the Users page's
-  Connect a Postgres client or BI tool and Connect an MCP client, and a user's card, print that address, its port and its `sslmode`, and say nothing of the host
+  Connect a Postgres client or BI tool and Connect an AI agent, and a user's card, print that address, its port and its `sslmode`, and say nothing of the host
   (`/api/state` `postgres.public`).
 
 `mason ui` on the server itself is refused, naming `--ssh`: nobody sits at a browser there. `mason status` says the same line.

@@ -2624,15 +2624,16 @@ together, or the start is refused naming what is missing. The owner's spec (2026
   both. A user's "connects from" ranges are judged on that address by the endpoint and, through the PROXY header the
   door's connection carries, by the listener at login and before every statement; the request log names it. No setting
   bypasses the check (an earlier draft's `MASON_MCP_FROM=token` is gone), and nothing here changes the Postgres API's.
-- **Presets for a hosted agent's addresses**: the Users page's Connects from offers "Claude (Anthropic)", the outbound
+- **Presets for a hosted agent's addresses**: the Users page's Connects from offers, under "A hosted agent's servers",
+  "claude.ai" (named "Claude (Anthropic)" until issue 1155, when a person using Claude Code chose it and was refused), the outbound
   ranges Anthropic publishes for MCP tool calls (https://platform.claude.com/docs/en/api/ip-addresses, "Outbound IP
-  addresses"), and "ChatGPT (OpenAI)", the file OpenAI's page of IP egress ranges
+  addresses"), and "ChatGPT on the web", the file OpenAI's page of IP egress ranges
   (https://developers.openai.com/api/docs/guides/ip-addresses, "Outbound IP addresses": "ChatGPT integrations —
   Plugins, connectors, GPT Actions, and agentic commerce") names for them, https://openai.com/chatgpt-connectors.json
   (289 ranges, its `creationTime` 2026-11-06; `chatgpt-actions.json` beside it is GPT Actions' alone and not used), so a
   user held to them connects through this endpoint from that agent alone (`src/cli/address-presets.ts`, `/api/state`
   `addressPresets`). The ranges are written as a user's ranges are kept (one address without its `/32`), so a user given a
-  company's list is shown as that company's ("from ChatGPT (OpenAI)'s addresses (289 ranges)"), the choice names the
+  company's list is shown as that company's ("from ChatGPT's servers (289 ranges)"), the choice names the
   company (`preset:<id>`), never a wall of CIDRs in the box, and a user takes up to 1,000 ranges (`MAX_RANGES`, 100
   before, which OpenAI's list did not fit). **They ship with the release; Mason never fetches them at run time** (a vendor's page
   changing under a run would change who connects without anyone deciding it). **How they stay up to date**:

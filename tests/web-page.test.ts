@@ -774,7 +774,7 @@ test("the users while the roles file cannot be read: mason user list's tip, word
 });
 
 /** New user added's MCP section (issue 1114): closed, under the URL, across the rows' width. */
-const MCP_UNDER = /<dd class="under"><details class="once-mcp" data-open="added-mcp"><summary>Connect an MCP client<\/summary>[^]*?<\/details><\/dd>/;
+const MCP_UNDER = /<dd class="under"><details class="once-mcp" data-open="added-mcp"><summary>Connect an AI agent<\/summary>[^]*?<\/details><\/dd>/;
 
 test("a user just added: the one-time dialog's parts, titled New user added; URL, User and Password alone, in that order, held equal to mason user add's rows — the URL and the Password each with a Copy that copies it, the User as plain text; Shown once right of the password's Copy; one line that it is only shown once — no Database, Host, Port or SSL mode (Connect's), no psql line", async () => {
   const password = "mason_0123456789abcdef_" + "a".repeat(32);
@@ -785,7 +785,7 @@ test("a user just added: the one-time dialog's parts, titled New user added; URL
   assert.deepEqual(Object.keys(parts), ["once-head", "once-status", "once-foot"], "the dialog's three parts");
   // under the URL, a closed section of its own (issue 1114, held by the test of it): the rows are what is around it
   const full = onceHtml(parts);
-  assert.match(full, new RegExp(`<dt>URL</dt><dd><span class="copyrow">[^]*?</dd>${MCP_UNDER.source}<dt>User</dt>`), "Connect an MCP client right under the URL");
+  assert.match(full, new RegExp(`<dt>URL</dt><dd><span class="copyrow">[^]*?</dd>${MCP_UNDER.source}<dt>User</dt>`), "Connect an AI agent right under the URL");
   const html = full.replace(MCP_UNDER, "");
   const text = textOf(html);
   // the title, then the user's own three fields, in one layout: each a label and its value, a Copy on all but the name
@@ -1871,7 +1871,8 @@ test("the users' add form: a Role choice where the roles file names roles, its d
   assert.equal(renderAddUser({ ...state, pageReadOnly: "the web page is read-only here (MASON_UI_READ_ONLY=1)" }), "", "read-only: no form, no choice");
   // one line on roles under the form, with roles or without: the file and the command that explains it
   // the link opens in the same tab: a host's CSP sandbox with no allow-popups silently drops a target="_blank" one
-  for (const html of [form, plain]) assert.match(html, /<\/button><p class="dim roles-line">Roles can limit a user to some tables, columns and rows\. Configure them via <code>mason\/roles\.yml<\/code>\. <a href="https:\/\/github\.com\/embeddable-hq\/mason-data#access-control" rel="noreferrer">The README<\/a> describes how\.<\/p><\/form>$/);
+  // (where hosted agents' servers are offered, in one cell with the line on them: issue 1155)
+  for (const html of [form, plain]) assert.match(html, /<\/button>(?:<div class="form-notes">)?<p class="dim roles-line">Roles can limit a user to some tables, columns and rows\. Configure them via <code>mason\/roles\.yml<\/code>\. <a href="https:\/\/github\.com\/embeddable-hq\/mason-data#access-control" rel="noreferrer">The README<\/a> describes how\.<\/p>(?:<p class="preset-hint">[^<]*<\/p><\/div>)?<\/form>$/);
   // the README's section the link names is there: its heading's anchor
   assert.ok(/^### Access control$/m.test(fs.readFileSync(path.join(WEB, "..", "..", "README.md"), "utf8")), "README.md has the Access control section the link names");
   // no --set: attributes stay the command's
@@ -2093,13 +2094,13 @@ test("the add form: Connects from, a dropdown in mason user add's words — anyw
   const renderAddUser = fn<[unknown], string>("renderAddUser");
   const form = renderAddUser(CATALOG_STATE);
   // the run's state carries the hosted agents' published ranges (issue 1115): each a choice after these two
-  assert.match(textOf(form), /Name Connects from anywhere only these addresses Claude \(Anthropic\) ChatGPT \(OpenAI\) Address ranges, comma-separated Add a user Roles can limit/);
-  assert.match(form, /<span class="connects"><label for="add-user-connects">Connects from<\/label> <select id="add-user-connects" name="connects"><option value="any" selected>anywhere<\/option><option value="only">only these addresses<\/option><option value="preset:claude">Claude \(Anthropic\)<\/option><option value="preset:openai">ChatGPT \(OpenAI\)<\/option><\/select> <span class="ranges">/,
+  assert.match(textOf(form), /Name Connects from anywhere only these addresses claude\.ai ChatGPT on the web Address ranges, comma-separated Add a user Roles can limit[^]* Only that agent's connectors connect from these, in its app or on the web\. Claude Code and Cursor: choose anywhere, or your computer's address\.$/);
+  assert.match(form, /<span class="connects"><label for="add-user-connects">Connects from<\/label> <select id="add-user-connects" name="connects"><option value="any" selected>anywhere<\/option><option value="only">only these addresses<\/option><optgroup label="A hosted agent&#39;s servers"><option value="preset:claude">claude\.ai<\/option><option value="preset:openai">ChatGPT on the web<\/option><\/optgroup><\/select> <span class="ranges">/,
     "a dropdown, its label; anywhere the default, as mason user add with no --from; the box beside it");
   assert.doesNotMatch(form, /type="radio"|<fieldset/, "no radios");
   // the box keeps its place while anywhere is chosen (visibility, never display): nothing in the form moves when the choice changes
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
-  assert.match(css, /\.connects:has\(option\[value="any"\]:checked\) \.ranges, \.connects:has\(option\[value\^="preset:"\]:checked\) \.ranges \{ visibility: hidden; \}/);
+  assert.match(css, /\.connects:has\(option\[value="any"\]:checked\) \.ranges > input, \.connects:has\(option\[value\^="preset:"\]:checked\) \.ranges > input \{ visibility: hidden; \}/);
   assert.doesNotMatch(css, /fieldset\.connects|\.connects[^{]*input\[type="radio"\]/, "the radios' rules are gone");
   assert.match(form, /<input id="add-user-from" name="from" spellcheck="false" autocapitalize="off" placeholder="e\.g\. 192\.0\.2\.0\/24, 2001:db8::\/32" value="">/);
   assert.ok(!/pattern=/.test(form), "never validated in the page");
@@ -2118,7 +2119,7 @@ test("the add form on one line where its card is wide enough: each field a label
   const children = [...form.replace(/^<form[^>]*>|<\/form>$/g, "").matchAll(/<(span|button)\b[^>]*? class="([^"]*)"/g)];
   assert.match(form, /^<form id="add-user" class="formcard" autocomplete="off"><span class="name-field"><label for="user-name">Name<\/label> <input id="user-name"[^>]*><\/span> <span class="role-field">/);
   assert.ok(["name-field", "role-field", "connects", "primary"].every((c) => children.some((m) => m[2] === c)), "the four fields");
-  assert.match(textOf(renderAddUser(CATALOG_STATE)), /^Name Connects from anywhere only these addresses Claude \(Anthropic\) ChatGPT \(OpenAI\) Address ranges, comma-separated Add a user Roles can limit a user to some tables, columns and rows\. Configure them via mason\/roles\.yml \. The README describes how\.$/);
+  assert.match(textOf(renderAddUser(CATALOG_STATE)), /^Name Connects from anywhere only these addresses claude\.ai ChatGPT on the web Address ranges, comma-separated Add a user Roles can limit a user to some tables, columns and rows\. Configure them via mason\/roles\.yml \. The README describes how\. Only that agent's connectors connect from these, in its app or on the web\. Claude Code and Cursor: choose anywhere, or your computer's address\.$/);
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
   assert.match(css, /#add-user \.roles-line \{ flex: 0 0 100%;/, "the line on roles is the form's own last row, under the fields");
   const rule = (sel: string) => css.match(new RegExp(`(?:^|\\})\\s*${sel.replace(/[.#[\]="]/g, "\\$&")}\\s*\\{([^}]*)\\}`))?.[1] ?? "";
@@ -2129,7 +2130,7 @@ test("the add form on one line where its card is wide enough: each field a label
   assert.match(rule("#add-user .connects .ranges"), /min-width: 0;/, "the address box shrinks inside its field, never over Add a user");
   assert.match(rule("#add-user .connects .ranges input"), /width: 100%; min-width: 0;/);
   // the box's place is kept while anywhere is chosen: the choice changes no width, so nothing moves
-  assert.match(css, /\.connects:has\(option\[value="any"\]:checked\) \.ranges, \.connects:has\(option\[value\^="preset:"\]:checked\) \.ranges \{ visibility: hidden; \}/);
+  assert.match(css, /\.connects:has\(option\[value="any"\]:checked\) \.ranges > input, \.connects:has\(option\[value\^="preset:"\]:checked\) \.ranges > input \{ visibility: hidden; \}/);
   assert.doesNotMatch(css, /\.ranges\s*\{[^}]*display: none/);
 });
 
@@ -2626,7 +2627,7 @@ test("after Add a user, New user added is a modal dialog: its Copy focused; a po
   assert.ok(el("once-head").html.includes(password));
   // its MCP section (issue 1114): closed, under the URL, the user's own URL in both lines, as the run's version pins them
   const userUrl = `postgres://grafana:${password}@127.0.0.1:5433/shop`;
-  assert.match(el("once-head").html, /<dd class="under"><details class="once-mcp" data-open="added-mcp"><summary>Connect an MCP client<\/summary>/);
+  assert.match(el("once-head").html, /<dd class="under"><details class="once-mcp" data-open="added-mcp"><summary>Connect an AI agent<\/summary>/);
   assert.ok(textOf(el("once-head").html).includes(`claude mcp add mason --env MASON_URL="${userUrl}" -- npx -y @mason-data/cli@${CATALOG_STATE.engine.version} mcp`));
   assert.ok(textOf(el("once-head").html).includes(`"MASON_URL": "${userUrl}"`));
   assert.match(textOf(el("once-status").html), /^Waiting for its first query…$/);
@@ -4467,11 +4468,11 @@ test("Tables and Users: the sections are a page head, the cards' part and a tool
   assert.doesNotMatch(tables, /tables-show/, "no Show select");
   assert.match(users, /<div class="page-head"><h2 id="users-h">Users<\/h2><p class="desc">Create and manage users that you can connect to tools and services\.<\/p><\/div>/, "the Users page's intro, in the owner's words");
   // the form is the page's own once the state is read (renderAddUser: none on a read-only page), in its place
-  assert.match(fn<[unknown], string>("renderAddUser")(CATALOG_STATE), /^<form id="add-user" class="formcard"[^>]*>[\s\S]*<button type="submit" id="add-user-submit" class="primary" data-room="Add a user" data-room2="Adding…">Add a user<\/button><p class="dim roles-line">[\s\S]*<\/p><\/form>$/);
+  assert.match(fn<[unknown], string>("renderAddUser")(CATALOG_STATE), /^<form id="add-user" class="formcard"[^>]*>[\s\S]*<button type="submit" id="add-user-submit" class="primary" data-room="Add a user" data-room2="Adding…">Add a user<\/button>(?:<div class="form-notes">)?<p class="dim roles-line">[\s\S]*<\/p>(?:<\/div>)?<\/form>$/);
   // the users first, right under the title (their read-only line is renderUsers' own); then the form, the password just
   // shown beside it, Connect: a card that appears moves nothing above it
   const order = ["users-h", "users", "add-box", "add-kinds", "add-user-box", "add-share-box", "action", "added", "users-connect", "users-mcp"].map((id) => users.indexOf(`id="${id}"`));
-  assert.ok(order.every((i, n) => i >= 0 && (n === 0 || i > order[n - 1]!)), "the title, the users, the box (its segments, the form, the temporary cloud tunnel), its failure, the card, Connect a Postgres client or BI tool, then Connect an MCP client");
+  assert.ok(order.every((i, n) => i >= 0 && (n === 0 || i > order[n - 1]!)), "the title, the users, the box (its segments, the form, the temporary cloud tunnel), its failure, the card, Connect a Postgres client or BI tool, then Connect an AI agent");
   assert.match(users, /<\/div>\s*<div id="users"><\/div>\s*<!--[^>]*-->\s*<div id="add-box" class="add-box"><div id="add-kinds"><\/div><div class="add-panes"><div id="add-user-box"><\/div><div id="add-share-box"><\/div><\/div><\/div>/, "the users list right under the page's head, then the box");
 });
 
@@ -5872,7 +5873,7 @@ test("Users: ONE Connect panel for the run — host, port, database, sslmode and
   assert.match(fs.readFileSync(path.join(WEB, "index.html"), "utf8"), /<div id="users"><\/div>[\s\S]*<div id="users-connect"><\/div>\s*<div id="users-mcp"><\/div>\s*<\/section>/, "the list first, the Postgres client or BI tool's box, then the MCP client's last");
 });
 
-test("Users: Connect an MCP client (issue 1114) — Claude Code's line and the JSON for other clients, each with Copy, from the run's URL and version; the Node they need; not the web ChatGPT or claude.ai", async () => {
+test("Users: Connect an AI agent with the MCP endpoint off (issues 1114, 1155) — the mason mcp way alone: Claude Code's line and the JSON for other clients, each with Copy, from the run's URL and version; the Node they need; not claude.ai or ChatGPT on the web", async () => {
   const usersPage = await import(path.join(WEB, "pages", "users.js") as string) as Record<string, unknown>;
   const renderUsersMcp = usersPage.renderUsersMcp as ((pg: unknown, served?: boolean, version?: unknown) => string) | undefined;
   assert.equal(typeof renderUsersMcp, "function", "src/web/pages/users.js exports renderUsersMcp");
@@ -5889,10 +5890,12 @@ test("Users: Connect an MCP client (issue 1114) — Claude Code's line and the J
   assert.deepEqual(JSON.parse(json), { mcpServers: { mason: { command: "npx", args: ["-y", "@mason-data/cli@0.22.0", "mcp"], env: { MASON_URL: shown } } } });
   assert.equal(json, JSON.stringify(JSON.parse(json), null, 2), "pretty-printed");
   for (const id of ["claude-code", "json"]) assert.match(html, new RegExp(`<pre><code id="users-mcp-${id}">[\\s\\S]*?</code></pre><span class="copyblock-side"><button type="button" class="small" data-copy="users-mcp-${id}" data-room="Press ⌘C">Copy</button></span></div>`), `${id}: a block with its Copy`);
-  assert.equal(textOf(html).replace(/<code[\s\S]*$/, ""), "Connect an MCP client Claude Code: run this in a terminal. claude mcp add mason --env MASON_URL=\"postgres://<user>:<password>@127.0.0.1:5433/shop\" -- npx -y @mason-data/cli@0.22.0 mcp Copy " +
-    "Claude Desktop, Cursor and other clients: add this to the client's MCP settings. { \"mcpServers\": { \"mason\": { \"command\": \"npx\", \"args\": [ \"-y\", \"@mason-data/cli@0.22.0\", \"mcp\" ], \"env\": { \"MASON_URL\": \"postgres://<user>:<password>@127.0.0.1:5433/shop\" } } } } Copy " +
-    "Put a user's name and password in place of <user> and <password> . The client's computer needs Node 22.13 or later. " +
-    "The web versions of ChatGPT and claude.ai can't connect this way yet.");
+  assert.equal(textOf(html).replace(/<code[\s\S]*$/, ""), "Connect an AI agent Claude Code: run this. claude mcp add mason --env MASON_URL=\"postgres://<user>:<password>@127.0.0.1:5433/shop\" -- npx -y @mason-data/cli@0.22.0 mcp Copy " +
+    "Claude Desktop, Cursor and others: add this to their MCP settings. { \"mcpServers\": { \"mason\": { \"command\": \"npx\", \"args\": [ \"-y\", \"@mason-data/cli@0.22.0\", \"mcp\" ], \"env\": { \"MASON_URL\": \"postgres://<user>:<password>@127.0.0.1:5433/shop\" } } } } Copy " +
+    "Put a user's name and password in place of <user> and <password> . Needs Node 22.13 or later. " +
+    "claude.ai and ChatGPT on the web can't connect this way yet.");
+  // off: no address, no line per client, no sign-in, no fallback to open — the mason mcp way is all there is
+  assert.doesNotMatch(html, /users-mcp-url|mcp-clients|mcp-fallback|<details|Customize|Developer mode|sign in/i);
   // the Node it names is the package's own (cli/package.json engines)
   const pkg = JSON.parse(fs.readFileSync(path.join(WEB, "..", "..", "cli", "package.json"), "utf8")) as { name: string; engines: { node: string } };
   assert.equal(`>=${usersPage.MCP_NODE as string}`, pkg.engines.node, "the Node the page names is cli/package.json's engines");
@@ -5918,58 +5921,99 @@ test("Users: Connect an MCP client (issue 1114) — Claude Code's line and the J
   assert.equal(codeOf(ph, "users-mcp-claude-code"), `claude mcp add mason --env MASON_URL="${pub.shown}" -- npx -y @mason-data/cli@0.22.0 mcp`);
 });
 
-test("Users: mason serve's MCP endpoint on (issue 1115) — its public address with Copy, and how to add it as a hosted agent's custom connector; the old 'can\'t connect' tip gone", async () => {
+test("Users: Connect an AI agent with the MCP endpoint on (issues 1115, 1155) — its address first with Copy, a line per client saying where it goes, one sign-in line, one on where each connects from; the mason mcp way, password and all, under a closed details", async () => {
   const usersPage = await import(path.join(WEB, "pages", "users.js") as string) as Record<string, unknown>;
-  const renderUsersMcp = usersPage.renderUsersMcp as (pg: unknown, served?: boolean, version?: unknown, mcp?: unknown) => string;
-  const pg = { url: "postgresql://127.0.0.1:5433/shop", host: "127.0.0.1", port: 5433, database: "shop", shown: "postgres://<user>:<password>@127.0.0.1:5433/shop" };
+  const renderUsersMcp = usersPage.renderUsersMcp as (pg: unknown, served?: boolean, version?: unknown, mcp?: unknown, isOpen?: (k: string) => boolean) => string;
+  const codeOf = (html: string, id: string): string => (new RegExp(`<code id="${id}">([\\s\\S]*?)</code>`).exec(html)?.[1] ?? "")
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"").replace(/&#39;/g, "'").replace(/&amp;/g, "&");
+  const shown = "postgres://<user>:<password>@127.0.0.1:5433/shop";
+  const pg = { url: "postgresql://127.0.0.1:5433/shop", host: "127.0.0.1", port: 5433, database: "shop", shown };
   const mcp = { url: "https://mason.example.test/mcp", issuer: "https://auth.example.test" };
   const html = renderUsersMcp(pg, true, "0.22.0", mcp);
-  assert.match(html, /<code id="users-mcp-url">https:\/\/mason\.example\.test\/mcp<\/code>/);
-  assert.match(html, /data-copy="users-mcp-url"/);
-  const text = textOf(html);
-  assert.ok(text.includes("claude.ai, ChatGPT and other hosted agents: add this address as a custom connector."), text);
-  assert.ok(text.includes("In the agent's settings, add a custom connector and paste the URL (in claude.ai: Settings, then Connectors, then Add custom connector)."), text);
-  assert.ok(text.includes("Connect, and sign in when the agent asks. You sign in at https://auth.example.test , and the agent's queries run as the Mason user your sign-in names."), text);
-  assert.ok(text.includes("A user limited to some addresses connects this way only from the agent's own: choose its company under Connects from."), text);
-  // only the URL is pasted: sign-in is in the browser, so a client's OAuth and token fields stay empty
-  assert.ok(text.includes("Paste only the URL. Leave the OAuth client ID, client secret, bearer token and header fields empty: you sign in in your browser."), text);
-  // a desktop app connects from the person's own computer: a hosted agent's preset would refuse it
-  assert.ok(text.includes("A desktop app (Claude Code, Cursor, the ChatGPT desktop app's Streamable HTTP server) connects from your own computer, not from its company's addresses: give its user your computer's address, or anywhere."), text);
-  assert.ok(text.indexOf("Paste only the URL.") < text.indexOf("Connect, and sign in when the agent asks."), "the URL alone, before signing in");
-  assert.doesNotMatch(text, /can't connect this way yet/);
-  // off (null): the box as before
-  assert.match(textOf(renderUsersMcp(pg, true, "0.22.0", null)), /can't connect this way yet/);
+  // the address first, before anything a person must read past
+  assert.match(html, /^<div class="connect connect-mcp"><p class="connect-title">Connect an AI agent<\/p><p class="mcp-lead">Add this address to your agent, then sign in in your browser\.<\/p><dl class="facts"><dt>URL<\/dt><dd><span class="copyrow"><code id="users-mcp-url">https:\/\/mason\.example\.test\/mcp<\/code> <button[^>]*data-copy="users-mcp-url"/);
+  // Claude Code's line and Cursor's mcp.json carry the address alone: each signs in in the browser, no password
+  assert.equal(codeOf(html, "users-mcp-claude-code-url"), "claude mcp add --transport http mason https://mason.example.test/mcp");
+  assert.deepEqual(JSON.parse(codeOf(html, "users-mcp-cursor")), { mcpServers: { mason: { url: "https://mason.example.test/mcp" } } });
+  for (const id of ["claude-code-url", "cursor"]) assert.match(html, new RegExp(`data-copy="users-mcp-${id}"`), id);
+  const [open, fallback] = [html.replace(/<details[^]*<\/details>/, ""), /<details class="mcp-fallback" data-open="users-mcp-fallback"><summary>For a client that can&#39;t sign in in a browser<\/summary>([^]*)<\/details>/.exec(html)?.[1] ?? ""];
+  assert.equal(textOf(open).replace(/\s+/g, " ").trim(), "Connect an AI agent Add this address to your agent, then sign in in your browser. URL https://mason.example.test/mcp Copy " +
+    "claude.ai and Claude Desktop : Customize, then Connectors, then Add custom connector. " +
+    "ChatGPT : turn on Developer mode in its settings, then create an app with the address. " +
+    "Claude Code : run this, then sign in from /mcp . claude mcp add --transport http mason https://mason.example.test/mcp Copy " +
+    `Cursor : add this to ~/.cursor/mcp.json . ${codeOf(html, "users-mcp-cursor").replace(/\s+/g, " ")} Copy ` +
+    "Paste only the address: leave any OAuth client ID, secret, token or header fields empty. Sign in as a Mason user. " +
+    "Claude Code and Cursor connect from your computer. claude.ai, Claude Desktop and ChatGPT connect from their companies' servers.");
+  // the mason mcp way, with a password, closed under the rest: its two snippets, the placeholders' line, the Node line,
+  // the server's note; never the "can't connect yet" line, which is the endpoint off's
+  assert.doesNotMatch(html, /<details[^>]* open/, "closed at first");
+  assert.equal(codeOf(fallback, "users-mcp-claude-code"), `claude mcp add mason --env MASON_URL="${shown}" -- npx -y @mason-data/cli@0.22.0 mcp`);
+  assert.deepEqual(JSON.parse(codeOf(fallback, "users-mcp-json")), { mcpServers: { mason: { command: "npx", args: ["-y", "@mason-data/cli@0.22.0", "mcp"], env: { MASON_URL: shown } } } });
+  assert.ok(textOf(fallback).includes("Put a user's name and password in place of <user> and <password> . Needs Node 22.13 or later."), textOf(fallback));
+  assert.match(textOf(fallback), /A tool on another machine uses the server's own address/);
+  assert.doesNotMatch(open, /users-mcp-claude-code"|users-mcp-json|<password>|Node 22/, "nothing of the mason mcp way outside its details");
+  assert.doesNotMatch(html, /can't connect this way yet/);
+  // a person's open details stays open across a rewrite (the page's open set, by key)
+  assert.match(renderUsersMcp(pg, true, "0.22.0", mcp, (k) => k === "users-mcp-fallback"), /<details class="mcp-fallback" data-open="users-mcp-fallback" open>/);
+  // the lines per client are the endpoint's alone: off, none
+  const off = renderUsersMcp(pg, true, "0.22.0", null);
+  assert.doesNotMatch(off, /mcp-clients|Customize|Developer mode|~\/\.cursor|--transport http/);
+  assert.match(textOf(off), /can't connect this way yet/);
 });
 
-test("Users: Connects from offers each hosted agent's published ranges (issue 1115) — a choice that sends them, chosen for a user whose ranges are exactly a company's; none offered when the run says none", async () => {
+test("Users: Connects from offers each hosted agent's published ranges (issue 1115) — a choice that sends them, chosen for a user whose ranges are exactly a company's; none offered when the run says none; under A hosted agent's servers, each named for the product that calls from them (issue 1155)", async () => {
   const usersPage = await import(path.join(WEB, "pages", "users.js") as string) as Record<string, unknown>;
   const connectsChoice = usersPage.connectsChoice as (id: string, from?: string[] | null, presets?: unknown[]) => string;
   const rangesOf = usersPage.rangesOf as (e: unknown, presets?: unknown[]) => string[] | null;
   const { presetsForPage, ADDRESS_PRESETS } = await import("../src/cli/address-presets.ts");
   const presets = presetsForPage();
   // the run's list, what /api/state carries: the company's label and its ranges, never its source
-  assert.deepEqual(presets[0], { id: "claude", label: "Claude (Anthropic)", ranges: ["160.79.104.0/21", "153.61.208.0/20"] });
-  assert.deepEqual(presets.map((p) => [p.id, p.label]), [["claude", "Claude (Anthropic)"], ["openai", "ChatGPT (OpenAI)"]]);
+  assert.deepEqual(presets[0], { id: "claude", label: "claude.ai", name: "claude.ai", ranges: ["160.79.104.0/21", "153.61.208.0/20"] });
+  // named for the product that calls from those servers, never the company alone, which a person using its desktop app
+  // took for theirs (issue 1155); the ids stay
+  assert.deepEqual(presets.map((p) => [p.id, p.label, p.name]), [["claude", "claude.ai", "claude.ai"], ["openai", "ChatGPT on the web", "ChatGPT"]]);
   assert.ok(ADDRESS_PRESETS.every((p) => p.source.startsWith("https://")), "each list cites where it is published");
   // every range is one mason user from takes
   const { userRanges } = await import("../src/duck/users.ts");
   for (const p of presets) assert.ok(!("problem" in userRanges(p.ranges)), p.id);
   const html = connectsChoice("add-user", null, presets.slice(0, 1));
-  assert.match(html, /<option value="any" selected>anywhere<\/option><option value="only">only these addresses<\/option><option value="preset:claude">Claude \(Anthropic\)<\/option><\/select>/);
+  // the agents' servers under a heading of their own, apart from anywhere and only these addresses
+  assert.match(html, /<option value="any" selected>anywhere<\/option><option value="only">only these addresses<\/option><optgroup label="A hosted agent&#39;s servers"><option value="preset:claude">claude\.ai<\/option><\/optgroup><\/select>/);
   // chosen, it sends its ranges, whatever the box holds
   assert.deepEqual(rangesOf({ connects: { value: "preset:claude" }, from: { value: "192.0.2.0/24" } }, presets), ["160.79.104.0/21", "153.61.208.0/20"]);
   // a company the run no longer lists: no range sent, for the run to refuse — never the box nor anywhere
   assert.deepEqual(rangesOf({ connects: { value: "preset:gone" }, from: { value: "192.0.2.0/24" } }, presets), []);
   // a user whose ranges are exactly a company's opens on it; any other list is its own
-  assert.match(connectsChoice("user-from", ["160.79.104.0/21", "153.61.208.0/20"], presets), /<option value="preset:[^"]+" selected>Claude \(Anthropic\)<\/option>/);
+  assert.match(connectsChoice("user-from", ["160.79.104.0/21", "153.61.208.0/20"], presets), /<option value="preset:[^"]+" selected>claude\.ai<\/option>/);
   assert.match(connectsChoice("user-from", ["160.79.104.0/21"], presets), /<option value="only" selected>/);
   // no list from the run: the two choices of before
-  assert.doesNotMatch(connectsChoice("add-user", null), /preset:/);
+  assert.doesNotMatch(connectsChoice("add-user", null), /preset:|optgroup|preset-hint/);
   // the box hides behind a company's choice as behind anywhere: nothing in the form moves
-  assert.match(fs.readFileSync(path.join(WEB, "app.css"), "utf8"), /\.connects:has\(option\[value\^="preset:"\]:checked\) \.ranges/);
+  const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
+  assert.match(css, /\.connects:has\(option\[value\^="preset:"\]:checked\) \.ranges > input/);
+  // a hosted agent's servers chosen: one line under the choice says who connects from them and what a desktop client
+  // chooses instead (issue 1155: a person using Claude Code chose Anthropic's servers and was refused); written in every
+  // form that offers them, shown only while one is chosen, its place kept (visibility), so nothing moves
+  assert.equal(usersPage.PRESET_HINT, "Only that agent's connectors connect from these, in its app or on the web. Claude Code and Cursor: choose anywhere, or your computer's address.");
+  for (const from of [null, ["192.0.2.0/24"], ["160.79.104.0/21", "153.61.208.0/20"]]) {
+    const h = connectsChoice("user-from", from, presets);
+    // in the address box's place: one grid cell with it (app.css), so the form keeps its height whatever is chosen
+    assert.match(h, /<\/select> <span class="ranges"><label class="sr"[^]*?<\/label><input [^>]*><span class="preset-hint">Only that agent&#39;s connectors connect from these, in its app or on the web\. Claude Code and Cursor: choose anywhere, or your computer&#39;s address\.<\/span><\/span><\/span>$/, String(from));
+  }
+  assert.match(css, /\.connects:not\(:has\(option\[value\^="preset:"\]:checked\)\) \.preset-hint \{ visibility: hidden; \}/);
+  assert.match(css, /\.connects \.ranges > input, \.connects \.ranges > \.preset-hint \{ grid-area: 1 \/ 1; \}/, "the hint in the address box's cell");
+  // the add form says it under its line instead, in the line on roles' place (the box beside the choice is too narrow
+  // there), the two in one cell: the hint once, never in the choice too
+  const renderAddUser = usersPage.renderAddUser as (s: unknown) => string;
+  const form = renderAddUser(CATALOG_STATE);
+  assert.equal(form.split("preset-hint").length - 1, 1, "the hint once in the add form");
+  assert.match(form, /<div class="form-notes"><p class="dim roles-line">[^]*?<\/p><p class="preset-hint">Only that agent&#39;s connectors[^<]*<\/p><\/div><\/form>$/);
+  assert.match(css, /#add-user:has\(option\[value\^="preset:"\]:checked\) \.form-notes \.roles-line,\n#add-user:not\(:has\(option\[value\^="preset:"\]:checked\)\) \.form-notes \.preset-hint \{ visibility: hidden; \}/);
+  assert.match(css, /#add-user \.form-notes > \* \{ grid-area: 1 \/ 1;/);
+  assert.doesNotMatch(css.match(/\.connects[^{]*\.preset-hint[^{]*\{[^}]*\}/g)!.join(" "), /display:\s*none/, "its place kept, never display: none");
 });
 
-test("Users: ChatGPT (OpenAI)'s published list (issue 1115) — OpenAI's JSON file of some 300 ranges, as a user's ranges are kept, that mason user from takes whole; a choice, never a wall of CIDRs in the box or the row", async () => {
+test("Users: ChatGPT on the web's published list (issue 1115) — OpenAI's JSON file of some 300 ranges, as a user's ranges are kept, that mason user from takes whole; a choice, never a wall of CIDRs in the box or the row", async () => {
   const usersPage = await import(path.join(WEB, "pages", "users.js") as string) as Record<string, unknown>;
   const connectsChoice = usersPage.connectsChoice as (id: string, from?: string[] | null, presets?: unknown[]) => string;
   const fromText = usersPage.fromText as (from: string[] | null, presets?: unknown[]) => string;
@@ -5977,9 +6021,9 @@ test("Users: ChatGPT (OpenAI)'s published list (issue 1115) — OpenAI's JSON fi
   const { presetsForPage, ADDRESS_PRESETS } = await import("../src/cli/address-presets.ts");
   const { userRanges, MAX_RANGES } = await import("../src/duck/users.ts");
   const openai = ADDRESS_PRESETS.find((p) => p.id === "openai");
-  assert.ok(openai !== undefined, "the ChatGPT (OpenAI) preset");
+  assert.ok(openai !== undefined, "the ChatGPT on the web preset");
   // its source: OpenAI's page of IP egress ranges, and the JSON file it names for ChatGPT's connectors
-  assert.equal(openai.label, "ChatGPT (OpenAI)");
+  assert.equal(openai.label, "ChatGPT on the web");
   assert.equal(openai.source, "https://developers.openai.com/api/docs/guides/ip-addresses");
   assert.deepEqual(openai.read, { kind: "json", url: "https://openai.com/chatgpt-connectors.json" });
   // some 300 ranges, each written as a user's ranges are kept (an address without its /32), once, within a user's bound
@@ -5992,7 +6036,7 @@ test("Users: ChatGPT (OpenAI)'s published list (issue 1115) — OpenAI's JSON fi
   const p = presets.find((x) => x.id === "openai")!;
   // the box stays empty and hidden behind the choice; the choice sends the whole list
   const html = connectsChoice("add-user", null, presets);
-  assert.match(html, /<option value="preset:[^"]+">ChatGPT \(OpenAI\)<\/option>/);
+  assert.match(html, /<option value="preset:[^"]+">ChatGPT on the web<\/option>/);
   assert.match(html, /<input id="add-user-from" name="from"[^>]* value="">/);
   assert.deepEqual(rangesOf({ connects: { value: "preset:openai" }, from: { value: "" } }, presets), p.ranges);
   // the page carries the list once (the run's state), never in the form: the option names the company
@@ -6000,9 +6044,11 @@ test("Users: ChatGPT (OpenAI)'s published list (issue 1115) — OpenAI's JSON fi
   assert.ok(!html.includes(p.ranges[0]!), "no range of the list written into the form");
   // a user given the list opens on it, and its row names the company and the count, not the ranges
   const opened = connectsChoice("user-from", [...p.ranges], presets);
-  assert.match(opened, /<option value="preset:[^"]+" selected>ChatGPT \(OpenAI\)<\/option>/);
+  assert.match(opened, /<option value="preset:[^"]+" selected>ChatGPT on the web<\/option>/);
   assert.match(opened, /<input id="user-from-from" name="from"[^>]* value="">/, "no wall of CIDRs in the box");
-  assert.equal(fromText([...p.ranges], presets), `from ChatGPT (OpenAI)'s addresses (${p.ranges.length} ranges)`);
+  assert.equal(fromText([...p.ranges], presets), `from ChatGPT's servers (${p.ranges.length} ranges)`);
+  // the row names whose servers, never the company's name alone (issue 1155)
+  assert.equal(fromText(["160.79.104.0/21", "153.61.208.0/20"], presets), "from claude.ai's servers (2 ranges)");
   assert.equal(fromText(["192.0.2.0/24"], presets), "from 192.0.2.0/24");
   assert.equal(fromText(null, presets), "from anywhere");
 });
@@ -6045,7 +6091,7 @@ test("scripts/connector-ranges.ts reads a company's list under its heading and u
   assert.equal(rangesUnder("Outbound IP addresses 198.51.100.0/24", "Outbound IP addresses", "Phased out IP addresses"), null, "no end: could not tell");
 });
 
-test("New user added: a closed Connect an MCP client under the URL — the box's two lines with the user's own URL, each Shown once with its Copy, and why the JSON keeps the password out of the shell's history (issue 1114)", async () => {
+test("New user added: a closed Connect an AI agent under the URL, the box's own body (issues 1114, 1155) — endpoint off, the mason mcp lines with the user's own URL, each Shown once, and why the JSON keeps the password out of the shell's history", async () => {
   const usersPage = await import(path.join(WEB, "pages", "users.js") as string) as Record<string, unknown>;
   const renderUsersMcp = usersPage.renderUsersMcp as (pg: unknown, served?: boolean, version?: unknown) => string;
   const renderAdded = (a: unknown, o?: unknown) => onceHtml(fn<[unknown, unknown?], Record<string, string>>("renderAdded")(a, o));
@@ -6067,9 +6113,10 @@ test("New user added: a closed Connect an MCP client under the URL — the box's
   for (const id of ["claude-code", "json"]) {
     assert.match(section, new RegExp(`<pre><code id="added-mcp-${id}">[^]*?</code></pre><span class="copyblock-side"><button type="button" class="small" data-copy="added-mcp-${id}" data-room="Press ⌘C">Copy</button><span class="badge warn">Shown once</span></span></div>`), id);
   }
-  assert.equal(textOf(section), `Connect an MCP client Claude Code: run this in a terminal. ${codeOf(section, "added-mcp-claude-code")} Copy Shown once ` +
-    "Running this line saves the password in your shell history. Pasting the JSON into the client's settings file avoids that. " +
-    `Claude Desktop, Cursor and other clients: add this to the client's MCP settings. ${codeOf(section, "added-mcp-json").replace(/\s+/g, " ")} Copy Shown once`);
+  assert.equal(textOf(section), `Connect an AI agent Claude Code: run this. ${codeOf(section, "added-mcp-claude-code")} Copy Shown once ` +
+    "This line saves the password in your shell history. The JSON in a client's settings file doesn't. " +
+    `Claude Desktop, Cursor and others: add this to their MCP settings. ${codeOf(section, "added-mcp-json").replace(/\s+/g, " ")} Copy Shown once ` +
+    "Needs Node 22.13 or later. claude.ai and ChatGPT on the web can't connect this way yet.");
   // a release pins the package; the run's version not said or no release: unpinned, as the box
   assert.match(codeOf(renderAdded(a), "added-mcp-claude-code"), / npx -y @mason-data\/cli mcp$/);
   assert.match(codeOf(renderAdded(a, { version: "dev" }), "added-mcp-claude-code"), / npx -y @mason-data\/cli mcp$/);
@@ -6082,7 +6129,47 @@ test("New user added: a closed Connect an MCP client under the URL — the box's
   assert.match(css, /\.copyblock pre \{ flex: 1 1 auto; min-width: 0; margin: 0; overflow-x: auto; white-space: pre;/);
 });
 
-test("the Users page over a fake run: Connect an MCP client under Connect a Postgres client or BI tool, from /api/state's postgres and version — on a served run and a read-only page too", async () => {
+test("New user added with the MCP endpoint on (issue 1155): both addresses up front, the Postgres URL and the MCP URL, each with Copy; the instructions closed under them — the box's lines per client, sign in as this user with the password above, and the mason mcp lines, Shown once, with the shell-history tip in a closed fallback; the password only where it was", async () => {
+  const usersPage = await import(path.join(WEB, "pages", "users.js") as string) as Record<string, unknown>;
+  const renderUsersMcp = usersPage.renderUsersMcp as (pg: unknown, served?: boolean, version?: unknown, mcp?: unknown) => string;
+  const renderAdded = (a: unknown, o?: unknown) => onceHtml(fn<[unknown, unknown?], Record<string, string>>("renderAdded")(a, o));
+  const a = ADDED("claude");
+  const mcp = { url: "https://mason.example.test/mcp", issuer: "https://auth.example.test" };
+  const html = renderAdded(a, { version: "0.22.0", mcp });
+  // the two addresses, up front: the Postgres URL (the password in it), then the MCP URL, then the instructions, closed
+  assert.match(html, new RegExp(`<dt>URL</dt><dd><span class="copyrow"><code id="added-url">[^<]*</code>[^]*?</dd><dt>MCP URL</dt><dd><span class="copyrow"><code id="added-mcp-url">https://mason\\.example\\.test/mcp</code> <button[^>]*data-copy="added-mcp-url"[^]*?</dd>${MCP_UNDER.source}<dt>User</dt>`));
+  const section = MCP_UNDER.exec(html)?.[0] ?? "";
+  assert.notEqual(section, "", "a section of its own, under the URLs");
+  assert.doesNotMatch(section, /<details class="once-mcp"[^>]* open/, "closed at first");
+  assert.doesNotMatch(section, /<dt>URL<\/dt>|id="added-mcp-url"/, "the address is the row's, never said twice");
+  const fallback = /<details class="mcp-fallback" data-open="added-mcp-fallback"><summary>For a client that can&#39;t sign in in a browser<\/summary>([^]*?)<\/details>/.exec(section)?.[1] ?? "";
+  assert.notEqual(fallback, "", "the mason mcp way, in a closed details of its own");
+  const outside = section.replace(/<details class="mcp-fallback"[^]*?<\/details>/, "");
+  // the user named at sign-in, the password the one above
+  assert.match(outside, /<p class="mcp-lead">Add the MCP URL to your agent, then sign in in your browser\.<\/p><ul class="mcp-clients">/);
+  assert.ok(textOf(outside).includes("Paste only the address: leave any OAuth client ID, secret, token or header fields empty. If the sign-in page asks for a Mason user, sign in as claude, with the password above."), textOf(outside));
+  // the box's lines per client, in the same words (one body): the box's, its ids the dialog's
+  const box = renderUsersMcp({ host: "127.0.0.1", port: 5433, database: "shop", shown: "postgres://<user>:<password>@127.0.0.1:5433/shop" }, false, "0.22.0", mcp);
+  const clients = (h: string) => /<ul class="mcp-clients">[^]*?<\/ul>/.exec(h)?.[0] ?? "";
+  assert.equal(clients(outside).replaceAll("added-mcp-", "users-mcp-"), clients(box));
+  // the password only where it was: the URL, the Password row and the mason mcp lines — never the MCP URL or the lines per client
+  assert.ok(!outside.includes(a.password), "the password only in the fallback's lines");
+  assert.equal(html.split(a.password).length - 1, 4, "the URL, the Password row, Claude Code's mason mcp line and the JSON");
+  assert.equal(renderAdded(a, { version: "0.22.0" }).split(a.password).length - 1, 4, "as with the endpoint off");
+  // off: the Postgres URL alone, no MCP URL row
+  assert.doesNotMatch(renderAdded(a, { version: "0.22.0" }), /MCP URL|added-mcp-url/);
+  assert.ok(fallback.includes(a.password));
+  assert.equal([...fallback.matchAll(/<span class="badge warn">Shown once<\/span>/g)].length, 2, "each mason mcp line Shown once");
+  assert.ok(textOf(fallback).includes("This line saves the password in your shell history."), "the shell-history tip with Claude Code's line");
+  assert.doesNotMatch(outside, /Shown once|shell history/);
+  assert.doesNotMatch(section, /can't connect this way yet/);
+  // a person's open section and fallback stay open across a rewrite (the page's open set)
+  const opened = renderAdded(a, { version: "0.22.0", mcp, isOpen: () => true });
+  assert.match(opened, /<details class="once-mcp" data-open="added-mcp" open>/);
+  assert.match(opened, /<details class="mcp-fallback" data-open="added-mcp-fallback" open>/);
+});
+
+test("the Users page over a fake run: Connect an AI agent under Connect a Postgres client or BI tool, from /api/state's postgres and version — on a served run and a read-only page too; the endpoint's address when the state says it, and New user added's section with it", async () => {
   for (const [what, state] of [["mason start", RUNNING], ["mason serve", { ...RUNNING, served: true }],
     ["read-only", { ...RUNNING, pageReadOnly: "the web page is read-only here (MASON_UI_READ_ONLY=1)" }]] as const) {
     const run = fakeRun();
@@ -6093,9 +6180,24 @@ test("the Users page over a fake run: Connect an MCP client under Connect a Post
     await app.poll();
     const v = app.view();
     assert.match(v["users-connect"]!, /^<div class="connect"><p class="connect-title">Connect a Postgres client or BI tool<\/p>/, what);
-    assert.match(v["users-mcp"]!, /^<div class="connect connect-mcp"><p class="connect-title">Connect an MCP client<\/p>/, what);
+    assert.match(v["users-mcp"]!, /^<div class="connect connect-mcp"><p class="connect-title">Connect an AI agent<\/p>/, what);
     assert.ok(textOf(v["users-mcp"]!).includes(`MASON_URL="${state.postgres!.shown}" -- npx -y @mason-data/cli@${state.engine.version} mcp`), `${what}: the run's URL and version`);
     assert.equal(/server's own address/.test(v["users-mcp"]!), /server's own address/.test(v["users-connect"]!), `${what}: the server's note where the Postgres client or BI tool's box has it`);
+  }
+  // the endpoint on (/api/state mcp): its address in the box, and in New user added's section, its sign-in naming the user
+  {
+    const run = fakeRun();
+    const mcp = { url: "https://mason.example.test/mcp", issuer: "https://auth.example.test" };
+    run.answers.set("GET api/state", answer({ ...RUNNING, served: true, mcp }));
+    run.answers.set("POST api/users", answer({ ...ADDED("agent"), url: "postgres://agent:secret@127.0.0.1:5433/shop", password: "secret" }));
+    const app = fn<[unknown], App>("createApp")(run.fetch);
+    app.show("users");
+    await app.poll();
+    assert.match(app.view()["users-mcp"]!, /<code id="users-mcp-url">https:\/\/mason\.example\.test\/mcp<\/code>/);
+    assert.equal(await app.addUser("agent"), true);
+    const head = app.view()["once-head"]!;
+    assert.match(head, /<dt>MCP URL<\/dt><dd><span class="copyrow"><code id="added-mcp-url">https:\/\/mason\.example\.test\/mcp<\/code>/);
+    assert.ok(textOf(head).includes("sign in as agent, with the password above"), textOf(head));
   }
   // a stopped run's state, with no postgres: neither box
   const run = fakeRun();

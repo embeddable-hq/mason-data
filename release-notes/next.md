@@ -49,6 +49,15 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   - The synced data grows by about 5%, and the first sync takes about 7% longer.
   - The upgrade reads no table again. A table synced before keeps running its queries as before, until it is synced
     again whole.
+- **The web page's "Connect an AI agent" is shorter and leads with what to paste.** With `mason serve`'s MCP endpoint
+  on, every client uses its address: the box shows it with Copy, one line per client (claude.ai and Claude Desktop,
+  ChatGPT, Claude Code, Cursor) saying where it goes, and one line on signing in. The `mason mcp` way is under it, closed.
+  "New user added" shows the MCP URL beside the Postgres URL, with the same instructions closed under them.
+- **Connects from's hosted-agent choices are now named for the product: "claude.ai" and "ChatGPT on the web"**, under
+  "A hosted agent's servers". Before, they read "Claude (Anthropic)" and "ChatGPT (OpenAI)", and a person using Claude
+  Code chose the first and was refused. Choosing one now says that Claude Code and Cursor connect from your own
+  computer. A user's row reads "from claude.ai's servers (2 ranges)". The ranges are the same.
+  `mason status --json`'s `addressPresets` carry the new labels and each one's short `name`.
 - **A lookup by a random key reads a few megabytes, not the whole key column.** A synced table has no index. Before,
   `WHERE id = $1` on a table keyed by a random UUID read every value of its key. One order of 100 M took 13 s on the
   README's cold benchmark. Now Mason keeps a sorted list of such a table's keys beside it, and a lookup by key reads
