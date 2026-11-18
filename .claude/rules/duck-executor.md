@@ -154,6 +154,13 @@ paths:
   releases it through `cleanUp`, its answer is drained once handed back), and `SessionRunner.close` closes an answer a
   statement opened while the close waited. `tests/duck-executor.test.ts` "a session closed while its function-calling
   statement starts" holds both, by the order the worker's port keeps (answered, then released).
+- **A statement that joins on hidden integer keys runs in a transaction of its own** (`numbersHold`, issue 1144): BEGIN,
+  then a check that no row of the tables whose numbers it reads is unnumbered, then the statement, in the same snapshot.
+  A row not numbered, or a check that fails, runs the plan without numbers instead (`PlannedSql.numbers.plain`). The
+  check is never a condition inside the statement: a WHERE is evaluated only on rows that reach it, and a join that
+  finds no pair meets none (an inner join over an unnumbered row answered no row, measured). Every way a statement ends
+  ends its transaction (`endHeld`: ROLLBACK, in `releasing`, so the session's next statement waits for it).
+  tests/duck-reference-keys.test.ts "fails or is cancelled" holds it.
 
 ## What review probes
 

@@ -44,6 +44,7 @@ import { jsonbText, parseJson, storedPairs, type Json } from "./jsonb.ts";
 import { atTimeZoneOf, isUtc, UTC_NAMES } from "../lib/timezone.ts";
 import type { CaseMapping, DuckCollation, StatementCollations } from "./collation.ts";
 import { pgTrim } from "./text.ts";
+import { NUMBERED_EQUALITY, type NumberedLookup, type NumberedRead } from "./reference-keys.ts";
 import { bucketGroups, shape, type BucketMark } from "./bucket-group.ts";
 
 /** A parse-tree node (`{ Kind: body }`) and a body, as libpg-query's JSON has them. */
@@ -337,6 +338,14 @@ class Rewriter {
   /** every read of a copied table's JSON column by literal steps the statement makes, stored or not: the request log's
    *  `json_reads`, which the keeper's policy reads (src/duck/kept.ts `review`) */
   readonly jsonReads = new Map<string, JsonRead>();
+  /** the references whose keys the synced data numbers (src/duck/reference-keys.ts): null where none may be read */
+  numbered: NumberedLookup | null = null;
+  /** an equality of a numbered reference's key columns, by its A_Expr's body: the equality of the two hidden numbers it
+   *  is written as, and the hidden columns it reads (`referenceJoins`) */
+  private readonly onNumbers = new WeakMap<Body, { write: () => AstNode; sides: NumberedRead[] }>();
+  /** the hidden columns the statement reads, by table and name: each checked numbered in the statement's own snapshot
+   *  before it runs (src/duck/store.ts `numbersHold`) */
+  readonly numbersRead = new Map<string, NumberedRead>();
   constructor(analysis: PgAnalysis, base: number, collations: StatementCollations, userTypes: ReadonlyMap<number, string> = new Map(), rowTypes: ReadonlyMap<number, readonly RowColumn[]> = new Map(), timeZone = "UTC", dateStyle = "ISO, MDY",
     enums: EnumTypes = { labels: new Map(), arrays: new Map() }, kept: KeptLookup | null = null, keyCounts: ReadonlySet<number> = new Set(), citextHeld: ReadonlySet<number> = new Set(),
     typeNames: ReadonlyMap<number, string> = new Map()) {
@@ -685,6 +694,103 @@ class Rewriter {
 
   typeOf(n: AstNode): number | null { return this.widened.get(bodyOf(n)) ?? this.typed(n)?.type ?? null; }
 
+  /**
+   * A JOIN ON A NUMBERED REFERENCE READS THE HIDDEN NUMBERS (src/duck/reference-keys.ts, issue 1144): every equality of
+   * a reference's key columns, `o.customer_id = c.id` (either way round; each column of a key of several), that is a
+   * conjunct of a JOIN's ON or of a WHERE, is written as the equality of the two rows' hidden numbers. Numbers are equal
+   * exactly when the keys are, and a NULL key's numbers match nothing, as its `=` does, which is FALSE where `=` says
+   * NULL: the same in those two places alone, so nowhere else. Each column a VAR of a table of this very query (no
+   * outer query's, no subquery's), compared by Postgres's own equality of its type (`NUMBERED_EQUALITY`). The statement
+   * is then run only where every row of the tables it reads numbers of is numbered, in its own snapshot
+   * (src/duck/store.ts `numbersHold`), else as it was written. Recorded here, before the walk; written by the walk's
+   * rule (`rule`'s A_Expr).
+   */
+  referenceJoins(root: AstNode): void {
+    if (this.numbered === null) return;
+    const visit = (v: unknown): void => {
+      if (Array.isArray(v)) { for (const x of v) visit(x); return; }
+      if (v === null || typeof v !== "object") return;
+      if (isNode(v) && kindOf(v) === "SelectStmt") this.numberSelect(bodyOf(v));
+      for (const [k, x] of Object.entries(isNode(v) ? bodyOf(v) : v as Body)) { const arm = armOf(k, x); visit(arm ?? x); }
+    };
+    visit(root);
+  }
+
+  /** the conjuncts of one SELECT's WHERE and of each of its JOINs' ONs, each list on its own */
+  private numberSelect(b: Body): void {
+    const conjuncts = (q: unknown): AstNode[] => !isNode(q) ? [] : kindOf(q) === "BoolExpr" && bodyOf(q).boolop === "AND_EXPR" ? ((bodyOf(q).args ?? []) as AstNode[]).flatMap(conjuncts) : [q];
+    const lists: AstNode[][] = [conjuncts(b.whereClause)];
+    const joins = (x: unknown): void => {
+      if (!isNode(x) || kindOf(x) !== "JoinExpr") return;
+      const j = bodyOf(x);
+      if (j.isNatural !== true && j.usingClause === undefined) lists.push(conjuncts(j.quals));
+      joins(j.larg); joins(j.rarg);
+    };
+    for (const f of (b.fromClause ?? []) as unknown[]) joins(f);
+    for (const list of lists) this.numberConjuncts(list);
+  }
+
+  /** a column of a table of this very query, as a numbered key's column may be: its table's OID and its number there,
+   *  the FROM item it is read from, and the name prefix that reads it there */
+  private numberedColumn(n: unknown): { relid: number; attno: number; owner: string; prefix: AstNode[] } | null {
+    if (!isNode(n) || kindOf(n) !== "ColumnRef" || this.typedLike.has(bodyOf(n))) return null;
+    const t = this.typed(n);
+    if (t === null || t.node !== "VAR" || t.relation === undefined || t.renamed !== null || (t.levelsUp ?? 0) !== 0) return null;
+    const fields = (bodyOf(n).fields ?? []) as AstNode[];
+    const owner = t.column?.owner ?? null;
+    if (owner === null || fields.length === 0 || fields.some((f) => kindOf(f) !== "String")) return null;
+    // read by the FROM item's name as DuckDB knows it: a hidden column's name is the table's own, so a bare one could be
+    // either side of a table joined to itself
+    return { relid: t.relation.relid, attno: t.relation.attno, owner, prefix: [S(t.qualifier ?? owner)] };
+  }
+
+  private numberConjuncts(list: readonly AstNode[]): void {
+    type Col = NonNullable<ReturnType<Rewriter["numberedColumn"]>>;
+    const eqs: Array<{ node: Body; l: Col; r: Col }> = [];
+    for (const c of list) {
+      if (kindOf(c) !== "A_Expr") continue;
+      const e = bodyOf(c);
+      if (e.kind !== "AEXPR_OP" || lastName(e.name) !== "=") continue;
+      const t = this.typed(c);
+      if (t === null || t.node !== "OPEXPR" || t.oid === null || !NUMBERED_EQUALITY.has(t.oid)) continue;
+      const l = this.numberedColumn(e.lexpr), r = this.numberedColumn(e.rexpr);
+      if (l !== null && r !== null && l.owner !== r.owner) eqs.push({ node: e, l, r });
+    }
+    const column = (c: Col, hidden: string): AstNode => ({ ColumnRef: { fields: [...c.prefix.map((f) => structuredClone(f)), S(hidden)] } });
+    const done = new Set<Body>();
+    for (const first of eqs) {
+      if (done.has(first.node)) continue;
+      // `a` the referencing side, `z` the referenced one: either way round
+      for (const [a, z] of [[first.l, first.r], [first.r, first.l]] as const) {
+        for (const ref of this.numbered!.between(a.relid, z.relid)) {
+          // every pair of its key's columns an equality here, between the same two FROM items
+          const pairs = ref.from.attnos.map((fa, i) => eqs.find((q) => !done.has(q.node)
+            && ((q.l.owner === a.owner && q.r.owner === z.owner && q.l.attno === fa && q.r.attno === ref.to.attnos[i])
+              || (q.r.owner === a.owner && q.l.owner === z.owner && q.r.attno === fa && q.l.attno === ref.to.attnos[i]))));
+          if (pairs.some((q) => q === undefined) || !pairs.includes(first)) continue;
+          // each pair is written as the one equality of the numbers: one written and another not is still the key's
+          // equality (the numbers' equality holds only where every pair's does), so no pair depends on another's place
+          for (const q of pairs as Array<(typeof eqs)[number]>) {
+            done.add(q.node);
+            this.onNumbers.set(q.node, { write: () => op("=", column(a, ref.from.hidden), column(z, ref.to.hidden)), sides: [ref.from, ref.to] });
+          }
+          break;
+        }
+        if (done.has(first.node)) break;
+      }
+    }
+  }
+
+  /** an equality `referenceJoins` recorded, written as the numbers' (the hidden columns it reads then checked), or null */
+  private onNumbersOf(b: Body): AstNode | null {
+    const on = this.onNumbers.get(b);
+    if (on === undefined) return null;
+    for (const side of on.sides) this.numbersRead.set(JSON.stringify([side.schema, side.table, side.hidden]), side);
+    const written = on.write();
+    this.done.add(bodyOf(written));
+    return written;
+  }
+
   // ------------------------------------------------------------------------------------------------ the walk
 
   /** marks every body of the statement as its own */
@@ -875,7 +981,7 @@ class Rewriter {
   private rule(k: string, b: Body): AstNode | AstNode[] | null {
     switch (k) {
       case "SelectStmt": return this.select(b);
-      case "A_Expr": return this.aExpr(b);
+      case "A_Expr": return this.onNumbersOf(b) ?? this.aExpr(b);
       case "FuncCall": { const r = this.funcCall(b); if (r === null && b.agg_within_group === true) this.widenArgs(b); return r; }
       case "TypeCast": return this.typeCast(b);
       case "A_Const": return this.aConst(b);
@@ -8622,6 +8728,8 @@ export interface RewriteOptions {
   boundPaths?: ReadonlyMap<number, string>;
   /** the plain numerics whose copy holds each value's own scale (src/duck/scale-column.ts, src/duck/plan.ts `scaleLookup`) */
   scales?: ScaleLookup | null;
+  /** the references whose keys the synced data numbers (src/duck/reference-keys.ts, src/duck/plan.ts `numberedLookup`) */
+  numbered?: NumberedLookup | null;
   /** the timestamptz columns whose copy holds each value's 15-minute bucket (src/duck/bucket-column.ts, src/duck/plan.ts
    *  `bucketLookup`) */
   buckets?: BucketLookup | null;
@@ -8648,12 +8756,14 @@ export interface ScaleLookup {
 }
 
 export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(), citextHeld = new Set(), typeNames = new Map(), rowTypes = new Map(), timeZone = "UTC", dateStyle = "ISO, MDY", enums = { labels: new Map(), arrays: new Map() }, kept = null,
-  wireBound = false, keyCounts = new Set(), boundPaths = new Map(), scales = null, buckets = null, own: prefix = ownPrefix([stmt, analysis.tree]) }: RewriteOptions):
-  { tree: AstNode; withTies: boolean; exact: ExactColumn[]; clock: { parse?: number; exec?: number }; jsonReads: JsonRead[]; unboundedLateral: boolean; pathParams: number[]; wholeNumericArrays: number[] } {
+  wireBound = false, keyCounts = new Set(), boundPaths = new Map(), scales = null, buckets = null, numbered = null, own: prefix = ownPrefix([stmt, analysis.tree]) }: RewriteOptions):
+  { tree: AstNode; withTies: boolean; exact: ExactColumn[]; clock: { parse?: number; exec?: number }; jsonReads: JsonRead[]; unboundedLateral: boolean; pathParams: number[]; wholeNumericArrays: number[];
+    numbers: NumberedRead[] } {
   const r = new Rewriter(analysis, base, collations, userTypes, rowTypes, timeZone, dateStyle, enums, kept, keyCounts, citextHeld, typeNames);
   r.boundPaths = boundPaths;
   r.scales = scales;
   r.buckets = buckets;
+  r.numbered = numbered;
   if (joinsUsing(analysis.tree, new Set([JSONB, JSONB_ARRAY]))) {
     throw new Unrewritable("a JOIN … USING or a NATURAL JOIN on a jsonb column is not supported by Mason (Postgres equates jsonb by its own rules)", "JOIN … ON a.j = b.j", "jsonb-compare");
   }
@@ -8677,12 +8787,13 @@ export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(
   r.carryAll(own);
   r.markBounds(own, wireBound);
   r.markWholeReads(own);
+  r.referenceJoins(own);
   r.walking = true;
   // a GROUP BY of a time's unit grouped by its 15-minute bucket first (src/duck/bucket-group.ts), over the finished walk
   const tree = bucketGroups(guardFilters(flattenBool(r.walk(own))) as AstNode, r.bucketMarks, r.bucketPlaceholder(), prefix,
     (n) => { const t = r.typeOf(n as AstNode); return t !== null && FLOATS.has(t); }) as AstNode;
   return { tree, withTies: r.wroteTies, exact, clock: r.clock, jsonReads: [...r.jsonReads.values()], unboundedLateral: r.unboundedLateral, pathParams: [...r.pathParams].sort((a, b) => a - b),
-    wholeNumericArrays: [...r.wholeNumericArrays].sort((a, b) => a - b) };
+    wholeNumericArrays: [...r.wholeNumericArrays].sort((a, b) => a - b), numbers: [...r.numbersRead.values()] };
 }
 
 /** the functions whose every call is a new value (Postgres's volatile ones Mason answers) */

@@ -44,12 +44,14 @@ import { gapIn, gapMark, type GapId } from "./gaps.ts";
 import { cellsOf, evaluateText, fieldOverflow, NumericError } from "../lib/pg-numeric.ts";
 import { explainJson, explainText, planNodes, profiled, qualifiedName, scannedTables, type Copy, type CopyFacts, type Explained, type PlanNode, type TableName } from "./explain.ts";
 import type { PlannedSql } from "./plan.ts";
+import type { NumberedRead } from "./reference-keys.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { DuckDBType } from "@duckdb/node-api";
 import { extensionSettings, findExtensions, type Extensions } from "./extensions.ts";
 import { messageOf } from "../lib/secret-mask.ts";
 import { SCALE_PREFIX } from "./scale-column.ts";
+import { unnumberedSql } from "./reference-keys.ts";
 import { BOM_PROBE, keepLeadingBom } from "./text.ts";
 import { Admission, heavyRowsFor, heavyTurns, keptRows } from "./admission.ts";
 
@@ -802,10 +804,11 @@ export class SessionRunner implements DuckRunner {
   /** `run`, and where its time goes as it is read: DuckDB's (its prepare, which plans; each chunk it computes) and
    *  Mason's (the exact numerics, the encoding), ms — what an EXPLAIN ANALYZE says. `profile`: the file DuckDB's
    *  profiler writes this statement's profile to (EXPLAIN ANALYZE), turned on here, after the settle */
-  private async streamed(planned: PlannedSql, params: readonly (string | null)[], session: DuckSession, signal: AbortSignal,
+  private async streamed(asked: PlannedSql, params: readonly (string | null)[], session: DuckSession, signal: AbortSignal,
     fields: ReadonlyArray<{ name: string; oid: number; typmod?: number }> | null, exact: readonly ExactColumn[],
     profile: string | null = null): Promise<{ answer: DuckAnswer; timing: { prepareMs: number; duckdbMs: number; masonMs: number } }> {
-    const sql = planned.text;
+    let planned = asked;
+    let sql = planned.text;
     const seq = this.next;
     await Promise.all([...this.releasing]);
     // this statement's calls read their cancel from here on: never before the last one is released, which a cancel of
@@ -813,17 +816,33 @@ export class SessionRunner implements DuckRunner {
     beginStatement(this.cancels, this.slot, seq);
     try { await this.settle(session); }
     catch (e) { throw pgErrorOf(e, sql); }
+    // A JOIN ON A REFERENCE'S HIDDEN INTEGER KEYS runs in a transaction whose snapshot holds every row it reads numbered,
+    // else as it was written (`numbersHold`); the transaction ends when the statement is released (`endHeld`)
+    let held = false;
+    if (planned.numbers !== undefined) {
+      held = await this.numbersHold(planned.numbers.sides, sql);
+      if (!held) { planned = planned.numbers.plain; sql = planned.text; }
+    }
+    const endHeld = (): void => {
+      if (!held) return;
+      held = false;
+      const ended = this.conn.run("ROLLBACK").then(() => undefined, (e: unknown) => this.log(`the transaction of a statement that joined on hidden integer keys could not be ended: ${messageOf(e)} — ${oneLine(sql)}`));
+      this.releasing.add(ended);
+      void ended.finally(() => this.releasing.delete(ended));
+    };
     // THE PROFILER IS ON FOR THE STATEMENT ALONE: DuckDB writes the profile of the LAST statement it profiled on the
     // connection, so it is turned on after every other statement Mason runs here (the settle's probe of the schemas,
     // turned on before it, was reported as the plan of a count(*) that wrote no profile of its own), and the caller turns
     // it off before it runs another (`explained`, which also holds the profile to the statement's text)
     if (profile !== null) {
       try { await this.conn.run("SET enable_profiling = 'json'"); await this.conn.run(`SET profiling_output = ${quoteLiteral(profile)}`); }
-      catch (e) { throw pgErrorOf(e, sql); }
+      catch (e) { endHeld(); throw pgErrorOf(e, sql); }
     }
     const timing = { prepareMs: 0, duckdbMs: 0, masonMs: 0 };
     const t0 = performance.now();
-    const p = await this.prepare(sql);
+    let p: DuckDBPreparedStatement;
+    try { p = await this.prepare(sql); }
+    catch (e) { endHeld(); throw e; }
     timing.prepareMs = performance.now() - t0;
     // HOW A STATEMENT IS CANCELLED (src/duck/functions.ts "every call carries its session"; the test
     // server's hung process). It is interrupted — its tasks stop at their next chunk — and, if it calls a Mason
@@ -845,7 +864,7 @@ export class SessionRunner implements DuckRunner {
     signal.addEventListener("abort", cancel);
     const failure = (e: unknown): StatementError => failureOf(signal, e, sql);
     // an abort before the listener was there (the timeout fired in the settle or the prepare) cancels nothing
-    if (signal.aborted) { signal.removeEventListener("abort", cancel); p.destroySync(); throw failure(null); }
+    if (signal.aborted) { signal.removeEventListener("abort", cancel); p.destroySync(); endHeld(); throw failure(null); }
     const started = Date.now();
     let total = 0;
     let result: DuckDBResult | null = null;
@@ -869,6 +888,7 @@ export class SessionRunner implements DuckRunner {
       signal.removeEventListener("abort", cancel);
       result?.closeSync();
       p.destroySync();
+      endHeld();
       say();
     };
     // A STATEMENT THAT DID NOT RUN TO ITS END (it failed, its cancel raised, it was closed early) IS CLOSED ONLY ONCE
@@ -1015,7 +1035,8 @@ export class SessionRunner implements DuckRunner {
         // naming the statement it timed. None: DuckDB ran no operator (it answered while planning — a count(*) of a
         // whole table is the table's row count), and its plan is its EXPLAIN, the rows the ones it answered
         const profile = fs.existsSync(file) ? profiled(JSON.parse(fs.readFileSync(file, "utf8"))) : null;
-        if (profile !== null && profile.sql !== sql.text) {
+        // (a join on hidden integer keys that ran as it was written: the plain plan's text, `numbersHold`)
+        if (profile !== null && profile.sql !== sql.text && profile.sql !== sql.numbers?.plain.text) {
           throw new StatementError({ code: "XX000", message: `the engine's profile of an EXPLAIN ANALYZE is of another statement (${oneLine(profile.sql ?? "none named")}): report it (Mason's EXPLAIN)` }, sql.text);
         }
         if (profile !== null) plan = profile.plan;
@@ -1120,6 +1141,26 @@ export class SessionRunner implements DuckRunner {
         else if (pgErrorOf(e, "SELECT 1").fields.code !== "57014") this.log(`the check that a statement ended failed: ${e instanceof Error ? e.message : String(e)} — ${oneLine(sql)}`);
       }
     } finally { clearTimeout(slow); }
+  }
+
+  /**
+   * WHETHER A STATEMENT THAT JOINS ON HIDDEN INTEGER KEYS MAY RUN SO (src/duck/reference-keys.ts `unnumberedSql`): a
+   * transaction begun, and every row of the tables whose numbers it reads numbered in its snapshot. True: the
+   * transaction is left open, and the statement runs in it, so it reads the rows the check read. False: a row is not
+   * numbered, or the check failed (said), and the transaction is ended: the statement runs as it was written.
+   */
+  private async numbersHold(sides: readonly NumberedRead[], sql: string): Promise<boolean> {
+    try { await this.conn.run("BEGIN TRANSACTION"); }
+    catch (e) { throw pgErrorOf(e, sql); }
+    let numbered = false;
+    try { numbered = (await this.conn.runAndReadAll(unnumberedSql(sides))).getRowsJS()[0]?.[0] === false; }
+    // tolerable: the statement runs on the keys themselves, which answer it as the numbers would (a table synced again
+    // under another shape, its hidden column gone, fails here)
+    catch (e) { this.log(`a join on hidden integer keys runs on the keys themselves: the check that its rows are numbered failed: ${messageOf(e)}`); }
+    if (numbered) return true;
+    try { await this.conn.run("ROLLBACK"); }
+    catch (e) { throw pgErrorOf(e, sql); }
+    return false;
   }
 
   /** Closes the connection once nothing runs on it: an answer left open drained (its statement cancelled), every

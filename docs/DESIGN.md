@@ -4828,3 +4828,74 @@ itself" has the current run's tallies). When it was added, of 2,753 statements M
 30.9 % exactly, 25.0 % the right rows under its own names, 16.2 % refused with its error, 12.6 % a wrong value, 6.1 % wrong
 rows or order. By group on DuckDB alone: common whole statements 80 % identical, the BI shapes 21 %, the type matrix 36 %;
 what fails includes integer division (`7 / 2` is 3.5), LIKE's escapes, an array's text (`[0,1]`), a libc collation's order.
+
+### Joins on hidden integer keys (issue 1144, 2026-11-18)
+
+**Decision.** For each reference the sources file names (`references:`), where the referenced key is clearly larger
+than a small integer (a UUID, a text, a key of several columns, or an integer whose range is at least 64 times its
+rows), the synced data holds a dictionary of the key's values (`_mason.ref_keys_…`), each given a number once, and a
+hidden BIGINT on both tables: the number of the row's key. A join on the reference's columns, as a conjunct of an ON or
+a WHERE, joins on the two numbers (src/duck/reference-keys.ts, src/duck/rewrite.ts `referenceJoins`). A dense integer
+key (a serial) gets none: the engine bit-packs it to the few bits its number would take.
+
+**Why a dictionary, not the referenced row's number.** The issue proposed numbering the referenced rows and giving each
+referencing row its row's number, with a check that the referenced key is unique and a fallback to the plain join for
+an orphan. A dictionary of the values instead makes the number a function of the value: two rows' numbers are equal
+exactly when their keys are. So uniqueness and orphans need no check. A key held twice has one number, an orphan's key
+has a number no referenced row holds, a row deleted and inserted again keeps its key's number. A NULL key is -1 on the
+referenced side and 0 on the other, so it never matches. That differs from `=` only in FALSE against NULL, which is why
+only a conjunct of an ON or a WHERE is rewritten. The cost is that the dictionary keeps a deleted key's number for ever.
+
+**Why numbers are given on the writer alone.** A number must never be given twice. Two connections that each read the
+dictionary's largest number and added to it would. So the writer alone adds to a dictionary: the stream's batches and
+the writer's polls number their rows in their own transaction, and the rest (a first sync, a catch-up, a compaction) is
+numbered on the writer's turn after, a chunk at a time. A side table is numbered before its swap from the dictionary as
+it is, read only, and a key new since then is left for the writer.
+
+**Why whether a number is still right is read from the store (the review of PR 1159).** The first version decided it
+from what the numbering's last turn had found: the hidden columns each table held (`present`) and the dictionaries it
+had made (`made`). A swap or a compaction cleared a table from `present` until the next turn, 50 ms later. A stream
+batch in that window updated a key in place without clearing its number, so the row kept its old key's number, and
+nothing was left unnumbered for the check to see. A FULL JOIN then answered 324 323 251 where Postgres answered 349 348
+275. And a dictionary was named for its key's table and columns alone. After a type change at the source on both sides
+(uuid to text, bigint to text), the old dictionary stayed, the new values were cast into it, and `upper(<uuid>)` or
+`'01000003'` joined a key it is not equal to (62 rows against 60). A value the old type could not hold failed the side
+table's numbering at every retry, and the table never synced again. Now every write decides from the store in its own
+transaction, a dictionary belongs to its key's types, a hidden column's name carries its dictionary's, a dictionary is
+dropped only once no column holds its numbers, and a row is numbered only where no cast is needed. So a number cannot
+outlive its key, whatever a swap, a timer, a restart or a change of type does.
+
+**Why numbering never joins on a row id.** The first version numbered a batch's rows by `UPDATE … FROM (…) s WHERE
+t.rowid = s.r`. Under DuckDB 2.0.0, the join filter on the row id read past the scan's vector: the process aborted in
+1 run of 4 of a stream batch on 20,000 rows (macOS's allocator caught the corruption; Guard Malloc showed the read in
+`BloomFilterExecutor::FilterSelection`). The update now joins on the key's own columns, from the batch's distinct keys
+and their numbers, which no run of 3 under Guard Malloc or 10 under load crashed.
+
+**Why the check is a transaction, not a condition.** A row not numbered yet holds NULL, and joined on numbers it would
+match nothing. So a statement that joins on numbers first checks, in a transaction, that no row of those tables is
+unnumbered, and then runs in the same snapshot (src/duck/store.ts `numbersHold`). Otherwise it runs as written. The first
+version put the check in the statement's WHERE, as `CASE WHEN EXISTS (… IS NULL) THEN error(…)`. DuckDB evaluates a WHERE
+only on rows that reach it, and an inner join whose only pair was an unnumbered row answered no row and raised nothing.
+A check on each key as the join reads it (`CASE WHEN h IS NULL THEN error() ELSE h END`) did raise, but it hid the column
+from the planner: the join's estimate was 746 billion rows, and its min-max filter on the probe side was gone.
+
+**Measured.** 100 M orders, 5 M customers for each kind of key, synthetic (scratch Postgres 18 on the same laptop: 10
+cores, 32 GiB, NVMe). One query: revenue by order month and signup year over the join, 72 rows. Before is the same
+build with no `references:` (what main does).
+
+| key | the orders' key column read | warm (min of 5) | cold (3 runs) |
+|---|---|---|---|
+| UUID | 1.60 GiB → 0.31 GiB | 0.83 s → 0.83 s | 1.07–1.20 s → 0.83–0.88 s |
+| text (`cus_` and 16 hex digits) | 1.20 GiB → 0.31 GiB | 1.42 s → 0.83 s | 1.63–1.71 s → 0.87–0.93 s |
+| sparse 60-bit integer | 0.79 GiB → 0.31 GiB | 0.82 s → 0.85 s | 0.89–0.92 s → 0.84–0.88 s |
+| dense serial (no hidden key) | 0.40 GiB, the same | 0.82 s → 0.85 s | 0.86–0.90 s → 0.85–0.89 s |
+
+The first sync of the five tables took 40.6 s before and 53.5 s after. The synced data grew from 4.04 GiB to 5.19 GiB.
+
+The cold runs read 42 GB before each run to push the tables out of the page cache, then ran the SQL Mason sent in a
+new engine instance. On a local NVMe disk the read is cheap, so a cold run costs little more than a warm one. What a
+join reads drops by 0.5 to 1.3 GiB for each reference at this size, and on a disk that reads 125 MB/s (an EBS gp3
+volume's baseline) that is 4 to 10 s a query. Warm, a UUID and a sparse integer join as fast as their numbers do. A
+text key joins faster on its number (1.42 s → 0.83 s). The cost is the hidden columns: about 312 MiB a reference on the
+orders (about 26 bits for each of 100 M rows), 13 MB on each customers table, and the dictionaries. The first
+sync took 13 s more for three references.

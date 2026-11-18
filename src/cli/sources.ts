@@ -85,7 +85,8 @@ export interface TableEntry {
  * A FOREIGN KEY AN ENTRY NAMES (`references:`, SQL's word), on the table that holds it (the "many" side): its own
  * columns, and the columns of another table the file syncs that they hold values of. One column is written
  * `customer_id: customers.id`; several as SQL's FOREIGN KEY … REFERENCES writes them, `(tenant_id, customer_id):
- * customers (tenant_id, id)`. Read and shown, nothing else yet: no query reads it.
+ * customers (tenant_id, id)`. The run numbers a reference's keys where they are larger than a small integer, and a join
+ * on it reads the numbers (src/duck/reference-keys.ts, issue 1144).
  */
 export interface Reference {
   /** its own columns, in order */
@@ -770,8 +771,9 @@ function keyProblems(t: SourceTable, key: readonly string[], at: string): string
  * THE TABLES THE RUN COPIES (`AddedTable`, src/duck/sync.ts): each entry against the database's catalog, narrowed to the
  * columns it copies (`copiedColumns`) and its foreign keys out of them. A `key:` is the key the table is copied by, and
  * `primaryKey` keeps the source's own (none): the catalog declares only what the source does. Every entry's problems on
- * one report (`sourceFailure`). Its `references:` are checked, never carried: no query reads them yet (`skipTo`: see
- * `entryProblems`).
+ * one report (`sourceFailure`). Its `references:` are checked and carried, each to a table the file syncs
+ * (src/duck/reference-keys.ts numbers their keys; a reference to a table of `skipTo` is neither checked nor carried:
+ * see `entryProblems`).
  */
 export function addedTables(src: SourceFile, tables: readonly SourceTable[], database: string, root: string, skipTo: readonly string[] = []): AddedTable[] | Failure {
   const problems: string[] = tableClashProblems(src);
@@ -783,8 +785,10 @@ export function addedTables(src: SourceFile, tables: readonly SourceTable[], dat
     if (p.length || t === undefined) { problems.push(...p); continue; }
     const keep = new Set(copiedColumns(t, e));
     const at = `${shownPath(root, src.file)}: tables.${e.name}`;
+    // its references to tables the file syncs, by their `schema.table` (src/duck/reference-keys.ts)
+    const references = (e.references ?? []).filter((r) => !skipTo.includes(r.table)).map((r) => ({ columns: [...r.columns], table: r.table, targetColumns: [...r.targetColumns] }));
     out.push({ ...t, columns: t.columns.filter((c) => keep.has(c.name)), foreignKeys: t.foreignKeys.filter((f) => keep.has(f.column)),
-      ...(e.key !== null ? { key: e.key, primaryKey: t.key } : {}), sync, entryAt: at,
+      ...(e.key !== null ? { key: e.key, primaryKey: t.key } : {}), sync, entryAt: at, ...(references.length > 0 ? { fileReferences: references } : {}),
       // its entry's words, for the line a hold for its columns says (src/duck/column-identity.ts)
       entry: { at, name: e.name, columns: e.columns, exclude: e.exclude } });
   }

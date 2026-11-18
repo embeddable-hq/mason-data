@@ -34,6 +34,7 @@ import type { BucketLookup, ScaleLookup } from "./rewrite.ts";
 import { scaledOf } from "./scale-column.ts";
 import { bucketOf } from "./bucket-column.ts";
 import { mayKeepRows } from "./admission.ts";
+import { numberedOf, type NumberedLookup, type NumberedRead } from "./reference-keys.ts";
 import { analysedRelations, routeLookups } from "./key-lookup.ts";
 
 const JSON_OID = 114, JSONB_OID = 3802, NUMERIC_OID = 1700, TIMESTAMPTZ_OID = 1184;
@@ -87,6 +88,43 @@ async function scaleLookup(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, 
   }));
   return { at: (relid, attno) => at.get(`${relid}.${attno}`) ?? null,
     named: (source, column) => { const dot = source.indexOf("."); return hidden.get(JSON.stringify([source.slice(0, dot), source.slice(dot + 1), column])) ?? null; } };
+}
+
+/**
+ * THE REFERENCES WHOSE KEYS THE SYNCED DATA NUMBERS (src/duck/reference-keys.ts), among the tables the statement reads:
+ * each side's table and key columns by the catalog's OIDs and numbers (Typed.relation), the listener saying which are
+ * numbered (`NUMBERED_KEY` in `userTypes`); null when none is, or the statement reads no table of one.
+ */
+async function numberedLookup(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, types: ReadonlyMap<number, ReadonlyArray<{ relation?: { relid: number; attno: number } }>>,
+  userTypes: ReadonlyMap<string, number>): Promise<NumberedLookup | null> {
+  const refs = [...userTypes.keys()].flatMap((k) => { const r = numberedOf(k); return r === null ? [] : [r]; });
+  if (refs.length === 0) return null;
+  const relids = new Set<number>();
+  for (const t of [...types.values()].flat()) if (t.relation !== undefined) relids.add(Math.trunc(t.relation.relid));
+  if (relids.size === 0) return null;
+  const rows = await catalogRows(catalog, `SELECT c.oid::text, n.nspname, c.relname, a.attnum::text, a.attname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace ` +
+    `JOIN pg_attribute a ON a.attrelid = c.oid WHERE c.oid::int8 IN (${[...relids].join(", ")}) AND c.relkind = 'r' AND a.attnum > 0 AND NOT a.attisdropped`);
+  // each table the statement reads, by its schema and name: its OID and its columns' numbers by name
+  const tables = new Map<string, { relid: number; attnos: Map<string, number> }>();
+  for (const [relid, schema, table, attno, column] of rows) {
+    const key = JSON.stringify([schema, table]);
+    const t = tables.get(key) ?? { relid: Number(relid), attnos: new Map<string, number>() };
+    t.attnos.set(column!, Number(attno));
+    tables.set(key, t);
+  }
+  const read = (side: { schema: string; table: string; columns: string[]; hidden: string }): (NumberedRead & { relid: number }) | null => {
+    const t = tables.get(JSON.stringify([side.schema, side.table]));
+    const attnos = side.columns.map((c) => t?.attnos.get(c));
+    return t === undefined || attnos.some((a) => a === undefined) ? null : { relid: t.relid, schema: side.schema, table: side.table, attnos: attnos as number[], hidden: side.hidden };
+  };
+  const between = new Map<string, Array<{ from: NumberedRead; to: NumberedRead }>>();
+  for (const r of refs) {
+    const from = read(r.from), to = read(r.to);
+    if (from === null || to === null) continue;
+    const key = `${from.relid}.${to.relid}`;
+    between.set(key, [...between.get(key) ?? [], { from, to }]);
+  }
+  return between.size === 0 ? null : { between: (fromRelid, toRelid) => between.get(`${fromRelid}.${toRelid}`) ?? [] };
 }
 
 /** THE TIMESTAMPTZ COLUMNS THE STATEMENT READS FROM A TABLE WHOSE COPY HOLDS EACH VALUE'S 15-MINUTE BUCKET
@@ -201,6 +239,12 @@ export interface PlannedSql {
    * Absent: it may keep rows, and the engine's plan says how many (`keptRows`)
    */
   readonly keepsNone?: true;
+  /**
+   * it joins on the hidden integer keys of references (src/duck/rewrite.ts `referenceJoins`): the hidden columns it
+   * reads, which src/duck/store.ts checks numbered in the statement's own transaction before it runs it (`numbersHold`),
+   * and the same statement planned on the keys' own columns, which it runs where one is not. Absent: it reads none
+   */
+  readonly numbers?: { readonly sides: readonly NumberedRead[]; readonly plain: PlannedSql };
   readonly [PLANNED]: true;
 }
 
@@ -390,6 +434,9 @@ export interface PlanOptions {
   /** the generated planner's ask for each output column's followed analysed expression (`DuckPlan.outputs`): only it
    *  reads them, so a wire statement never pays for them (PR 202 round 14) */
   outputs?: boolean;
+  /** false: no join reads a reference's hidden integer keys (src/duck/reference-keys.ts), the plan a statement that
+   *  reads them runs where a row is not numbered (`PlannedSql.numbers`) */
+  numbers?: boolean;
 }
 
 /** The catalog declares a type the source made with nothing over it (`PgColumn.made`), so what its analysis says is not
@@ -500,7 +547,7 @@ async function heldRefusal(catalog: Parameters<typeof catalogRows>[0], tree: Tre
  *  `walls`: `text` is the statement with its filtered reads in place (expandRowFilters), each of which the wall ends */
 export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   const { catalog, text, stmt, base, paramOids, searchPath, timeZone, dateStyle = "ISO, MDY", collations: resolver, verified, userTypes = new Map<string, number>(), copies = () => [],
-    depth = 0, kept = null, wireBound = false, boundPaths = new Map<number, string>(), grants, walls = null, relations, outputs = false } = options;
+    depth = 0, kept = null, wireBound = false, boundPaths = new Map<number, string>(), grants, walls = null, relations, outputs = false, numbers = true } = options;
   const started = performance.now();
   const under: SessionState = { searchPath, timeZone, dateStyle };
   const analysis = await analyze(catalog, text, paramOids, under);
@@ -615,7 +662,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
       typeNames.set(Number(oid), name!);
     }
   }
-  let tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams: number[], wholeNumericArrays: number[];
+  let tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams: number[], wholeNumericArrays: number[], numberedReads: NumberedRead[];
   // a table's row the source has otherwise (copied in part: no source OID for it) is not the source's row
   const sourceRows = new Map([...rowTypes].filter(([oid]) => userTypes.has(catalogTypes.get(oid) ?? "")));
   // IS [NOT] NULL of a composite reads its fields (a row of NULLs IS NULL), which the copy's text does not
@@ -631,6 +678,9 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   // the plain numerics it reads whose own scales their copy holds (src/duck/scale-column.ts); not a generated table's run
   // (`outputs`), whose stored column holds the engine's DECIMAL as a copy of the column does, no scale beside it
   const scales = outputs ? null : await scaleLookup(catalog, analysis.types, userTypes);
+  // the references whose hidden integer keys a join may read (src/duck/reference-keys.ts); never a generated table's run,
+  // which is not a wire statement's run and has no check before it (src/duck/store.ts `numbersHold`)
+  const numbered = !numbers || outputs || (relations !== undefined && relations.size > 0) ? null : await numberedLookup(catalog, analysis.types, userTypes);
   // the timestamptz columns it reads whose 15-minute buckets their copy holds (src/duck/bucket-column.ts); not a
   // generated table's run, whose stored columns hold none
   const buckets = outputs ? null : await bucketLookup(catalog, analysis.types, userTypes);
@@ -644,20 +694,21 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   // its columns read by a `*` included, whichever module writes it (the rewrite, the late select list, the libc bounds)
   const own = ownPrefix([stmt, analysis.tree], walls?.written ?? []);
   const analysed = performance.now();
-  const rewritten = (l = lookup, sc = scales, bu = buckets): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, typeNames, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts, boundPaths, scales: sc, buckets: bu, own });
+  const rewritten = (l = lookup, sc = scales, bu = buckets, nb = numbered): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, typeNames, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts, boundPaths, scales: sc, buckets: bu, numbered: nb, own });
   try {
-    ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams, wholeNumericArrays } = rewritten());
+    ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams, wholeNumericArrays, numbers: numberedReads } = rewritten());
     // the oracle's (`eager`): every read stored before the plan is made, and the plan made again over them
     if (kept?.keepNow != null && lookup !== null && jsonReads.some((r) => kept.ready(r) === null)) {
       await kept.keepNow(jsonReads);
-      ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams, wholeNumericArrays } = rewritten());
+      ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams, wholeNumericArrays, numbers: numberedReads } = rewritten());
     }
     // a statement that lists a copy's columns without naming them reads none from a stored column (hideKept): made
     // again with every read its call, the reads still recorded
     // (and none from a plain numeric's hidden scale column, which that view does not list: its values print with the
     // column's one scale there, `mixed-scale-numeric`; nor from a timestamptz's hidden bucket, its GROUP BY as before)
-    if ((lookup !== null || scales !== null || buckets !== null) && exposes(tree)) {
-      ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams, wholeNumericArrays } = rewritten(lookup === null ? null : { at: (relid, attno) => lookup.at(relid, attno), ready: () => null }, null, null));
+    // (nor a reference's hidden integer key, which that view does not list either: its joins read the keys)
+    if ((lookup !== null || scales !== null || buckets !== null || numberedReads.length > 0) && exposes(tree)) {
+      ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams, wholeNumericArrays, numbers: numberedReads } = rewritten(lookup === null ? null : { at: (relid, attno) => lookup.at(relid, attno), ready: () => null }, null, null, null));
     }
   }
   catch (e) {
@@ -714,7 +765,11 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
     throw new StatementError({ code: "0A000", message: "Mason cannot run this statement exactly: its rewritten form does not read back as itself (a Mason gap: report it, with the statement)",
       detail: `read back: ${difference}; the rewritten SQL: ${sql}` }, text);
   }
+  // A JOIN ON NUMBERS: the same statement planned on the keys' own columns beside it, run where a row is not numbered
+  // (src/duck/store.ts `numbersHold`)
+  const plain = numberedReads.length === 0 ? null : (await planDuck({ ...options, numbers: false })).sql;
   const planned = { text: sql, functions: masonCalls(tree), ...(unboundedLateral ? { unboundedLateral: true } : {}),
+    ...(plain !== null ? { numbers: { sides: numberedReads, plain } } : {}),
     ...(pathParams.length > 0 ? { pathParams } : {}), ...(wholeNumericArrays.length > 0 ? { wholeNumericArrays } : {}),
     ...(mayKeepRows(tree) ? {} : { keepsNone: true }) } as unknown as PlannedSql;
   return { sql: planned, params: analysis.params, fields: fields?.map((f) => ({ ...f, size: pgTyplen(f.oid) })) ?? null, withTies, ...(exact.length > 0 ? { exact, own } : {}), resolved: keys, argumentTypes: argumentTypes(analysis.tree), ...(outputs ? { outputs: outputExpressions(analysis.tree) ?? [] } : {}),

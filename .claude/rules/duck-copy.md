@@ -163,6 +163,10 @@ paths:
   never listed (the copy's view of its visible columns, stored JSON paths on or off), and the rewrite reads it only to
   print (`scaleOf`): keys, filters and aggregates stay the engine's DECIMAL. A copy without it is read again once
   (`SCALE_LAYOUT`). Why: Postgres prints `12.5` beside `12.49`, and one DECIMAL scale printed `12.50`.
+- **A reference's hidden integer keys are a column a side table gets before its swap** (src/duck/reference-keys.ts
+  `fillSide`, issue 1144): added to the side table and numbered from the dictionary, read only, on the rebuilds'
+  connection, in chunks the stop can interrupt. Never listed, like the scale column. A key the dictionary lacks stays
+  NULL until the writer numbers it.
 - **A timestamptz's 15-minute bucket is a hidden column every write computes** (`src/duck/bucket-column.ts`, issue
   1146). Beside each `timestamptz` column the copy holds an INTEGER, the value's 15 minutes of UTC (`bucketSql`). It is
   NULL for a NULL, and `BUCKET_NONE` (-1) for a value no bucket decides: before 1980, from year 10000, ±infinity. The

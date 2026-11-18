@@ -64,6 +64,7 @@ import { copyFacts, type CopyFacts } from "../../duck/explain.ts";
 import { utf8Fatal } from "../../duck/text.ts";
 import { scaledKey } from "../../duck/scale-column.ts";
 import { bucketKey } from "../../duck/bucket-column.ts";
+import { numberedKey } from "../../duck/reference-keys.ts";
 import type { CopyState } from "../../duck/sync.ts";
 import { explainedText, explainOptions, type ExplainOptions } from "./explain.ts";
 import * as crypto from "node:crypto";
@@ -3183,6 +3184,8 @@ class Server {
       // a timestamptz whose 15-minute buckets the copy holds (src/duck/bucket-column.ts), by schema, table and column
       for (const c of t.columns) if (c.bucket !== undefined) out.set(bucketKey(t.schema ?? "public", t.name, c.name, c.bucket), 1);
     }
+    // a reference whose keys the synced data numbers (src/duck/reference-keys.ts): a join on its columns reads the numbers
+    for (const r of this.options.schema().references ?? []) out.set(numberedKey(r), 1);
     for (const t of this.options.schema().tables) for (const c of t.columns) {
       if (c.typeOid === undefined || c.spelled === undefined) continue;
       // the type's name as pg_type holds it (`other.level` is `level`, `"My Mood"` is `My Mood`)

@@ -110,6 +110,7 @@ tables:
   `mason add` writes the ones your database declares, between tables the file syncs. When you add the table a foreign
   key points to later, `mason add` writes it then. You can add a relationship your database doesn't declare by hand.
   A foreign key of several columns is written as in SQL: `(tenant_id, customer_id): customers (tenant_id, id)`.
+  Where the key is a UUID, a text or several columns, a join on it reads small numbers Mason keeps for it.
 - While Mason runs, `mason add` and `mason remove` take effect at once. A change you make by hand applies at the next
   `mason start`. If an entry has a mistake, Mason names the key and says how to fix it. You never write column types.
 - A column the file leaves out stays out until you confirm it, even if you rename it, its table or its schema on your
