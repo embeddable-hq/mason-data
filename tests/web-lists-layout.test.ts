@@ -18,9 +18,9 @@
 import { test, after } from "node:test";
 import * as assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import { PAGES, serveThePage } from "./web-lists-fixtures.ts";
+import { PAGES, NOW, serveThePage } from "./web-lists-fixtures.ts";
 
-type Page = { goto(url: string): Promise<unknown>; waitForSelector(s: string): Promise<unknown>; evaluate<T = unknown>(expression: string): Promise<T>;
+type Page = { clock: { setFixedTime(time: number): Promise<void> }; goto(url: string): Promise<unknown>; waitForSelector(s: string): Promise<unknown>; evaluate<T = unknown>(expression: string): Promise<T>;
   setViewportSize(s: { width: number; height: number }): Promise<void>; close(): Promise<void> };
 type Browser = { newPage(o: { viewport: { width: number; height: number }; colorScheme?: "light" | "dark" }): Promise<Page>; close(): Promise<void> };
 const playwright = ((): { chromium: { launch(): Promise<Browser> } } | null => {
@@ -154,6 +154,9 @@ const MEASURE = `(() => {
 async function open(hash: string, ready: string, width: number, colorScheme: "light" | "dark"): Promise<Page> {
   browser ??= await playwright!.chromium.launch();
   const p = await browser.newPage({ viewport: { width, height: 900 }, colorScheme });
+  // the page's now is the fixtures' (`NOW`), whatever day the test runs: Date.now and new Date() read it, and the timers
+  // still run
+  await p.clock.setFixedTime(NOW);
   await p.goto(`http://127.0.0.1:${(await served)!.port}/${hash}`);
   await p.waitForSelector(ready);
   await p.evaluate("document.fonts.ready.then(() => null)");
@@ -169,6 +172,8 @@ for (const page of PAGES) {
     test(`${page.id}: every list stays in its card, squeezes no column below its content, and scrolls in its card, never the page, from 320 to 1600 px (${scheme})`, { skip: noBrowser }, async () => {
       assert.ok(playwright !== null, "CI runs this test: Playwright and its Chromium are installed there (.github/workflows/ci.yml)");
       const p = await open(page.hash, page.ready, WIDTHS[0]!, scheme);
+      const shown = await p.evaluate<string>(`document.querySelector('section[id^="page-"]:not([hidden])').innerText`);
+      for (const s of page.says ?? []) assert.ok(shown.includes(s), `${page.id} says ${JSON.stringify(s)} at the fixtures' clock, so its lists are measured with it`);
       const found: string[] = [];
       for (const width of WIDTHS) {
         await p.setViewportSize({ width, height: 900 });
