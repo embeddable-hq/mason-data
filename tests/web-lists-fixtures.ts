@@ -24,15 +24,17 @@ import type { SyncEvent } from "../src/duck/events.ts";
 /** The page's files in this checkout. */
 export const WEB = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "web");
 
-/** Every page, by the hash that shows it, and the part of the page its lists are written into once it is read. */
-export const PAGES = [
+/** Every page, by the hash that shows it, and the part of the page its lists are written into once it is read. `says`:
+ *  words the page must show at the fixed clock (`NOW`), so a state the lists are measured in is there on purpose. */
+export const PAGES: ReadonlyArray<{ id: string; hash: string; ready: string; says?: readonly string[] }> = [
   { id: "overview", hash: "#overview", ready: "#page-status table.tables" },
   { id: "tables", hash: "#tables", ready: "#page-tables table.catalog" },
-  { id: "users", hash: "#users", ready: "#page-users table.users" },
+  // each state of a user's Last used: an age, never used, and the longest, not used in the request log's days
+  { id: "users", hash: "#users", ready: "#page-users table.users", says: ["30 s ago", "60 min ago", "never", "not used in the last 7 days"] },
   { id: "queries", hash: "#observability/queries", ready: "#page-queries table.requests" },
   { id: "usage", hash: "#observability/usage?range=24h", ready: "#page-usage table.sizes" },
   { id: "syncs", hash: "#observability/syncs", ready: "#page-syncs table.events tbody tr" },
-] as const;
+];
 
 // ------------------------------------------------------------------ the state: tables of every phase, long names
 
@@ -48,6 +50,12 @@ const source = "source" in parsed ? parsed.source : assert.fail(parsed.problem);
 const ADDED = ["customers", "orders", "order_items", LONG, "events"];
 const FILE = parseSourceText(`kind: postgres\nurl: x\ntables:\n${ADDED.map((n) => `  ${n}: {}\n`).join("")}`, "shop", "/app/mason/sources/shop.yml");
 assert.ok(!("problems" in FILE));
+/** THE CLOCK: the page's now in the browser (the test fixes it there, `page.clock`) and every time these fixtures write
+ *  relative to it. So what the page says ("30 s ago", "never", "not used in the last 7 days") is the same whatever day
+ *  the test runs. With the machine's clock, the fixed times below aged: on 2026-11-18 every user on the Users page was
+ *  "not used in the last 7 days", which no fixture meant, and the test failed. */
+export const NOW = Date.parse("2026-11-18T12:00:00.000Z");
+/** When the tables were synced and two of the users added: over 7 days before now, past the request log's 7 days. */
 const at = "2026-11-11T09:00:00.000Z";
 const kept: CopyState["kept"] = { by: "poll", sync: { mode: "off" }, syncedAt: at, nextAt: null };
 const COPIES: CopyState[] = [
@@ -79,12 +87,12 @@ const STATE = (() => {
     sources: () => ({ file: FILE, problem: null }), listener: { openSessions: () => ({ open: 14, byClient: BY_CLIENT }) },
     duck: { file: "/app/.mason/duck.db", requests: { days: 7 }, restarts: () => [], disk: () => ({ path: "/app/.mason", freeBytes: null, projectedBytes: null }) },
   } as unknown as RunContext;
-  return JSON.parse(JSON.stringify(runState(ctx, COPIES, null, Date.parse(at)))) as Record<string, unknown>;
+  return JSON.parse(JSON.stringify(runState(ctx, COPIES, null, NOW))) as Record<string, unknown>;
 })();
 
 // ------------------------------------------------------------------ the other reads, relative to now
 
-const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+const ago = (ms: number) => new Date(NOW - ms).toISOString();
 const STATEMENT = `SELECT customer_id, date_trunc('day', created_at) AS day, sum(total) AS revenue, count(DISTINCT order_id) AS orders FROM public.${LONG} WHERE status IN ('paid', 'shipped') GROUP BY 1, 2 ORDER BY 2 DESC`;
 const request = (i: number, o: Record<string, unknown> = {}) => ({ requestId: `r-${i}`, startedAt: ago(60_000 * i), session: 3 + i, applicationName: "Metabase v0.50.21 (production analytics, read replica)",
   tokenName: "", user: "analytics_service_account_for_dashboards", method: "QUERY", outcome: "ok", status: "completed", sqlstate: null, message: null, detail: null, hint: null,
@@ -121,10 +129,13 @@ const EVENTS = (): SyncEvent[] => [
 const UNSUPPORTED = () => ({ since: ago(86_400_000), keptDays: 7, unsupported: [
   { gap: "frame-groups", title: "a window frame in GROUPS mode", runs: 12_345, users: ["analytics_service_account_for_dashboards", "metabase"], clients: ["Metabase v0.50.21 (production analytics, read replica)"],
     last: ago(30_000), example: `SELECT sum(amount) OVER (ORDER BY day GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM orders WHERE ${"x = 1 AND ".repeat(40)}true` }] });
+/** The users, one in each state of Last used (users.js `lastUsedText`): used 30 s and an hour ago, never used (added
+ *  within the request log's 7 days), and not used in the last 7 days (added before them, and disabled). */
 const USERS = { users: [
-  { name: "metabase", id: "0123456789abcdef", addedAt: at, live: true, from: null, lastUsed: ago(30_000) },
-  { name: "analytics_service_account_for_dashboards", id: "fedcba9876543210", addedAt: at, live: true, from: ["192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8:1234:5678::/64"], lastUsed: ago(3_600_000) },
-  { name: "looker", id: "aaaabbbbccccdddd", addedAt: at, disabledAt: at, live: true, from: null, lastUsed: null }], lastUsedNote: null, requestLogDays: 7 };
+  { name: "metabase", id: "0123456789abcdef", addedAt: at, live: true, from: null, lastUsedAt: ago(30_000) },
+  { name: "analytics_service_account_for_dashboards", id: "fedcba9876543210", addedAt: at, live: true, from: ["192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8:1234:5678::/64"], lastUsedAt: ago(3_600_000) },
+  { name: "grafana", id: "1111222233334444", addedAt: ago(86_400_000), live: true, from: null, lastUsedAt: null },
+  { name: "looker", id: "aaaabbbbccccdddd", addedAt: at, disabledAt: at, live: true, from: null, lastUsedAt: null }], lastUsedNote: null, requestLogDays: 7 };
 const QUERIES = { queries: { keptDays: 7, day: WINDOW, week: { ...WINDOW, days: 7, covered: 7 } } };
 const LOGS = { kept: 2000, lines: [{ at: ago(60_000), text: `copy: public.${LONG}: chunk 3 of 20 read, ${"x".repeat(300)}` }] };
 

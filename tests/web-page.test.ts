@@ -731,6 +731,8 @@ test("the users: a row each under two tabs, Active (with its Remove) and Removed
   assert.equal(renderUsers(list, null, NOW_U, null, null, null, "nonsense"), html, "a tab the page does not know is Active");
   // the last use is an age with its UTC time in a title (mason user list's words); status is a dot and a word
   assert.match(html, /<td class="num"><span title="2026-10-28 08:15 UTC">60 min ago<\/span><\/td>/);
+  // and why not, its whole the title: wider than its column, which cuts it
+  assert.match(html, /<td class="num"><span title="not used in the last 7 days">not used in the last 7 days<\/span><\/td>/);
   assert.deepEqual([...html.matchAll(/<span class="indicator (\w+)"><span class="dot" aria-hidden="true"><\/span>([^<]*)<\/span>/g)].map((m) => `${m[1]} ${m[2]}`),
     ["ok Active", "ok Active"]);
   assert.match(removedTab, /<span class="indicator unknown"><span class="dot" aria-hidden="true"><\/span>Removed 2026-10-02 10:00 UTC<\/span>/);

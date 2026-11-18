@@ -118,7 +118,7 @@ function usersTabs(show, active, removed) {
 /**
  * THE USERS from `/api/users?lastUsed=1` (`mason user list --json`'s shape), in a table in a card: a row each — its name
  * in mono with its id muted, its status as a dot and the word (Active, Disabled and when, or Removed and when), when it
- * was added, when it was last used (an age, `lastUsedText`'s UTC time in a title; or the note why it is not known), then
+ * was added, when it was last used (an age, `lastUsedText`'s UTC time in a title; or why not, its whole the title), then
  * Queries, Disable — Enable for a disabled one, in Disable's room — and Remove. Over the table, two tabs (`usersTabs`):
  * Active, the users not removed (a disabled one among them), and Removed, the removed ones, muted, without actions —
  * each with its count; `show` ("active", the default, or "removed") is the hash's (`#users?show=removed`), so Back
@@ -155,8 +155,10 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
   return why + brokenNote + tabs + listTable("users", `<thead><tr><th scope="col">User</th><th scope="col" class="role">Role</th><th scope="col" class="status">Status</th><th scope="col" class="added">Added</th><th scope="col" class="num last">Last used</th><th scope="col" class="act"></th></tr></thead><tbody>${users.map((u) => {
     const active = u.removedAt == null;
     const last = lastUsedText(u, list.lastUsedNote, list.requestLogDays, now);
-    const lastCell = !active ? "" : u.lastUsedAt != null
-      ? `<span title="${esc(last)}">${esc(duration(Math.max(0, (now - Date.parse(u.lastUsedAt)) / 1000)))} ago</span>` : esc(last);
+    // an age, its UTC time the title; or why not, its whole the title too: "not used in the last 7 days" is wider than
+    // its column, which cuts it (the rules' "bounded")
+    const lastCell = !active ? "" : `<span title="${esc(last)}">${u.lastUsedAt != null
+      ? `${esc(duration(Math.max(0, (now - Date.parse(u.lastUsedAt)) / 1000)))} ago` : esc(last)}</span>`;
     const disabled = active && u.disabledAt != null;
     const asking = active && ask?.name === u.name ? ask.verb : null;
     const anchor = actId("users", u.name);
