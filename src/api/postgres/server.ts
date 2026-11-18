@@ -96,7 +96,7 @@ import {
 } from "./protocol.ts";
 import { madeTypeName, typeNameParts, type PgApiType, type PgSchema } from "./schema.ts";
 import { Unsupported, duckTranslate, endsFailedBlock, type Translation } from "./translate.ts";
-import { clientAddress, PROXY_HEADER_MS, PROXY_SETTING, proxyNames, readProxyHeader, startsProxyHeader, type ProxyFrom } from "./proxy.ts";
+import { clientAddress, parseProxyFrom, PROXY_HEADER_MS, PROXY_SETTING, proxyNames, readProxyHeader, startsProxyHeader, type ProxyFrom } from "./proxy.ts";
 import type { Node } from "libpg-query";
 
 /** what a statement is: one the session or the catalog Postgres answers (translate.ts), one DuckDB answers, or an
@@ -384,11 +384,31 @@ export interface ShareSocket {
   close(): Promise<void>;
 }
 
+/**
+ * A SOCKET FOR THIS PROCESS'S OWN CLIENTS (`mason serve`'s MCP endpoint, src/cli/mcp-http.ts): on loopback, plain, and
+ * every connection must begin with a PROXY v2 header naming the client it is made for (from loopback alone), so the
+ * session's address — what a user's ranges are judged on, and the request log's `client_addr` — is that client's.
+ * Who logs in is `authenticate`'s alone: it holds a secret only the process that opened the door knows, so no other
+ * process on the machine logs in here, whatever header it sends. A refused login here writes no row of the request log
+ * (a header there is anyone's claim until the login succeeds); the endpoint says its own refusals.
+ */
+export interface LocalDoor {
+  authenticate(password: string, user: string, clientAddr: string | null): PgToken | Promise<PgToken>;
+  /** asked before every statement, as `PgApiOptions.recheck` is */
+  recheck(token: PgToken, clientAddr: string | null): Promise<PgToken | void>;
+  /** what the session's login is, in the log's connected line */
+  who: string;
+  /** what a refused login is told */
+  loginHint: string;
+}
+
 export interface PgApiServer {
   readonly port: number;
   close(): Promise<void>;
   /** opens a second socket (`ShareDoor`); closed by its own `close`, or with the server's */
   openShare(door: ShareDoor): Promise<ShareSocket>;
+  /** opens a socket for this process's own clients (`LocalDoor`); closed by its own `close`, or with the server's */
+  openLocal(door: LocalDoor): Promise<ShareSocket>;
   /** what a generated table's SQL is asked of (src/duck/generated-plan.ts `Planner`): a statement planned as a session with
    *  no role, in UTC under `public`, by this listener's catalog as of now */
   planner(): Planner;
@@ -3469,6 +3489,29 @@ export async function startPostgresApi(options: PgApiOptions): Promise<PgApiServ
           if (!shares.delete(share.listener)) return;
           for (const s of sessionsOf(door)) s.end("the share ended");
           await closeListener(share.listener);
+        },
+      };
+    },
+    async openLocal(o) {
+      const loopback = parseProxyFrom("127.0.0.1,::1");
+      if (loopback === null || "problem" in loopback) throw new Error("loopback's addresses could not be read as a PROXY header's source (Mason bug: report it)");
+      const door: Door = { tls: null, authenticate: (password, user, from) => o.authenticate(password, user, from ?? null),
+        recheck: (token, from) => o.recheck(token, from ?? null), recheckMs: 0, who: o.who, loginHint: o.loginHint, public: false, logins: null,
+        refused: () => false, proxyFrom: loopback };
+      const local = await listenOn(server, door, 0, "127.0.0.1");
+      shares.add(local.listener);
+      return {
+        port: local.port,
+        get sessions() { return sessionsOf(door).filter((s) => s.phase === "ready").length; },
+        endSessions: (jti, why) => {
+          const ended = sessionsOf(door).filter((s) => s.token?.jti === jti);
+          for (const s of ended) s.end(why);
+          return ended.length;
+        },
+        async close() {
+          if (!shares.delete(local.listener)) return;
+          for (const s of sessionsOf(door)) s.end("the endpoint closed");
+          await closeListener(local.listener);
         },
       };
     },

@@ -806,7 +806,7 @@ function writeFixture(file: string, f: Fixture): void {
 }
 
 /** Mason's commit, `+dirty` when src/ differs from it */
-function commit(): string {
+export function commit(): string {
   const r = spawnSync("git", ["rev-parse", "--short=12", "HEAD"], { cwd: REPO, encoding: "utf8" });
   if (r.status !== 0) return "unknown (not a git checkout)";
   const dirty = spawnSync("git", ["status", "--porcelain", "--untracked-files=no", "--", "src"], { cwd: REPO, encoding: "utf8" }).stdout.trim() !== "";

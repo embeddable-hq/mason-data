@@ -60,6 +60,8 @@ import { runningVersion, version, type RunningVersion } from "./version.ts";
 import { phaseCounts } from "./readiness.ts";
 import { METRICS_CONTENT_TYPE, metricsText, type RunMetrics } from "./metrics.ts";
 import type { CopyState } from "../duck/sync.ts";
+import { mcpSettings, MCP_PATH, type McpSettings } from "./mcp-oauth.ts";
+import { mcpEndpoint, type McpEndpoint } from "./mcp-http.ts";
 
 export const SERVE: CommandSpec = {
   name: "serve",
@@ -160,7 +162,37 @@ export const SERVE: CommandSpec = {
                             data:image/png;base64,… or data:image/svg+xml;base64,…, the image at most ${ICON_BYTES_MAX}
                             bytes; it is inline, so the browser makes no request for it; any other value is refused
                             (default unset: no icon)
-    MASON_PG_HOST, MASON_PG_PORT   the Postgres API's address (default 127.0.0.1:5433)
+    MASON_MCP_URL           an MCP endpoint for a hosted agent (claude.ai, ChatGPT, a team's agent platform): mason
+                            mcp's tools over MCP's Streamable HTTP (revisions 2025-11-25 and 2026-07-28), at
+                            ${MCP_PATH} on MASON_HEALTH_PORT. This is its PUBLIC address, as a client reaches it
+                            through the relay in front (https://mason.example.com/mcp): the resource its metadata
+                            names (/.well-known/oauth-protected-resource) and the audience every token must name
+                            exactly — never the address Mason sees. Set with MASON_MCP_ISSUER and MASON_MCP_JWKS_URL,
+                            or none (default unset: no endpoint)
+    MASON_MCP_ISSUER        the OAuth authorization server that signs the endpoint's tokens, as their iss names it
+                            (https://auth.example.com); Mason issues no token and runs no sign-in page (required with
+                            MASON_MCP_URL)
+    MASON_MCP_JWKS_URL      where that server publishes its signing keys, a JWK set, read by Mason (never discovered):
+                            each token's signature is checked by them (required with MASON_MCP_URL)
+    MASON_MCP_USER_CLAIM    the token's claim that names the mason user each request runs as, under its role and
+                            limits (default mason_user)
+    MASON_MCP_USER_ID_CLAIM  the token's claim that holds that user's id, as mason user list shows it: the user is
+                            looked up by both at every request, so a user removed (or removed and added again: a new
+                            id) or disabled is refused at once (default mason_user_id)
+    MASON_MCP_PROXY_FROM    the relay or proxy in front of the endpoint: its own addresses, CIDRs comma-separated,
+                            read as the Postgres API's proxy addresses are (below); from one of them alone, the client
+                            is the LAST X-Forwarded-For entry (the one it appended), which a user's address ranges are
+                            judged on; from any other address the header is ignored and the peer judged (default
+                            unset: every request's peer)
+    MASON_MCP_PLAIN         1 to say TLS is terminated in front of the endpoint (a relay, a proxy), required when
+                            MASON_HEALTH_HOST is off loopback: a bearer token must never cross a network in clear
+                            (default 0)
+    MASON_MCP_ORIGINS       the browser origins a page may use the endpoint from, comma-separated, each written as a
+                            browser sends it (https://app.example.test, http://localhost:5173): a request carrying an
+                            Origin header it does not name, Origin: null included, is refused 403 before its token is
+                            read. A hosted agent's server or a desktop app sends none, and is not judged by it
+                            (default unset: no browser origin)
+    MASON_PG_HOST, MASON_PG_PORT  the Postgres API's address (default 127.0.0.1:5433)
     MASON_PG_TLS_CERT, MASON_PG_TLS_KEY   its certificate, required off loopback; or MASON_PG_SELF_SIGNED_TLS=1
                             for one made in .mason/, or MASON_PG_PLAIN=1 behind a TLS proxy of your own
     MASON_PG_PUBLIC_URL     the Postgres API's address as a client reaches it, behind a load balancer, a proxy or a DNS
@@ -215,6 +247,8 @@ export interface ServeSettings {
    *  the Unix socket MASON_UI_SOCKET names, absolute, the page served there too (src/cli/ui-socket.ts), or null;
    *  `runFile`: the file MASON_UI_RUN_FILE names, absolute, the port and the token written there (src/cli/ui-run-file.ts), or null */
   ui: { port: number; named: boolean; socket: string | null; runFile: string | null };
+  /** the MCP endpoint (src/cli/mcp-oauth.ts), or null when none of its settings is set */
+  mcp: McpSettings | null;
 }
 
 const MIN_API_KEY = 32;
@@ -299,6 +333,9 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
   // the address a client reaches (src/cli/pg-public-url.ts): its one reading, refused here with the rest
   const publicUrl = pgPublicUrlSetting(env);
   if (publicUrl !== null && "problem" in publicUrl) wrong.push(publicUrl.problem);
+  // the MCP endpoint (src/cli/mcp-oauth.ts): off unless set; a partial or wrong setting said here with the rest
+  const mcp = mcpSettings(env, env.MASON_HEALTH_HOST || "0.0.0.0");
+  if (mcp !== null && "problems" in mcp) wrong.push(...mcp.problems);
   if (env.MASON_UI_HOST) wrong.push("MASON_UI_HOST is set, and the web page has no address but 127.0.0.1: remove it (mason ui --ssh <user@server> opens the page from your machine)");
   if (wrong.length) {
     return { message: `${wrong.length === 1 ? "a setting is" : `${wrong.length} settings are`} missing or wrong: ${wrong.join("; ")}`, code: "bad_config",
@@ -311,6 +348,7 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
     project, data,
     health: { host: env.MASON_HEALTH_HOST || "0.0.0.0", port },
     ui: { port: uiPort, named: !!env.MASON_UI_PORT, socket: typeof socket === "string" ? socket : null, runFile: typeof runFile === "string" ? runFile : null },
+    mcp: mcp !== null && !("problems" in mcp) ? mcp : null,
   };
 }
 
@@ -493,9 +531,23 @@ export async function metricsBody(state: ServePhase, startedAt: number, now = Da
   return metricsText({ version: version(), run: { ...run, uptimeSeconds: uptimeSeconds(startedAt, now) } });
 }
 
-/** The health server: GET /healthz and GET /metrics, nothing else. `log` says a scrape whose numbers could not be read. */
-export function healthServer(state: () => ServePhase, startedAt: number, log: (line: string) => void = say, page: PageServed = NO_PAGE_SERVED): http.Server {
-  return http.createServer((req, res) => {
+/**
+ * THE HEALTH PORT'S LIMITS, now that it serves /mcp to whoever reaches it (docs/DESIGN.md "An MCP server over HTTPS"):
+ * a request's headers within `headersMs` and its whole BODY within `requestMs` — Node's `requestTimeout` times the
+ * request alone, never the answer, so a tool call whose query runs for minutes is answered whole (its JSON is written
+ * once the query ends; nothing times the wait); an idle keep-alive connection closed after `keepAliveMs`; at most
+ * `maxConnections` connections, a connection past it closed at once. /mcp itself runs at most MAX_REQUESTS
+ * (src/cli/mcp-http.ts) at a time, far under the cap, so its clients alone never fill it and /healthz is answered beside
+ * them; connections that send nothing are closed within `headersMs`, so a flood must keep opening them to hold the cap.
+ */
+export const HEALTH_LIMITS = { headersMs: 10_000, requestMs: 30_000, keepAliveMs: 5_000, maxConnections: 1024, checkEveryMs: 1_000 } as const;
+
+/** The health server: GET /healthz and GET /metrics, and the MCP endpoint's paths when it is on (src/cli/mcp-http.ts),
+ *  nothing else, under HEALTH_LIMITS. `log` says a scrape whose numbers could not be read. */
+export function healthServer(state: () => ServePhase, startedAt: number, log: (line: string) => void = say, page: PageServed = NO_PAGE_SERVED, mcp: McpEndpoint | null = null,
+  limits: { [K in keyof typeof HEALTH_LIMITS]: number } = HEALTH_LIMITS): http.Server {
+  const server = http.createServer({ headersTimeout: limits.headersMs, requestTimeout: limits.requestMs, keepAliveTimeout: limits.keepAliveMs, connectionsCheckingInterval: limits.checkEveryMs }, (req, res) => {
+    if (mcp !== null && mcp.handle(req, res)) return;
     const url = new URL(req.url ?? "/", "http://health");
     if (url.pathname !== "/healthz" && url.pathname !== "/metrics") { res.writeHead(404, { "content-type": "text/plain" }).end("GET /healthz or GET /metrics\n"); return; }
     if (req.method !== "GET" && req.method !== "HEAD") { res.writeHead(405, { allow: "GET, HEAD" }).end(); return; }
@@ -519,6 +571,8 @@ export function healthServer(state: () => ServePhase, startedAt: number, log: (l
     const h = healthBody(state(), startedAt, Date.now(), page);
     res.writeHead(h.status, { "content-type": "application/json", "cache-control": "no-store" }).end(`${JSON.stringify(h.body)}\n`);
   });
+  server.maxConnections = limits.maxConnections;
+  return server;
 }
 
 const say = (m: string): void => { process.stdout.write(`${m}\n`); };
@@ -584,7 +638,9 @@ export async function serve(argv: string[]): Promise<number> {
   let state: ServePhase = { phase: "starting" };
   /** the engine stopped under the run (`ServeHooks.failed`): how the serve's last word says its exit */
   let engineStopped = false;
-  const health = healthServer(() => state, startedAt, say, { socket: page?.file ?? null, readOnly: uiReadOnlySetting(process.env) === true });
+  // the MCP endpoint (MASON_MCP_URL), on the health port: its metadata from now, /mcp once the run answers
+  const mcp = s.mcp === null ? null : mcpEndpoint(s.mcp, { log: say });
+  const health = healthServer(() => state, startedAt, say, { socket: page?.file ?? null, readOnly: uiReadOnlySetting(process.env) === true }, mcp);
   const listening = await new Promise<Error | null>((resolve) => {
     health.once("error", resolve);
     health.listen(s.health.port, s.health.host, () => resolve(null));
@@ -601,6 +657,10 @@ export async function serve(argv: string[]): Promise<number> {
   say(`  database  ${made.database}, what a tool connects with`);
   say(`  health    http://${s.health.host}:${s.health.port}/healthz`);
   say(`  metrics   http://${s.health.host}:${s.health.port}/metrics`);
+  if (s.mcp !== null) {
+    say(`  mcp       ${s.mcp.url.href} (MASON_MCP_URL), served at http://${s.health.host}:${s.health.port}${MCP_PATH}: tokens of ${s.mcp.issuer}, ` +
+      `the user in their ${s.mcp.claim} and ${s.mcp.idClaim} claims, a user's address ranges judged on ${s.mcp.proxyFrom === null ? "each request's peer" : `the X-Forwarded-For entry of ${s.mcp.proxyFrom.entries.join(", ")} (MASON_MCP_PROXY_FROM), else the peer`}`);
+  }
   for (const l of socketSaid) say(`  ${l}`);
   if (s.ui.runFile !== null) say(`  run file  ${s.ui.runFile}: written once Mason answers (mode 0600; it holds the run's token)`);
   if (page !== null) say(`  web page  ${page.file} (a Unix socket, mode 0600: a request on it passes the same guard as mason ui --ssh's)`);
@@ -643,17 +703,23 @@ export async function serve(argv: string[]): Promise<number> {
             runFile = w;
             say(`  run file  ${w.file} (the web page's port and the run's token, mode 0600)`);
           }
+          // the MCP endpoint's door to the listener: /mcp answers once it is open (503 before, and if it cannot open)
+          if (mcp !== null) {
+            mcp.attach(run.postgres).catch((e: unknown) => { say(`  the MCP endpoint could not open its connection to the Postgres API, so ${MCP_PATH} answers 503: ${(e as Error).message}`); });
+          }
           state = { phase: "ready", tables: run.tables, metrics: run.metrics };
           return null;
         },
-        stopping: () => { state = { phase: "stopping" }; page?.close(); runFile?.remove(); },
-        failed: () => { state = { phase: "failed" }; engineStopped = true; page?.close(); runFile?.remove(); },
+        stopping: () => { state = { phase: "stopping" }; page?.close(); runFile?.remove(); void mcp?.close(); },
+        failed: () => { state = { phase: "failed" }; engineStopped = true; page?.close(); runFile?.remove(); void mcp?.close(); },
+        ...(s.mcp !== null ? { mcp: { url: s.mcp.url.href, issuer: s.mcp.issuer } } : {}),
         ...(page !== null ? { page: page.attach, socket: page.file } : {}) } });
   } finally {
     // removed whatever ended the run: a stop, a crash of the engine's thread, or a start that failed
     page?.close();
     runFile?.remove();
     unhookEarly();
+    await mcp?.close();
     // a platform's health check may hold a keep-alive connection open, which close() alone would wait for
     health.closeAllConnections();
     await new Promise<void>((resolve) => health.close(() => resolve()));

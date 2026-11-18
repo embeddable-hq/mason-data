@@ -92,7 +92,7 @@ export function userRanges(list: readonly string[]): { from: string[]; ranges: R
 }
 
 /** The most address ranges one user takes (all input is untrusted: a bound). */
-export const MAX_RANGES = 100;
+export const MAX_RANGES = 1000;
 
 /** Whether a user may connect from `address` (`Session.clientAddr`): any address when it has no ranges; with ranges, one
  *  in them, and never an address that could not be read (null), nor any when its ranges cannot be read (fail closed). */
@@ -145,6 +145,9 @@ export const SHARE_PASSWORD_PREFIX = "mason_share_";
 
 /** Whether a user was added under this API key (one rotated since is no longer live). */
 export const underKey = (u: MasonUser, apiKey: string): boolean => u.key === keyFingerprint(apiKey);
+
+/** a refusal's code (ApiError.code): the token names a user by a name whose user is now another one, its id new */
+export const USER_REMOVED = "user_removed";
 
 /** What `mason user check` answers of a name and a password (src/cli/user.ts). */
 export type CheckAnswer = "ok" | "wrong" | "disabled" | "removed";
@@ -349,6 +352,28 @@ export class LiveUsers {
     if (found.name !== user) throw refusal(401, "not a password of this project's users: mason user list shows them", user);
     // disabled: refused only once its password verified (so the state is told to the holder of the login alone), in
     // Postgres's words for a role without LOGIN, 28000 (src/api/postgres/server.ts reads the code)
+    if (isDisabled(found)) throw refusal(401, disabledMessage(found.name), user, USER_DISABLED);
+    return { filters: [], subject: undefined, user: found.name, jti: found.id, ...(found.role !== undefined ? { role: found.role } : {}), ...attributesOf(found) };
+  }
+
+  /**
+   * A USER NAMED, WITH ITS ID, BY SOMEONE THIS PROCESS ALREADY BELIEVES, with no password (`mason serve`'s MCP endpoint,
+   * whose bearer token, verified by the operator's authorization server, names the user and its id: src/cli/mcp-http.ts),
+   * judged as the file has it NOW, at every request: the session's token, or why it is refused, as `login` refuses —
+   * no such user (`invalid_user`), the name's user now another one (its id is not the token's: the user it was issued
+   * for was removed, and the name added again: `USER_REMOVED`), one added under another API key, an address outside its
+   * ranges (`from`, the client's address: always judged), a disabled one.
+   */
+  vouched(user: string, id: string, from: string | null): PgToken {
+    const now = this.now();
+    if ("problem" in now) throw refusal(503, `the list of users cannot be read, so no user can connect: ${now.problem}`, user);
+    const found = now.users.find((u) => u.name === user);
+    if (found === undefined) throw refusal(401, `no user "${user}": mason user add ${user} makes it`, user);
+    if (found.id !== id) throw refusal(401, `the user "${user}" the token was issued for (id ${id}) was removed; the name is another user's now (id ${found.id})`, user, USER_REMOVED);
+    if (!underKey(found, this.apiKey)) throw refusal(401, `the API key was rotated since the user "${found.name}" was added, which removes every user: mason user remove ${found.name}, then mason user add ${found.name}`, user);
+    if (!this.inside(found.from === undefined ? null : this.ranges.get(found.id) ?? [], from)) {
+      throw refusal(401, `the user "${user}" may not connect from ${addressShown(from)}, outside its address ranges (mason user list shows them)`, user, ADDRESS_NOT_ALLOWED);
+    }
     if (isDisabled(found)) throw refusal(401, disabledMessage(found.name), user, USER_DISABLED);
     return { filters: [], subject: undefined, user: found.name, jti: found.id, ...(found.role !== undefined ? { role: found.role } : {}), ...attributesOf(found) };
   }

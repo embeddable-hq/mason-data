@@ -2090,13 +2090,14 @@ test("the users: From… asks where the user connects from in a popover beside i
 test("the add form: Connects from, a dropdown in mason user add's words — anywhere (the default, no from sent) or only these addresses, the box beside it, a comma list as --from takes it, the run judging each", async () => {
   const renderAddUser = fn<[unknown], string>("renderAddUser");
   const form = renderAddUser(CATALOG_STATE);
-  assert.match(textOf(form), /Name Connects from anywhere only these addresses Address ranges, comma-separated Add a user Roles can limit/);
-  assert.match(form, /<span class="connects"><label for="add-user-connects">Connects from<\/label> <select id="add-user-connects" name="connects"><option value="any" selected>anywhere<\/option><option value="only">only these addresses<\/option><\/select> <span class="ranges">/,
+  // the run's state carries the hosted agents' published ranges (issue 1115): each a choice after these two
+  assert.match(textOf(form), /Name Connects from anywhere only these addresses Claude \(Anthropic\) ChatGPT \(OpenAI\) Address ranges, comma-separated Add a user Roles can limit/);
+  assert.match(form, /<span class="connects"><label for="add-user-connects">Connects from<\/label> <select id="add-user-connects" name="connects"><option value="any" selected>anywhere<\/option><option value="only">only these addresses<\/option><option value="preset:claude">Claude \(Anthropic\)<\/option><option value="preset:openai">ChatGPT \(OpenAI\)<\/option><\/select> <span class="ranges">/,
     "a dropdown, its label; anywhere the default, as mason user add with no --from; the box beside it");
   assert.doesNotMatch(form, /type="radio"|<fieldset/, "no radios");
   // the box keeps its place while anywhere is chosen (visibility, never display): nothing in the form moves when the choice changes
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
-  assert.match(css, /\.connects:has\(option\[value="any"\]:checked\) \.ranges \{ visibility: hidden; \}/);
+  assert.match(css, /\.connects:has\(option\[value="any"\]:checked\) \.ranges, \.connects:has\(option\[value\^="preset:"\]:checked\) \.ranges \{ visibility: hidden; \}/);
   assert.doesNotMatch(css, /fieldset\.connects|\.connects[^{]*input\[type="radio"\]/, "the radios' rules are gone");
   assert.match(form, /<input id="add-user-from" name="from" spellcheck="false" autocapitalize="off" placeholder="e\.g\. 192\.0\.2\.0\/24, 2001:db8::\/32" value="">/);
   assert.ok(!/pattern=/.test(form), "never validated in the page");
@@ -2115,7 +2116,7 @@ test("the add form on one line where its card is wide enough: each field a label
   const children = [...form.replace(/^<form[^>]*>|<\/form>$/g, "").matchAll(/<(span|button)\b[^>]*? class="([^"]*)"/g)];
   assert.match(form, /^<form id="add-user" class="formcard" autocomplete="off"><span class="name-field"><label for="user-name">Name<\/label> <input id="user-name"[^>]*><\/span> <span class="role-field">/);
   assert.ok(["name-field", "role-field", "connects", "primary"].every((c) => children.some((m) => m[2] === c)), "the four fields");
-  assert.match(textOf(renderAddUser(CATALOG_STATE)), /^Name Connects from anywhere only these addresses Address ranges, comma-separated Add a user Roles can limit a user to some tables, columns and rows\. Configure them via mason\/roles\.yml \. The README describes how\.$/);
+  assert.match(textOf(renderAddUser(CATALOG_STATE)), /^Name Connects from anywhere only these addresses Claude \(Anthropic\) ChatGPT \(OpenAI\) Address ranges, comma-separated Add a user Roles can limit a user to some tables, columns and rows\. Configure them via mason\/roles\.yml \. The README describes how\.$/);
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
   assert.match(css, /#add-user \.roles-line \{ flex: 0 0 100%;/, "the line on roles is the form's own last row, under the fields");
   const rule = (sel: string) => css.match(new RegExp(`(?:^|\\})\\s*${sel.replace(/[.#[\]="]/g, "\\$&")}\\s*\\{([^}]*)\\}`))?.[1] ?? "";
@@ -2126,7 +2127,7 @@ test("the add form on one line where its card is wide enough: each field a label
   assert.match(rule("#add-user .connects .ranges"), /min-width: 0;/, "the address box shrinks inside its field, never over Add a user");
   assert.match(rule("#add-user .connects .ranges input"), /width: 100%; min-width: 0;/);
   // the box's place is kept while anywhere is chosen: the choice changes no width, so nothing moves
-  assert.match(css, /\.connects:has\(option\[value="any"\]:checked\) \.ranges \{ visibility: hidden; \}/);
+  assert.match(css, /\.connects:has\(option\[value="any"\]:checked\) \.ranges, \.connects:has\(option\[value\^="preset:"\]:checked\) \.ranges \{ visibility: hidden; \}/);
   assert.doesNotMatch(css, /\.ranges\s*\{[^}]*display: none/);
 });
 
@@ -5913,6 +5914,133 @@ test("Users: Connect an MCP client (issue 1114) — Claude Code's line and the J
   const ph = renderUsersMcp!(pub, true, "0.22.0");
   assert.doesNotMatch(textOf(ph), note);
   assert.equal(codeOf(ph, "users-mcp-claude-code"), `claude mcp add mason --env MASON_URL="${pub.shown}" -- npx -y @mason-data/cli@0.22.0 mcp`);
+});
+
+test("Users: mason serve's MCP endpoint on (issue 1115) — its public address with Copy, and how to add it as a hosted agent's custom connector; the old 'can\'t connect' tip gone", async () => {
+  const usersPage = await import(path.join(WEB, "pages", "users.js") as string) as Record<string, unknown>;
+  const renderUsersMcp = usersPage.renderUsersMcp as (pg: unknown, served?: boolean, version?: unknown, mcp?: unknown) => string;
+  const pg = { url: "postgresql://127.0.0.1:5433/shop", host: "127.0.0.1", port: 5433, database: "shop", shown: "postgres://<user>:<password>@127.0.0.1:5433/shop" };
+  const mcp = { url: "https://mason.example.test/mcp", issuer: "https://auth.example.test" };
+  const html = renderUsersMcp(pg, true, "0.22.0", mcp);
+  assert.match(html, /<code id="users-mcp-url">https:\/\/mason\.example\.test\/mcp<\/code>/);
+  assert.match(html, /data-copy="users-mcp-url"/);
+  const text = textOf(html);
+  assert.ok(text.includes("claude.ai, ChatGPT and other hosted agents: add this address as a custom connector."), text);
+  assert.ok(text.includes("In the agent's settings, add a custom connector and paste the URL (in claude.ai: Settings, then Connectors, then Add custom connector)."), text);
+  assert.ok(text.includes("Connect, and sign in when the agent asks. You sign in at https://auth.example.test , and the agent's queries run as the Mason user your sign-in names."), text);
+  assert.ok(text.includes("A user limited to some addresses connects this way only from the agent's own: choose its company under Connects from."), text);
+  // only the URL is pasted: sign-in is in the browser, so a client's OAuth and token fields stay empty
+  assert.ok(text.includes("Paste only the URL. Leave the OAuth client ID, client secret, bearer token and header fields empty: you sign in in your browser."), text);
+  // a desktop app connects from the person's own computer: a hosted agent's preset would refuse it
+  assert.ok(text.includes("A desktop app (Claude Code, Cursor, the ChatGPT desktop app's Streamable HTTP server) connects from your own computer, not from its company's addresses: give its user your computer's address, or anywhere."), text);
+  assert.ok(text.indexOf("Paste only the URL.") < text.indexOf("Connect, and sign in when the agent asks."), "the URL alone, before signing in");
+  assert.doesNotMatch(text, /can't connect this way yet/);
+  // off (null): the box as before
+  assert.match(textOf(renderUsersMcp(pg, true, "0.22.0", null)), /can't connect this way yet/);
+});
+
+test("Users: Connects from offers each hosted agent's published ranges (issue 1115) — a choice that sends them, chosen for a user whose ranges are exactly a company's; none offered when the run says none", async () => {
+  const usersPage = await import(path.join(WEB, "pages", "users.js") as string) as Record<string, unknown>;
+  const connectsChoice = usersPage.connectsChoice as (id: string, from?: string[] | null, presets?: unknown[]) => string;
+  const rangesOf = usersPage.rangesOf as (e: unknown, presets?: unknown[]) => string[] | null;
+  const { presetsForPage, ADDRESS_PRESETS } = await import("../src/cli/address-presets.ts");
+  const presets = presetsForPage();
+  // the run's list, what /api/state carries: the company's label and its ranges, never its source
+  assert.deepEqual(presets[0], { id: "claude", label: "Claude (Anthropic)", ranges: ["160.79.104.0/21", "153.61.208.0/20"] });
+  assert.deepEqual(presets.map((p) => [p.id, p.label]), [["claude", "Claude (Anthropic)"], ["openai", "ChatGPT (OpenAI)"]]);
+  assert.ok(ADDRESS_PRESETS.every((p) => p.source.startsWith("https://")), "each list cites where it is published");
+  // every range is one mason user from takes
+  const { userRanges } = await import("../src/duck/users.ts");
+  for (const p of presets) assert.ok(!("problem" in userRanges(p.ranges)), p.id);
+  const html = connectsChoice("add-user", null, presets.slice(0, 1));
+  assert.match(html, /<option value="any" selected>anywhere<\/option><option value="only">only these addresses<\/option><option value="preset:claude">Claude \(Anthropic\)<\/option><\/select>/);
+  // chosen, it sends its ranges, whatever the box holds
+  assert.deepEqual(rangesOf({ connects: { value: "preset:claude" }, from: { value: "192.0.2.0/24" } }, presets), ["160.79.104.0/21", "153.61.208.0/20"]);
+  // a company the run no longer lists: no range sent, for the run to refuse — never the box nor anywhere
+  assert.deepEqual(rangesOf({ connects: { value: "preset:gone" }, from: { value: "192.0.2.0/24" } }, presets), []);
+  // a user whose ranges are exactly a company's opens on it; any other list is its own
+  assert.match(connectsChoice("user-from", ["160.79.104.0/21", "153.61.208.0/20"], presets), /<option value="preset:[^"]+" selected>Claude \(Anthropic\)<\/option>/);
+  assert.match(connectsChoice("user-from", ["160.79.104.0/21"], presets), /<option value="only" selected>/);
+  // no list from the run: the two choices of before
+  assert.doesNotMatch(connectsChoice("add-user", null), /preset:/);
+  // the box hides behind a company's choice as behind anywhere: nothing in the form moves
+  assert.match(fs.readFileSync(path.join(WEB, "app.css"), "utf8"), /\.connects:has\(option\[value\^="preset:"\]:checked\) \.ranges/);
+});
+
+test("Users: ChatGPT (OpenAI)'s published list (issue 1115) — OpenAI's JSON file of some 300 ranges, as a user's ranges are kept, that mason user from takes whole; a choice, never a wall of CIDRs in the box or the row", async () => {
+  const usersPage = await import(path.join(WEB, "pages", "users.js") as string) as Record<string, unknown>;
+  const connectsChoice = usersPage.connectsChoice as (id: string, from?: string[] | null, presets?: unknown[]) => string;
+  const fromText = usersPage.fromText as (from: string[] | null, presets?: unknown[]) => string;
+  const rangesOf = usersPage.rangesOf as (e: unknown, presets?: unknown[]) => string[] | null;
+  const { presetsForPage, ADDRESS_PRESETS } = await import("../src/cli/address-presets.ts");
+  const { userRanges, MAX_RANGES } = await import("../src/duck/users.ts");
+  const openai = ADDRESS_PRESETS.find((p) => p.id === "openai");
+  assert.ok(openai !== undefined, "the ChatGPT (OpenAI) preset");
+  // its source: OpenAI's page of IP egress ranges, and the JSON file it names for ChatGPT's connectors
+  assert.equal(openai.label, "ChatGPT (OpenAI)");
+  assert.equal(openai.source, "https://developers.openai.com/api/docs/guides/ip-addresses");
+  assert.deepEqual(openai.read, { kind: "json", url: "https://openai.com/chatgpt-connectors.json" });
+  // some 300 ranges, each written as a user's ranges are kept (an address without its /32), once, within a user's bound
+  assert.ok(openai.ranges.length >= 200 && openai.ranges.length <= MAX_RANGES, String(openai.ranges.length));
+  const kept = userRanges(openai.ranges);
+  assert.ok(!("problem" in kept), "problem" in kept ? kept.problem : "");
+  assert.deepEqual(kept.from, [...openai.ranges], "already in the form mason user from keeps: a user given them is shown as OpenAI's");
+  assert.ok(openai.ranges.every((r) => !r.endsWith("/32")));
+  const presets = presetsForPage();
+  const p = presets.find((x) => x.id === "openai")!;
+  // the box stays empty and hidden behind the choice; the choice sends the whole list
+  const html = connectsChoice("add-user", null, presets);
+  assert.match(html, /<option value="preset:[^"]+">ChatGPT \(OpenAI\)<\/option>/);
+  assert.match(html, /<input id="add-user-from" name="from"[^>]* value="">/);
+  assert.deepEqual(rangesOf({ connects: { value: "preset:openai" }, from: { value: "" } }, presets), p.ranges);
+  // the page carries the list once (the run's state), never in the form: the option names the company
+  assert.ok(html.length < 4_000, `the add form is ${html.length} characters`);
+  assert.ok(!html.includes(p.ranges[0]!), "no range of the list written into the form");
+  // a user given the list opens on it, and its row names the company and the count, not the ranges
+  const opened = connectsChoice("user-from", [...p.ranges], presets);
+  assert.match(opened, /<option value="preset:[^"]+" selected>ChatGPT \(OpenAI\)<\/option>/);
+  assert.match(opened, /<input id="user-from-from" name="from"[^>]* value="">/, "no wall of CIDRs in the box");
+  assert.equal(fromText([...p.ranges], presets), `from ChatGPT (OpenAI)'s addresses (${p.ranges.length} ranges)`);
+  assert.equal(fromText(["192.0.2.0/24"], presets), "from 192.0.2.0/24");
+  assert.equal(fromText(null, presets), "from anywhere");
+});
+
+test("scripts/connector-ranges.ts reads a JSON list of prefixes (OpenAI's shape): IPv4 and IPv6, in the form a user's ranges are kept; another shape is could-not-read, never an empty list; --write's text replaces the preset's ranges alone", async () => {
+  const { rangesOfPrefixes, keptForm, withRanges, rangesLiteral } = await import("../scripts/connector-ranges.ts");
+  // synthetic addresses, in the file's shape
+  const file = JSON.stringify({ creationTime: "2026-11-06T18:26:55.215535", prefixes: [{ ipv4Prefix: "198.51.100.7/32" }, { ipv4Prefix: "203.0.113.0/28" }, { ipv6Prefix: "2001:db8:5::/48" }, { ipv6Prefix: "2001:db8::1/128" }] });
+  const read = rangesOfPrefixes(file);
+  assert.deepEqual(read, ["198.51.100.7/32", "203.0.113.0/28", "2001:db8:5::/48", "2001:db8::1/128"]);
+  assert.deepEqual(keptForm(read as string[]), ["198.51.100.7", "203.0.113.0/28", "2001:db8:5::/48", "2001:db8::1"]);
+  // couldn't tell is said, never read as no ranges
+  for (const [text, said] of [["not json", /not JSON/], ["{}", /no prefixes/], [JSON.stringify({ prefixes: [] }), /no prefix/],
+    [JSON.stringify({ prefixes: [{ ipv4Prefix: "198.51.100.0/24" }, { cidr: "203.0.113.0/24" }] }), /prefix 2 has no ipv4Prefix or ipv6Prefix/]] as const) {
+    const r = rangesOfPrefixes(text);
+    assert.equal(typeof r, "string", text);
+    assert.match(r as string, said);
+  }
+  assert.match(keptForm(["198.51.100.0/24", "relay.example.test"]) as string, /cannot/);
+  // --write: the preset's ranges replaced, every other byte kept
+  const source = `export const ADDRESS_PRESETS = [\n  {\n    id: "a",\n    ranges: ["192.0.2.0/24"],\n  },\n  {\n    id: "b",\n    ranges: [\n      "198.51.100.1",\n    ],\n  },\n];\n`;
+  const ten = Array.from({ length: 10 }, (_, i) => `198.51.100.${i}`);
+  const written = withRanges(source, "b", ten);
+  assert.equal(written, source.replace(`ranges: [\n      "198.51.100.1",\n    ]`, rangesLiteral(ten)));
+  assert.ok(written!.includes(`ranges: ["192.0.2.0/24"]`), "the other preset kept");
+  assert.equal(withRanges(source, "c", ten), null, "a preset not found: said, never written elsewhere");
+  assert.equal(withRanges(withRanges(source, "a", ["203.0.113.0/24"])!, "a", ["192.0.2.0/24"]), source);
+});
+
+test("scripts/connector-ranges.ts reads a company's list under its heading and up to the next, and nothing else on the page", async () => {
+  const { pageText, rangesUnder } = await import("../scripts/connector-ranges.ts");
+  // a page shaped as the company's: the inbound list, the outbound one, then the phased-out one (synthetic addresses)
+  const html = `<h2>Inbound IP addresses</h2><p>IPv4</p><code>192.0.2.0/24</code>` +
+    `<h2>Outbound IP addresses</h2><p>These are the stable IP addresses used for outbound requests.</p><code>198.51.100.0/24</code><code>203.0.113.0/25</code>` +
+    `<h2>Phased out IP addresses</h2><code>203.0.113.200/32</code><nav>Outbound IP addresses</nav>`;
+  assert.deepEqual(rangesUnder(pageText(html), "Outbound IP addresses", "Phased out IP addresses"), ["198.51.100.0/24", "203.0.113.0/25"]);
+  const plain = "Inbound IP addresses 192.0.2.0/24 Outbound IP addresses These are the stable IP addresses 198.51.100.0/24 2001:db8:5::/48 Phased out IP addresses 203.0.113.200/32";
+  assert.deepEqual(rangesUnder(plain, "Outbound IP addresses", "Phased out IP addresses"), ["198.51.100.0/24", "2001:db8:5::/48"]);
+  assert.equal(rangesUnder(plain, "Egress IP addresses", "Phased out IP addresses"), null, "a heading gone: could not tell");
+  assert.equal(rangesUnder("Outbound IP addresses 198.51.100.0/24", "Outbound IP addresses", "Phased out IP addresses"), null, "no end: could not tell");
 });
 
 test("New user added: a closed Connect an MCP client under the URL — the box's two lines with the user's own URL, each Shown once with its Copy, and why the JSON keeps the password out of the shell's history (issue 1114)", async () => {

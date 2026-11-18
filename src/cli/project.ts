@@ -15,6 +15,7 @@
  * lives (`--project <name>` and `mason list` found a project through its container's labels, and there is no
  * container).
  */
+import { MCP_SETTINGS } from "./mcp-oauth.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomBytes } from "node:crypto";
@@ -476,6 +477,12 @@ export function startSettingRefusal(p: Project, env: NodeJS.ProcessEnv, o: { ser
   if (!o.serve && env[UI_SOCKET_SETTING]) {
     return { message: `${UI_SOCKET_SETTING} is mason serve's setting, and mason start ignores no setting silently`, code: "refused",
       fix: `unset ${UI_SOCKET_SETTING}: mason ui opens this run's page` };
+  }
+  // the MCP endpoint is a server's (src/cli/mcp-http.ts): a laptop's agent runs mason mcp
+  const mcp = MCP_SETTINGS.filter((k) => (env[k] ?? "") !== "");
+  if (!o.serve && mcp.length > 0) {
+    return { message: `${mcp.join(" and ")} ${mcp.length === 1 ? "is mason serve's setting" : "are mason serve's settings"}, and mason start ignores no setting silently`, code: "refused",
+      fix: `unset ${mcp.join(" and ")}: an agent on this machine runs mason mcp (mason help mcp)` };
   }
   // the run's file is a server's supervisor's (src/cli/ui-run-file.ts): a laptop's commands read the project's config
   if (!o.serve && env[UI_RUN_FILE_SETTING]) {

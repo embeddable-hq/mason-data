@@ -239,7 +239,16 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   clients**' MCP settings (`npx` as the command, `MASON_URL` in `env`), pretty-printed, each in a block with **Copy**;
   that a user's name and password go in place of `<user>` and `<password>` and the client's computer needs Node 22.13
   or later (cli/package.json `engines`, held equal by a test); and that the web versions of ChatGPT and claude.ai can't
-  connect this way yet. The URL is in the server's environment, never on its command line (`mason mcp` reads
+  connect this way yet — unless `mason serve`'s MCP endpoint is on (`/api/state` `mcp`, issue 1115): then its public
+  address (`MASON_MCP_URL`) with **Copy**, and the short steps to add it as a hosted agent's custom connector (paste
+  the URL, only the URL: the OAuth client ID, client secret, bearer token and header fields stay empty; sign in at the
+  issuer, whose user the queries run as), and that a user limited to some addresses connects this way only from the
+  agent's own, its company a choice of **Connects from**, while a desktop app (Claude Code, Cursor, the ChatGPT desktop
+  app's Streamable HTTP server) connects from the person's own computer: that address, or anywhere. **Connects from** offers, after anywhere and
+  only these addresses, each hosted agent's published ranges (`/api/state` `addressPresets`, src/cli/address-presets.ts:
+  "Claude (Anthropic)", "ChatGPT (OpenAI)"), a choice whose option names the company (`preset:<id>`) and sends the
+  ranges the run lists for it, chosen for a user whose ranges are exactly a company's; the box hides behind it as behind
+  anywhere, and a user's row says "from ChatGPT (OpenAI)'s addresses (289 ranges)", never a wall of CIDRs. The URL is in the server's environment, never on its command line (`mason mcp` reads
   `MASON_URL`). The package is pinned to the run's version where it is a release npm has (`0.22.0`: the package's, or
   a release image's), so the client runs the same Mason as the server; a checkout's `dev` or an image of main's
   `main-<sha>` leaves it unpinned. It is shown wherever the box above is (a served run and a read-only page too), with

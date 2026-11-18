@@ -498,6 +498,76 @@ names the agent. Its tools say over this wire what a bare SQL tool would leave a
   out), the fields this listener's ErrorResponse carries;
 - `explain` is this API's EXPLAIN, as text.
 
+### From a hosted agent: MCP over HTTPS
+
+`mason serve` serves the same tools to a hosted agent (claude.ai, ChatGPT, a team's agent platform) that cannot start
+a process: MCP's Streamable HTTP (revision 2025-11-25 with a session, and 2026-07-28 as its published text says: no
+session, `server/discover`, each request's version and client in its `_meta`, a cancel by closing the request) at
+`/mcp` on its health port
+(`MASON_HEALTH_PORT`), signed in by an OAuth authorization server the operator runs or rents. Mason issues no token and
+runs no sign-in page; it checks each bearer token against that server's published keys (docs/DESIGN.md "An MCP server
+over HTTPS").
+
+```bash
+MASON_MCP_URL=https://mason.example.com/mcp          # the address a client reaches, through the relay in front
+MASON_MCP_ISSUER=https://auth.example.com            # the authorization server, as the tokens' iss names it
+MASON_MCP_JWKS_URL=https://auth.example.com/.well-known/jwks.json   # its signing keys
+MASON_MCP_USER_CLAIM=mason_user                       # the claim that names the mason user (default mason_user)
+MASON_MCP_USER_ID_CLAIM=mason_user_id                 # the claim that holds its id (default mason_user_id)
+MASON_MCP_PROXY_FROM=10.0.0.0/16                      # the relay's own addresses: its X-Forwarded-For is believed
+MASON_MCP_PLAIN=1                                     # TLS is terminated in front (required off loopback)
+MASON_MCP_ORIGINS=https://app.example.test            # browser origins a page may use it from (default: none)
+```
+
+- **The authorization server** issues signed JWT access tokens (RS256, PS256, ES256, EdDSA, …) whose `iss` is
+  `MASON_MCP_ISSUER`, whose `aud` is `MASON_MCP_URL` exactly — the resource a client asks for (RFC 8707) — and that carry
+  the mason user's name and id. Its sign-in page may ask Mason whether a person's Mason password is right with `mason
+  user check <name> --json` (the password on stdin), which answers the id to sign in. An agent finds the server from
+  `/.well-known/oauth-protected-resource` (also under `/mcp`), which a 401's `WWW-Authenticate` names.
+- **A person adds it by pasting ONLY the URL** as a custom connector (claude.ai: Settings, then Connectors, then Add
+  custom connector; the Users page shows it with Copy). They leave empty any OAuth client ID or client secret field, and
+  any bearer-token or header field a desktop app shows: sign-in happens in their browser, at the authorization server.
+- **A desktop app connects from the person's own computer**: Claude Code, Cursor, and the ChatGPT desktop app's
+  Streamable HTTP server reach `/mcp` from that machine, never from their company's published addresses, so a user
+  held to the "Claude (Anthropic)" or "ChatGPT (OpenAI)" ranges is refused there. Give such a user that computer's
+  address, or anywhere.
+- **`MASON_MCP_URL` is the public address, never what Mason sees.** Behind a relay or proxy, set it to the address the
+  agent is given; the relay forwards `/mcp` and `/.well-known/oauth-protected-resource…` to the health port.
+- **Each request runs as the mapped user, looked up every time**: its role, row filters and limits, and the request log
+  names it with `application_name` `mason-mcp/<client>` and the client's address. A user that does not exist, is disabled
+  or was removed is refused (403) at its very next request, with the command that fixes it; so is a token for a user
+  removed and added again under the same name, whose id is new.
+- **A user's "connects from" ranges apply, judged on the real client.** Without `MASON_MCP_PROXY_FROM` every request's
+  address is its peer's. With it, a request from one of the named addresses is judged on the **last entry of its
+  `X-Forwarded-For`** — the one the relay appended; the relay must append the client's address to every request (nginx:
+  `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for`), and a request it sends without one is refused. The entry
+  may carry a port (`203.0.113.7:51234`, `[2001:db8::1]:443`) or be v4-mapped (`::ffff:203.0.113.7`, a dual-stack
+  listener): it is read as the one address it names. Entries before the last came from the client and are never
+  believed, and a header from any other peer is ignored. A hosted agent's requests come from its company's servers: the
+  Users page's Connects from offers each company's published ranges ("Claude (Anthropic)", from
+  https://platform.claude.com/docs/en/api/ip-addresses; "ChatGPT (OpenAI)", the file
+  https://openai.com/chatgpt-connectors.json that https://developers.openai.com/api/docs/guides/ip-addresses names for
+  ChatGPT's connectors), so a user held to them connects from that agent alone. The lists ship with each release.
+- **TLS**: the health port is plain HTTP. Off loopback the start is refused unless `MASON_MCP_PLAIN=1` says TLS is
+  terminated in front of it, so a bearer token never crosses a network in clear.
+- **`Origin`**: a request that carries an `Origin` header is a browser's, and is refused 403 (`origin_not_allowed`,
+  naming the setting) unless `MASON_MCP_ORIGINS` names that origin exactly: comma-separated, each written as a browser
+  sends it (`https://app.example.test`, `http://localhost:5173`: the scheme and host in lower case, no default port, no
+  path). `Origin: null` is refused. It is checked first, before the token, under every revision. A request with no
+  `Origin` is not judged by it: a hosted agent calls from its own servers and a desktop app from its own process
+  (Node's `fetch`, which MCP's TypeScript SDK uses, sends none), so neither needs the setting. An entry that is not an
+  origin refuses the start.
+- **Bounds**: the authorization server's keys are kept at most 5 minutes (less under its `Cache-Control: max-age`), so a
+  key it removes is refused within 5 minutes, and fetched at most once a minute, backing off to 10 minutes while the
+  fetch fails (every token 503 meanwhile). **If the keys cannot be fetched for longer than their 5 minutes, every
+  request is 503** ("the token could not be checked"), by design: Mason fails closed. mason serve's log says why
+  (`[mcp] the authorization server's keys could not be read…`); check that `MASON_MCP_JWKS_URL` is reachable from the
+  replica, and requests are answered again at the next fetch. A user holds at most 32 sessions and the endpoint 1,000 (a new one past that is
+  503 with `Retry-After`, never made by ending a session in use). The health port takes a request's headers within 10 s
+  and its body within 30 s, closes an idle connection after 5 s, holds at most 1,024 connections and runs at most 256 MCP
+  requests at once, each request of a JSON-RPC batch counted (a batch is taken under MCP 2025-03-26 alone, the one
+  revision that has them, of at most 32 messages; a body is at most 1 MiB); a tool call's own time is not limited by these (docs/DESIGN.md "An MCP server over HTTPS").
+
 ## What a tool sees
 
 - **Each synced table**, in the schema it has in the source (`public.orders` stays `public.orders`), with the columns

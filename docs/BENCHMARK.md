@@ -103,6 +103,27 @@ node scripts/bench-replica.ts --cold --sizes 100k --runs 1 --memory 8GiB --out /
 node scripts/bench-replica.ts --cold --label "m7g.xlarge, 4 vCPU, 16 GiB RAM" --disk "EBS gp3, 125 MB/s, 3000 IOPS" --memory 8GiB --out /tmp/bench-cold.json
 ```
 
+**Mason alone.** When only Mason changed, `--engines mason` measures Mason and copies some of Postgres's cells from an
+earlier run, `--postgres-from` (by default the published `tests/fixtures/bench-replica.json`). It takes about half the
+time. Postgres still runs as Mason's source, and is restarted before each of Mason's runs. The count and the revenue are
+not measured on Postgres. Their Postgres cells are copied unchanged, once Postgres's answers to them are the earlier
+run's. The data comes from `setseed()` and `random()`, so data made again gives the same answers. The lookup asks for
+rows sampled in this run, since the order ids are random, so it is measured on both engines. Before anything with a side
+effect, the run refuses an earlier run that did not end, or that differs from this one in its data, statements,
+`--clients`, `--runs`, `--settle`, `--cpus`, `--memory`, `--postgres-image`, `--disk` or `--label`, or that lacks a size
+this run measures. Once its Postgres answers, it refuses one of another version or settings, and a size where a copied
+statement's answer is not the earlier run's. The fixture marks each copied cell, and the README and docs/MEASUREMENTS.md
+say which times came from which run. Give `--out` another file, and copy it over once the run is complete. `--resume`
+refuses a file of the other engines, or with Postgres's cells from another run.
+
+An image built from a branch says its version is "dev". Give `--mason-commit <sha>`, the commit it was built from, and
+the page names Mason by it. Without it, the page names the image. The commit of the checkout the script runs from is
+recorded apart, and is never named as Mason's.
+
+```bash
+node scripts/bench-replica.ts --cold --engines mason --label "m7g.xlarge, 4 vCPU, 16 GiB RAM" --disk "EBS gp3, 125 MB/s, 3000 IOPS" --memory 8GiB --out /tmp/bench-cold-mason.json
+```
+
 `tests/integration/bench-replica-cold.itest.ts` runs a smoke at 1 M rows and checks its fixture, when
 `IT_BENCH_COLD=1`. CI does not run it by default: it would add about ten minutes to every PR, on a runner shared with
 other jobs.
