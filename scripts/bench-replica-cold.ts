@@ -22,21 +22,30 @@
  *
  * MASON ALONE (--engines mason) re-measures Mason after a change to Mason only, in about half the time. Postgres still
  * runs, as Mason's source, and is restarted before each of Mason's runs as before. A statement with no per-client
- * literal (the count, the revenue) is not measured on Postgres: its Postgres cells are copied unchanged from
- * --postgres-from, once Postgres's answer to it is that run's answer. Its data comes from setseed() and random(), so data
- * made again gives the same answers. The lookup asks for rows sampled in this run (the order ids are random), so it is
- * measured on both engines. The fixture marks each copied cell (`copied`) and records the run (environment.postgresFrom).
- * The run refuses, before anything with a side effect, an earlier run that is not a complete cold run, or that differs
- * from this one in its data, statements, clients, runs, settle, limits, Postgres image, disk or label, or lacks a size
- * this run measures. Once its Postgres answers, it refuses one of another version or settings, and a size where
- * Postgres's answer to a statement it would copy is not the earlier run's.
+ * literal that the earlier run sent as this one sends it (the count, the revenue) is not measured on Postgres: its
+ * Postgres cells are copied unchanged from --postgres-from, once Postgres's answer to it is that run's answer. Its data
+ * comes from setseed() and random(), so data made again gives the same answers. The lookup asks for rows sampled in this
+ * run (the order ids are random), so it is measured on both engines, and so is a statement the earlier run did not send
+ * (the revenue in Asia/Kathmandu, for a run before it). The fixture marks each copied cell (`copied`) and records the run
+ * (environment.postgresFrom). The run refuses, before anything with a side effect, an earlier run that is not a
+ * complete cold run, or that differs from this one in its data, the statements it sent, clients, runs, settle, limits,
+ * Postgres image, disk or label, or lacks a size this run measures. Once its Postgres answers, it refuses one of another
+ * version or settings, and a size where Postgres's answer to a statement it would copy is not the earlier run's.
  *
  * THE DATA (COLD_DATA, `coldDataSql`): the warm mode's orders and customers, with random UUID primary keys and no
- * index on status, in databases of their own (`bench_replica_cold_<rows>`). The fixture records it.
+ * index on status, in databases of their own (`bench_replica_cold_<rows>`). The fixture records it. Mason's sources
+ * file (SOURCES_FILE) names the reference orders.customer_id → customers.id, which the data does not declare.
  *
- * WHAT IS MEASURED. Three statements (COLD_STATEMENTS), sent as written to both engines: a count over every row, a sum
- * by month over a join, and one row by its primary key. Each size × client count × statement × engine is run --runs
- * times. In each run every client sends the statement once, all at the same moment, and the run records each client's
+ * MASON'S OWN WORK. After `mason wait` says the first sync is done, the run waits until Mason's log says it built the
+ * side table for lookups by orders.id (where one is expected, `sideTableExpected`) and numbered the reference's hidden
+ * keys (`backgroundLeft`), at most an hour, and records how long that took (`backgroundSeconds`). Then it restarts Mason
+ * once, and fails unless Mason says the keys are numbered again, does not build the side table again, and runs a lookup
+ * and the join on them under EXPLAIN (ANALYZE, VERBOSE) (`restartProblems`).
+ *
+ * WHAT IS MEASURED. Four statements (COLD_STATEMENTS), sent as written to both engines: a count over every row, a sum
+ * by month over a join, the same sum in a session whose time zone is Asia/Kathmandu, and one row by its primary key.
+ * Each session's time zone is UTC, or the statement's own, set as it starts (libpq's PGTZ). Each size × client count ×
+ * statement × engine is run --runs times. In each run every client sends the statement once, all at the same moment, and the run records each client's
  * time. A client's time excludes its connection. The cell's time is the median over the runs of the slowest client:
  * the time until every client has its answer. Each run also records what the measured engine's container read from
  * disk while pgbench ran (and, beside Mason, the idle Postgres's), from its cgroup v2 io.stat; where that cannot be
@@ -165,17 +174,28 @@ export const coldShape = (rows: number): DataShape => ({ database: `bench_replic
 
 // --------------------------------------------------------------------------------------------- the statements
 
-export interface ColdStatement { name: string; title: string; sql: string; lookup?: true }
+/** a statement the run sends: its SQL, and the session's time zone it runs in (`timeZone`; absent: UTC) */
+export interface ColdStatement { name: string; title: string; sql: string; lookup?: true; timeZone?: string }
 /** where the lookup's id goes: each client's own, as a literal */
 export const LOOKUP_ID = "<id>";
+const REVENUE_SQL = "SELECT date_trunc('month', o.created_at) AS month, date_trunc('year', c.created_at) AS signup_year, sum(o.amount) AS revenue " +
+  "FROM orders o JOIN customers c ON c.id = o.customer_id GROUP BY 1, 2 ORDER BY 1, 2";
 export const COLD_STATEMENTS: readonly ColdStatement[] = [
   { name: "count_by_status", title: "Count by status, every order",
     sql: "SELECT status, count(*) FROM orders GROUP BY status ORDER BY status" },
-  { name: "revenue_by_month", title: "Revenue by month, orders joined to customers",
-    sql: "SELECT date_trunc('month', o.created_at) AS month, date_trunc('year', c.created_at) AS signup_year, sum(o.amount) AS revenue " +
-      "FROM orders o JOIN customers c ON c.id = o.customer_id GROUP BY 1, 2 ORDER BY 1, 2" },
+  { name: "revenue_by_month", title: "Revenue by month, orders joined to customers", sql: REVENUE_SQL },
+  // the same SQL in a session whose zone is off the hour by 45 minutes: Mason groups a time's unit by a stored
+  // 15-minute bucket outside UTC (src/duck/bucket-column.ts, issue 1146), never in UTC
+  { name: "revenue_by_month_kathmandu", title: "Revenue by month in Asia/Kathmandu, orders joined to customers", sql: REVENUE_SQL, timeZone: "Asia/Kathmandu" },
   { name: "lookup", title: "One order by its primary key", sql: `SELECT * FROM orders WHERE id = '${LOOKUP_ID}'`, lookup: true },
 ];
+/** the session's time zone a statement runs in: its own, else UTC (both engines, the answers and the timed runs alike) */
+export const zoneOf = (st: Pick<ColdStatement, "timeZone">): string => st.timeZone ?? "UTC";
+/** what makes a statement the one an earlier run sent: its name, its SQL and its session's time zone */
+export const statementKey = (st: Pick<ColdStatement, "name" | "sql" | "timeZone">): string => JSON.stringify([st.name, st.sql, zoneOf(st)]);
+/** a statement as the fixture records it */
+export const fixtureStatement = (st: ColdStatement): ColdFixture["statements"][number] =>
+  ({ name: st.name, title: st.title, sql: st.sql, ...(st.timeZone === undefined ? {} : { timeZone: st.timeZone }) });
 
 /** a UUID as Postgres writes it: 36 characters, lower-case hex in groups of 8, 4, 4, 4 and 12 */
 const UUID_TEXT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -329,6 +349,10 @@ export interface ColdSize {
   masonBytes: number;
   /** from the Mason container's first start to every table synced and served, s */
   syncSeconds: number;
+  /** after that, until Mason's own work on the synced data was done, s: the side table for lookups by orders.id, where
+   *  one is expected (`sideTableExpected`), and the reference's hidden keys numbered (`backgroundLeft`). Absent from a
+   *  run before it was waited for */
+  backgroundSeconds?: number;
   /** the lookup's ids, by client */
   lookupIds: string[];
   /** each statement's answer on each engine, as an md5 of its column names, type OIDs and rows (the lookup per id) */
@@ -360,7 +384,7 @@ export interface ColdFixture {
   };
   /** what the data is: its keys and indexes (COLD_DATA) */
   data: ColdData;
-  statements: Array<{ name: string; title: string; sql: string }>;
+  statements: Array<{ name: string; title: string; sql: string; timeZone?: string }>;
   sizes: ColdSize[];
   skipped: Array<{ rows: number; why: string }>;
   cells: ColdCell[];
@@ -371,20 +395,38 @@ export interface ColdFixture {
 export interface PostgresFrom { date: string; measuredAt: string | null; file: string }
 
 /**
+ * The statements of this script a fixture measured, or null when it names one this script does not send as it was sent
+ * (another SQL or time zone, or out of order). A fixture made before a statement was added to the script names the
+ * others alone: it is a run of those, and has no cell of the one added.
+ */
+export function fixtureStatements(f: Pick<ColdFixture, "statements">): ColdStatement[] | null {
+  const sends = COLD_STATEMENTS.map(statementKey);
+  let at = 0;
+  for (const s of f.statements) {
+    const i = sends.indexOf(statementKey(s), at);
+    if (i < 0) return null;
+    at = i + 1;
+  }
+  return f.statements.length === 0 ? null : COLD_STATEMENTS.filter((st) => f.statements.some((s) => statementKey(s) === statementKey(st)));
+}
+
+/**
  * What is wrong with a cold run's fixture, in words (none: a run that ended, with every cell its method names): the
- * statements this script sends, every size measured or skipped, and for each size × clients × statement × engine a
- * cell of --runs runs, each with every client's time, the cell's time the median of the runs' slowest.
+ * statements it names sent now as it sent them, every size measured or skipped, and for each size × clients ×
+ * statement × engine a cell of --runs runs, each with every client's time, the cell's time the median of the runs'
+ * slowest.
  */
 export function coldFixtureProblems(f: ColdFixture): string[] {
   const out: string[] = [];
   if (f.mode !== "cold") out.push(`mode is ${JSON.stringify(f.mode)}, not "cold"`);
-  if (JSON.stringify(f.statements.map((s) => [s.name, s.sql])) !== JSON.stringify(COLD_STATEMENTS.map((s) => [s.name, s.sql]))) out.push("its statements are not the ones scripts/bench-replica-cold.ts sends now: run it again");
+  const statements = fixtureStatements(f);
+  if (statements === null) out.push("its statements are not the ones scripts/bench-replica-cold.ts sends now: run it again");
   if (JSON.stringify(f.data ?? null) !== JSON.stringify(COLD_DATA)) out.push("its data is not the data scripts/bench-replica-cold.ts makes now (COLD_DATA): run it again");
   const m = f.environment.method;
   for (const rows of m.sizes) if (!f.sizes.some((z) => z.rows === rows) && !f.skipped.some((k) => k.rows === rows)) out.push(`${rows} rows: neither measured nor skipped`);
   for (const z of f.sizes) {
     if (z.lookupIds.length < Math.max(...m.clients)) out.push(`${z.rows} rows: ${z.lookupIds.length} lookup ids for ${Math.max(...m.clients)} clients`);
-    for (const clients of m.clients) for (const st of COLD_STATEMENTS) for (const engine of ["postgres", "mason"] as const) {
+    for (const clients of m.clients) for (const st of statements ?? COLD_STATEMENTS) for (const engine of ["postgres", "mason"] as const) {
       const where = `${z.rows} rows, ${clients} clients, ${st.name}, ${engine}`;
       const c = f.cells.filter((x) => x.rows === z.rows && x.clients === clients && x.statement === st.name && x.engine === engine);
       if (c.length !== 1) { out.push(`${where}: ${c.length} cells`); continue; }
@@ -399,7 +441,7 @@ export function coldFixtureProblems(f: ColdFixture): string[] {
       }
     }
   }
-  for (const st of COLD_STATEMENTS) {
+  for (const st of statements ?? COLD_STATEMENTS) {
     const pg = f.cells.filter((c) => c.engine === "postgres" && c.statement === st.name);
     const copied = pg.filter((c) => c.copied !== undefined).length;
     if (copied > 0 && copied < pg.length) out.push(`${st.name}: its Postgres cells are copied at some sizes or client counts and measured at others`);
@@ -423,7 +465,9 @@ export function postgresFromProblems(earlier: ColdFixture, o: ColdOptions): stri
   if (earlier.mode !== "cold") return [`${file} is not a cold run (mode ${JSON.stringify(earlier.mode)})`];
   if (!earlier.complete) out.push(`${file} is of a run that did not end (complete: false)`);
   if (JSON.stringify(earlier.data ?? null) !== JSON.stringify(COLD_DATA)) out.push(`${file} measured other data than this run makes (COLD_DATA)`);
-  if (JSON.stringify(earlier.statements.map((s) => [s.name, s.sql])) !== JSON.stringify(COLD_STATEMENTS.map((s) => [s.name, s.sql]))) out.push(`${file} sent other statements than this run sends`);
+  // a statement this run sends that the earlier run did not is measured on Postgres too (`copiedFrom`); one the earlier
+  // run sent otherwise (its SQL or time zone), or that this run no longer sends, refuses it
+  if (fixtureStatements(earlier) === null) out.push(`${file} sent other statements than this run sends`);
   const e = earlier.environment, m = e.method;
   const differs = (what: string, was: unknown, now: unknown): void => {
     if (JSON.stringify(was) !== JSON.stringify(now)) out.push(`${file} has ${what} ${JSON.stringify(was)}, and this run ${JSON.stringify(now)}`);
@@ -440,7 +484,7 @@ export function postgresFromProblems(earlier: ColdFixture, o: ColdOptions): stri
   for (const rows of o.sizes) {
     const z = earlier.sizes.find((x) => x.rows === rows);
     if (z === undefined) { out.push(`${file} did not measure ${fmtRows(rows)} rows, a size this run measures`); continue; }
-    for (const clients of o.clients) for (const st of COLD_STATEMENTS.filter(copyable)) {
+    for (const clients of o.clients) for (const st of COLD_STATEMENTS.filter((s) => copiedFrom(earlier, s))) {
       if (!earlier.cells.some((c) => c.engine === "postgres" && c.rows === rows && c.clients === clients && c.statement === st.name)) out.push(`${file} has no Postgres cell for ${fmtRows(rows)} rows, ${clients} clients, ${st.name}`);
     }
   }
@@ -471,10 +515,15 @@ export function postgresFromOf(earlier: ColdFixture, file: string): PostgresFrom
 /** a statement whose Postgres cells a Mason-alone run may copy: one with no per-client literal, so its answer proves
  *  the rows are the ones the earlier run measured. The lookup's rows are sampled in each run, so it is measured */
 export const copyable = (st: ColdStatement): boolean => st.lookup !== true;
-/** the statements it would copy whose live Postgres answer (an md5, by statement) is not the earlier run's: none, or
- *  their cells cannot be copied */
-export function postgresAnswerChanges(earlier: ColdSize, live: Record<string, string>): string[] {
-  return COLD_STATEMENTS.filter(copyable).map((st) => st.name).filter((k) => earlier.answers[k]?.postgres === undefined || earlier.answers[k]!.postgres !== live[k]);
+/** a statement whose Postgres cells a Mason-alone run copies from `earlier`: copyable, and sent by that run as this one
+ *  sends it (its SQL and time zone). A statement the earlier run did not send has no cell to copy: Postgres's is
+ *  measured in this run, as the lookup's is */
+export const copiedFrom = (earlier: Pick<ColdFixture, "statements">, st: ColdStatement): boolean =>
+  copyable(st) && earlier.statements.some((s) => statementKey(s) === statementKey(st));
+/** the statements it copies (`copied`) whose live Postgres answer (an md5, by statement) is not the earlier run's:
+ *  none, or their cells cannot be copied */
+export function postgresAnswerChanges(earlier: ColdSize, live: Record<string, string>, copied: readonly ColdStatement[]): string[] {
+  return copied.map((st) => st.name).filter((k) => earlier.answers[k]?.postgres === undefined || earlier.answers[k]!.postgres !== live[k]);
 }
 /** the earlier run's Postgres cell, unchanged (every run, each client's time and what it read), marked as copied */
 export function earlierPostgresCell(earlier: ColdFixture, rows: number, clients: number, statement: string): ColdCell {
@@ -768,15 +817,16 @@ async function untilAnswers(conn: pg.ClientConfig, what: string, timeoutMs: numb
   }
 }
 
-/** each statement's answer as one text: column names, type OIDs and rows (the lookup at each id), under UTC */
+/** each statement's answer as one text: column names, type OIDs and rows (the lookup at each id), each in its session's
+ *  time zone (`zoneOf`: UTC, or the statement's own) */
 async function answersOf(conn: pg.ClientConfig, ids: readonly string[]): Promise<Map<string, string>> {
   const c = new pg.Client(conn);
   await c.connect();
   try {
-    await c.query("SET TimeZone = 'UTC'");
     const raw = { getTypeParser: () => (v: string) => v };
     const out = new Map<string, string>();
     for (const st of COLD_STATEMENTS) {
+      await c.query(`SET TIME ZONE '${zoneOf(st)}'`);
       for (const id of st.lookup === true ? ids : [undefined]) {
         const key = id === undefined ? st.name : `${st.name} ${id}`;
         try {
@@ -934,7 +984,8 @@ export async function mainCold(argv: string[], at: { lockFile?: string; procRoot
       if (problems.length > 0) throw new Usage(`--engines mason: this run's Postgres is not the one ${o.postgresFrom} measured:\n  ${problems.join("\n  ")}`);
     }
     const pgClientEnv = path.join(secrets, "client-postgres.env");
-    writeSecret(pgClientEnv, { PGPASSWORD: pgPassword, PGTZ: "UTC" });
+    // the session's time zone is each statement's, on pgbench's command line (`pgbenchArgs`)
+    writeSecret(pgClientEnv, { PGPASSWORD: pgPassword });
 
     // ---- the fixture: new, or --resume's sizes kept
     const fresh: ColdFixture = {
@@ -953,7 +1004,7 @@ export async function mainCold(argv: string[], at: { lockFile?: string; procRoot
         ...(earlier === null ? {} : { postgresFrom: postgresFromOf(earlier, o.postgresFrom) }),
       },
       data: { version: COLD_DATA.version, keys: COLD_DATA.keys, indexes: [...COLD_DATA.indexes] },
-      statements: COLD_STATEMENTS.map((s) => ({ name: s.name, title: s.title, sql: s.sql })),
+      statements: COLD_STATEMENTS.map(fixtureStatement),
       sizes: [], skipped: [], cells: [], complete: false,
     };
     let fixture = fresh;
@@ -1006,18 +1057,22 @@ export async function mainCold(argv: string[], at: { lockFile?: string; procRoot
         if (fixture.environment.mason.engineMemory === "unknown") fixture.environment.mason.engineMemory = mason.engineMemory;
         const masonConn: pg.ClientConfig = { host: "127.0.0.1", port: mason.port, user: "bench", password: mason.password, database: mason.database, ssl: { rejectUnauthorized: false } };
         const ids = await pickLookupIds(pgConn, rows, Math.max(...o.clients));
+        // ---- what Mason built after its first sync survives a restart, and a lookup and the join run on it
+        await checkRestart(rows, masonConn, ids, log);
         // ---- the answers, before anything is timed
         const a = await answersOf(pgConn, ids), b = await answersOf(masonConn, ids);
         const answers = Object.fromEntries([...a.keys()].map((k) => [k, { postgres: md5(a.get(k)!), mason: md5(b.get(k) ?? "") }]));
         const differences = [...a.keys()].filter((k) => a.get(k) !== b.get(k)).map((k) => `${k}: Postgres ${a.get(k)!.slice(0, 300)}; Mason ${(b.get(k) ?? "none").slice(0, 300)}`);
         log(differences.length === 0 ? "  every statement's answer is the same on both" : `  ANSWERS DIFFER (a Mason defect; measured anyway):\n    ${differences.join("\n    ")}`);
         if (earlier !== null) {
-          const changed = postgresAnswerChanges(earlier.sizes.find((z) => z.rows === rows)!, Object.fromEntries([...a].map(([k, v]) => [k, md5(v)])));
+          const copied = COLD_STATEMENTS.filter((st) => copiedFrom(earlier, st));
+          const changed = postgresAnswerChanges(earlier.sizes.find((z) => z.rows === rows)!, Object.fromEntries([...a].map(([k, v]) => [k, md5(v)])), copied);
           if (changed.length > 0) throw new Usage(`--engines mason: at ${fmtRows(rows)} rows, Postgres's answer to ${changed.join(" and ")} is not the one ${o.postgresFrom} recorded, so its Postgres cells cannot be copied. Measure both engines`);
-          log(`  Postgres's answers to ${COLD_STATEMENTS.filter(copyable).map((s) => s.name).join(" and ")} are the ones ${path.relative(REPO, o.postgresFrom)} recorded: their Postgres cells are copied`);
+          log(`  Postgres's answers to ${copied.map((s) => s.name).join(" and ")} are the ones ${path.relative(REPO, o.postgresFrom)} recorded: their Postgres cells are copied. ` +
+            `${COLD_STATEMENTS.filter((st) => !copied.includes(st)).map((s) => s.name).join(" and ")} measured on Postgres too`);
         }
         const size: ColdSize = { rows, customers: customersOf(rows), generatedSeconds: data.generatedSeconds, postgresBytes, masonBytes: mason.bytes, syncSeconds: mason.syncSeconds,
-          lookupIds: ids, answers, answersEqual: differences.length === 0, differences };
+          backgroundSeconds: mason.backgroundSeconds, lookupIds: ids, answers, answersEqual: differences.length === 0, differences };
 
         // ---- the runs: each cold, the engines alternating which goes first
         const target: Record<ColdEngine, PgbenchTarget> = {
@@ -1047,15 +1102,16 @@ export async function mainCold(argv: string[], at: { lockFile?: string; procRoot
             const runs: Record<ColdEngine, ColdRun[]> = { postgres: [], mason: [] };
             fs.writeFileSync(path.join(clientDir, "script.sql"), coldScript(stmt, clients, ids));
             for (let n = 0; n < o.runs; n++) {
-              // Mason alone: Postgres is measured only for a statement whose cells cannot be copied (the lookup)
-              const measured = (e: ColdEngine): boolean => earlier === null || e === "mason" || !copyable(stmt);
+              // Mason alone: Postgres is measured only for a statement whose cells cannot be copied (the lookup, and one
+              // the earlier run did not send)
+              const measured = (e: ColdEngine): boolean => earlier === null || e === "mason" || !copiedFrom(earlier, stmt);
               for (const engine of ((n % 2 === 0 ? ["postgres", "mason"] : ["mason", "postgres"]) as ColdEngine[]).filter(measured)) {
                 const readyMs = await cold(engine);
                 const at = new Date().toISOString();
                 // what the measured engine (and, beside Mason, the idle Postgres) read from disk while pgbench ran
                 const measured = engine === "postgres" ? PG_CONTAINER : MASON_CONTAINER;
                 const before = { measured: containerReadBytes(measured), idle: engine === "mason" ? containerReadBytes(PG_CONTAINER) : 0 };
-                const times = await pgbench(o.postgresImage, clientDir, made.clientIdFile, target[engine], clients, uid, gid);
+                const times = await pgbench(o.postgresImage, clientDir, made.clientIdFile, target[engine], clients, uid, gid, zoneOf(stmt));
                 const disk: DiskRead = { readBytes: containerReadBytes(measured) - before.measured,
                   ...(engine === "mason" ? { idleReadBytes: containerReadBytes(PG_CONTAINER) - before.idle } : {}) };
                 const r = runOf(times, readyMs, at, disk);
@@ -1065,7 +1121,7 @@ export async function mainCold(argv: string[], at: { lockFile?: string; procRoot
             }
             for (const e of ["postgres", "mason"] as const) {
               // Mason alone: Postgres's cell as the earlier run measured it, unchanged
-              cells.push(earlier !== null && e === "postgres" && copyable(stmt) ? earlierPostgresCell(earlier, rows, clients, stmt.name) : coldCell(rows, clients, e, stmt.name, runs[e]));
+              cells.push(earlier !== null && e === "postgres" && copiedFrom(earlier, stmt) ? earlierPostgresCell(earlier, rows, clients, stmt.name) : coldCell(rows, clients, e, stmt.name, runs[e]));
             }
           }
         }
@@ -1184,9 +1240,10 @@ function takeOwner(image: string, me: string, procRoot: string): string {
   throw new Usage(`another cold run took ${OWNER_CONTAINER} as this one did: wait for it to end`);
 }
 
-/** what the container logged, both streams: the image logs to stdout, and a warning may go to stderr */
-function containerLog(name: string, tail?: number): string {
-  const r = spawnSync("docker", ["logs", ...(tail === undefined ? [] : ["--tail", String(tail)]), name], { encoding: "utf8", maxBuffer: 256 * 2 ** 20 });
+/** what the container logged, both streams: the image logs to stdout, and a warning may go to stderr. `since`: from
+ *  that moment (an ISO time) on */
+function containerLog(name: string, tail?: number, since?: string): string {
+  const r = spawnSync("docker", ["logs", ...(tail === undefined ? [] : ["--tail", String(tail)]), ...(since === undefined ? [] : ["--since", since]), name], { encoding: "utf8", maxBuffer: 256 * 2 ** 20 });
   if (r.status !== 0) throw new Error(`docker logs ${name}: ${r.stderr.trim()}`);
   return `${r.stdout}\n${r.stderr}`;
 }
@@ -1196,10 +1253,127 @@ export function engineMemoryOf(logText: string): string {
   return /at most (\S+) of memory \(MASON_DUCKDB_MEMORY\)/.exec(logText)?.[1] ?? "unknown";
 }
 
-/** the sources file of the bench's project: both tables, never polled; the URL a variable, so the file holds no secret */
-export const SOURCES_FILE = "kind: postgres\nurl: ${DATABASE_URL}\nsync: off\ntables:\n  orders: {}\n  customers: {}\n";
+/**
+ * The sources file of the bench's project: both tables, never polled; the URL a variable, so the file holds no secret.
+ * orders references customers by `customer_id`, written by hand as a user adds a relationship the database does not
+ * declare (the cold data declares no foreign key, so `mason add` writes none), so its join reads the hidden integer
+ * keys (src/duck/reference-keys.ts, issue 1144).
+ */
+export const SOURCES_FILE = "kind: postgres\nurl: ${DATABASE_URL}\nsync: off\ntables:\n  orders:\n    references:\n      customer_id: customers.id\n  customers: {}\n";
 
-interface MasonUp { port: number; password: string; database: string; clientEnv: string; bytes: number; syncSeconds: number; engineMemory: string }
+// --------------------------------------------------------------------------------------------- Mason's own work
+
+/**
+ * WHAT MASON DOES AFTER ITS FIRST SYNC, waited for before anything is timed. Mason exposes neither in `mason status
+ * --json` or `/api/state`, so the run reads its log, where each says it is done:
+ *  - the side table for lookups by orders.id (src/duck/key-lookup.ts, issue 1148), built once orders is synced, its line
+ *    `public.orders: its side table for lookups by id built in …` (src/duck/sync.ts `buildLookup`). Lookups' side
+ *    tables are built one at a time, the smallest table first, so customers' (if any) is done before orders';
+ *  - the reference's hidden keys numbered on both tables (src/duck/reference-keys.ts, issue 1144), its line `public.orders
+ *    (customer_id) references public.customers (id): a join on it reads hidden integer keys`, said once a run, when no
+ *    row of either table is left unnumbered (`ReferenceNumbers.fill`).
+ */
+export const ORDERS_LOOKUP_BUILT = /\bpublic\.orders: its side table for lookups by id built in /;
+export const REFERENCE_NUMBERED = /\bpublic\.orders \(customer_id\) references public\.customers \(id\): a join on it reads hidden integer keys\b/;
+/** a hidden integer key's column, as a plan names it (src/duck/reference-keys.ts `NUMBER_RE`) */
+const HIDDEN_KEY = /__mason_ref_[0-9a-f]{12}_[0-9a-f]{12}/;
+/** the rows of one of the engine's row groups (src/duck/compact.ts `ROW_GROUP_ROWS`), and the row groups a key's value
+ *  must fall in, on average, for Mason to build a table a side table (src/duck/key-lookup.ts `LOOKUP_MIN_ROW_GROUPS`).
+ *  Copied, not imported, so the script loads no engine: tests/bench-replica.test.ts holds them equal */
+export const ROW_GROUP_ROWS = 122_880;
+export const LOOKUP_MIN_ROW_GROUPS = 8;
+/**
+ * Whether Mason builds orders a side table for lookups by id. A random UUID key's every row group spans nearly every
+ * value, so a key's value falls in about every row group, and orders has at least rows / ROW_GROUP_ROWS of them. More
+ * than LOOKUP_MIN_ROW_GROUPS: built (1 M orders have 9). At or under it, Mason may decide either way, and says nothing
+ * when it builds none: the run does not wait for one. The 100 k smoke has one row group.
+ */
+export const sideTableExpected = (rows: number): boolean => Math.ceil(rows / ROW_GROUP_ROWS) > LOOKUP_MIN_ROW_GROUPS;
+/** what Mason has not finished after its first sync, by its log, in words (none: done) */
+export function backgroundLeft(logText: string, rows: number): string[] {
+  const left: string[] = [];
+  if (sideTableExpected(rows) && !ORDERS_LOOKUP_BUILT.test(logText)) left.push("the side table for lookups by orders.id (its log line: \"public.orders: its side table for lookups by id built in …\")");
+  if (!REFERENCE_NUMBERED.test(logText)) {
+    left.push("the numbering of the hidden keys of orders.customer_id and customers.id (its log line: \"public.orders (customer_id) references public.customers (id): a join on it reads hidden integer keys\")");
+  }
+  return left;
+}
+/** how long Mason may take over that work, after its first sync, and to say its keys are numbered after a restart */
+const BACKGROUND_TIMEOUT_MS = 60 * 60_000;
+const RESTART_NUMBERS_TIMEOUT_MS = 10 * 60_000;
+/** an EXPLAIN ANALYZE's text without the line of the SQL Mason planned: what the engine ran (its profile). A join on the
+ *  hidden keys whose rows are not all numbered runs the plain SQL, while that line still names the hidden keys */
+const ranPlan = (plan: string): string => plan.split("\n").filter((l) => !/^\s*Sent to the engine:/.test(l)).join("\n");
+/**
+ * What Mason redid or did not run on after a restart, in words (none: all as it should be): the side table built again,
+ * a lookup by orders.id that did not read it, or the join of orders to customers on their keys rather than the hidden
+ * numbers. `log` is Mason's log since the restart; the plans are `EXPLAIN (ANALYZE, VERBOSE)`'s text.
+ */
+export function restartProblems(o: { rows: number; log: string; lookupPlan: string | null; joinPlan: string }): string[] {
+  const out: string[] = [];
+  if (sideTableExpected(o.rows)) {
+    if (ORDERS_LOOKUP_BUILT.test(o.log)) out.push("it built the side table for lookups by orders.id again");
+    if (o.lookupPlan === null || !/key_lookup:public\.orders/.test(ranPlan(o.lookupPlan))) out.push(`a lookup by orders.id did not read its side table:\n${o.lookupPlan ?? "(not run)"}`);
+  }
+  if (!HIDDEN_KEY.test(ranPlan(o.joinPlan))) out.push(`the join of orders to customers ran on customer_id and id, not on their hidden keys:\n${o.joinPlan}`);
+  return out;
+}
+
+interface MasonUp { port: number; password: string; database: string; clientEnv: string; bytes: number; syncSeconds: number; backgroundSeconds: number; engineMemory: string }
+
+/** until Mason's log says its work after the first sync is done (`backgroundLeft`), at most BACKGROUND_TIMEOUT_MS: ms
+ *  waited. A container that stopped, or work not done in time, fails the run, naming what never finished */
+async function untilBackgroundDone(rows: number, log: (l: string) => void): Promise<number> {
+  const t0 = performance.now();
+  let said = "";
+  for (;;) {
+    const left = backgroundLeft(containerLog(MASON_CONTAINER), rows);
+    if (left.length === 0) return performance.now() - t0;
+    if (left.join() !== said) { log(`  waiting for Mason to finish ${left.map((l) => l.replace(/ \(its log line.*$/, "")).join(", and ")}…`); said = left.join(); }
+    if (docker(["inspect", "--format", "{{.State.Running}}", MASON_CONTAINER]) !== "true") throw new Error(`Mason's container stopped before it finished ${left.join("; and ")}:\n${containerLog(MASON_CONTAINER, 30)}`);
+    if (performance.now() - t0 > BACKGROUND_TIMEOUT_MS) {
+      throw new Error(`Mason did not finish its work after the first sync in ${BACKGROUND_TIMEOUT_MS / 60_000} minutes. Never finished: ${left.join("; and ")}. ` +
+        `An image from before issues 1144 and 1148 does neither. Its log's last lines:\n${containerLog(MASON_CONTAINER, 30)}`);
+    }
+    await sleep(2000);
+  }
+}
+
+/**
+ * A COLD RESTART REDOES NONE OF IT: Mason restarted once its work after the first sync is done, and once it answers and
+ * says its keys are numbered again, a lookup by orders.id and the join of orders to customers run under EXPLAIN
+ * (ANALYZE, VERBOSE). The lookup must read the side table, the join the hidden keys (in what the engine ran, not the
+ * SQL Mason planned), and the side table must not be built again. Fails the run otherwise: it would measure other work.
+ */
+async function checkRestart(rows: number, masonConn: pg.ClientConfig, ids: readonly string[], log: (l: string) => void): Promise<void> {
+  docker(["stop", "-t", "120", MASON_CONTAINER]);
+  const since = new Date().toISOString();
+  docker(["start", MASON_CONTAINER]);
+  const t0 = performance.now();
+  await untilAnswers(masonConn, "Mason", READY_TIMEOUT_MS);
+  // the line is said once a run: again in this one once a numbering turn finds every row numbered
+  while (!REFERENCE_NUMBERED.test(containerLog(MASON_CONTAINER, undefined, since))) {
+    if (performance.now() - t0 > RESTART_NUMBERS_TIMEOUT_MS) {
+      throw new Error(`after a restart, Mason did not say the hidden keys of orders.customer_id and customers.id are numbered in ${RESTART_NUMBERS_TIMEOUT_MS / 60_000} minutes. Its log's last lines:\n${containerLog(MASON_CONTAINER, 30)}`);
+    }
+    await sleep(1000);
+  }
+  const numberedMs = performance.now() - t0;
+  const explain = async (st: ColdStatement, id?: string): Promise<string> => {
+    const c = new pg.Client(masonConn);
+    await c.connect();
+    try {
+      await c.query(`SET TIME ZONE '${zoneOf(st)}'`);
+      return ((await c.query(`EXPLAIN (ANALYZE, VERBOSE) ${statementSql(st, id)}`)).rows as Array<{ "QUERY PLAN": string }>).map((r) => r["QUERY PLAN"]).join("\n");
+    } finally { await c.end(); }
+  };
+  const statement = (name: string): ColdStatement => COLD_STATEMENTS.find((s) => s.name === name)!;
+  const lookupPlan = sideTableExpected(rows) ? await explain(statement("lookup"), ids[0]) : null;
+  const joinPlan = await explain(statement("revenue_by_month"));
+  const problems = restartProblems({ rows, log: containerLog(MASON_CONTAINER, undefined, since), lookupPlan, joinPlan });
+  if (problems.length > 0) throw new Error(`after a restart, Mason did not run on what it built after its first sync:\n  ${problems.join("\n  ")}`);
+  log(`  after a restart: the hidden keys numbered ${secondsText(numberedMs)} after its start; ${lookupPlan === null ? "no side table expected at this size; " : "a lookup reads the side table; "}the join reads the hidden keys`);
+}
 /** Mason for one size: the image, syncing the size's database by the network alias, every table `sync: off`; its first
  *  sync waited for, a bench user made, its password in a 0600 env file and never printed */
 async function startMason(o: ColdOptions, s: { db: string; pgPassword: string; limits: string[]; secrets: string; rows: number; volume: string }, made: Made, log: (l: string) => void): Promise<MasonUp> {
@@ -1239,28 +1413,40 @@ async function startMason(o: ColdOptions, s: { db: string; pgPassword: string; l
   const waited = ((): { ready?: boolean } | null => { try { return JSON.parse(w.stdout) as { ready?: boolean }; } catch { return null; } })();
   if (w.status !== 0 || waited?.ready !== true) throw new Error(`Mason's first sync did not finish (mason wait exit ${w.status}): ${(w.stdout || w.stderr).slice(0, 2000)}`);
   const syncSeconds = round((performance.now() - t0) / 1000, 1);
+  // its own work on the synced data after that, before anything is timed: the lookup's side table, the hidden keys
+  const backgroundSeconds = round(await untilBackgroundDone(s.rows, log) / 1000, 1);
   const added = await run("docker", ["exec", MASON_CONTAINER, "mason", "user", "add", "bench", "--json"]);
   // what mason user add said is never printed: it holds the password
   const user = ((): { password?: unknown; database?: unknown } | null => { try { return JSON.parse(added.stdout) as { password?: unknown; database?: unknown }; } catch { return null; } })();
   if (added.status !== 0 || typeof user?.password !== "string") throw new Error(`mason user add bench failed (exit ${added.status}): ${added.stderr.trim().slice(0, 500)}`);
   const database = typeof user.database === "string" ? user.database : "mason";
   const clientEnv = path.join(s.secrets, `client-mason-${s.rows}.env`);
-  writeSecret(clientEnv, { PGPASSWORD: user.password, PGTZ: "UTC" });
+  writeSecret(clientEnv, { PGPASSWORD: user.password });
   const bytes = Number(docker(["exec", MASON_CONTAINER, "du", "-sb", "/mason/data"]).split(/\s/)[0]);
   const engineMemory = engineMemoryOf(containerLog(MASON_CONTAINER));
-  log(`  synced and served in ${syncSeconds} s; its volume ${gibText(bytes)}; its engine at most ${engineMemory} of memory`);
-  return { port, password: user.password, database, clientEnv, bytes, syncSeconds, engineMemory };
+  log(`  synced and served in ${syncSeconds} s, its work after that done ${backgroundSeconds} s later; its volume ${gibText(bytes)}; its engine at most ${engineMemory} of memory`);
+  return { port, password: user.password, database, clientEnv, bytes, syncSeconds, backgroundSeconds, engineMemory };
 }
 
-interface PgbenchTarget { port: number; db: string; user: string; ssl: string; env: string }
-/** one run's clients: pgbench in a container of its own on the host's network, as this user, its log read back */
-async function pgbench(image: string, clientDir: string, idFile: string, t: PgbenchTarget, clients: number, uid: number, gid: number): Promise<ClientTime[]> {
+export interface PgbenchTarget { port: number; db: string; user: string; ssl: string; env: string }
+/**
+ * pgbench's container for one run: on the host's network, as this user, the password from the 0600 env file. The
+ * session's time zone is the statement's (`zoneOf`), by libpq's PGTZ, which sets it as the session starts: the same
+ * setting `SET TIME ZONE` sets, outside the time pgbench records. A zone is no secret, so it is on the command line.
+ */
+export function pgbenchArgs(o: { image: string; clientDir: string; idFile: string; target: PgbenchTarget; clients: number; uid: number; gid: number; timeZone: string }): string[] {
+  if (!/^[A-Za-z_]+(\/[A-Za-z_+-]+)*$/.test(o.timeZone)) throw new Error(`a time zone is an IANA name: ${JSON.stringify(o.timeZone)}`);
+  const t = o.target;
+  return ["run", "--rm", "--cidfile", o.idFile, "--name", CLIENT_CONTAINER, "--network", "host", "--user", `${o.uid}:${o.gid}`, "-v", `${o.clientDir}:/work`, "--env-file", t.env,
+    "-e", `PGTZ=${o.timeZone}`, o.image, "pgbench", "-n", "-c", String(o.clients), "-j", String(o.clients), "-t", "1", "-f", "/work/script.sql", "--log", "--log-prefix=/work/log",
+    `host=127.0.0.1 port=${t.port} dbname=${t.db} user=${t.user} sslmode=${t.ssl}`];
+}
+/** one run's clients: pgbench in a container of its own (`pgbenchArgs`), its log read back */
+async function pgbench(image: string, clientDir: string, idFile: string, t: PgbenchTarget, clients: number, uid: number, gid: number, timeZone: string): Promise<ClientTime[]> {
   for (const f of fs.readdirSync(clientDir)) if (f.startsWith("log")) fs.rmSync(path.join(clientDir, f));
   // docker refuses a --cidfile that exists: the last run's, its container gone with --rm
   fs.rmSync(idFile, { force: true });
-  const r = await run("docker", ["run", "--rm", "--cidfile", idFile, "--name", CLIENT_CONTAINER, "--network", "host", "--user", `${uid}:${gid}`, "-v", `${clientDir}:/work`, "--env-file", t.env,
-    image, "pgbench", "-n", "-c", String(clients), "-j", String(clients), "-t", "1", "-f", "/work/script.sql", "--log", "--log-prefix=/work/log",
-    `host=127.0.0.1 port=${t.port} dbname=${t.db} user=${t.user} sslmode=${t.ssl}`]);
+  const r = await run("docker", pgbenchArgs({ image, clientDir, idFile, target: t, clients, uid, gid, timeZone }));
   if (r.status !== 0) throw new Error(`pgbench exited ${r.status}: ${(r.stderr || r.stdout).trim().slice(-2000)}`);
   const text = fs.readdirSync(clientDir).filter((f) => f.startsWith("log")).map((f) => fs.readFileSync(path.join(clientDir, f), "utf8")).join("\n");
   return parsePgbenchLog(text, clients);
