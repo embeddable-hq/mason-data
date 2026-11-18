@@ -195,7 +195,7 @@ export interface RunState {
   mcp?: { url: string; issuer: string } | null;
   /** the address ranges hosted agents' companies publish for their connectors (src/cli/address-presets.ts), which the
    *  Users page's Connects from offers: src/cli/run-server.ts runState; a run from before it has none */
-  addressPresets?: Array<{ id: string; label: string; ranges: string[] }>;
+  addressPresets?: Array<{ id: string; label: string; name: string; ranges: string[] }>;
   /** the roles file (mason/roles.yml, src/cli/roles.ts) as the listener reads it now: the roles by name, and what is
    *  wrong with it (every statement of a user with a role is refused while there is); absent from a run before roles */
   roles?: { file: string | null; roles: string[]; problem: string | null; default: string | null; all?: string[];
@@ -598,8 +598,8 @@ const STATUS_USAGE = `usage: mason status [--json]
     the page's address, its Overview reads the host's card from: mason serve with MASON_UI_OVERVIEW_CARD — or null), pageSocket (the Unix socket the
     page is served on too: mason serve with MASON_UI_SOCKET — or null), mcp ({ url, issuer }: mason serve's MCP endpoint
     for a hosted agent, its public address (MASON_MCP_URL) and its authorization server (MASON_MCP_ISSUER) — or null
-    when it is off), addressPresets ([{ id, label, ranges }]: the address ranges a hosted agent's company publishes for its
-    connectors, shipped with this release, which the web page's Connects from offers), next }.
+    when it is off), addressPresets ([{ id, label, name, ranges }]: the address ranges a hosted agent's company publishes for its
+    connectors (label: the product that calls from them, name: its short name), shipped with this release, which the web page's Connects from offers), next }.
     Each table's kept is how it is kept current now (absent for a table the sync does not hold):
     { by: poll, sync: { mode: off } or { mode: poll, every (30s), seconds } (its entry's sync:, else the file's,
     else off), syncedAt (its last whole read or poll), nextAt (when its next poll is due; null: off, or not polled

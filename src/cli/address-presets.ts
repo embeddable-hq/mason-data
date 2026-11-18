@@ -21,8 +21,11 @@
 export interface AddressPreset {
   /** its name in /api/state (the page's choice carries its ranges, `preset:<range>,…`) */
   id: string;
-  /** the choice's words */
+  /** the choice's words: the product that calls from these servers, under "A hosted agent's servers" (never a company's
+   *  name alone, which a person using its desktop app took for theirs: issue 1155) */
   label: string;
+  /** the product's short name, in a user's row: "from <name>'s servers (N ranges)" */
+  name: string;
   /** the company's documentation page that publishes the list (or names the file that does) */
   source: string;
   /** how the list is read again: the CIDRs on `source` under `heading`, up to `until` (the heading after it); or the
@@ -35,7 +38,8 @@ export interface AddressPreset {
 export const ADDRESS_PRESETS: readonly AddressPreset[] = [
   {
     id: "claude",
-    label: "Claude (Anthropic)",
+    label: "claude.ai",
+    name: "claude.ai",
     source: "https://platform.claude.com/docs/en/api/ip-addresses",
     read: { kind: "page", heading: "Outbound IP addresses", until: "Phased out IP addresses" },
     // "These are the stable IP addresses that Anthropic uses for outbound requests (for example, when making MCP tool
@@ -44,7 +48,8 @@ export const ADDRESS_PRESETS: readonly AddressPreset[] = [
   },
   {
     id: "openai",
-    label: "ChatGPT (OpenAI)",
+    label: "ChatGPT on the web",
+    name: "ChatGPT",
     source: "https://developers.openai.com/api/docs/guides/ip-addresses",
     // "Outbound IP addresses": "ChatGPT integrations — Plugins, connectors, GPT Actions, and agentic commerce —
     // [ChatGPT connectors]", the file below. Its creationTime 2026-11-06T18:26:55; read 2026-11-17.
@@ -92,5 +97,5 @@ export const ADDRESS_PRESETS: readonly AddressPreset[] = [
 ];
 
 /** The presets as `/api/state` carries them to the page: what a choice shows and sends, no more. */
-export const presetsForPage = (): Array<{ id: string; label: string; ranges: string[] }> =>
-  ADDRESS_PRESETS.map((p) => ({ id: p.id, label: p.label, ranges: [...p.ranges] }));
+export const presetsForPage = (): Array<{ id: string; label: string; name: string; ranges: string[] }> =>
+  ADDRESS_PRESETS.map((p) => ({ id: p.id, label: p.label, name: p.name, ranges: [...p.ranges] }));

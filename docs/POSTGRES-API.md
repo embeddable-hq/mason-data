@@ -524,13 +524,16 @@ MASON_MCP_ORIGINS=https://app.example.test            # browser origins a page m
   the mason user's name and id. Its sign-in page may ask Mason whether a person's Mason password is right with `mason
   user check <name> --json` (the password on stdin), which answers the id to sign in. An agent finds the server from
   `/.well-known/oauth-protected-resource` (also under `/mcp`), which a 401's `WWW-Authenticate` names.
-- **A person adds it by pasting ONLY the URL** as a custom connector (claude.ai: Settings, then Connectors, then Add
-  custom connector; the Users page shows it with Copy). They leave empty any OAuth client ID or client secret field, and
-  any bearer-token or header field a desktop app shows: sign-in happens in their browser, at the authorization server.
-- **A desktop app connects from the person's own computer**: Claude Code, Cursor, and the ChatGPT desktop app's
-  Streamable HTTP server reach `/mcp` from that machine, never from their company's published addresses, so a user
-  held to the "Claude (Anthropic)" or "ChatGPT (OpenAI)" ranges is refused there. Give such a user that computer's
-  address, or anywhere.
+- **A person adds it by pasting ONLY the URL**: in claude.ai and Claude Desktop as a custom connector (Customize, then
+  Connectors, then Add custom connector), in ChatGPT as an app in Developer mode, in Claude Code with `claude mcp add
+  --transport http mason <url>` (then `/mcp` to sign in), in Cursor as a server's `url` in `~/.cursor/mcp.json`; the
+  Users page shows each with Copy. They leave empty any OAuth client ID or client secret field, and any bearer-token or
+  header field a client shows: sign-in happens in their browser, at the authorization server.
+- **Where a client connects from**: Claude Code and Cursor reach `/mcp` from the person's own computer, never from a
+  company's published addresses, so a user held to the "claude.ai" or "ChatGPT on the web" ranges is refused there: give
+  such a user that computer's address, or anywhere. claude.ai's and Claude Desktop's custom connectors, and ChatGPT's
+  apps, connect from their company's servers (Anthropic: "Claude connects to your remote MCP server from Anthropic's
+  cloud infrastructure, rather than from your local device").
 - **`MASON_MCP_URL` is the public address, never what Mason sees.** Behind a relay or proxy, set it to the address the
   agent is given; the relay forwards `/mcp` and `/.well-known/oauth-protected-resource…` to the health port.
 - **Each request runs as the mapped user, looked up every time**: its role, row filters and limits, and the request log
@@ -544,8 +547,8 @@ MASON_MCP_ORIGINS=https://app.example.test            # browser origins a page m
   may carry a port (`203.0.113.7:51234`, `[2001:db8::1]:443`) or be v4-mapped (`::ffff:203.0.113.7`, a dual-stack
   listener): it is read as the one address it names. Entries before the last came from the client and are never
   believed, and a header from any other peer is ignored. A hosted agent's requests come from its company's servers: the
-  Users page's Connects from offers each company's published ranges ("Claude (Anthropic)", from
-  https://platform.claude.com/docs/en/api/ip-addresses; "ChatGPT (OpenAI)", the file
+  Users page's Connects from offers each company's published ranges, under "A hosted agent's servers" ("claude.ai", from
+  https://platform.claude.com/docs/en/api/ip-addresses; "ChatGPT on the web", the file
   https://openai.com/chatgpt-connectors.json that https://developers.openai.com/api/docs/guides/ip-addresses names for
   ChatGPT's connectors), so a user held to them connects from that agent alone. The lists ship with each release.
 - **TLS**: the health port is plain HTTP. Off loopback the start is refused unless `MASON_MCP_PLAIN=1` says TLS is
