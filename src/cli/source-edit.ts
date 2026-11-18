@@ -229,15 +229,20 @@ export function addEntry(at: EditTarget, db: EditCatalog, table: string, columns
   if (!t) throw new Refusal(404, `${table} is not a table of ${db.database} that this user can read`);
   const p = plannedEntry(at.parsed, db, t, columns, key, o, () => othersHold(at, db, [table], `add ${entryName(table)}`));
   const { entry, was, keep } = p;
-  const same = was !== undefined && p.others.length === 0 &&
-    JSON.stringify([was.columns, was.exclude, was.key, was.sync, was.references ?? []]) === JSON.stringify([entry.columns, entry.exclude, entry.key, entry.sync, entry.references ?? []]);
+  // its entry as it was but for its references, and its references as they were: each edited alone, so an entry that
+  // stays keeps its every byte, its comments too (the review of PR 1145)
+  const sameShape = was !== undefined && JSON.stringify([was.columns, was.exclude, was.key, was.sync]) === JSON.stringify([entry.columns, entry.exclude, entry.key, entry.sync]);
+  const sameRefs = was !== undefined && JSON.stringify(was.references ?? []) === JSON.stringify(entry.references ?? []);
+  const same = sameShape && sameRefs && p.others.length === 0;
   // WILL IT FIT ON DISK, before anything is written (issue 1075): a new table, or one whose columns or key change, is
   // synced whole; refused with the numbers unless the person goes ahead anyway (`o.yes`: --yes, the page's Add anyway)
   const whole = !same && !keep && (was === undefined || JSON.stringify([was.columns, was.exclude, was.key]) !== JSON.stringify([entry.columns, entry.exclude, entry.key]));
   const disk = whole ? diskCheck(db, t, entry, was !== undefined) : null;
   if (disk !== null && "fits" in disk && !disk.fits && o.yes !== true) throw diskRefusal(disk);
   if (!same) {
-    let r = keep ? withEntrySync(at.text, was!, entry.sync) : withTable(at.text, entry);
+    let r: { text: string } | { problem: string } = sameShape ? { text: at.text } : keep ? withEntrySync(at.text, was!, entry.sync) : withTable(at.text, entry);
+    // only its references changed: those lines alone
+    if (sameShape && !sameRefs && !("problem" in r)) r = withReferences(r.text, was!, entry.references ?? []);
     // the references a table the file syncs already holds to this one, each on its own entry (its other lines as they were)
     for (const o of p.others) if (!("problem" in r)) r = withReferences(r.text, o.entry, o.references);
     if ("problem" in r) throw new Refusal(409, `${path.relative(at.root, at.file)} cannot be edited: ${r.problem}`);

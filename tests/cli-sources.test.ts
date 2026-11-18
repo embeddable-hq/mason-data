@@ -1426,3 +1426,75 @@ test("mason remove takes the references to a removed table out of the entries th
     assert.equal(fs.readFileSync(file, "utf8"), `${HEAD}tables:\n  invoices:\n    sync: poll 5m   # hourly is too slow\n  orders: {}\n`);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+// THE REVIEW OF PR 1145: an entry whose nested block ends in a comment line has the `yaml` package's range run on to the
+// next entry's key, so an edit that cut to it took that entry too. Every edit now asks one function where an entry ends.
+const visits = table({ table: "visits", columns: [col("id", "bigint", true), col("customer_id", "bigint")],
+  references: [{ columns: ["customer_id"], target: "public.customers", targetColumns: ["id"] }] });
+const billingAccounts = table({ schema: "billing", table: "accounts" });
+const user = table({ table: "User" });
+const ENDS_CATALOG = [customers, visits, billingAccounts, user];
+
+test("mason remove after an entry whose block ends in a comment line cuts only what it names: the next entry stays, its line and all (review of PR 1145)", async () => {
+  const E = await import("../src/cli/source-edit.ts" as string) as typeof import("../src/cli/source-edit.ts");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mason-remove-ends-"));
+  const folder = path.join(root, "mason");
+  fs.mkdirSync(path.join(folder, "sources"), { recursive: true });
+  const file = path.join(folder, "sources", "app.yml");
+  const edit = (text?: string) => { if (text !== undefined) fs.writeFileSync(file, text); return E.sourceToEdit(folder, root, () => S.readSource(folder, root, {})); };
+  const db = { tables: ENDS_CATALOG, database: "shop" };
+  try {
+    // as a person gets there: mason add each, then a comment line at the end of visits' references
+    fs.writeFileSync(file, `${HEAD}tables: {}\n`);
+    for (const t of ["public.customers", "public.visits", "billing.accounts", "public.User"]) E.addEntry(edit(), db, t);
+    assert.equal(fs.readFileSync(file, "utf8"), `${HEAD}tables:\n  customers: {}\n  visits:\n    references:\n      customer_id: customers.id\n  billing.accounts: {}\n  User: {}\n`);
+    fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("customer_id: customers.id\n", "customer_id: customers.id\n      # d: days.d   (once days is synced)\n"));
+    const r = E.removeEntries(edit(), db, ["customers"]);
+    assert.deepEqual([r.removed, r.referencesRemoved.map((x) => x.table)], [["public.customers"], ["public.visits"]]);
+    assert.equal(fs.readFileSync(file, "utf8"), `${HEAD}tables:\n  visits: {}\n  billing.accounts: {}\n  User: {}\n`);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("every edit ends an entry where its own lines end: a block ending in a comment, a block list at the key's indent, a comment at the next key's indent, a blank line after it (review of PR 1145)", () => {
+  const top = `${HEAD}tables:\n`;
+  const after = "  # the next one's comment\n  User: {}\n";
+  for (const body of [
+    "  visits:\n    columns:\n      - id\n      # - customer_id\n",
+    "  visits:\n    columns:\n    - id\n    # - customer_id\n",
+    "  visits:\n    references:\n      customer_id: customers.id\n      # d: days.d\n",
+    "  visits:   # every column\n    # until it is big\n",
+  ]) {
+    const text = `${top}${body}\n${after}`;
+    // mason remove: the entry's own lines go, the blank line and the next entry's comment stay
+    assert.deepEqual(S.withoutTable(text, "public.visits"), { text: `${top}\n${after}` }, body);
+    // mason add again: the entry written in its place, the rest as it was
+    assert.deepEqual(S.withTable(text, { name: "visits", table: "public.visits", columns: ["id"], exclude: [], key: null }), { text: `${top}  visits:\n    columns: [id]\n\n${after}` }, body);
+    // mason add of a new table: after the last entry's own lines
+    const last = `${top}${after.replace("  User: {}\n", "")}${body}`;
+    assert.deepEqual(S.withTable(last, { name: "orders", table: "public.orders", columns: null, exclude: [], key: null }), { text: `${last}  orders: {}\n` }, body);
+  }
+  // a key of the entry: a sync: line added after the entry's own lines, never inside the next entry
+  const commented = `${top}  visits:\n    columns:\n      - id\n      # - customer_id\n  User: {}\n`;
+  assert.deepEqual(S.withEntrySync(commented, { name: "visits", table: "public.visits", columns: ["id"], exclude: [], key: null }, { mode: "off" }),
+    { text: `${top}  visits:\n    columns:\n      - id\n      # - customer_id\n    sync: off\n  User: {}\n` });
+});
+
+test("mason add of a table added already keeps its entry byte for byte, its comments too, writing only the reference another entry holds to it (review of PR 1145)", async () => {
+  const E = await import("../src/cli/source-edit.ts" as string) as typeof import("../src/cli/source-edit.ts");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mason-readd-"));
+  const folder = path.join(root, "mason");
+  fs.mkdirSync(path.join(folder, "sources"), { recursive: true });
+  const file = path.join(folder, "sources", "app.yml");
+  const edit = (text: string) => { fs.writeFileSync(file, text); return E.sourceToEdit(folder, root, () => S.readSource(folder, root, {})); };
+  const db = { tables: ENDS_CATALOG, database: "shop" };
+  const customersEntry = "  customers:   # who pays\n    # hourly is enough\n    sync: poll 1h   # cheap\n";
+  try {
+    const r = E.addEntry(edit(`${HEAD}tables:\n${customersEntry}  visits: {}\n`), db, "public.customers");
+    assert.deepEqual(r.referencesWritten.map((x) => x.table), ["public.visits"]);
+    assert.equal(fs.readFileSync(file, "utf8"), `${HEAD}tables:\n${customersEntry}  visits:\n    references:\n      customer_id: customers.id\n`);
+    // its own references alone changed (the database declares one the entry lacks): those lines alone written
+    const own = "  visits:   # the app's visits\n    # polled: they change all day\n    sync: poll 5m\n";
+    E.addEntry(edit(`${HEAD}tables:\n  customers: {}\n${own}`), db, "public.visits");
+    assert.equal(fs.readFileSync(file, "utf8"), `${HEAD}tables:\n  customers: {}\n${own}    references:\n      customer_id: customers.id\n`);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
