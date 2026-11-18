@@ -31,7 +31,7 @@ after(() => fs.rmSync(dir, { recursive: true, force: true }));
 
 test("the rule: short or repeated values take the dictionary; long values that do not repeat, or one too long for the dictionary, take zstd; no value, the instance's", () => {
   const textStorage = need("textStorage");
-  const s = (avgBytes: number, distinct: number | null, maxBytes = avgBytes * 2, values = 10_000) => textStorage({ values, avgBytes, maxBytes, distinct, distinctOf: values });
+  const s = (avgBytes: number, distinct: number | null, maxBytes = avgBytes * 2, values = 10_000) => textStorage({ values, avgBytes, maxBytes, distinct, distinctOf: values, exact: true, compressed: 0 });
   // the shapes measured (docs/DESIGN.md "Text compression by column"), as a sample of 10,000 rows sees them
   assert.equal(s(7, 6), "dictionary", "a status");
   assert.equal(s(2, 209), "dictionary", "a country code");
@@ -49,9 +49,26 @@ test("the rule: short or repeated values take the dictionary; long values that d
   assert.equal(s(40, 10_000, 45_000), "zstd", "short values with one the dictionary cannot hold");
   assert.equal(s(40, 10_000, 16_383), "dictionary", "the longest value the dictionary holds");
   assert.equal(s(708, null), "zstd", "long values not counted: the instance's zstd");
-  assert.equal(textStorage({ values: 200, avgBytes: 708, maxBytes: 900, distinct: 10, distinctOf: 100 }), "dictionary", "counted over fewer rows than the lengths");
-  assert.equal(textStorage({ values: 0, avgBytes: 0, maxBytes: 0, distinct: 0, distinctOf: 0 }), null, "no value sampled");
+  assert.equal(textStorage({ values: 200, avgBytes: 708, maxBytes: 900, distinct: 10, distinctOf: 100, exact: true, compressed: 0 }), "dictionary", "counted over fewer rows than the lengths");
+  assert.equal(textStorage({ values: 0, avgBytes: 0, maxBytes: 0, distinct: 0, distinctOf: 0, exact: true, compressed: 0 }), null, "no value sampled");
   assert.equal(textStorage(undefined), null, "not sampled");
+});
+
+test("the rule over sizes as stored (a json's, a jsonb's): the dictionary only when every value is small and stored uncompressed; a value Postgres compressed, or a source that cannot say, zstd however the values repeat", () => {
+  const textStorage = need("textStorage"), needsDistinct = need("needsDistinct");
+  const stored = (avgBytes: number, maxBytes: number, compressed: number | null, distinct: number | null = 5) =>
+    textStorage({ values: 10_000, avgBytes, maxBytes, distinct, distinctOf: 10_000, exact: false, compressed });
+  // the review of PR 1141: documents of 51,892 bytes of text, 3,383 stored, 5 distinct, were given the dictionary and
+  // stored Uncompressed, 51 times larger than under zstd
+  assert.equal(stored(3_383, 3_383, 10_000), "zstd", "large documents Postgres compressed, however they repeat");
+  assert.equal(stored(150, 400, 1), "zstd", "one value compressed: its text is not known");
+  assert.equal(stored(150, 400, null), "zstd", "a source that cannot say what it compressed (before Postgres 14)");
+  assert.equal(stored(1_500, 2_000, 0), "zstd", "a value stored uncompressed at 2,000 bytes: its text could reach 16 KiB");
+  assert.equal(stored(150, 1_999, 0, null), "dictionary", "a jsonb of about 150 bytes, all stored uncompressed and small");
+  assert.equal(stored(700, 1_500, 0, 300), "dictionary", "long documents that repeat, all stored uncompressed and small");
+  assert.equal(stored(700, 1_500, 0, 9_000), "zstd", "long documents that do not repeat");
+  assert.equal(needsDistinct({ values: 10, avgBytes: 700, maxBytes: 900, exact: false, compressed: 3 }), false, "compressed: never counted");
+  assert.equal(needsDistinct({ values: 10, avgBytes: 700, maxBytes: 900, exact: false, compressed: 0 }), true);
   assert.equal(need("compressionClause")(null), "");
 });
 
@@ -59,18 +76,21 @@ test("a sample's SQL: a random share of the source's pages, the same pages for i
   const sourceLengthsSql = need("sourceLengthsSql"), sourceDistinctSql = need("sourceDistinctSql"), syncedLengthsSql = need("syncedLengthsSql");
   const distinctRows = need("distinctRows"), needsDistinct = need("needsDistinct");
   const lengths = sourceLengthsSql(`"public"."orders"`, [{ column: `"status"`, type: "text" }, { column: `"code"`, type: "character(2)" }, { column: `"name"`, type: "character varying(80)" },
-    { column: `"doc"`, type: "jsonb" }, { column: `"j"`, type: "json" }], 3_400_000);
+    { column: `"doc"`, type: "jsonb" }, { column: `"j"`, type: "json" }], 3_400_000, true);
   assert.match(lengths, /FROM "public"\."orders" TABLESAMPLE SYSTEM \(0\.00294117647\d*\) REPEATABLE \(0\) LIMIT 10000\) s$/);
   assert.doesNotMatch(lengths, /ORDER BY|e-|md5|::text/i, "no ORDER BY on the source, no exponent in the percent, no value made whole or hashed");
   assert.match(lengths, /avg\(octet_length\(c0\)\).*avg\(octet_length\(c1\)\).*avg\(octet_length\(c2\)\).*avg\(pg_column_size\(c3\)\).*avg\(pg_column_size\(c4\)\)/, "a text's length from its header; a json's or jsonb's size as stored");
-  assert.match(sourceLengthsSql(`"t"`, [{ column: `"a"`, type: "text" }], 40), /TABLESAMPLE SYSTEM \(100\) REPEATABLE \(0\) LIMIT 10000/, "a small table read from its start");
-  const distinct = sourceDistinctSql(`"public"."orders"`, [`"doc"`], 3_400_000, distinctRows(2_000));
-  assert.match(distinct, /count\(DISTINCT md5\(c0::text\)\) FROM \(SELECT "doc" AS c0 FROM "public"\."orders" TABLESAMPLE SYSTEM \(0\.00294117647\d*\) REPEATABLE \(0\) LIMIT 8388\) s$/, "the same pages, about 16 MiB of 2 KB values");
-  assert.equal(distinctRows(700), 10_000);
-  assert.equal(distinctRows(1_000_000), 16, "values of a megabyte: 16 of them");
-  assert.equal(needsDistinct({ values: 10, avgBytes: 700, maxBytes: 900 }), true);
-  assert.equal(needsDistinct({ values: 10, avgBytes: 100, maxBytes: 900 }), false, "short: never counted");
-  assert.equal(needsDistinct({ values: 10, avgBytes: 700, maxBytes: 20_000 }), false, "a value the dictionary cannot hold: never counted");
+  assert.match(lengths, /max\(octet_length\(c0\)\), 0, .*max\(pg_column_size\(c3\)\), count\(\*\) FILTER \(WHERE pg_column_compression\(c3\) IS NOT NULL\), /, "how many of a jsonb's values Postgres compressed; a text's length is its own");
+  assert.match(sourceLengthsSql(`"t"`, [{ column: `"doc"`, type: "jsonb" }], 40, false), /max\(pg_column_size\(c0\)\), NULL FROM/, "before Postgres 14: not known");
+  assert.match(sourceLengthsSql(`"t"`, [{ column: `"a"`, type: "text" }], 40, true), /TABLESAMPLE SYSTEM \(100\) REPEATABLE \(0\) LIMIT 10000/, "a small table read from its start");
+  const distinct = sourceDistinctSql(`"public"."orders"`, [`"doc"`], 3_400_000, distinctRows({ avgBytes: 2_000, exact: true }));
+  assert.match(distinct, /count\(DISTINCT hashtextextended\(c0::text, 0\)\) FROM \(SELECT "doc" AS c0 FROM "public"\."orders" TABLESAMPLE SYSTEM \(0\.00294117647\d*\) REPEATABLE \(0\) LIMIT 8388\) s$/, "the same pages, about 16 MiB of 2 KB values");
+  assert.equal(distinctRows({ avgBytes: 700, exact: true }), 10_000);
+  assert.equal(distinctRows({ avgBytes: 1_000_000, exact: true }), 16, "values of a megabyte: 16 of them");
+  assert.equal(distinctRows({ avgBytes: 1_000, exact: false }), 2_796, "a size as stored counted at its text's most: 16 MiB of 6,000 bytes");
+  assert.equal(needsDistinct({ values: 10, avgBytes: 700, maxBytes: 900, exact: true, compressed: 0 }), true);
+  assert.equal(needsDistinct({ values: 10, avgBytes: 100, maxBytes: 900, exact: true, compressed: 0 }), false, "short: never counted");
+  assert.equal(needsDistinct({ values: 10, avgBytes: 700, maxBytes: 20_000, exact: true, compressed: 0 }), false, "a value the dictionary cannot hold: never counted");
   const synced = syncedLengthsSql(`"public"."t"`, [`"s"`], 1_000_000);
   assert.equal(synced.match(/rowid >= \d+ AND rowid < \d+/g)?.length, 8, "eight runs of row ids");
   assert.match(synced, /rowid >= 998750 AND rowid < 1000000/, "the last run ends at the table's end");

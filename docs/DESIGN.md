@@ -4385,13 +4385,20 @@ default. But when a table's copy is made, each text column (VARCHAR or JSON) is 
 definition, `USING COMPRESSION`, which wins over the instance's (src/duck/text-compression.ts `textStorage`):
 - **the dictionary** (`dict_fsst`, the analyzer's own choice for text) when the sample's values average under 256 bytes,
   or repeat (its distinct values at most an eighth of its values);
-- **ZSTD** for long values that do not repeat, and for a column whose sample holds a value of 16 KiB or more.
+- **ZSTD** for long values that do not repeat, and for a column whose text could reach 16 KiB. For a text, varchar or
+  char, that is a sampled value of 16 KiB or more. For any other type (json, jsonb, citext, xml and the rest), the
+  sample has only each value's size as Postgres stored it, so the dictionary needs every sampled value stored
+  uncompressed and under 2,000 bytes (`dictionaryHolds`). Such a value prints in under 12,000 bytes of text. A value
+  Postgres compressed says nothing of its text's length, and before Postgres 14 the source cannot say which it
+  compressed, so those columns keep ZSTD.
 
 The inputs come from one sample of the source, read in the copy's transaction (`beginCopy`, `textStorageOf`). It reads
 about 100 pages chosen at random (`TABLESAMPLE SYSTEM … REPEATABLE`) and at most 10,000 rows, and sends back one row of
 aggregates. Lengths come first, read from each value's header (`octet_length` of a text; `pg_column_size` of a json or
-jsonb, whose text would have to be made whole), so no large value is taken out of its TOAST table. Only the long columns
-are then hashed for their distinct values, over about 16 MiB of them on the same pages. A compaction decides again from
+jsonb, whose text would have to be made whole, with `pg_column_compression` from Postgres 14), so no large value is
+taken out of its TOAST table. Only the long columns the dictionary could hold are then hashed for their distinct values
+(`hashtextextended`, which a FIPS-mode Postgres allows where it refuses `md5`), on the same pages. The rows hashed are
+held to about 16 MiB of text, a stored size counted at six times itself, the most its text can be. A compaction decides again from
 the table's own rows (src/duck/compact.ts `rewrite`): eight runs of row ids, at most a piece's rows, halved when it runs
 out of memory. A column with no value sampled (an empty table) gets no clause and keeps the instance's ZSTD.
 
@@ -4413,7 +4420,18 @@ forced). Both hold: the dictionary for what dashboards group and filter on, ZSTD
 256 KiB blocks: 16,383 bytes kept it, 16,384 did not). One such value in a row group, and the whole row group is stored
 Uncompressed, a forced `dict_fsst` included (it falls back, it never fails). Documents of 700 bytes with one of 45 KB in a
 hundred took 1,451 MB a million rows Uncompressed, against 312 MB under ZSTD. A sample may miss rare large values in a
-short column. Then only the row groups that hold one are stored Uncompressed, and those values are short.
+short column, and the cost is not small. A row group holds 122,880 rows, so a large value in one row of 100,000 puts
+one in nearly every row group, and nearly the whole column is stored Uncompressed. The review of PR 1141 measured
+5 M rows of such a short column at 63 MB, against 21 MB under ZSTD. That is the worst case of a text column given the
+dictionary: three times ZSTD's size, never the 51 times a large document stored Uncompressed costs. A compaction
+decides again from the table's own rows, and so sees a large value the source's sample missed only if its own sample
+holds one.
+
+The first version of this rule measured a json or jsonb by its size as stored, and compared that with the 16 KiB
+limit, which applies to the text. The review of PR 1141 found 20,000 jsonb documents of 800 keys and five distinct
+values, 51,892 bytes of text each and 3,383 bytes stored compressed. They were given the dictionary and took 995 MB
+Uncompressed, against 19.3 MB under ZSTD on main. A stored size now gives the dictionary only when no value is
+compressed and every one is small.
 
 **Measured.** DuckDB 2.0.0, 4 threads, a laptop. One column of a million rows of each shape, the
 same rows in the same order for each method. The size is the database file's after a checkpoint. "Fresh scan" is

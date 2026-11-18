@@ -45,20 +45,49 @@ export const LONG_TEXT_BYTES = 256;
  */
 export const REPEATED_SHARE = 1 / 8;
 
-/** what a sample says of one text column: its values (not null), their average and longest length in bytes, and how
- *  many distinct among `distinctOf` of them (null: not counted, as it is not needed for a short column) */
-export interface TextSample { values: number; avgBytes: number; maxBytes: number; distinct: number | null; distinctOf: number }
+/**
+ * A VALUE STORED INLINE AND UNCOMPRESSED IS AT MOST THIS LONG, about: Postgres compresses or moves out of line the
+ * values of a row past `TOAST_TUPLE_THRESHOLD` (2,032 bytes at 8 KB pages), so a sample whose every value is under this,
+ * none compressed, has its stored sizes as its values' own.
+ */
+export const INLINE_BYTES = 2_000;
+/**
+ * A JSONB'S TEXT AGAINST ITS STORED BYTES, at most: a character Postgres stores in one byte is printed as six at worst (a
+ * control character's `\u0001`). So a value stored in under `INLINE_BYTES`, uncompressed, prints in under 12,000
+ * bytes, inside the dictionary's 16,384.
+ */
+export const TEXT_EXPANSION = 6;
+
+/**
+ * What a sample says of one text column: its values (not null), their average and longest length in bytes, and how
+ * many distinct among `distinctOf` of them (null: not counted, as it is not needed for a short column). `exact`: the
+ * lengths are the values' text (a text's own length, or a synced table's); else they are sizes as Postgres stores them (a
+ * json's or jsonb's), and `compressed` says how many of the values it stored compressed (null: it cannot tell, before
+ * Postgres 14).
+ */
+export interface TextSample { values: number; avgBytes: number; maxBytes: number; distinct: number | null; distinctOf: number; exact: boolean; compressed: number | null }
 /** how a text column is stored */
 export type TextStorage = "dictionary" | "zstd";
 
+/**
+ * WHETHER THE DICTIONARY CAN HOLD THE COLUMN'S VALUES, as far as the sample tells. A length that is the text's: its
+ * longest under `DICTIONARY_VALUE_LIMIT`. A size as stored tells the text's length only for a value stored inline and
+ * uncompressed, and then within `TEXT_EXPANSION`: every value under `INLINE_BYTES`, none compressed. A value Postgres
+ * compressed or moved out of line says nothing of its text: a jsonb of 3,383 bytes stored was 51,892 bytes of text, and
+ * given the dictionary every row group of it was stored Uncompressed (the review of PR 1141).
+ */
+export function dictionaryHolds(s: Pick<TextSample, "maxBytes" | "exact" | "compressed">): boolean {
+  return s.exact ? s.maxBytes < DICTIONARY_VALUE_LIMIT : s.compressed === 0 && s.maxBytes < INLINE_BYTES;
+}
+
 /** whether the rule needs the column's distinct values: only for long values the dictionary can hold */
-export const needsDistinct = (s: Pick<TextSample, "values" | "avgBytes" | "maxBytes">): boolean =>
-  s.values > 0 && s.maxBytes < DICTIONARY_VALUE_LIMIT && s.avgBytes >= LONG_TEXT_BYTES;
+export const needsDistinct = (s: Pick<TextSample, "values" | "avgBytes" | "maxBytes" | "exact" | "compressed">): boolean =>
+  s.values > 0 && dictionaryHolds(s) && s.avgBytes >= LONG_TEXT_BYTES;
 
 /** THE RULE. Null: no value was sampled, and the column keeps the instance's method. */
 export function textStorage(s: TextSample | null | undefined): TextStorage | null {
   if (s === null || s === undefined || s.values <= 0) return null;
-  if (s.maxBytes >= DICTIONARY_VALUE_LIMIT) return "zstd";
+  if (!dictionaryHolds(s)) return "zstd";
   if (s.avgBytes < LONG_TEXT_BYTES) return "dictionary";
   // not counted: as if they did not repeat, the instance's own ZSTD
   if (s.distinct !== null && s.distinctOf > 0 && s.distinct <= s.distinctOf * REPEATED_SHARE) return "dictionary";
@@ -82,29 +111,36 @@ function sampled(pgFrom: string, columns: readonly string[], pages: number, rows
   return `(SELECT ${columns.map((c, i) => `${c} AS c${i}`).join(", ")} FROM ${pgFrom} TABLESAMPLE SYSTEM (${p}) REPEATABLE (0) LIMIT ${rows}) s`;
 }
 
+/** whether a source column's length is its text's own (`octet_length` reads it from the value's header, however it is
+ *  stored), else its size as stored (`pg_column_size`: a json or jsonb, whose text would have to be made whole).
+ *  `type` is as `format_type` spells it. */
+export const exactLength = (type: string): boolean => /^(text|character varying(\(\d+\))?|character(\(\d+\))?)$/.test(type);
+
 /**
- * A SOURCE COLUMN'S LENGTH IN BYTES, read without taking a large value out of its TOAST table: a text's own length
- * (`octet_length` reads it from the value's header), else its size as stored (`pg_column_size`: a json or jsonb, whose
- * text would have to be made whole; for one compressed, less than its text). `type` is as `format_type` spells it.
+ * THE SAMPLE'S LENGTHS ON THE SOURCE, in the copy's transaction (its snapshot), never a large value taken out of its
+ * TOAST table: per column its values, their average and longest length (`exactLength`), and for a size as stored how
+ * many values Postgres stored compressed (`pg_column_compression`, from Postgres 14, `compressionKnown`; before it,
+ * NULL: it cannot tell), one row back. `columns`: each quoted for Postgres, with its type.
  */
-export function sourceLength(column: string, type: string): string {
-  return /^(text|character varying(\(\d+\))?|character(\(\d+\))?)$/.test(type) ? `octet_length(${column})` : `pg_column_size(${column})`;
+export function sourceLengthsSql(pgFrom: string, columns: ReadonlyArray<{ column: string; type: string }>, pages: number, compressionKnown: boolean): string {
+  const of = (c: { type: string }, i: number): string => {
+    const v = `c${i}`, length = exactLength(c.type) ? `octet_length(${v})` : `pg_column_size(${v})`;
+    const compressed = exactLength(c.type) ? "0" : compressionKnown ? `count(*) FILTER (WHERE pg_column_compression(${v}) IS NOT NULL)` : "NULL";
+    return `count(${v}), avg(${length}), max(${length}), ${compressed}`;
+  };
+  return `SELECT ${columns.map(of).join(", ")} FROM ${sampled(pgFrom, columns.map((c) => c.column), pages, TEXT_SAMPLE_ROWS)}`;
 }
 
-/** THE SAMPLE'S LENGTHS ON THE SOURCE, in the copy's transaction (its snapshot): per column its values, their average
- *  and longest length (`sourceLength`), one row back. `columns`: each quoted for Postgres, with its type. */
-export function sourceLengthsSql(pgFrom: string, columns: ReadonlyArray<{ column: string; type: string }>, pages: number): string {
-  return `SELECT ${columns.map((c, i) => `count(c${i}), avg(${sourceLength(`c${i}`, c.type)}), max(${sourceLength(`c${i}`, c.type)})`).join(", ")} ` +
-    `FROM ${sampled(pgFrom, columns.map((c) => c.column), pages, TEXT_SAMPLE_ROWS)}`;
-}
-
-/** how many rows a distinct count reads of values of `avgBytes` on average: about `DISTINCT_SAMPLE_BYTES` of them */
-export const distinctRows = (avgBytes: number): number => Math.max(1, Math.min(TEXT_SAMPLE_ROWS, Math.floor(DISTINCT_SAMPLE_BYTES / Math.max(1, avgBytes))));
+/** how many rows a distinct count reads, about `DISTINCT_SAMPLE_BYTES` of text the source hashes: a length as stored
+ *  counted at its text's most (`TEXT_EXPANSION`) */
+export const distinctRows = (s: Pick<TextSample, "avgBytes" | "exact">): number =>
+  Math.max(1, Math.min(TEXT_SAMPLE_ROWS, Math.floor(DISTINCT_SAMPLE_BYTES / Math.max(1, s.avgBytes * (s.exact ? 1 : TEXT_EXPANSION)))));
 
 /** THE SAMPLE'S DISTINCT VALUES ON THE SOURCE, on the same pages as its lengths: per column its values and its distinct
- *  ones (by a hash of its text, so the sort is small) among the first `rows` rows. */
+ *  ones among the first `rows` rows, by a hash of its text (`hashtextextended`, Postgres 11: no cryptographic hash, which
+ *  a server in FIPS mode refuses), so the sort is small. */
 export function sourceDistinctSql(pgFrom: string, columns: readonly string[], pages: number, rows: number): string {
-  return `SELECT ${columns.map((_, i) => `count(c${i}), count(DISTINCT md5(c${i}::text))`).join(", ")} FROM ${sampled(pgFrom, columns, pages, rows)}`;
+  return `SELECT ${columns.map((_, i) => `count(c${i}), count(DISTINCT hashtextextended(c${i}::text, 0))`).join(", ")} FROM ${sampled(pgFrom, columns, pages, rows)}`;
 }
 
 /** a synced table's rows by row id alone: eight runs spread up to `end`, `rows` rows in all, each column as text */
@@ -122,7 +158,7 @@ function syncedRows(table: string, columns: readonly string[], end: number, rows
  * `DISTINCT_SAMPLE_BYTES` of them (`syncedDistinctSql`, the same runs' first rows). `columns` are quoted for the engine.
  */
 export function syncedLengthsSql(table: string, columns: readonly string[], end: number, rows: number = TEXT_SAMPLE_ROWS): string {
-  return `SELECT ${columns.map((_, i) => `count(c${i}), avg(strlen(c${i})), max(strlen(c${i}))`).join(", ")} FROM ${syncedRows(table, columns, end, rows)}`;
+  return `SELECT ${columns.map((_, i) => `count(c${i}), avg(strlen(c${i})), max(strlen(c${i})), 0`).join(", ")} FROM ${syncedRows(table, columns, end, rows)}`;
 }
 export function syncedDistinctSql(table: string, columns: readonly string[], end: number, rows: number): string {
   return `SELECT ${columns.map((_, i) => `count(c${i}), count(DISTINCT c${i})`).join(", ")} FROM ${syncedRows(table, columns, end, rows)}`;
@@ -131,9 +167,10 @@ export function syncedDistinctSql(table: string, columns: readonly string[], end
 const num = (x: unknown): number => x === null || x === undefined ? 0 : Number(x);
 
 /** a sample's lengths (`sourceLengthsSql`, `syncedLengthsSql`) as each column's `TextSample`, the distinct count not
- *  yet read */
-export function lengthSamplesOf(names: readonly string[], row: readonly unknown[]): Map<string, TextSample> {
-  return new Map(names.map((name, i) => [name, { values: num(row[3 * i]), avgBytes: num(row[3 * i + 1]), maxBytes: num(row[3 * i + 2]), distinct: null, distinctOf: 0 }]));
+ *  yet read; `exact` per column (a synced table's lengths are all its text's) */
+export function lengthSamplesOf(names: readonly string[], row: readonly unknown[], exact: readonly boolean[] = names.map(() => true)): Map<string, TextSample> {
+  return new Map(names.map((name, i) => [name, { values: num(row[4 * i]), avgBytes: num(row[4 * i + 1]), maxBytes: num(row[4 * i + 2]), distinct: null, distinctOf: 0,
+    exact: exact[i] ?? true, compressed: row[4 * i + 3] === null || row[4 * i + 3] === undefined ? null : Number(row[4 * i + 3]) }]));
 }
 
 /** the distinct counts (`sourceDistinctSql`, `syncedDistinctSql`, over `names`) set on their samples */

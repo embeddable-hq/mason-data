@@ -89,7 +89,7 @@ import { isFailure, type SyncEventInput } from "./events.ts";
 import { originHere } from "../lib/failure-facts.ts";
 import { COMPACT_DISK_MARGIN_BYTES, COMPACT_MIN_WASTE_BLOCKS, COMPACT_WASTE_SHARE, CompactNoRoom, CompactTooLarge, dropLeftovers, pieceRows, readShape, rewrite, sideOf, spilled, swapSql, unspilled, wasteOf, type TableShape, type Waste } from "./compact.ts";
 import { extensionFailure, loadPostgresSql } from "./extensions.ts";
-import { compressionClause, distinctRows, isTextType, needsDistinct, sourceDistinctSql, sourceLengthsSql, lengthSamplesOf, textStorage, withDistinct, type TextStorage } from "./text-compression.ts";
+import { compressionClause, distinctRows, exactLength, isTextType, needsDistinct, sourceDistinctSql, sourceLengthsSql, lengthSamplesOf, textStorage, withDistinct, type TextStorage } from "./text-compression.ts";
 import { errorCode, errorText, maskPasswordKeyword, messageOf } from "../lib/secret-mask.ts";
 import { BIG_TABLE_ROWS, intervalOf, msText, syncedText, syncText, syncWords, type PolledSync, type TableSync } from "../lib/table-sync.ts";
 import { relationKey } from "../lib/relation-key.ts";
@@ -5903,10 +5903,13 @@ export class Sync {
     const out = new Map<string, TextStorage>();
     if (texts.length === 0) return out;
     const one = async (sql: string): Promise<unknown[]> => (await this.rebuilder.conn.runAndReadAll(`SELECT * FROM ${pq(sql)}`)).getRowsJS()[0] ?? [];
-    const samples = lengthSamplesOf(texts.map((c) => c.name), await one(sourceLengthsSql(pgFrom, texts.map((c) => ({ column: pgIdent(c.name), type: c.type })), pages)));
+    // whether the source says which values it stored compressed (`pg_column_compression`, Postgres 14)
+    const compressionKnown = Number((await one("SELECT current_setting('server_version_num')::int"))[0]) >= 140000;
+    const samples = lengthSamplesOf(texts.map((c) => c.name), await one(sourceLengthsSql(pgFrom, texts.map((c) => ({ column: pgIdent(c.name), type: c.type })), pages, compressionKnown)),
+      texts.map((c) => exactLength(c.type)));
     const long = texts.filter((c) => needsDistinct(samples.get(c.name)!));
     if (long.length > 0) {
-      const rows = distinctRows(Math.max(...long.map((c) => samples.get(c.name)!.avgBytes)));
+      const rows = Math.min(...long.map((c) => distinctRows(samples.get(c.name)!)));
       withDistinct(samples, long.map((c) => c.name), await one(sourceDistinctSql(pgFrom, long.map((c) => pgIdent(c.name)), pages, rows)));
     }
     for (const c of texts) {

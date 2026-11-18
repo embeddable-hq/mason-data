@@ -155,11 +155,14 @@ paths:
   print (`scaleOf`): keys, filters and aggregates stay the engine's DECIMAL. A copy without it is read again once
   (`SCALE_LAYOUT`). Why: Postgres prints `12.5` beside `12.49`, and one DECIMAL scale printed `12.50`.
 - **Each text column is compressed by its own values** (`src/duck/text-compression.ts`, issue 1140): `beginCopy` reads
-  one sample of the source in the copy's snapshot (`sourceSampleSql`: about 100 pages by `TABLESAMPLE SYSTEM`, at most
-  10,000 rows, one row of aggregates back), and gives each VARCHAR or JSON column `USING COMPRESSION` in the side table's
-  definition (`textStorage`): the dictionary (`dict_fsst`) for values under 256 bytes or repeated, ZSTD for long values
-  that do not repeat or a value of 16 KiB or more. A compaction decides again from the table's own rows (`rewrite`,
-  `syncedSampleSql`). Why: the instance's forced ZSTD stored a six-value status 16 times larger than the dictionary, and
+  one sample of the source in the copy's snapshot (`sourceLengthsSql`, then `sourceDistinctSql`: about 100 pages by
+  `TABLESAMPLE SYSTEM`, at most 10,000 rows, one row of aggregates back each), and gives each VARCHAR or JSON column
+  `USING COMPRESSION` in the side table's definition (`textStorage`): the dictionary (`dict_fsst`) for values under 256
+  bytes or repeated, ZSTD for long values that do not repeat or a column whose text could reach 16 KiB. A json's or
+  jsonb's sample is its size as stored, so it gets the dictionary only when every value is uncompressed and under 2,000
+  bytes (`dictionaryHolds`). Why: a jsonb stored compressed at 3 KB was 52 KB of text, and the dictionary stored it
+  Uncompressed, 51 times ZSTD's size. A compaction decides again from the table's own rows (`rewrite`,
+  `syncedLengthsSql`). Why: the instance's forced ZSTD stored a six-value status 16 times larger than the dictionary, and
   a count by it read cold took 4.03 s against 0.17 s. The definition carries the choice, so a new path that makes a
   synced table must give its text columns a clause, or they fall back to the instance's ZSTD.
 - **What heap order gives up**, said as such: a wide uuid-keyed table's click takes seconds, a point lookup by a random

@@ -1209,6 +1209,41 @@ test("a copy stores each text column by a sample of its values: the dictionary f
   } finally { await sync.stop(); await store.close(); }
 });
 
+// A JSON VALUE'S STORED SIZE IS NOT ITS TEXT'S (the review of PR 1141): Postgres compresses a large document, so its
+// stored size can be far under the engine's dictionary limit while its text is past it. Large documents that repeat,
+// stored compressed, keep zstd: given the dictionary, every row group of them was stored Uncompressed, 51 times larger.
+// A small jsonb, stored inline and uncompressed, still takes the dictionary.
+test("a copy keeps zstd for a jsonb of large documents Postgres stored compressed, however they repeat; a small inline jsonb takes the dictionary", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {
+  const db = `${tag}_tz`;
+  const url = (() => { const u = new URL(adminUrl!); u.pathname = `/${db}`; return u.toString(); })();
+  psql(adminUrl!, `CREATE DATABASE ${db}`);
+  after(() => psql(adminUrl!, `DROP DATABASE IF EXISTS ${db} WITH (FORCE)`));
+  const ROWS = 3_000;
+  // each doc 800 keys, about 28 KB of text, one of 5 documents; Postgres stores it compressed in a few KB
+  psql(url, `CREATE TABLE cfg (id int PRIMARY KEY, doc jsonb, small jsonb); INSERT INTO cfg SELECT g, ` +
+    `(SELECT jsonb_object_agg('key_' || k, 'value number ' || (g % 5) || ' of ' || k) FROM generate_series(1, 800) k), jsonb_build_object('id', g, 'kind', 'k' || (g % 7)) FROM generate_series(1, ${ROWS}) g`);
+  assert.equal(psql(url, "SELECT bool_and(octet_length(doc::text) > 16384 AND pg_column_size(doc) < 16384) FROM cfg"), "t", "each doc's text past the dictionary's limit, its stored size under it (else this proves nothing)");
+  await rowsOlderThanEverySnapshot(url, "cfg");
+  const col = (name: string, type: string, notNull = false) => ({ name, type, notNull, comment: null });
+  const CFG: AddedTable = { source: "public.cfg", schema: "public", table: "cfg", key: ["id"], bytes: 0, rows: ROWS, foreignKeys: [],
+    columns: [col("id", "integer", true), col("doc", "jsonb"), col("small", "jsonb")] };
+  const parsed = parseSource(url);
+  if ("problem" in parsed) throw new Error(parsed.problem);
+  const logged: string[] = [];
+  const store = await DuckStore.open(path.join(dir, "toasted.db"), (l) => logged.push(l), { memoryLimit: "256MB" });
+  const sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 3_600_000, "poll");
+  try {
+    await sync.open();
+    void sync.setTables([CFG]);
+    await sync.once();
+    assert.deepEqual(sync.state().map((s) => [s.source, s.phase, s.error]), [["public.cfg", "copied", null]], logged.join("\n"));
+    await store.writer.run("CHECKPOINT");
+    assert.deepEqual((await store.writer.runAndReadAll(`SELECT column_name, string_agg(DISTINCT compression, ',' ORDER BY compression) FROM pragma_storage_info('public.cfg') ` +
+      `WHERE column_name IN ('doc', 'small') AND segment_type <> 'VALIDITY' GROUP BY column_name ORDER BY column_name`)).getRowsJS(), [["doc", "ZSTD"], ["small", "DICT_FSST"]], logged.join("\n"));
+    assert.equal(String((await store.writer.runAndReadAll("SELECT count(DISTINCT doc) || '/' || count(*) FROM public.cfg")).getRowsJS()[0]![0]), `5/${ROWS}`);
+  } finally { await sync.stop(); await store.close(); }
+});
+
 // A COPY IN THE OLD LAYOUT (sorted by its primary key, with the key's index; `_mason.copy_state`
 // with the re-sort's `written` and `counted`) is a RETIRED LAYOUT (src/duck/sync.ts RETIRED_LAYOUT): said by name in the
 // log and in the table's state, served as it was, and copied again through the normal path — never converted. Its

@@ -199,7 +199,7 @@ async function sampleOf(c: DuckConnection, target: string, texts: readonly strin
       const samples = lengthSamplesOf(texts, (await c.runAndReadAll(syncedLengthsSql(target, quoted, end, rows))).getRowsJS()[0] ?? []);
       const long = texts.filter((n) => needsDistinct(samples.get(n)!));
       if (long.length > 0) {
-        const counted = Math.min(rows, distinctRows(Math.max(...long.map((n) => samples.get(n)!.avgBytes))));
+        const counted = Math.min(rows, ...long.map((n) => distinctRows(samples.get(n)!)));
         withDistinct(samples, long, (await c.runAndReadAll(syncedDistinctSql(target, long.map(ident), end, counted))).getRowsJS()[0] ?? []);
       }
       return samples;
