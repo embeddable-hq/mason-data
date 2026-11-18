@@ -20,14 +20,15 @@
  *                           (default tests/fixtures/bench-replica.json). Give --out another file
  *
  * MASON ALONE (--engines mason) re-measures Mason after a change to Mason only, in about half the time. Postgres still
- * runs, as Mason's source, and is restarted before each of Mason's runs as before, but is not measured. Its cells are
- * copied unchanged from --postgres-from, and the fixture says so (environment.postgresFrom). The run refuses, before
- * anything with a side effect, an earlier run that is not a complete cold run, or that differs from this one in its
- * data, statements, clients, runs, settle, limits, Postgres image, disk or label, or lacks a size this run measures.
- * Once its Postgres answers, it refuses one of another version or settings. Each size asks for the earlier run's
- * lookup rows, refused if one is not in the data: the order ids are random, so run it against the Postgres and data the
- * earlier run kept, with --reuse-postgres --keep-postgres. Postgres's answers must be the earlier run's, and Mason's
- * must be Postgres's, before anything is timed.
+ * runs, as Mason's source, and is restarted before each of Mason's runs as before. A statement with no per-client
+ * literal (the count, the revenue) is not measured on Postgres: its Postgres cells are copied unchanged from
+ * --postgres-from, once Postgres's answer to it is that run's answer. Its data comes from setseed() and random(), so data
+ * made again gives the same answers. The lookup asks for rows sampled in this run (the order ids are random), so it is
+ * measured on both engines. The fixture marks each copied cell (`copied`) and records the run (environment.postgresFrom).
+ * The run refuses, before anything with a side effect, an earlier run that is not a complete cold run, or that differs
+ * from this one in its data, statements, clients, runs, settle, limits, Postgres image, disk or label, or lacks a size
+ * this run measures. Once its Postgres answers, it refuses one of another version or settings, and a size where
+ * Postgres's answer to a statement it would copy is not the earlier run's.
  *
  * THE DATA (COLD_DATA, `coldDataSql`): the warm mode's orders and customers, with random UUID primary keys and no
  * index on status, in databases of their own (`bench_replica_cold_<rows>`). The fixture records it.
@@ -224,23 +225,6 @@ async function pickLookupIds(conn: pg.ClientConfig, rows: number, n: number): Pr
   } finally { await c.end(); }
 }
 
-/** the earlier run's ids at this size, each checked to be in the live data: the same rows, or the run refuses */
-async function earlierLookupIds(conn: pg.ClientConfig, earlier: ColdFixture, rows: number, file: string): Promise<string[]> {
-  const ids = earlier.sizes.find((z) => z.rows === rows)!.lookupIds;
-  for (const id of ids) statementSql(COLD_STATEMENTS.find((s) => s.lookup === true)!, id);
-  const c = new pg.Client(conn);
-  await c.connect();
-  try {
-    const found = ((await c.query("SELECT id::text AS id FROM orders WHERE id = ANY($1::uuid[])", [ids])).rows as Array<{ id: string }>).map((r) => r.id);
-    const missing = missingLookupIds(ids, found);
-    if (missing.length > 0) {
-      throw new Usage(`--engines mason: ${missing.length} of the ${ids.length} rows ${file} looked up at ${fmtRows(rows)} rows are not in this data (${missing.join(", ")}). ` +
-        "The order ids are random, so data generated again has other ones: measure Mason alone against the data that run measured (--reuse-postgres a Postgres it kept), or measure both engines");
-    }
-    return ids;
-  } finally { await c.end(); }
-}
-
 // --------------------------------------------------------------------------------------------- one run's times
 
 export interface ClientTime { client: number; latencyMs: number; endMs: number }
@@ -324,6 +308,9 @@ export interface ColdCell {
   /** the median over the runs of a client's mean, ms */
   meanMs: number;
   runs: ColdRun[];
+  /** a Postgres cell copied unchanged from an earlier run (--engines mason): that run's date, and the md5 of the answer
+   *  both runs' Postgres gave. Absent: measured in this run */
+  copied?: { from: string; answer: string };
 }
 export function coldCell(rows: number, clients: number, engine: ColdEngine, statement: string, runs: ColdRun[]): ColdCell {
   if (runs.length === 0) throw new Error(`${rows} rows, ${clients} clients, ${engine}, ${statement}: a cell with no run`);
@@ -403,6 +390,10 @@ export function coldFixtureProblems(f: ColdFixture): string[] {
       if (cell.runs.some((r) => r.clientsMs.length !== clients || !(r.slowestMs > 0))) out.push(`${where}: a run without every client's time`);
       if (cell.runs.some((r) => !Number.isFinite(r.readBytes) || (engine === "mason") !== (r.idleReadBytes !== undefined))) out.push(`${where}: a run without what it read from disk`);
       if (cell.slowestMs !== round(median(cell.runs.map((r) => r.slowestMs)), 3)) out.push(`${where}: its time is not the median of its runs' slowest`);
+      if (cell.copied !== undefined) {
+        if (engine !== "postgres" || st.lookup === true || f.environment.postgresFrom?.date !== cell.copied.from) out.push(`${where}: copied, and only a Postgres cell of a statement with no per-client literal, from environment.postgresFrom's run, may be`);
+        if (z.answers[st.name]?.postgres !== cell.copied.answer) out.push(`${where}: copied, and Postgres's answer in this run is not the one it had in the run it was copied from`);
+      }
     }
   }
   const from = f.environment.postgresFrom;
@@ -441,7 +432,7 @@ export function postgresFromProblems(earlier: ColdFixture, o: ColdOptions): stri
   for (const rows of o.sizes) {
     const z = earlier.sizes.find((x) => x.rows === rows);
     if (z === undefined) { out.push(`${file} did not measure ${fmtRows(rows)} rows, a size this run measures`); continue; }
-    for (const clients of o.clients) for (const st of COLD_STATEMENTS) {
+    for (const clients of o.clients) for (const st of COLD_STATEMENTS.filter(copyable)) {
       if (!earlier.cells.some((c) => c.engine === "postgres" && c.rows === rows && c.clients === clients && c.statement === st.name)) out.push(`${file} has no Postgres cell for ${fmtRows(rows)} rows, ${clients} clients, ${st.name}`);
     }
   }
@@ -457,21 +448,21 @@ export function livePostgresProblems(earlier: ColdFixture, live: { version: stri
   }
   return out;
 }
-/** the earlier run's lookup ids that the live data lacks: none, or the rows are not the ones it measured */
-export function missingLookupIds(ids: readonly string[], found: readonly string[]): string[] {
-  const have = new Set(found.map((x) => x.toLowerCase()));
-  return ids.filter((id) => !have.has(id.toLowerCase()));
-}
-/** the answers (by key) where the live Postgres's md5 is not the earlier run's: none, or its data is not the same */
+/** a statement whose Postgres cells a Mason-alone run may copy: one with no per-client literal, so its answer proves
+ *  the rows are the ones the earlier run measured. The lookup's rows are sampled in each run, so it is measured */
+export const copyable = (st: ColdStatement): boolean => st.lookup !== true;
+/** the statements it would copy whose live Postgres answer (an md5, by statement) is not the earlier run's: none, or
+ *  their cells cannot be copied */
 export function postgresAnswerChanges(earlier: ColdSize, live: Record<string, string>): string[] {
-  const keys = [...new Set([...Object.keys(earlier.answers), ...Object.keys(live)])].sort();
-  return keys.filter((k) => earlier.answers[k]?.postgres !== live[k]);
+  return COLD_STATEMENTS.filter(copyable).map((st) => st.name).filter((k) => earlier.answers[k]?.postgres === undefined || earlier.answers[k]!.postgres !== live[k]);
 }
-/** the earlier run's Postgres cell, unchanged: every run, each client's time and what it read */
+/** the earlier run's Postgres cell, unchanged (every run, each client's time and what it read), marked as copied */
 export function earlierPostgresCell(earlier: ColdFixture, rows: number, clients: number, statement: string): ColdCell {
   const c = earlier.cells.find((x) => x.engine === "postgres" && x.rows === rows && x.clients === clients && x.statement === statement);
-  if (c === undefined) throw new Error(`no Postgres cell for ${rows} rows, ${clients} clients, ${statement} in the earlier run`);
-  return structuredClone(c);
+  const z = earlier.sizes.find((x) => x.rows === rows);
+  if (c === undefined || z?.answers[statement] === undefined) throw new Error(`no Postgres cell or answer for ${rows} rows, ${clients} clients, ${statement} in the earlier run`);
+  const from = earlier.environment.postgresFrom?.date ?? earlier.environment.date;
+  return { ...structuredClone(c), copied: { from: c.copied?.from ?? from, answer: z.answers[statement]!.postgres } };
 }
 
 // --------------------------------------------------------------------------------------------- arguments
@@ -983,7 +974,7 @@ export async function mainCold(argv: string[], at: { lockFile?: string; procRoot
       try {
         if (fixture.environment.mason.engineMemory === "unknown") fixture.environment.mason.engineMemory = mason.engineMemory;
         const masonConn: pg.ClientConfig = { host: "127.0.0.1", port: mason.port, user: "bench", password: mason.password, database: mason.database, ssl: { rejectUnauthorized: false } };
-        const ids = earlier === null ? await pickLookupIds(pgConn, rows, Math.max(...o.clients)) : await earlierLookupIds(pgConn, earlier, rows, o.postgresFrom);
+        const ids = await pickLookupIds(pgConn, rows, Math.max(...o.clients));
         // ---- the answers, before anything is timed
         const a = await answersOf(pgConn, ids), b = await answersOf(masonConn, ids);
         const answers = Object.fromEntries([...a.keys()].map((k) => [k, { postgres: md5(a.get(k)!), mason: md5(b.get(k) ?? "") }]));
@@ -991,8 +982,8 @@ export async function mainCold(argv: string[], at: { lockFile?: string; procRoot
         log(differences.length === 0 ? "  every statement's answer is the same on both" : `  ANSWERS DIFFER (a Mason defect; measured anyway):\n    ${differences.join("\n    ")}`);
         if (earlier !== null) {
           const changed = postgresAnswerChanges(earlier.sizes.find((z) => z.rows === rows)!, Object.fromEntries([...a].map(([k, v]) => [k, md5(v)])));
-          if (changed.length > 0) throw new Usage(`--engines mason: at ${fmtRows(rows)} rows, Postgres's answers are not the ones ${o.postgresFrom} recorded (${changed.join(", ")}): its rows are not the ones that run measured`);
-          log(`  Postgres's answers are the ones ${path.relative(REPO, o.postgresFrom)} recorded`);
+          if (changed.length > 0) throw new Usage(`--engines mason: at ${fmtRows(rows)} rows, Postgres's answer to ${changed.join(" and ")} is not the one ${o.postgresFrom} recorded, so its Postgres cells cannot be copied. Measure both engines`);
+          log(`  Postgres's answers to ${COLD_STATEMENTS.filter(copyable).map((s) => s.name).join(" and ")} are the ones ${path.relative(REPO, o.postgresFrom)} recorded: their Postgres cells are copied`);
         }
         const size: ColdSize = { rows, customers: customersOf(rows), generatedSeconds: data.generatedSeconds, postgresBytes, masonBytes: mason.bytes, syncSeconds: mason.syncSeconds,
           lookupIds: ids, answers, answersEqual: differences.length === 0, differences };
@@ -1025,7 +1016,9 @@ export async function mainCold(argv: string[], at: { lockFile?: string; procRoot
             const runs: Record<ColdEngine, ColdRun[]> = { postgres: [], mason: [] };
             fs.writeFileSync(path.join(clientDir, "script.sql"), coldScript(stmt, clients, ids));
             for (let n = 0; n < o.runs; n++) {
-              for (const engine of ((n % 2 === 0 ? ["postgres", "mason"] : ["mason", "postgres"]) as ColdEngine[]).filter((e) => o.engines.includes(e))) {
+              // Mason alone: Postgres is measured only for a statement whose cells cannot be copied (the lookup)
+              const measured = (e: ColdEngine): boolean => earlier === null || e === "mason" || !copyable(stmt);
+              for (const engine of ((n % 2 === 0 ? ["postgres", "mason"] : ["mason", "postgres"]) as ColdEngine[]).filter(measured)) {
                 const readyMs = await cold(engine);
                 const at = new Date().toISOString();
                 // what the measured engine (and, beside Mason, the idle Postgres) read from disk while pgbench ran
@@ -1041,7 +1034,7 @@ export async function mainCold(argv: string[], at: { lockFile?: string; procRoot
             }
             for (const e of ["postgres", "mason"] as const) {
               // Mason alone: Postgres's cell as the earlier run measured it, unchanged
-              cells.push(earlier !== null && e === "postgres" ? earlierPostgresCell(earlier, rows, clients, stmt.name) : coldCell(rows, clients, e, stmt.name, runs[e]));
+              cells.push(earlier !== null && e === "postgres" && copyable(stmt) ? earlierPostgresCell(earlier, rows, clients, stmt.name) : coldCell(rows, clients, e, stmt.name, runs[e]));
             }
           }
         }
