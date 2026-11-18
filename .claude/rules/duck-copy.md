@@ -2,10 +2,12 @@
 paths:
   - "src/duck/extensions.ts"
   - "src/duck/sync.ts"
+  - "src/duck/text-compression.ts"
   - "tests/duck-copy-disk.test.ts"
   - "tests/duck-copy-order.test.ts"
   - "tests/duck-copy-retry.test.ts"
   - "tests/duck-extensions.test.ts"
+  - "tests/duck-text-compression.test.ts"
   - "tests/integration/duck-poll.itest.ts"
   - "tests/integration/duck-rewrite.itest.ts"
 ---
@@ -152,6 +154,14 @@ paths:
   never listed (the copy's view of its visible columns, stored JSON paths on or off), and the rewrite reads it only to
   print (`scaleOf`): keys, filters and aggregates stay the engine's DECIMAL. A copy without it is read again once
   (`SCALE_LAYOUT`). Why: Postgres prints `12.5` beside `12.49`, and one DECIMAL scale printed `12.50`.
+- **Each text column is compressed by its own values** (`src/duck/text-compression.ts`, issue 1140): `beginCopy` reads
+  one sample of the source in the copy's snapshot (`sourceSampleSql`: about 100 pages by `TABLESAMPLE SYSTEM`, at most
+  10,000 rows, one row of aggregates back), and gives each VARCHAR or JSON column `USING COMPRESSION` in the side table's
+  definition (`textStorage`): the dictionary (`dict_fsst`) for values under 256 bytes or repeated, ZSTD for long values
+  that do not repeat or a value of 16 KiB or more. A compaction decides again from the table's own rows (`rewrite`,
+  `syncedSampleSql`). Why: the instance's forced ZSTD stored a six-value status 16 times larger than the dictionary, and
+  a count by it read cold took 4.03 s against 0.17 s. The definition carries the choice, so a new path that makes a
+  synced table must give its text columns a clause, or they fall back to the instance's ZSTD.
 - **What heap order gives up**, said as such: a wide uuid-keyed table's click takes seconds, a point lookup by a random
   uuid is a scan, and uniqueness is the write path's (the oracle holds every copy to the source), not the engine's. The
   later step is a sort by a declared time column once the sources file names one.

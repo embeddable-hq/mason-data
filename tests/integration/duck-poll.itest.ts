@@ -1142,6 +1142,73 @@ test("a copy is stored in the source's heap order with no index, and a time wind
   } finally { await sync.stop(); await store.close(); }
 });
 
+// EACH TEXT COLUMN COMPRESSED BY ITS OWN VALUES (issue 1140; src/duck/text-compression.ts): from a sample of the source in
+// the copy's snapshot, the dictionary for short or repeated text, zstd for long text that does not repeat; held in the
+// table's definition, so the rows a poll writes later, a checkpoint and a restart keep it. Equal to the source throughout.
+test("a copy stores each text column by a sample of its values: the dictionary for short or repeated text, zstd for long JSON; the poll's rows, a checkpoint and a restart keep it", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {
+  const db = `${tag}_tc`;
+  const url = (() => { const u = new URL(adminUrl!); u.pathname = `/${db}`; return u.toString(); })();
+  psql(adminUrl!, `CREATE DATABASE ${db}`);
+  after(() => psql(adminUrl!, `DROP DATABASE IF EXISTS ${db} WITH (FORCE)`));
+  const ROWS = 200_000;
+  const values = (from: number, to: number): string => `SELECT g, (ARRAY['shipped','pending','paid','returned'])[1 + g % 4], 'n' || g, ` +
+    `'Plan ' || (g % 40) || ': ' || repeat('priority support, unlimited seats, audit logs; ', 6), ` +
+    `(SELECT jsonb_build_object('id', g, 'events', jsonb_agg(jsonb_build_object('ref', md5((g * 31 + x)::text), 'kind', 'view'))) FROM generate_series(1, 6) x), NULL FROM generate_series(${from}, ${to}) g`;
+  psql(url, `CREATE TABLE orders (id bigint PRIMARY KEY, status text NOT NULL, note text, label text, doc jsonb, unused text); INSERT INTO orders ${values(1, ROWS)}`);
+  await rowsOlderThanEverySnapshot(url, "orders");
+  const col = (name: string, type: string, notNull = false) => ({ name, type, notNull, comment: null });
+  const ORDERS: AddedTable = { source: "public.orders", schema: "public", table: "orders", key: ["id"], bytes: 0, rows: ROWS, foreignKeys: [],
+    columns: [col("id", "bigint", true), col("status", "text", true), col("note", "text"), col("label", "text"), col("doc", "jsonb"), col("unused", "text")] };
+  const parsed = parseSource(url);
+  if ("problem" in parsed) throw new Error(parsed.problem);
+  const logged: string[] = [];
+  const file = path.join(dir, "text.db");
+  const methods = async (store: DuckStore): Promise<unknown[][]> => (await store.writer.runAndReadAll(`SELECT column_name, string_agg(DISTINCT compression, ',' ORDER BY compression) ` +
+    `FROM pragma_storage_info('public.orders') WHERE column_name IN ('status', 'note', 'label', 'doc') AND segment_type <> 'VALIDITY' GROUP BY column_name ORDER BY column_name`)).getRowsJS();
+  const definition = async (store: DuckStore): Promise<string> => String((await store.writer.runAndReadAll("SELECT sql FROM duckdb_tables() WHERE schema_name = 'public' AND table_name = 'orders'")).getRowsJS()[0]![0]);
+  const DEFINED = /^CREATE TABLE public\.orders\(id BIGINT, status VARCHAR USING COMPRESSION DICT_FSST, note VARCHAR USING COMPRESSION DICT_FSST, "label" VARCHAR USING COMPRESSION DICT_FSST, doc JSON USING COMPRESSION ZSTD, unused VARCHAR\);$/;
+  const BY_COLUMN = [["doc", "ZSTD"], ["label", "DICT_FSST"], ["note", "DICT_FSST"], ["status", "DICT_FSST"]];
+  const answer = "SELECT status, count(*), count(DISTINCT note), count(DISTINCT label), count(DISTINCT doc), count(unused) FROM orders GROUP BY status ORDER BY status";
+  const same = async (store: DuckStore, step: string): Promise<void> => {
+    const duck = ((await store.writer.runAndReadAll(answer.replace("FROM orders", "FROM public.orders"))).getRowsJS() as unknown[][]).map((r) => r.map(String).join("\t")).join("\n");
+    assert.equal(duck, psql(url, answer), `the same rows after ${step}`);
+  };
+  let store = await DuckStore.open(file, (l) => logged.push(l), { memoryLimit: "256MB" });
+  let sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 3_600_000, "poll");
+  try {
+    await sync.open();
+    void sync.setTables([ORDERS]);
+    await sync.once();
+    assert.deepEqual(sync.state().map((s) => [s.source, s.phase, s.error]), [["public.orders", "copied", null]], logged.join("\n"));
+    await store.writer.run("CHECKPOINT");
+    // the status and the note short, the label long but of 40 values: the dictionary; each JSON document long and its
+    // own: zstd; a column with no value sampled: the instance's, named nowhere
+    assert.deepEqual(await methods(store), BY_COLUMN, logged.join("\n"));
+    assert.match(await definition(store), DEFINED);
+    assert.ok(logged.some((l) => /^public\.orders: its text stored by column, from a sample of its rows: status, note, label with a dictionary \(short or repeated values\); doc with zstd \(long values\)$/.test(l)), logged.join("\n"));
+    await same(store, "the first sync");
+    // ROWS THE POLL WRITES: new ones and changed ones, then a checkpoint
+    psql(url, `INSERT INTO orders ${values(ROWS + 1, ROWS + 150_000)}; UPDATE orders SET status = 'paid', note = 'changed' WHERE id % 50 = 0`);
+    await sync.once();
+    await store.writer.run("CHECKPOINT");
+    assert.deepEqual(await methods(store), BY_COLUMN, "every row group the poll wrote keeps each column's method");
+    await same(store, "a poll");
+  } finally { await sync.stop(); await store.close(); }
+  // A RESTART: the definition is the file's, and the next poll's rows keep it
+  store = await DuckStore.open(file, (l) => logged.push(l), { memoryLimit: "256MB" });
+  sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 3_600_000, "poll");
+  try {
+    await sync.open();
+    void sync.setTables([ORDERS]);
+    psql(url, `INSERT INTO orders ${values(ROWS + 150_001, ROWS + 200_000)}`);
+    await sync.once();
+    await store.writer.run("CHECKPOINT");
+    assert.match(await definition(store), DEFINED);
+    assert.deepEqual(await methods(store), BY_COLUMN);
+    await same(store, "a restart and a poll");
+  } finally { await sync.stop(); await store.close(); }
+});
+
 // A COPY IN THE OLD LAYOUT (sorted by its primary key, with the key's index; `_mason.copy_state`
 // with the re-sort's `written` and `counted`) is a RETIRED LAYOUT (src/duck/sync.ts RETIRED_LAYOUT): said by name in the
 // log and in the table's state, served as it was, and copied again through the normal path — never converted. Its

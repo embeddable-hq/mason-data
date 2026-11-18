@@ -89,6 +89,7 @@ import { isFailure, type SyncEventInput } from "./events.ts";
 import { originHere } from "../lib/failure-facts.ts";
 import { COMPACT_DISK_MARGIN_BYTES, COMPACT_MIN_WASTE_BLOCKS, COMPACT_WASTE_SHARE, CompactNoRoom, CompactTooLarge, dropLeftovers, pieceRows, readShape, rewrite, sideOf, spilled, swapSql, unspilled, wasteOf, type TableShape, type Waste } from "./compact.ts";
 import { extensionFailure, loadPostgresSql } from "./extensions.ts";
+import { compressionClause, distinctRows, isTextType, needsDistinct, sourceDistinctSql, sourceLengthsSql, lengthSamplesOf, textStorage, withDistinct, type TextStorage } from "./text-compression.ts";
 import { errorCode, errorText, maskPasswordKeyword, messageOf } from "../lib/secret-mask.ts";
 import { BIG_TABLE_ROWS, intervalOf, msText, syncedText, syncText, syncWords, type PolledSync, type TableSync } from "../lib/table-sync.ts";
 import { relationKey } from "../lib/relation-key.ts";
@@ -5594,12 +5595,15 @@ export class Sync {
     }
     // the numerics the extension would read as doubles: their widths, in the copy's snapshot (NUMERIC_TYPE)
     const exact = await this.exactNumerics(t, scanned, pgFrom);
-    const defs = t.columns.map((c) => `${ident(c.name)} ${exact.has(c.name) ? `DECIMAL(38,${exact.get(c.name)})` : storedType(c, scanned.get(c.name) ?? "VARCHAR")}`);
+    const types = new Map(t.columns.map((c) => [c.name, exact.has(c.name) ? `DECIMAL(38,${exact.get(c.name)})` : storedType(c, scanned.get(c.name) ?? "VARCHAR")]));
+    const pages = Number((await w.runAndReadAll(`SELECT * FROM ${pq(`SELECT (pg_relation_size(${pgLiteral(pgFrom)}::regclass) / current_setting('block_size')::int)::bigint`)}`)).getRowsJS()[0]![0]);
+    // EACH TEXT COLUMN'S COMPRESSION, from a sample of its values in this snapshot (src/duck/text-compression.ts)
+    const storage = await this.textStorageOf(t, pgFrom, types, pages);
+    const defs = t.columns.map((c) => `${ident(c.name)} ${types.get(c.name)!}${compressionClause(storage.get(c.name) ?? null)}`);
     // each plain numeric's own scales, hidden beside it (src/duck/scale-column.ts)
     for (const c of t.columns) if (exact.has(c.name) && plainNumeric(c.type)) defs.push(`${ident(scaleColumn(c.name, t.columns.map((x) => x.name)))} UTINYINT`);
     await w.run(`CREATE SCHEMA IF NOT EXISTS ${ident(t.schema)}`);
     await w.run(`CREATE OR REPLACE TABLE ${side} (${defs.join(", ")})`);
-    const pages = Number((await w.runAndReadAll(`SELECT * FROM ${pq(`SELECT (pg_relation_size(${pgLiteral(pgFrom)}::regclass) / current_setting('block_size')::int)::bigint`)}`)).getRowsJS()[0]![0]);
     const ceiling = ceilingOf(pages);
     const byBytes = ceiling < chunkPages(pages, t.rows, this.copyChunkRows) && outOfLine !== null
       ? ` for its ${humanBytes(outOfLine)} of values out of line in ${humanBytes(this.store.memoryLimitBytes)} of memory` : "";
@@ -5885,6 +5889,36 @@ export class Sync {
       fs.rmSync(path.join(dir, f), { recursive: true, force: true });
       this.log(`removed ${f}: a sync's stage, from an older Mason (a sync now reads the source once, straight into its table)`);
     }
+  }
+
+  /**
+   * HOW EACH TEXT COLUMN OF A COPY IS STORED (src/duck/text-compression.ts `textStorage`): from a sample of the source's
+   * rows in the copy's transaction, its snapshot — about a hundred pages chosen at random, at most 10,000 rows, one row
+   * of aggregates back. First its lengths, read from each value's header, never a large value made whole
+   * (`sourceLengthsSql`); then, for the long columns alone, their distinct values over about 16 MiB of them, on the same
+   * pages (`sourceDistinctSql`). A column with no value sampled is left out, and keeps the instance's ZSTD.
+   */
+  private async textStorageOf(t: AddedTable, pgFrom: string, types: ReadonlyMap<string, string>, pages: number): Promise<Map<string, TextStorage>> {
+    const texts = t.columns.filter((c) => isTextType(types.get(c.name) ?? ""));
+    const out = new Map<string, TextStorage>();
+    if (texts.length === 0) return out;
+    const one = async (sql: string): Promise<unknown[]> => (await this.rebuilder.conn.runAndReadAll(`SELECT * FROM ${pq(sql)}`)).getRowsJS()[0] ?? [];
+    const samples = lengthSamplesOf(texts.map((c) => c.name), await one(sourceLengthsSql(pgFrom, texts.map((c) => ({ column: pgIdent(c.name), type: c.type })), pages)));
+    const long = texts.filter((c) => needsDistinct(samples.get(c.name)!));
+    if (long.length > 0) {
+      const rows = distinctRows(Math.max(...long.map((c) => samples.get(c.name)!.avgBytes)));
+      withDistinct(samples, long.map((c) => c.name), await one(sourceDistinctSql(pgFrom, long.map((c) => pgIdent(c.name)), pages, rows)));
+    }
+    for (const c of texts) {
+      const s = textStorage(samples.get(c.name));
+      if (s !== null) out.set(c.name, s);
+    }
+    const named = (s: TextStorage): string => texts.filter((c) => out.get(c.name) === s).map((c) => c.name).join(", ");
+    if (out.size > 0) {
+      this.log(`${t.source}: its text stored by column, from a sample of its rows: ` +
+        [named("dictionary") && `${named("dictionary")} with a dictionary (short or repeated values)`, named("zstd") && `${named("zstd")} with zstd (long values)`].filter(Boolean).join("; "));
+    }
+    return out;
   }
 
   /** The table's numerics the extension would read as doubles, each with the DECIMAL(38, s) scale that holds every value
