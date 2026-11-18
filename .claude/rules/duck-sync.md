@@ -6,6 +6,7 @@ paths:
   - "src/duck/sync.ts"
   - "src/duck/reference-keys.ts"
   - "tests/integration/duck-reference-keys.itest.ts"
+  - "tests/integration/duck-reference-keys-stale.itest.ts"
   - "src/cli/dev.ts"
   - "tests/duck-events.test.ts"
   - "tests/duck-publication.test.ts"
@@ -324,12 +325,20 @@ paths:
   key's number is given once, in its dictionary (`_mason.ref_keys_…`), and never changed, so two connections giving
   numbers at once could give one twice: only the writer adds to a dictionary. A stream batch and a writer's poll number
   the rows they wrote in their own transaction (`fillIn`), and an update in place that sets a key's column unnumbers its
-  row first (`unnumberedSet` in `updateCarried`). A catch-up, a compaction and a first sync's rows are numbered on the
+  row in the same statement (`unnumberedSet` in `updateCarried`). Both decide from the store, in the write's own
+  transaction: the hidden columns the table holds now, never what an earlier turn found (`present`), which a swap or a
+  compaction leaves behind until the next turn. A catch-up, a compaction and a first sync's rows are numbered on the
   writer's turn after (`numbersRun`, `fill`, a chunk a turn). A side table is numbered from the dictionaries as they are
-  before its swap (`fillSide`): a key new since is left for the writer. A new write path into a synced table leaves its
-  rows NULL in the hidden column, which costs the faster join and never an answer. The schema names a reference to the
-  listener once both its hidden columns are there (`schemaBuilt`), and is built again when that changes. DETECTOR:
-  tests/integration/duck-reference-keys.itest.ts.
+  before its swap (`fillSide`): a key new since is left for the writer, and a failure there drops the side's hidden
+  column, never the sync. A dictionary belongs to its key's types (`dictionaryOf`), a hidden column's name begins with
+  its dictionary's, and a dictionary is dropped only once no column holds its numbers: so a type changed at the source
+  gives new dictionaries and columns, and a number is never read against another dictionary. A row is numbered only
+  where its key's columns are of its dictionary's types (`fits`), so no cast fails or matches two values. Never join on
+  `rowid` in a numbering statement: DuckDB 2.0.0's join filter on a row id corrupted the heap (`numberRows`). A new
+  write path into a synced table leaves its rows NULL in the hidden column, which costs the faster join and never an
+  answer. The schema names a reference to the listener once both its hidden columns are there (`schemaBuilt`), and is
+  built again whenever the numbering's references differ from those it was built with. DETECTOR:
+  tests/integration/duck-reference-keys.itest.ts, tests/integration/duck-reference-keys-stale.itest.ts.
 
 ## What the sync records
 

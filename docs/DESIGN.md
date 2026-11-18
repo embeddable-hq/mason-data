@@ -4852,6 +4852,25 @@ the writer's polls number their rows in their own transaction, and the rest (a f
 numbered on the writer's turn after, a chunk at a time. A side table is numbered before its swap from the dictionary as
 it is, read only, and a key new since then is left for the writer.
 
+**Why whether a number is still right is read from the store (the review of PR 1159).** The first version decided it
+from what the numbering's last turn had found: the hidden columns each table held (`present`) and the dictionaries it
+had made (`made`). A swap or a compaction cleared a table from `present` until the next turn, 50 ms later. A stream
+batch in that window updated a key in place without clearing its number, so the row kept its old key's number, and
+nothing was left unnumbered for the check to see. A FULL JOIN then answered 324 323 251 where Postgres answered 349 348
+275. And a dictionary was named for its key's table and columns alone. After a type change at the source on both sides
+(uuid to text, bigint to text), the old dictionary stayed, the new values were cast into it, and `upper(<uuid>)` or
+`'01000003'` joined a key it is not equal to (62 rows against 60). A value the old type could not hold failed the side
+table's numbering at every retry, and the table never synced again. Now every write decides from the store in its own
+transaction, a dictionary belongs to its key's types, a hidden column's name carries its dictionary's, a dictionary is
+dropped only once no column holds its numbers, and a row is numbered only where no cast is needed. So a number cannot
+outlive its key, whatever a swap, a timer, a restart or a change of type does.
+
+**Why numbering never joins on a row id.** The first version numbered a batch's rows by `UPDATE … FROM (…) s WHERE
+t.rowid = s.r`. Under DuckDB 2.0.0, the join filter on the row id read past the scan's vector: the process aborted in
+1 run of 4 of a stream batch on 20,000 rows (macOS's allocator caught the corruption; Guard Malloc showed the read in
+`BloomFilterExecutor::FilterSelection`). The update now joins on the key's own columns, from the batch's distinct keys
+and their numbers, which no run of 3 under Guard Malloc or 10 under load crashed.
+
 **Why the check is a transaction, not a condition.** A row not numbered yet holds NULL, and joined on numbers it would
 match nothing. So a statement that joins on numbers first checks, in a transaction, that no row of those tables is
 unnumbered, and then runs in the same snapshot (src/duck/store.ts `numbersHold`). Otherwise it runs as written. The first

@@ -1432,6 +1432,9 @@ export class Sync {
   private numbersTimer: ReturnType<typeof setTimeout> | null = null;
   /** the numbering's last failure, said once until its words change */
   private numbersFailed: string | null = null;
+  /** the references the schema was last built with (`schemaBuilt`), their hidden columns: what a numbering turn holds
+   *  the references now to, so the schema is built again whenever they differ, whatever built it last */
+  private schemaReferences = "[]";
   /** the connection their runs read and write on (`open`), set up as a session: what `stop` interrupts */
   private generatedLane: Lane | null = null;
   /** the generated lane's session set-up: settled before each plan and run (`GeneratedHost.settle`) */
@@ -1493,6 +1496,7 @@ export class Sync {
       busy: (source) => (this.rebuildingNow?.source === source && this.rebuildingNow.kind !== "copy") || this.catchingUp?.source === source || this.spilling.has(source),
       recorded: (source) => this.states.get(source)?.phase === "copied" ? this.copiedColumns.get(source)?.map((c) => c.name) : undefined,
       log: (line) => this.log(line),
+      errorText: (e) => this.errorText(e),
     });
     this.kept = new KeptJsonPaths(store, {
       onWriter: (f) => this.onWriter(f),
@@ -4121,7 +4125,7 @@ export class Sync {
     // hidden key whose columns it sets, unnumbered: numbered again before the batch commits (src/duck/reference-keys.ts `fillIn`)
     const assign = [...set.map((c) => `${ident(c)} = p.${ident(c)}`), ...scales.map((c) => `${ident(scaleColumn(c, cols))} = p.${ident(scaleColumn(c, cols))}`),
       ...set.filter((c) => buckets.includes(c)).map((c) => `${ident(bucketColumn(c, cols))} = ${bucketSql(`p.${ident(c)}`)}`),
-      ...this.kept.storedSet(t.source, set, (c) => `p.${ident(c)}`), ...this.numbers.unnumberedSet(t.source, set)];
+      ...this.kept.storedSet(t.source, set, (c) => `p.${ident(c)}`), ...await this.numbers.unnumberedSet(w, t.source, target, cols, set)];
     const matched = set.length === 0 ? 0 : Number((await w.run(`UPDATE ${target} AS t SET ${assign.join(", ")} FROM ${WRITE_PARTIAL} p WHERE ${on}`)).rowsChanged);
     // only when some row was not there: another scan, to say which
     const missing = matched === rows.length ? [] : (await w.runAndReadAll(`SELECT p.${ident(WRITE_ROW)} FROM ${WRITE_PARTIAL} p ANTI JOIN ${target} t ON ${on}`)).getRowsJS().map((r) => Number(r[0]));
@@ -4569,10 +4573,10 @@ export class Sync {
   private async numbersRun(): Promise<void> {
     if (this.stopped) return;
     let changed = false, left = false, numbered = 0, failed = false;
-    // the references the schema tells the listener of (`schemaBuilt`): built again when they change, a hidden column
-    // made here or found in a table swapped in with it (src/duck/reference-keys.ts `fillSide`)
+    // the references the schema tells the listener of (`schemaBuilt`): built again when they differ from those it was
+    // last built with, a hidden column made here or found in a table swapped in with it (src/duck/reference-keys.ts
+    // `fillSide`). Never this turn's before and after alone: a swap's own build between two turns can leave it behind
     const told = (): string => JSON.stringify(this.numbers.published().map((r) => [r.from.hidden, r.to.hidden]));
-    const before = told();
     try {
       await this.onWriter(async () => {
         if (this.stopped) return;
@@ -4588,7 +4592,7 @@ export class Sync {
       if (this.numbersFailed !== m) this.log(`the hidden keys of the sources file's references could not be numbered (a join on them reads the keys themselves meanwhile; tried again in 30 s): ${this.errorText(e)}`);
       this.numbersFailed = m;
     }
-    if (changed || told() !== before) await this.rebuildSchema().catch((e: unknown) => this.log(`the catalog could not be rebuilt (it is at the next pass): ${this.errorText(e)}`));
+    if (changed || told() !== this.schemaReferences) await this.rebuildSchema().catch((e: unknown) => this.log(`the catalog could not be rebuilt (it is at the next pass): ${this.errorText(e)}`));
     // rows left: the next chunk at once; only a table busy meanwhile (its rebuild): a second from now
     if (left) this.numbersSoon(failed ? 30_000 : numbered > 0 ? 50 : 1_000);
   }
@@ -5447,7 +5451,7 @@ export class Sync {
       // catch-up, whose rows carry none
       await this.kept.fillSide(w, t.source, side, t.columns.map((c) => c.name), (sql) => this.interruptible(this.rebuilder, async () => Number((await w.run(sql)).rowsChanged)));
       // and its references' hidden keys, numbered from the dictionaries as they are (src/duck/reference-keys.ts)
-      await this.numbers.fillSide(w, t.source, side, (sql) => this.interruptible(this.rebuilder, async () => Number((await w.run(sql)).rowsChanged)));
+      await this.numbers.fillSide(w, t.source, side, (sql) => this.interruptible(this.rebuilder, async () => Number((await w.run(sql)).rowsChanged)), (e) => e instanceof Stopping);
       // THE SWAP, on the writer's turn: one transaction, between two of the stream's or the polls'. It carries the
       // catch-up's watermark and removes the copy's progress; the changes the stream held since the catch-up began are
       // applied in the same turn, and the table joins the stream (`swapCaughtUp`). In recopy mode, its one snapshot
@@ -6433,6 +6437,7 @@ export class Sync {
     const served = (s: { schema: string; table: string; hidden: string }): boolean => tables.some((t) => t.schema === s.schema && t.name === s.table);
     const references = this.numbers.published().filter((r) => served(r.from) && served(r.to))
       .map((r) => ({ from: { schema: r.from.schema, table: r.from.table, columns: r.from.columns, hidden: r.from.hidden }, to: { schema: r.to.schema, table: r.to.table, columns: r.to.columns, hidden: r.to.hidden } }));
+    this.schemaReferences = JSON.stringify(references.map((r) => [r.from.hidden, r.to.hidden]));
     const key = JSON.stringify([tables, views, collations, references]);
     if (key !== this.schemaKey) {
       this.schemaKey = key;

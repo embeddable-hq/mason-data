@@ -11,7 +11,16 @@
  * the numbers of two rows are equal exactly when their keys are equal. That holds whether the referenced key is unique
  * or not, for a referencing row whose referenced row is missing (its key has a number no referenced row holds), for a
  * referenced row deleted and inserted again (its key keeps its number), and for a key updated (its row is written again,
- * and numbered again). A NULL key (or a key of several columns with a NULL in it) is numbered 0 on the referencing side
+ * and numbered again). Two rules keep it so, each decided from the store, never from what the numbering found before (a
+ * swap, a compaction or a timer can leave that behind):
+ * - A NUMBER IS OF ITS DICTIONARY, NAMED IN ITS COLUMN. A dictionary belongs to a key's table, columns and types
+ *   (`dictionaryOf`), and a hidden column's name begins with its dictionary's (`NUMBER_RE`). A type changed at the source
+ *   gives another dictionary and other hidden columns. A dictionary is dropped only once no column of the store holds
+ *   its numbers (`ensure`), so it is never made again under numbers it gave. A row is numbered only where its key's
+ *   columns and the dictionary are of the types their families give (`fits`): no cast can fail, or match two values.
+ * - A WRITE THAT CHANGES A KEY UNNUMBERS ITS ROW, in its own statement: an insert writes no number, and an update in
+ *   place sets each hidden key the table holds now whose columns it sets to NULL (`unnumberedSet`).
+ * A NULL key (or a key of several columns with a NULL in it) is numbered 0 on the referencing side
  * and -1 on the referenced side, so it matches nothing, as `=` matches nothing there. That differs from `=` only in
  * telling FALSE from NULL, so the rewrite joins on the numbers only where a comparison's FALSE and NULL do the same: a
  * conjunct of a JOIN's ON or of a WHERE.
@@ -40,9 +49,10 @@ import type { DuckConnection } from "./executor.ts";
 import { hiddenColumns } from "./hidden-columns.ts";
 
 /** the hidden column's name prefix, and its pattern: what tells its kind among the columns a copy's record does not
- *  name (src/duck/hidden-columns.ts), never alone whether a column is hidden */
+ *  name (src/duck/hidden-columns.ts), never alone whether a column is hidden. Its first part names the dictionary that
+ *  numbered it (`dictionaryOfColumn`), so the store alone says which dictionary a column's numbers are of */
 export const NUMBER_PREFIX = "__mason_ref_";
-export const NUMBER_RE = /^__mason_ref_[0-9a-f]{12}$/;
+export const NUMBER_RE = /^__mason_ref_([0-9a-f]{12})_[0-9a-f]{12}$/;
 /** the schema of Mason's own tables (src/duck/store.ts MASON_SCHEMA), spelled here so this module needs no store */
 const OWN_SCHEMA = "_mason";
 /** a dictionary's table name prefix, in `_mason` */
@@ -74,14 +84,21 @@ export function keyFamily(type: string): Family | null {
   return f === undefined ? null : f as Family;
 }
 
-/** a hidden column's name, hashed from what it numbers, and hashed again with a count where the table (`columns`, the
- *  source's column names) holds a column of that name itself — as src/duck/scale-column.ts `scaleColumn` */
-function hiddenName(what: string, columns: readonly string[]): string {
+/** a hidden column's name: its dictionary's hash (the part of `dictionary` after `DICTIONARY_PREFIX`), then a hash of
+ *  what it numbers, hashed again with a count where the table (`columns`, the source's column names) holds a column of
+ *  that name itself — as src/duck/scale-column.ts `scaleColumn` */
+function hiddenName(dictionary: string, what: string, columns: readonly string[]): string {
   const taken = new Set(columns.map((c) => c.toLowerCase()));
   for (let n = 0; ; n++) {
-    const name = `${NUMBER_PREFIX}${createHash("sha256").update(n === 0 ? what : `${what}\u0000${n}`).digest("hex").slice(0, 12)}`;
+    const name = `${NUMBER_PREFIX}${dictionary.slice(DICTIONARY_PREFIX.length)}_${createHash("sha256").update(n === 0 ? what : `${what}\u0000${n}`).digest("hex").slice(0, 12)}`;
     if (!taken.has(name.toLowerCase())) return name;
   }
+}
+
+/** the dictionary a hidden column's numbers are of (its name's first part), or null for a name not of one */
+export function dictionaryOfColumn(name: string): string | null {
+  const m = NUMBER_RE.exec(name);
+  return m === null ? null : `${DICTIONARY_PREFIX}${m[1]}`;
 }
 
 /** a referenced key: its table (`schema.table`) and its columns */
@@ -126,9 +143,11 @@ export interface NumberedLookup {
  *  nondeterministic one, whose `=` does not, is refused wherever a statement names it (src/duck/collation.ts) */
 export const NUMBERED_EQUALITY = new Set([2972, 98, 94, 96, 410, 532, 533, 15, 416, 1862, 1868]);
 
-/** the dictionary of a referenced key: one per key, shared by every reference to it */
-export function dictionaryOf(to: KeyOf): string {
-  return `${DICTIONARY_PREFIX}${createHash("sha256").update(`${to.source}\u0000${to.columns.join("\u0000")}`).digest("hex").slice(0, 12)}`;
+/** the dictionary of a referenced key of these families: one per key and type, shared by every reference to it. A type
+ *  changed at the source gives another dictionary, and so other hidden columns: a number is never read against a
+ *  dictionary of other values */
+export function dictionaryOf(to: KeyOf, families: readonly Family[]): string {
+  return `${DICTIONARY_PREFIX}${createHash("sha256").update(`${to.source}\u0000${to.columns.join("\u0000")}\u0000\u0000${families.join("\u0000")}`).digest("hex").slice(0, 12)}`;
 }
 
 /** the table a reference is drawn over, as the sync holds it: its source columns and their types, and its foreign keys */
@@ -163,10 +182,11 @@ export function numberable(tables: readonly ReferencingTable[]): Array<NumberedR
       seen.add(id);
       const to: KeyOf = { source: p.source, schema: p.schema, table: p.table, columns: [...r.targetColumns] };
       const from: KeyOf = { source: t.source, schema: t.schema, table: t.table, columns: [...r.columns] };
+      const dictionary = dictionaryOf(to, families as Family[]);
       out.push({
-        to: { ...to, hidden: hiddenName(`to\u0000${to.source}\u0000${to.columns.join("\u0000")}`, p.columns.map((c) => c.name)) },
-        from: { ...from, hidden: hiddenName(`from\u0000${to.source}\u0000${to.columns.join("\u0000")}\u0000${from.source}\u0000${from.columns.join("\u0000")}`, t.columns.map((c) => c.name)) },
-        dictionary: dictionaryOf(to),
+        to: { ...to, hidden: hiddenName(dictionary, `to\u0000${to.source}\u0000${to.columns.join("\u0000")}`, p.columns.map((c) => c.name)) },
+        from: { ...from, hidden: hiddenName(dictionary, `from\u0000${to.source}\u0000${to.columns.join("\u0000")}\u0000${from.source}\u0000${from.columns.join("\u0000")}`, t.columns.map((c) => c.name)) },
+        dictionary,
         families: families as Family[],
         integerKey: families.length === 1 && families[0] === "integer",
       });
@@ -197,6 +217,31 @@ export function dictionaryDdl(r: Pick<NumberedReference, "dictionary" | "familie
   return `CREATE TABLE IF NOT EXISTS ${dictionarySql(r.dictionary)} (${r.families.map((f, i) => `${keyCol(i)} ${FAMILY_TYPE[f]}`).join(", ")}, num BIGINT NOT NULL)`;
 }
 
+/** the engine types a family's key column may have in a copy: each compared with its dictionary's column with no cast
+ *  that can fail (an integer widened to the dictionary's BIGINT) */
+const ENGINE_TYPES: Record<Family, readonly string[]> = { uuid: ["UUID"], text: ["VARCHAR"], integer: ["TINYINT", "SMALLINT", "INTEGER", "BIGINT"] };
+
+/** a table's columns as the engine holds them now (`table` as SQL names it), each with its type, read on `c`: in the
+ *  caller's transaction when it has one, so what the store holds there, never what an earlier read found */
+export async function engineColumns(c: DuckConnection, table: string): Promise<Map<string, string>> {
+  const r = await c.runAndReadAll(`SELECT * FROM ${table} LIMIT 0`);
+  return new Map(r.columnNames.map((n, i) => [n, r.columnType(i).toString()]));
+}
+
+/** whether the store holds `r`'s dictionary, of the types its families give, read on `c` */
+async function dictionaryThere(c: DuckConnection, r: Pick<NumberedReference, "dictionary" | "families">): Promise<boolean> {
+  const types = (await c.runAndReadAll(`SELECT data_type FROM duckdb_columns() WHERE database_name = current_database() AND schema_name = '${OWN_SCHEMA}' ` +
+    `AND table_name = '${r.dictionary}' ORDER BY column_index`)).getRowsJS().map((x) => String(x[0]));
+  const want = [...r.families.map((f) => FAMILY_TYPE[f]), "BIGINT"];
+  return types.length === want.length && types.every((x, i) => x === want[i]);
+}
+
+/** whether a table whose columns are `columns` (`engineColumns`) can have `side`'s numbers written: its hidden column
+ *  there, and each key column of the type its family gives */
+function fits(r: Pick<NumberedReference, "families">, side: Pick<Side, "columns" | "hidden">, columns: ReadonlyMap<string, string>): boolean {
+  return columns.has(side.hidden) && side.columns.every((c, i) => ENGINE_TYPES[r.families[i]!].includes(columns.get(c) ?? ""));
+}
+
 /** one side's key columns, the hidden column holding their number, and a NULL key's number */
 export interface Side { schema: string; table: string; source: string; columns: readonly string[]; hidden: string; nullNumber: number }
 /** a reference's two sides: the referenced one first */
@@ -205,43 +250,55 @@ export const sidesOf = (r: NumberedReference): [Side, Side] => [
   { ...r.from, nullNumber: REFERENCING_NULL },
 ];
 
-/** the temp table a fill reads one table's unnumbered rows into */
+/** the temp table a fill reads the keys of one table's unnumbered rows into */
 const UNNUMBERED_TEMP = "__mason_unnumbered";
 
 /**
  * NUMBERS A TABLE'S UNNUMBERED ROWS FOR ONE SIDE, in the caller's transaction, ON THE WRITER — the only connection that
- * gives a value a number, so the dictionary never holds one value twice: the rows' keys new to the dictionary given the
- * next numbers, then every unnumbered row its key's number (a NULL key its side's NULL number). `within` narrows the rows
- * (` AND rowid >= …`). Answers the rows numbered.
+ * gives a value a number, so the dictionary never holds one value twice: the distinct keys of its unnumbered rows read,
+ * those new to the dictionary given the next numbers, then every unnumbered row its key's number, joined on the key's
+ * own columns (a NULL key its side's NULL number). `range` narrows the rows to row ids [lo, hi). Answers the rows
+ * numbered. Never a join on the row id: the engine's join filter on a row id read past the scan's vector (measured:
+ * DuckDB 2.0.0 crashed the process in 1 run of 4 of a stream's batch, heap corruption)
  */
-export async function numberRows(w: DuckConnection, r: NumberedReference, side: Side, within = ""): Promise<number> {
+export async function numberRows(w: DuckConnection, r: NumberedReference, side: Side, range?: readonly [number, number]): Promise<number> {
   const table = tableSql(side.schema, side.table);
-  const keys = side.columns.map((c, i) => `${ident(c)} AS ${keyCol(i)}`).join(", ");
-  const n = Number((await w.run(`CREATE OR REPLACE TEMP TABLE ${UNNUMBERED_TEMP} AS SELECT rowid AS r, ${keys} FROM ${table} WHERE ${ident(side.hidden)} IS NULL${within}`)).rowsChanged);
+  const within = range === undefined ? "" : ` AND t.rowid >= ${range[0]} AND t.rowid < ${range[1]}`;
+  const unnumbered = `t.${ident(side.hidden)} IS NULL${within}`;
+  const present = side.columns.map((c) => `t.${ident(c)} IS NOT NULL`).join(" AND ");
+  // the distinct keys of its unnumbered rows, none NULL
+  const keys = side.columns.map((c, i) => `t.${ident(c)} AS ${keyCol(i)}`).join(", ");
+  const n = Number((await w.run(`CREATE OR REPLACE TEMP TABLE ${UNNUMBERED_TEMP} AS SELECT DISTINCT ${keys} FROM ${table} AS t WHERE ${unnumbered} AND ${present}`)).rowsChanged);
+  let numbered = 0;
   if (n > 0) {
-    const all = side.columns.map((_, i) => `u.${keyCol(i)} IS NOT NULL`).join(" AND ");
     const on = side.columns.map((_, i) => `d.${keyCol(i)} = u.${keyCol(i)}`).join(" AND ");
     const list = side.columns.map((_, i) => keyCol(i)).join(", ");
     const d = dictionarySql(r.dictionary);
     // its values new to the dictionary, numbered after its last
     await w.run(`INSERT INTO ${d} SELECT ${list}, (SELECT coalesce(max(num), 0) FROM ${d}) + row_number() OVER () FROM ` +
-      `(SELECT DISTINCT ${side.columns.map((_, i) => `u.${keyCol(i)}`).join(", ")} FROM ${UNNUMBERED_TEMP} u WHERE ${all} AND NOT EXISTS (SELECT 1 FROM ${d} d WHERE ${on})) AS u`);
-    await w.run(`UPDATE ${table} AS t SET ${ident(side.hidden)} = s.num FROM (SELECT u.r, CASE WHEN ${all} THEN d.num ELSE ${side.nullNumber} END AS num ` +
-      `FROM ${UNNUMBERED_TEMP} u LEFT JOIN ${d} d ON ${on}) AS s WHERE t.rowid = s.r`);
+      `(SELECT ${side.columns.map((_, i) => `u.${keyCol(i)}`).join(", ")} FROM ${UNNUMBERED_TEMP} u WHERE NOT EXISTS (SELECT 1 FROM ${d} d WHERE ${on})) AS u`);
+    // each row its key's number: the keys and numbers of the batch (its own key's values, so its own types) the small side
+    const match = side.columns.map((c, i) => `t.${ident(c)} = n.${keyCol(i)}`).join(" AND ");
+    numbered += Number((await w.run(`UPDATE ${table} AS t SET ${ident(side.hidden)} = n.num FROM (SELECT ${side.columns.map((_, i) => `u.${keyCol(i)}`).join(", ")}, d.num ` +
+      `FROM ${UNNUMBERED_TEMP} u JOIN ${d} d ON ${on}) AS n WHERE ${unnumbered} AND ${match}`)).rowsChanged);
   }
   await w.run(`DROP TABLE ${UNNUMBERED_TEMP}`);
-  return n;
+  // a NULL key (any of its columns NULL): its side's NULL number
+  numbered += Number((await w.run(`UPDATE ${table} AS t SET ${ident(side.hidden)} = ${side.nullNumber} WHERE ${unnumbered} AND NOT (${present})`)).rowsChanged);
+  return numbered;
 }
 
 /**
  * A SIDE TABLE'S NUMBERS, BEFORE ITS SWAP, on the rebuilds' connection (`table` the side table): the hidden column added,
  * and every row whose key the dictionary has numbered, a chunk at a time — the dictionary only READ here, never given a
  * value (the writer alone gives numbers). A key new to it is left unnumbered, numbered on the writer's turn after the
- * swap (`ReferenceNumbers.fill`). `run` is the sync's interruptible statement; `dictionary` false: none made yet.
+ * swap (`ReferenceNumbers.fill`). `run` is the sync's interruptible statement. Numbered only where the store holds the
+ * dictionary and the side table's key columns are of its types (`fits`): else every row is left unnumbered, and a join
+ * on it reads the keys. Answers whether its rows were numbered.
  */
-export async function numberSideTable(c: DuckConnection, r: NumberedReference, side: Side, table: string, dictionary: boolean, run: (sql: string) => Promise<number>): Promise<void> {
+export async function numberSideTable(c: DuckConnection, r: NumberedReference, side: Side, table: string, run: (sql: string) => Promise<number>): Promise<boolean> {
   await c.run(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${ident(side.hidden)} BIGINT`);
-  if (!dictionary) return;
+  if (!fits(r, side, await engineColumns(c, table)) || !await dictionaryThere(c, r)) return false;
   const end = Number((await c.runAndReadAll(`SELECT coalesce(max(rowid), -1) + 1 FROM ${table}`)).getRowsJS()[0]![0]);
   const all = side.columns.map((col) => `t.${ident(col)} IS NOT NULL`).join(" AND ");
   const on = side.columns.map((col, i) => `d.${keyCol(i)} = t.${ident(col)}`).join(" AND ");
@@ -250,6 +307,7 @@ export async function numberSideTable(c: DuckConnection, r: NumberedReference, s
     await run(`UPDATE ${table} AS t SET ${ident(side.hidden)} = d.num FROM ${dictionarySql(r.dictionary)} d WHERE ${within} AND ${on}`);
     await run(`UPDATE ${table} AS t SET ${ident(side.hidden)} = ${side.nullNumber} WHERE ${within} AND NOT (${all})`);
   }
+  return true;
 }
 
 /**
@@ -271,6 +329,8 @@ export interface NumberingHost {
   /** the source columns its copy records (src/duck/hidden-columns.ts), or undefined while it is not served */
   recorded(source: string): readonly string[] | undefined;
   log(line: string): void;
+  /** an error as a log line may say it (src/duck/sync.ts `errorText`) */
+  errorText(e: unknown): string;
 }
 
 /**
@@ -284,10 +344,11 @@ export class ReferenceNumbers {
   private candidates: Array<NumberedReference & { integerKey: boolean }> = [];
   /** an integer key's decision, by its dictionary: numbered (sparse) or not (dense), once its table has rows */
   private readonly sparse = new Map<string, boolean>();
-  /** each served table's hidden number columns, as the last `ensure` found them; a table swapped since is forgotten */
+  /** each served table's hidden number columns, as the last `ensure` found them; a table swapped since is forgotten.
+   *  What the schema offers the rewrite (`published`), never what decides a write: a write reads the store */
   private readonly present = new Map<string, Set<string>>();
-  /** the dictionaries made */
-  private readonly made = new Set<string>();
+  /** the dictionaries the store held at the last `ensure`, for `published` alone, as `present` */
+  private readonly dictionaries = new Set<string>();
   /** the tables written since their rows were last numbered (`fill`) */
   private readonly dirty = new Set<string>();
   /** each numbered reference said once a run, when its hidden keys are first whole */
@@ -325,8 +386,11 @@ export class ReferenceNumbers {
   /**
    * ON THE WRITER'S TURN: an integer key's sparseness read once its table has rows, every dictionary made, every served
    * table given the hidden columns it lacks (with no default: its NULL is "not numbered", and an ADD COLUMN writes no row)
-   * and its hidden number columns that no reference numbers now dropped, with the dictionaries none uses. Never a table
-   * being rebuilt. Answers whether a hidden column was added or dropped (the catalog's schema is built again).
+   * and its hidden number columns that no reference numbers now dropped. Never a table being rebuilt. A dictionary no
+   * reference numbers now is dropped once no table of the store holds a column of its numbers (`dictionaryOfColumn`): a
+   * busy table's, a side table's. So a dictionary is never dropped and made again under numbers it gave, and a number
+   * always reads against the dictionary that gave it. Answers whether a hidden column was added or dropped (the
+   * catalog's schema is built again).
    */
   async ensure(w: DuckConnection): Promise<boolean> {
     for (const r of this.candidates) {
@@ -339,7 +403,7 @@ export class ReferenceNumbers {
     }
     const wanted = this.wanted();
     let changed = false;
-    // every served table's columns as the engine holds them, its hidden number columns among them
+    // every table's columns as the engine holds them, its hidden number columns among them
     const physical = new Map<string, string[]>();
     for (const [table, column] of (await w.runAndReadAll(`SELECT schema_name || '.' || table_name, column_name FROM duckdb_columns() WHERE database_name = current_database() ` +
       `AND schema_name <> '${OWN_SCHEMA}' ORDER BY table_oid, column_index`)).getRowsJS() as Array<[string, string]>) {
@@ -347,18 +411,20 @@ export class ReferenceNumbers {
       cols.push(column);
       physical.set(table, cols);
     }
-    for (const r of wanted) {
-      if (this.made.has(r.dictionary)) continue;
-      await w.run(dictionaryDdl(r));
-      this.made.add(r.dictionary);
-    }
+    for (const r of wanted) await w.run(dictionaryDdl(r));
+    // the dictionaries whose numbers a column of the store still holds, as it is after the drops below
+    const named = new Set<string>();
     this.present.clear();
     for (const [source, cols] of physical) {
       const recorded = this.host.recorded(source);
-      if (recorded === undefined) continue;
+      // a table not served (a side table, a table being added): every column of a hidden key's name keeps its dictionary
+      if (recorded === undefined) {
+        for (const c of cols) { const d = dictionaryOfColumn(c); if (d !== null) named.add(d); }
+        continue;
+      }
       // a column is hidden only where the copy's record does not name it (src/duck/hidden-columns.ts, issue 998)
       const here = new Set(hiddenColumns(cols, recorded).filter((h) => h.kind === "number").map((h) => h.name));
-      const want = this.sidesIn(source).filter((s) => this.made.has(s.r.dictionary)).map((s) => s.side.hidden);
+      const want = this.sidesIn(source).map((s) => s.side.hidden);
       if (!this.host.busy(source)) {
         const target = tableSql(source.slice(0, source.indexOf(".")), source.slice(source.indexOf(".") + 1));
         for (const h of [...here].filter((x) => !want.includes(x))) {
@@ -374,30 +440,41 @@ export class ReferenceNumbers {
           this.dirty.add(source);
         }
       }
+      for (const h of here) { const d = dictionaryOfColumn(h); if (d !== null) named.add(d); }
       this.present.set(source, here);
     }
-    // the dictionaries no reference numbers now
+    // the dictionaries no reference numbers now, and no column holds numbers of
+    this.dictionaries.clear();
     for (const [name] of (await w.runAndReadAll(`SELECT table_name FROM duckdb_tables() WHERE database_name = current_database() AND schema_name = '${OWN_SCHEMA}' AND starts_with(table_name, '${DICTIONARY_PREFIX}')`)).getRowsJS() as Array<[string]>) {
-      if (wanted.some((r) => r.dictionary === name)) continue;
+      if (wanted.some((r) => r.dictionary === name) || named.has(name)) { this.dictionaries.add(name); continue; }
       await w.run(`DROP TABLE ${dictionarySql(name)}`);
-      this.made.delete(name);
     }
     return changed;
   }
 
-  /** the references both of whose hidden columns are there, which the schema offers the rewrite */
+  /** the references both of whose hidden columns are there, and their dictionary, as the last `ensure` found them: which
+   *  the schema offers the rewrite. A statement that joins on them checks the store first (`unnumberedSql`) */
   published(): NumberedReference[] {
-    return this.wanted().filter((r) => this.present.get(r.from.source)?.has(r.from.hidden) === true && this.present.get(r.to.source)?.has(r.to.hidden) === true);
+    return this.wanted().filter((r) => this.dictionaries.has(r.dictionary) && this.present.get(r.from.source)?.has(r.from.hidden) === true && this.present.get(r.to.source)?.has(r.to.hidden) === true);
   }
 
   /** whether a fill has rows to number */
   due(): boolean { return this.dirty.size > 0; }
 
-  /** the sides of `source` that can be numbered now: its hidden column there, its dictionary made, the table not busy */
-  private ready(source: string): Array<{ r: NumberedReference; side: Side }> {
+  /**
+   * THE SIDES OF `source` WHOSE ROWS CAN BE NUMBERED NOW, decided from the store on `w`, in the caller's transaction: the
+   * table not busy, its hidden column there, its key columns of the types their families give, and the dictionary there
+   * of those types (`fits`, `dictionaryThere`). Never from what an earlier `ensure` found, which a swap or a compaction
+   * since can have made wrong.
+   */
+  private async writable(w: DuckConnection, source: string): Promise<Array<{ r: NumberedReference; side: Side }>> {
     if (this.host.busy(source) || this.host.recorded(source) === undefined) return [];
-    const here = this.present.get(source);
-    return this.sidesIn(source).filter((s) => here?.has(s.side.hidden) === true && this.made.has(s.r.dictionary));
+    const sides = this.sidesIn(source);
+    if (sides.length === 0) return [];
+    const columns = await engineColumns(w, tableSql(sides[0]!.side.schema, sides[0]!.side.table));
+    const out: Array<{ r: NumberedReference; side: Side }> = [];
+    for (const s of sides) if (fits(s.r, s.side, columns) && await dictionaryThere(w, s.r)) out.push(s);
+    return out;
   }
 
   /**
@@ -406,17 +483,23 @@ export class ReferenceNumbers {
    */
   async fillIn(w: DuckConnection, source: string): Promise<number> {
     let n = 0;
-    for (const { r, side } of this.ready(source)) n += await numberRows(w, r, side);
+    for (const { r, side } of await this.writable(w, source)) n += await numberRows(w, r, side);
     return n;
   }
 
   /**
-   * AN UPDATE IN PLACE THAT SETS `set` (src/duck/sync.ts `updateCarried`): each hidden key of `source` whose columns it
-   * sets made unnumbered, as assignments of its UPDATE, so the write's `fillIn` numbers it again by its new key
+   * AN UPDATE IN PLACE OF `target` THAT SETS `set` (src/duck/sync.ts `updateCarried`), `own` its source columns: each
+   * hidden key the table holds whose key columns it sets made unnumbered, as assignments of its UPDATE, so the write's
+   * `fillIn` numbers it again by its new key. Decided from the store on `w`, in the write's own transaction: the hidden
+   * columns the table holds now, whatever an earlier `ensure` found. One whose key columns this Mason does not know (no
+   * reference numbers it now) is made unnumbered by every such write.
    */
-  unnumberedSet(source: string, set: readonly string[]): string[] {
-    const here = this.present.get(source);
-    return this.sidesIn(source).filter((s) => here?.has(s.side.hidden) === true && s.side.columns.some((c) => set.includes(c))).map((s) => `${ident(s.side.hidden)} = NULL`);
+  async unnumberedSet(w: DuckConnection, source: string, target: string, own: readonly string[], set: readonly string[]): Promise<string[]> {
+    if (set.length === 0) return [];
+    const held = hiddenColumns([...(await engineColumns(w, target)).keys()], own).filter((h) => h.kind === "number");
+    if (held.length === 0) return [];
+    const known = new Map(this.sidesIn(source).map((s) => [s.side.hidden, s.side.columns]));
+    return held.filter((h) => known.get(h.name)?.some((c) => set.includes(c)) ?? true).map((h) => `${ident(h.name)} = NULL`);
   }
 
   /**
@@ -427,16 +510,16 @@ export class ReferenceNumbers {
     let left = false, numbered = 0;
     for (const source of [...this.dirty]) {
       if (this.host.recorded(source) === undefined) { this.dirty.delete(source); continue; }
-      if (this.host.busy(source) || !this.present.has(source)) { left = true; continue; }
+      if (this.host.busy(source)) { left = true; continue; }
       let more = false;
       await w.run("BEGIN TRANSACTION");
       try {
-        for (const { r, side } of this.ready(source)) {
+        for (const { r, side } of await this.writable(w, source)) {
           const table = tableSql(side.schema, side.table);
           const from = (await w.runAndReadAll(`SELECT min(rowid) FROM ${table} WHERE ${ident(side.hidden)} IS NULL`)).getRowsJS()[0]![0];
           if (from === null || from === undefined) continue;
           const lo = Number(from);
-          numbered += await numberRows(w, r, side, ` AND rowid >= ${lo} AND rowid < ${lo + FILL_CHUNK_ROWS}`);
+          numbered += await numberRows(w, r, side, [lo, lo + FILL_CHUNK_ROWS]);
           if ((await w.runAndReadAll(`SELECT EXISTS (SELECT 1 FROM ${table} WHERE ${ident(side.hidden)} IS NULL)`)).getRowsJS()[0]![0] === true) more = true;
         }
         await w.run("COMMIT");
@@ -457,11 +540,23 @@ export class ReferenceNumbers {
 
   /**
    * A SIDE TABLE'S NUMBERS, BEFORE ITS SWAP, on the rebuilds' connection (src/duck/sync.ts `copy`): every hidden number
-   * column its table holds for a reference numbered now, added and filled from the dictionaries as they are
-   * (`numberSideTable`). `run` is the sync's interruptible statement.
+   * column its table holds for a reference numbered now, added and filled from the dictionaries as the store holds them
+   * (`numberSideTable`). A side whose key columns or dictionary are not of its types is left unnumbered. Its numbering
+   * never fails the sync: a failure (`stopping` aside, the sync's stop) drops the side's hidden column, so no number it
+   * wrote outlives it, and the writer adds it again after the swap. `run` is the sync's interruptible statement.
    */
-  async fillSide(c: DuckConnection, source: string, side: string, run: (sql: string) => Promise<number>): Promise<void> {
+  async fillSide(c: DuckConnection, source: string, side: string, run: (sql: string) => Promise<number>, stopping: (e: unknown) => boolean): Promise<void> {
     // (`side` is the side table as SQL names it, src/duck/sync.ts `copy`)
-    for (const { r, side: s } of this.sidesIn(source)) await numberSideTable(c, r, s, side, this.made.has(r.dictionary), run);
+    for (const { r, side: s } of this.sidesIn(source)) {
+      try {
+        if (!await numberSideTable(c, r, s, side, run)) this.host.log(`${source}: its hidden key ${s.hidden} is left unnumbered at its sync: its dictionary is not made yet, or its key's columns are not of its types`);
+      } catch (e) {
+        if (stopping(e)) throw e;
+        // tolerable: a join on it reads the keys until the writer numbers it after the swap. The column goes, with what
+        // it holds, and a failure of that fails the sync as before
+        await c.run(`ALTER TABLE ${side} DROP COLUMN IF EXISTS ${ident(s.hidden)}`);
+        this.host.log(`${source}: its hidden key ${s.hidden} could not be numbered at its sync, and is numbered after the swap: ${this.host.errorText(e)}`);
+      }
+    }
   }
 }

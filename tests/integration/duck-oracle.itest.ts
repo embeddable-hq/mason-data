@@ -369,15 +369,20 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   // every reference numbered, its rows too, before a statement is asked: the joins on them are held to Postgres on the
   // numbers (a row not numbered would run them on the keys)
   await fixedClock.time("references numbered", async () => {
+    // read on a connection of its own: the sync numbers on the writer meanwhile, and one connection never runs two
+    // statements at once
+    const reader = await store!.instance.connect();
     const unnumbered = async (): Promise<number> => {
-      const cols = (await store!.writer.runAndReadAll("SELECT table_name, column_name FROM duckdb_columns() WHERE schema_name = 'public' AND table_name IN ('rparent', 'rchild') AND starts_with(column_name, '__mason_ref_')")).getRowsJS();
+      const cols = (await reader.runAndReadAll("SELECT table_name, column_name FROM duckdb_columns() WHERE schema_name = 'public' AND table_name IN ('rparent', 'rchild') AND starts_with(column_name, '__mason_ref_')")).getRowsJS();
       let n = cols.length === 0 ? 1 : 0;
-      for (const [t, c] of cols) n += Number((await store!.writer.runAndReadAll(`SELECT count(*) FROM public."${String(t)}" WHERE "${String(c)}" IS NULL`)).getRowsJS()[0]![0]);
+      for (const [t, c] of cols) n += Number((await reader.runAndReadAll(`SELECT count(*) FROM public."${String(t)}" WHERE "${String(c)}" IS NULL`)).getRowsJS()[0]![0]);
       return n;
     };
-    for (const end = Date.now() + 60_000; (sync!.schema().references ?? []).length < 4 || await unnumbered() > 0; await new Promise((r) => setTimeout(r, 50))) {
-      if (Date.now() > end) assert.fail(`the oracle's references were not numbered in 60 s: ${JSON.stringify(sync!.schema().references ?? [])}\n${log.slice(-10).join("\n")}`);
-    }
+    try {
+      for (const end = Date.now() + 60_000; (sync!.schema().references ?? []).length < 4 || await unnumbered() > 0; await new Promise((r) => setTimeout(r, 50))) {
+        if (Date.now() > end) assert.fail(`the oracle's references were not numbered in 60 s: ${JSON.stringify(sync!.schema().references ?? [])}\n${log.slice(-10).join("\n")}`);
+      }
+    } finally { reader.closeSync(); }
   });
   // THE ORACLE RUNS AS A USER'S INSTALL DOES, with the copy's extensions from this platform's package (src/duck/extensions.ts):
   // autoinstall off and both files the package's, so every statement it holds equal is answered with nothing

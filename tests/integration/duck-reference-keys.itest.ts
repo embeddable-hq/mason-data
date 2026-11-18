@@ -154,23 +154,32 @@ async function numbered(sync: Sync, logged: readonly string[]): Promise<void> {
   assert.fail(`the references were not numbered in 30 s: ${JSON.stringify(sync.schema().references)}\n${logged.slice(-10).join("\n")}`);
 }
 
+/** `f` on a connection of the test's own, which sees what is committed: never the sync's writer, which the sync uses
+ *  meanwhile (one connection never runs two statements at once) */
+async function own<T>(store: DuckStore, f: (c: Awaited<ReturnType<DuckStore["instance"]["connect"]>>) => Promise<T>): Promise<T> {
+  const c = await store.instance.connect();
+  try { return await f(c); } finally { c.closeSync(); }
+}
+
 /** every row of each hidden column of `table` numbered (none NULL) */
 async function unnumbered(store: DuckStore, table: string): Promise<number> {
-  const cols = (await store.writer.runAndReadAll(`SELECT column_name FROM duckdb_columns() WHERE schema_name = 'public' AND table_name = '${table}' AND starts_with(column_name, '__mason_ref_')`)).getRowsJS().map((r) => String(r[0]));
-  let n = 0;
-  for (const c of cols) n += Number((await store.writer.runAndReadAll(`SELECT count(*) FROM public.${table} WHERE "${c}" IS NULL`)).getRowsJS()[0]![0]);
-  return n;
+  return own(store, async (w) => {
+    const cols = (await w.runAndReadAll(`SELECT column_name FROM duckdb_columns() WHERE schema_name = 'public' AND table_name = '${table}' AND starts_with(column_name, '__mason_ref_')`)).getRowsJS().map((r) => String(r[0]));
+    let n = 0;
+    for (const c of cols) n += Number((await w.runAndReadAll(`SELECT count(*) FROM public.${table} WHERE "${c}" IS NULL`)).getRowsJS()[0]![0]);
+    return n;
+  });
 }
 
 /** a table with a reference and a timestamptz (`pings`): both its hidden columns there, each told apart by its kind
  *  (src/duck/hidden-columns.ts), and every row's bucket the one its value has (its key's number: `unnumbered`) */
 async function bothHidden(store: DuckStore, when: string): Promise<void> {
-  const own = ["id", "device_id", "ms", "seen_at"];
-  const physical = (await store.writer.runAndReadAll(`SELECT column_name FROM duckdb_columns() WHERE schema_name = 'public' AND table_name = 'pings' ORDER BY column_index`)).getRowsJS().map((r) => String(r[0]));
-  const kinds = hiddenColumns(physical, own).map((h) => h.kind).sort();
-  assert.deepEqual(kinds, ["bucket", "number"], `pings holds a bucket and a number, ${when}: ${JSON.stringify(hiddenColumns(physical, own))}`);
-  const bucket = bucketColumn("seen_at", own);
-  const wrong = (await store.writer.runAndReadAll(`SELECT count(*) FROM public.pings WHERE "${bucket}" IS DISTINCT FROM ${bucketSql("seen_at")}`)).getRowsJS()[0]![0];
+  const source = ["id", "device_id", "ms", "seen_at"];
+  const physical = (await own(store, (w) => w.runAndReadAll(`SELECT column_name FROM duckdb_columns() WHERE schema_name = 'public' AND table_name = 'pings' ORDER BY column_index`))).getRowsJS().map((r) => String(r[0]));
+  const kinds = hiddenColumns(physical, source).map((h) => h.kind).sort();
+  assert.deepEqual(kinds, ["bucket", "number"], `pings holds a bucket and a number, ${when}: ${JSON.stringify(hiddenColumns(physical, source))}`);
+  const bucket = bucketColumn("seen_at", source);
+  const wrong = (await own(store, (w) => w.runAndReadAll(`SELECT count(*) FROM public.pings WHERE "${bucket}" IS DISTINCT FROM ${bucketSql("seen_at")}`))).getRowsJS()[0]![0];
   assert.equal(wrong, 0n, `every row of pings has its value's bucket, ${when}`);
 }
 
@@ -232,10 +241,10 @@ test("a join on each declared reference answers as Postgres does through the fir
       await sameAnswers(s.api, s.url, s.logged, `after the poll's writes ${i + 1}`);
     }
     // a dense serial's reference gets no hidden key
-    assert.deepEqual((await s.store.writer.runAndReadAll(`SELECT count(*) FROM duckdb_columns() WHERE table_name IN ('stores', 'sales') AND starts_with(column_name, '__mason_ref_')`)).getRowsJS(), [[0n]]);
+    assert.deepEqual((await own(s.store, (w) => w.runAndReadAll(`SELECT count(*) FROM duckdb_columns() WHERE table_name IN ('stores', 'sales') AND starts_with(column_name, '__mason_ref_')`))).getRowsJS(), [[0n]]);
     // a row not numbered yet (as a catch-up leaves one, before the writer's turn): the statement reads the keys
-    const hidden = String((await s.store.writer.runAndReadAll(`SELECT column_name FROM duckdb_columns() WHERE table_name = 'orders' AND starts_with(column_name, '__mason_ref_')`)).getRowsJS()[0]![0]);
-    await s.store.writer.run(`UPDATE public.orders SET "${hidden}" = NULL WHERE id = 10`);
+    const hidden = String((await own(s.store, (w) => w.runAndReadAll(`SELECT column_name FROM duckdb_columns() WHERE table_name = 'orders' AND starts_with(column_name, '__mason_ref_')`))).getRowsJS()[0]![0]);
+    await own(s.store, (w) => w.run(`UPDATE public.orders SET "${hidden}" = NULL WHERE id = 10`));
     const first = JOINS[0]!;
     const before = s.logged.length;
     assert.equal(await s.api.ask(first), psql(s.url, first), "a row not numbered: the keys' answer");

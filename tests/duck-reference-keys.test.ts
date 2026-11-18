@@ -27,9 +27,9 @@ let store: DuckStore;
 let api: PgApiServer;
 const logged: string[] = [];
 
-// the hidden columns, as the sync names them (`__mason_ref_` and 12 hex digits)
-const H = { customer: "__mason_ref_00000000000a", order: "__mason_ref_00000000000b", seat: "__mason_ref_00000000000c", booking: "__mason_ref_00000000000d",
-  staff: "__mason_ref_00000000000e", boss: "__mason_ref_00000000000f" };
+// the hidden columns, as the sync names them (`__mason_ref_`, the dictionary's 12 hex digits, `_` and 12 more)
+const H = { customer: "__mason_ref_00000000000a_00000000000a", order: "__mason_ref_00000000000a_00000000000b", seat: "__mason_ref_00000000000c_00000000000c",
+  booking: "__mason_ref_00000000000c_00000000000d", staff: "__mason_ref_00000000000e_00000000000e", boss: "__mason_ref_00000000000e_00000000000f" };
 const uuid = (n: number): string => `00000000-0000-4000-8000-${n.toString(16).padStart(12, "0")}`;
 
 // customers: 8 of them, the id of 3 held twice, one with a NULL id; orders: of each, of a missing customer, of none
