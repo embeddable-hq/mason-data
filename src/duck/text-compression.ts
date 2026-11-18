@@ -29,13 +29,16 @@ export const DISTINCT_SAMPLE_BYTES = 16 * 2 ** 20;
  */
 export const DICTIONARY_VALUE_LIMIT = 16_384;
 /**
- * VALUES THIS LONG, ON AVERAGE, ARE DOCUMENTS (JSON, descriptions, free text), stored ZSTD unless they repeat. Measured
- * over a million rows of each (docs/DESIGN.md "Text compression by column"): below 64 bytes the dictionary is smaller
- * (a status 8.5 times, a name 3.4 times, an email 1.5 times); from 64 to 230 bytes of values that do not repeat ZSTD is
- * within 18 % either way (smaller for random words, larger for sentences) but reads them 1.5 to 3 times slower; at 700
- * bytes and over it is 24 % smaller.
+ * VALUES THIS LONG, ON AVERAGE, ARE STORED ZSTD UNLESS THEY REPEAT. Measured over a million rows of each
+ * (docs/DESIGN.md "Text compression by column"): below 64 bytes the dictionary is smaller (a status 8.5 times, a name
+ * 3.4 times, an email 1.5 times). From 64 bytes, of values that do not repeat, ZSTD was smaller in every shape but one:
+ * the cold benchmark's jsonb of 156 bytes took 65.5 MB under ZSTD against 102.3 MB with the dictionary over 2 M rows,
+ * and random words and JSON of 68 to 223 bytes 5 to 16 % less. Sentences of 175 bytes were 11 % larger. The dictionary
+ * filters such a column faster when it is cached (the jsonb: 67 ms against 92 ms), but a dashboard filters and groups on
+ * short codes, and a column's bytes are what a cold read pays for. At 256 bytes, the threshold first chosen, the
+ * benchmark's synced data grew 7.5 %.
  */
-export const LONG_TEXT_BYTES = 256;
+export const LONG_TEXT_BYTES = 64;
 /**
  * VALUES REPEAT when the sample's distinct values are at most this share of its values: the dictionary holds each once.
  * JSON documents of 700 bytes over a million rows, of 300 distinct, took 2.6 MB with the dictionary and 40.9 MB under

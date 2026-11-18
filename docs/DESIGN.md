@@ -4383,7 +4383,7 @@ read of the run's state.
 **Decision.** The instance still forces ZSTD (`force_compression`, src/duck/store.ts `INSTANCE_SETTINGS`), as the
 default. But when a table's copy is made, each text column (VARCHAR or JSON) is given its own method in the table's
 definition, `USING COMPRESSION`, which wins over the instance's (src/duck/text-compression.ts `textStorage`):
-- **the dictionary** (`dict_fsst`, the analyzer's own choice for text) when the sample's values average under 256 bytes,
+- **the dictionary** (`dict_fsst`, the analyzer's own choice for text) when the sample's values average under 64 bytes,
   or repeat (its distinct values at most an eighth of its values);
 - **ZSTD** for long values that do not repeat, and for a column whose text could reach 16 KiB. For a text, varchar or
   char, that is a sampled value of 16 KiB or more. For any other type (json, jsonb, citext, xml and the rest), the
@@ -4463,13 +4463,31 @@ Every answer was the same under both methods.
 | JSON (1,127 B), one of 45 KB in 100 | 1,451.0 Uncompressed | 312.2 | 193 / 201 | 92 / 255 | 138 / 305 |
 
 So the rule's thresholds. Below 64 bytes the dictionary is 1.2 to 8.5 times smaller, and as fast or faster except on hex
-ids. From 64 to about 230 bytes of values that do not repeat, ZSTD is within 18 % either way (smaller for random words,
-larger for sentences) but reads them 1.5 to 3 times slower warm: the dictionary, since a dashboard filters and groups on
-such columns warm. From 700 bytes ZSTD is 24 % smaller, and a document is rarely
-grouped on whole: ZSTD, so a large JSON column stays as small as before. Values that repeat are many times smaller in the
+ids. From 64 bytes, of values that do not repeat, ZSTD is smaller in every shape but one: 5 to 16 % for random words and
+small JSON, 24 % from 700 bytes, and 36 % for the cold benchmark's jsonb (below). Sentences of 175 bytes are the
+exception, 11 % larger. ZSTD reads such a column 1.5 to 3 times slower when it is cached. But a dashboard filters and
+groups on short codes, not on unique documents, and a cold read pays for a column's bytes. So from 64 bytes: ZSTD. Values that repeat are many times smaller in the
 dictionary at any length, until there are too many distinct values for a block's dictionary: 1,000 of 220 B or of 700 B
 still repeat, 3,000 of 700 B and 5,000 of 220 B no longer do. A sample of 10,000 rows sees 1,000 distinct at a tenth,
 3,000 at about three tenths, so the line is an eighth.
+
+**The cold benchmark's columns, and why the threshold is 64 bytes.** The rule first gave the dictionary to everything
+under 256 bytes. On the cold benchmark at 100 M orders (`scripts/bench-replica-cold.ts` `coldDataSql`), that made a
+count by status 4.03 s to 0.51 s, but the synced data grew from 8.29 to 8.91 GiB (+7.5 %). Its columns, measured at 2 M
+rows from the same SQL on a laptop, each column in a file of its own (MB, ZSTD against the dictionary; a warm filter
+the best of five):
+
+| Column (avg bytes, distinct) | MB ZSTD | MB dictionary | warm filter ms |
+|---|---|---|---|
+| `orders.status` (7 B, 6) | 12.5 | 1.3 | 5 / 1 |
+| `orders.note` (34 B, 4; 30 % non-null) | 12.8 | 1.3 | 8 / 2 |
+| `orders.payload` jsonb (156 B of text, 176 B stored, unique) | 65.5 | 102.3 | 92 / 67 |
+| `customers.name` (small at 2 M) | 0.8 | 0.8 | 1 / 1 |
+| `customers.email` (small at 2 M) | 0.8 | 1.0 | 1 / 1 |
+
+At 100 M rows the payload costs about 1.8 GB more with the dictionary, against about 1.1 GB the status and the note
+save. That is the box's +0.62 GiB. With the threshold at 64 bytes, the payload keeps ZSTD and the status and note keep
+the dictionary. The price is the payload's warm filter, 92 ms against 67 ms over 2 M rows.
 
 **What it costs a first sync.** Nothing measurable. The sample is two small reads on the source, and a dictionary is
 no slower to write than ZSTD. The real sync of 2 M orders from a local Postgres 18 (a six-value status, an email, a jsonb

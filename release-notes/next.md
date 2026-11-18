@@ -17,8 +17,8 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
     light query. `mason logs --requests --id <request>` shows it.
 - **Short text columns are stored many times smaller, so a dashboard that groups or filters on them reads less.** When
   Mason syncs a table, it now chooses how to compress each text column from a sample of its values. A column of short
-  or repeated values, such as a status, a type, a country code or a name, is stored with a dictionary. Long values that
-  do not repeat, such as JSON documents, are stored as before. On a benchmark of 100 M orders, a status column of six
+  or repeated values, such as a status, a type, a country code or a name, is stored with a dictionary. Values of 64 bytes
+  or more that do not repeat, such as JSON documents, are stored as before. On a benchmark of 100 M orders, a status column of six
   values went from 645 MB to 41 MB, and a count by status read from disk went from 4.03 s to 0.17 s. The answers are
   the same.
   - The upgrade reads no table again. A table synced before keeps how it is stored until it is synced again whole, or

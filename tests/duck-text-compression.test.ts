@@ -38,9 +38,16 @@ test("the rule: short or repeated values take the dictionary; long values that d
   assert.equal(s(18, 4_000), "dictionary", "a name");
   assert.equal(s(27, 10_000), "dictionary", "an email");
   assert.equal(s(43, 10_000), "dictionary", "a URL");
-  assert.equal(s(175, 9_990), "dictionary", "free text of a sentence or two");
+  assert.equal(s(175, 9_990), "zstd", "free text of a sentence or two, each its own");
   assert.equal(s(186, 40), "dictionary", "a long label of 40 values");
-  assert.equal(s(222, 4_300), "dictionary", "values under 256 bytes, however many distinct");
+  assert.equal(s(222, 4_300), "zstd", "values of 222 bytes, too many distinct to repeat");
+  // the boundary: 64 bytes on average, and values that repeat when at most an eighth of the sample is distinct
+  assert.equal(s(63, 10_000), "dictionary", "just under 64 bytes, each its own");
+  assert.equal(s(64, 10_000), "zstd", "64 bytes, each its own");
+  assert.equal(s(65, 10_000), "zstd", "just over 64 bytes, each its own");
+  assert.equal(s(65, 1_250), "dictionary", "just over 64 bytes, an eighth distinct: they repeat");
+  assert.equal(s(65, 1_251), "zstd", "just over 64 bytes, a little more than an eighth distinct");
+  assert.equal(s(65, null), "zstd", "just over 64 bytes, not counted");
   assert.equal(s(704, 300), "dictionary", "JSON documents of 300 values");
   assert.equal(s(704, 982), "dictionary", "JSON documents of 1,000 values");
   assert.equal(s(706, 2_894), "zstd", "JSON documents of 3,000 values");
@@ -64,7 +71,11 @@ test("the rule over sizes as stored (a json's, a jsonb's): the dictionary only w
   assert.equal(stored(150, 400, 1), "zstd", "one value compressed: its text is not known");
   assert.equal(stored(150, 400, null), "zstd", "a source that cannot say what it compressed (before Postgres 14)");
   assert.equal(stored(1_500, 2_000, 0), "zstd", "a value stored uncompressed at 2,000 bytes: its text could reach 16 KiB");
-  assert.equal(stored(150, 1_999, 0, null), "dictionary", "a jsonb of about 150 bytes, all stored uncompressed and small");
+  assert.equal(stored(40, 1_999, 0, null), "dictionary", "a short jsonb, all stored uncompressed and small");
+  assert.equal(stored(176, 181, 0, 10_000), "zstd", "the cold benchmark's payload: 176 bytes stored, uncompressed, each its own");
+  assert.equal(stored(176, 181, 0, 40), "dictionary", "as long, of 40 values");
+  assert.equal(stored(40, 300, 0, null), "dictionary", "short and stored uncompressed: never counted");
+  assert.equal(stored(40, 300, 1, 5), "zstd", "short, but one value compressed: zstd however they repeat");
   assert.equal(stored(700, 1_500, 0, 300), "dictionary", "long documents that repeat, all stored uncompressed and small");
   assert.equal(stored(700, 1_500, 0, 9_000), "zstd", "long documents that do not repeat");
   assert.equal(needsDistinct({ values: 10, avgBytes: 700, maxBytes: 900, exact: false, compressed: 3 }), false, "compressed: never counted");
@@ -89,7 +100,8 @@ test("a sample's SQL: a random share of the source's pages, the same pages for i
   assert.equal(distinctRows({ avgBytes: 1_000_000, exact: true }), 16, "values of a megabyte: 16 of them");
   assert.equal(distinctRows({ avgBytes: 1_000, exact: false }), 2_796, "a size as stored counted at its text's most: 16 MiB of 6,000 bytes");
   assert.equal(needsDistinct({ values: 10, avgBytes: 700, maxBytes: 900, exact: true, compressed: 0 }), true);
-  assert.equal(needsDistinct({ values: 10, avgBytes: 100, maxBytes: 900, exact: true, compressed: 0 }), false, "short: never counted");
+  assert.equal(needsDistinct({ values: 10, avgBytes: 63, maxBytes: 900, exact: true, compressed: 0 }), false, "short: never counted");
+  assert.equal(needsDistinct({ values: 10, avgBytes: 64, maxBytes: 900, exact: true, compressed: 0 }), true, "from 64 bytes, counted");
   assert.equal(needsDistinct({ values: 10, avgBytes: 700, maxBytes: 20_000, exact: true, compressed: 0 }), false, "a value the dictionary cannot hold: never counted");
   const synced = syncedLengthsSql(`"public"."t"`, [`"s"`], 1_000_000);
   assert.equal(synced.match(/rowid >= \d+ AND rowid < \d+/g)?.length, 8, "eight runs of row ids");

@@ -157,7 +157,7 @@ paths:
 - **Each text column is compressed by its own values** (`src/duck/text-compression.ts`, issue 1140): `beginCopy` reads
   one sample of the source in the copy's snapshot (`sourceLengthsSql`, then `sourceDistinctSql`: about 100 pages by
   `TABLESAMPLE SYSTEM`, at most 10,000 rows, one row of aggregates back each), and gives each VARCHAR or JSON column
-  `USING COMPRESSION` in the side table's definition (`textStorage`): the dictionary (`dict_fsst`) for values under 256
+  `USING COMPRESSION` in the side table's definition (`textStorage`): the dictionary (`dict_fsst`) for values under 64
   bytes or repeated, ZSTD for long values that do not repeat or a column whose text could reach 16 KiB. A json's or
   jsonb's sample is its size as stored, so it gets the dictionary only when every value is uncompressed and under 2,000
   bytes (`dictionaryHolds`). Why: a jsonb stored compressed at 3 KB was 52 KB of text, and the dictionary stored it
