@@ -181,7 +181,7 @@ CLI lacks).
   of entries: `{}` every column, `columns:` those (the key always copied), `exclude:` every column but those (never
   both), `sync:` how it is kept current (`off`, `poll <interval>`, `replication`; the file's top `sync:` is every entry's
   default, and none written is `off`, said at `mason start`), `key:` only for a table with no primary key (refused on
-  one that has one; refused under `sync: replication`, whose changes the stream applies by key), and `publication:` at
+  one that has one; refused under `sync: replication`, whose changes the stream applies by key), `references:` the table's foreign keys from the side that holds them (`customer_id: customers.id`; several columns as SQL writes them, `(a, b): customers (c, d)`; held at load to columns both sides sync and a table the file syncs; read and shown, never read by a query yet: issue 1143), and `publication:` at
   the top (the publication replication reads, `${PG_PUBLICATION}` allowed; the literal `publication: null` is Mason's own, on purpose). Types are never in the file: the run reads them at every start. A
   second file is refused ("one source per project for now"). ONE reader (`readSource`, `parseSourceText`, then
   `addedTables` against the catalog, src/cli/sources.ts) for the run, `mason tables`, `mason add` and `serve`; every
@@ -205,7 +205,7 @@ CLI lacks).
   or `exclude:` naming the secret-looking ones it left out, which `--include` names (`--columns`
   instead of a DSL); `--key` for a table with no primary key — and refuses while another entry of the file fails
   against the database ("fix it first"). Never add boilerplate a coding agent would have to delete. `mason remove`
-  cuts the entry (the last one leaves `tables: {}`) and the run drops the copy (at once, or at the next start). No `--json` answer names a model
+  cuts the entry (the last one leaves `tables: {}`) and the run drops the copy (at once, or at the next start). `mason add` also writes the foreign keys the database declares as `references:`, on the entry that holds each (one into the added table on an entry already there too, its other lines kept: `withReferences`), and says each it left out and why (`referencesLeftOut`); `mason remove` takes the references to a removed table out of the entries that stay, and says them (`referencesRemoved`). No `--json` answer names a model
   (`tests/conventions.test.ts`, `tests/cli-help.test.ts`, the state matrix).
 - **A project an older Mason made is refused, and nothing is migrated** (no backwards compatibility before v1.0): a
   folder with `models/` and no sources file stops `mason start` (and `serve`, `tables`, `doctor`) in the failure shape,

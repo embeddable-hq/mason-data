@@ -15,9 +15,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Failure, FailureCode } from "./command.ts";
 import type { SourceTable } from "./preflight.ts";
-import { addedTables, catalogTable, chooseColumns, clashReason, effectiveSync, entryFields, entryName, entryProblems, everyColumnLeavesOut, findEntry, noKeyReason, parseSourceText, sourceFailure, sourceFileNames, sourcesDir,
-  unaddableReason, usableUniqueKey, withEntrySync, withoutTable, withTable, type CatalogColumn, type CatalogTable, type EntryFields, type ProjectSource, type SourceFile,
-  type TableEntry, type WrittenEntry } from "./sources.ts";
+import { addedTables, catalogTable, chooseColumns, clashReason, copiedColumns, declaredReferences, effectiveSync, entryFields, entryName, entryProblems, everyColumnLeavesOut, findEntry, noKeyReason, parseSourceText, sourceFailure, sourceFileNames, sourcesDir,
+  referenceKey, referenceProblems, referenceValue, unaddableReason, usableUniqueKey, withEntrySync, withoutTable, withReferences, withTable, type CatalogColumn, type CatalogTable, type EntryFields, type ProjectSource, type SourceFile,
+  type Reference, type TableEntry, type WrittenEntry } from "./sources.ts";
 import { BIG_TABLE_ROWS, COSTLY_POLL_ROWS, COSTLY_POLL_SECONDS, syncText, type TableSync } from "../lib/table-sync.ts";
 import { projectWriteRefusal } from "./project.ts";
 import { DISK_SHORT, diskFit, diskShortWords, syncedEstimate, type DiskFit, type DiskRoom, type DiskUnknown } from "../duck/disk-fit.ts";
@@ -146,7 +146,8 @@ export function sourceToEdit(folder: string | null, root: string, read: () => Pr
 /** The file's other entries against the database: an edit is never written over a file the run would not take. */
 function othersHold(at: EditTarget, db: EditCatalog, without: readonly string[], then: string): void {
   const others = { ...at.parsed, tables: at.parsed.tables.filter((e) => !without.includes(e.table)) };
-  const held = addedTables(others, db.tables, db.database, at.root);
+  // (a reference to an edited table is held to the file as it will be written, by the edit itself)
+  const held = addedTables(others, db.tables, db.database, at.root, without);
   if (!Array.isArray(held)) throw new Refusal(409, `${held.message}${held.why ? `\n${held.why}` : ""} — fix it first, then ${then}`);
 }
 
@@ -177,7 +178,17 @@ export interface PickResult {
    *  (`--yes`, the page's Add anyway); `unknown` when the free disk could not be read; null when nothing is synced whole
    *  (the file named it so already, or only its sync changed), or the room is not checked here */
   disk: DiskFit | DiskUnknown | null;
+  /** the references it wrote (`references:`): the foreign keys the database declares out of this table, and into it
+   *  from a table the file syncs already, each on the entry of the table that holds it */
+  referencesWritten: ReferenceFact[];
+  /** the foreign keys it did not write, and why: a table the file does not sync, a column it does not sync; and a
+   *  reference this table's entry named before that no longer holds */
+  referencesLeftOut: Array<ReferenceFact & { reason: string }>;
 }
+
+/** A foreign key as `mason add` says it: the table that holds it, its columns, and the table and columns it references
+ *  (schema.table). */
+export interface ReferenceFact { table: string; columns: string[]; references: string; targetColumns: string[] }
 
 /**
  * WILL ITS SYNC FIT ON DISK (src/duck/disk-fit.ts, the one decision): the entry's columns estimated from the catalog,
@@ -218,20 +229,24 @@ export function addEntry(at: EditTarget, db: EditCatalog, table: string, columns
   if (!t) throw new Refusal(404, `${table} is not a table of ${db.database} that this user can read`);
   const p = plannedEntry(at.parsed, db, t, columns, key, o, () => othersHold(at, db, [table], `add ${entryName(table)}`));
   const { entry, was, keep } = p;
-  const same = was !== undefined && JSON.stringify([was.columns, was.exclude, was.key, was.sync]) === JSON.stringify([entry.columns, entry.exclude, entry.key, entry.sync]);
+  const same = was !== undefined && p.others.length === 0 &&
+    JSON.stringify([was.columns, was.exclude, was.key, was.sync, was.references ?? []]) === JSON.stringify([entry.columns, entry.exclude, entry.key, entry.sync, entry.references ?? []]);
   // WILL IT FIT ON DISK, before anything is written (issue 1075): a new table, or one whose columns or key change, is
   // synced whole; refused with the numbers unless the person goes ahead anyway (`o.yes`: --yes, the page's Add anyway)
   const whole = !same && !keep && (was === undefined || JSON.stringify([was.columns, was.exclude, was.key]) !== JSON.stringify([entry.columns, entry.exclude, entry.key]));
   const disk = whole ? diskCheck(db, t, entry, was !== undefined) : null;
   if (disk !== null && "fits" in disk && !disk.fits && o.yes !== true) throw diskRefusal(disk);
   if (!same) {
-    const r = keep ? withEntrySync(at.text, was!, entry.sync) : withTable(at.text, entry);
+    let r = keep ? withEntrySync(at.text, was!, entry.sync) : withTable(at.text, entry);
+    // the references a table the file syncs already holds to this one, each on its own entry (its other lines as they were)
+    for (const o of p.others) if (!("problem" in r)) r = withReferences(r.text, o.entry, o.references);
     if ("problem" in r) throw new Refusal(409, `${path.relative(at.root, at.file)} cannot be edited: ${r.problem}`);
     fs.writeFileSync(at.file, r.text);
   }
   const eff = effectiveSync(at.parsed, entry);
   return { table, file: at.file, entry: entry.name, columns: entry.columns, exclude: entry.exclude, key: entry.key, addedKey: p.addedKey, skippedSecrets: p.skipped, already: same,
-    sync: { value: syncText(eff.sync), from: eff.from }, bigOff: p.bigOff, notReplicated: p.notReplicated, pollCost: pollCost(t, eff.sync, db.measured?.(table) ?? null), disk };
+    sync: { value: syncText(eff.sync), from: eff.from }, bigOff: p.bigOff, notReplicated: p.notReplicated, pollCost: pollCost(t, eff.sync, db.measured?.(table) ?? null), disk,
+    referencesWritten: p.referencesWritten, referencesLeftOut: p.referencesLeftOut };
 }
 
 /** The entry `mason add` decides for a table, before anything is written (`plannedEntry`). */
@@ -242,6 +257,97 @@ export interface PlannedEntry {
   /** the key's columns added to a --columns list; the secret-looking columns every-column left out (sources.ts chooseColumns) */
   addedKey: string[]; skipped: string[];
   bigOff: boolean; notReplicated: string | null;
+  /** the entries the file syncs already that get a reference to this table, each with its references as they will be */
+  others: Array<{ entry: TableEntry; references: Reference[] }>;
+  referencesWritten: ReferenceFact[]; referencesLeftOut: Array<ReferenceFact & { reason: string }>;
+}
+
+/** A foreign key: its columns, and the table (schema.table) and columns it references. */
+type Declared = { columns: string[]; target: string; targetColumns: string[] };
+
+/**
+ * THE REFERENCES `mason add` WRITES (issue 1143): the foreign keys the database declares out of the table added, and into
+ * it from a table the file syncs already, each on the entry of the table that holds it — every one whose table and
+ * columns both sides sync. The rest are said with why (`leftOut`). The references the entry named before are kept, unless
+ * the entry as it will be no longer syncs what they name. `entry` is the table's entry as it will be, before its
+ * references. A reference another entry holds to this table already, which the entry as it will be breaks, refuses the add.
+ */
+function plannedReferences(file: SourceFile, db: EditCatalog, t: SourceTable, entry: WrittenEntry & { sync: TableSync | null }, was: TableEntry | undefined):
+  Pick<PlannedEntry, "others" | "referencesWritten" | "referencesLeftOut"> & { own: Reference[]; after: TableEntry[] } {
+  const table = t.source;
+  const self: TableEntry = { name: entry.name, table, columns: entry.columns, exclude: entry.exclude, key: entry.key, sync: entry.sync };
+  const entries = [...file.tables.filter((e) => e.table !== table), self];
+  const tableOf = (x: string): SourceTable | undefined => x === table ? t : db.tables.find((y) => y.source === x);
+  const written: ReferenceFact[] = [];
+  const leftOut: Array<ReferenceFact & { reason: string }> = [];
+  const fact = (holder: string, d: Declared): ReferenceFact => ({ table: holder, columns: d.columns, references: d.target, targetColumns: d.targetColumns });
+  const are = (xs: readonly string[]): string => xs.length === 1 ? "is" : "are";
+  // why `d` cannot be a reference on `he` (its table `ht`) beside `have`: a reason, "already" when it is one, or null
+  const why = (he: TableEntry, ht: SourceTable, d: Declared, have: readonly Reference[], declared: boolean): string | null => {
+    if (declared && [...d.columns, ...d.targetColumns].some((c) => c === "" || c.trim() !== c || /[.,()]/.test(c))) {
+      return "a name in it holds a dot, a comma or a parenthesis, which a reference cannot be written with";
+    }
+    const same = have.find((r) => JSON.stringify(r.columns) === JSON.stringify(d.columns));
+    if (same !== undefined) {
+      return same.table === d.target && JSON.stringify(same.targetColumns) === JSON.stringify(d.targetColumns) ? "already"
+        : `${referenceKey(same)} references ${referenceValue(same)} already, as the file says`;
+    }
+    const te = entries.find((e) => e.table === d.target);
+    if (te === undefined) return `${entryName(d.target)} is not in the sources file: mason add ${entryName(d.target)} syncs it and writes this reference`;
+    const own = copiedColumns(ht, he).filter((c) => d.columns.includes(c));
+    const notOwn = d.columns.filter((c) => !own.includes(c));
+    if (notOwn.length) return `${entryName(ht.source)}.${notOwn.join(`, ${entryName(ht.source)}.`)} ${are(notOwn)} not synced`;
+    const tt = tableOf(d.target);
+    if (tt === undefined) return `${d.target} is not a table of ${db.database} that this user can read`;
+    const theirs = copiedColumns(tt, te);
+    const notTheirs = d.targetColumns.filter((c) => !theirs.includes(c));
+    if (notTheirs.length) return `${entryName(d.target)}.${notTheirs.join(`, ${entryName(d.target)}.`)} ${are(notTheirs)} not synced`;
+    return null;
+  };
+  const ref = (d: Declared): Reference => ({ columns: d.columns, to: entries.find((e) => e.table === d.target)!.name, table: d.target, targetColumns: d.targetColumns });
+  // its own: what it named before that still holds, then what the database declares
+  const own: Reference[] = [];
+  for (const r of was?.references ?? []) {
+    const d = { columns: r.columns, target: r.table, targetColumns: r.targetColumns };
+    const w = why(self, t, d, own, false);
+    if (w === null) own.push(r);
+    else if (w !== "already") leftOut.push({ ...fact(table, d), reason: w });
+  }
+  for (const d of declaredReferences(t)) {
+    const w = why(self, t, d, own, true);
+    if (w === "already") continue;
+    // (said once: the entry named it before, and the database declares it)
+    const said = leftOut.some((x) => JSON.stringify([x.columns, x.references, x.targetColumns]) === JSON.stringify([d.columns, d.target, d.targetColumns]));
+    if (w !== null) { if (!said) leftOut.push({ ...fact(table, d), reason: w }); continue; }
+    own.push(ref(d));
+    written.push(fact(table, d));
+  }
+  // into it, from the tables the file syncs already
+  const others: PlannedEntry["others"] = [];
+  for (const o of file.tables) {
+    const ot = o.table === table ? undefined : db.tables.find((x) => x.source === o.table);
+    if (ot === undefined) continue;
+    const have = [...(o.references ?? [])];
+    let added = false;
+    for (const d of declaredReferences(ot).filter((x) => x.target === table)) {
+      const w = why(o, ot, d, have, true);
+      if (w === "already") continue;
+      if (w !== null) { leftOut.push({ ...fact(o.table, d), reason: w }); continue; }
+      have.push(ref(d));
+      written.push(fact(o.table, d));
+      added = true;
+    }
+    if (added) others.push({ entry: o, references: have });
+  }
+  const after = entries.map((e) => e === self ? { ...self, ...(own.length ? { references: own } : {}) }
+    : ((x) => x === undefined ? e : { ...e, references: x.references })(others.find((x) => x.entry === e)));
+  // a reference another entry held to it already, which the entry as it will be breaks (a column it no longer syncs)
+  const broken = after.filter((e) => e.table !== table).flatMap((e) => {
+    const et = db.tables.find((x) => x.source === e.table);
+    return et === undefined ? [] : referenceProblems(et, e, db.tables, after, after.map((x) => x.table).filter((x) => x !== table));
+  });
+  if (broken.length) throw new Refusal(409, `${table} cannot be added as asked: ${broken.join("; ")}`);
+  return { own, after, others, referencesWritten: written, referencesLeftOut: leftOut };
 }
 
 /**
@@ -291,11 +397,16 @@ export function plannedEntry(file: SourceFile, db: EditCatalog, t: SourceTable, 
     throw new Refusal(400, `${table} cannot be kept current by logical replication: ${unreplicable} — mason add ${entryName(table)}${flags} --sync "poll 5m" polls it instead`);
   }
   const sync: TableSync | null = o.sync ?? was?.sync ?? (bigOff ? { mode: "off" } : notReplicated !== null ? { mode: "poll", every: "5m", seconds: 300 } : null);
-  const entry = { name: was?.name ?? entryName(table), table, columns: chosen.columns, exclude: chosen.exclude, key: keep ? was.key : key === null ? null : [...key], sync };
+  const bare = { name: was?.name ?? entryName(table), table, columns: chosen.columns, exclude: chosen.exclude, key: keep ? was.key : key === null ? null : [...key], sync };
+  // its references (issue 1143): only its sync asked, they stay as they are; else the foreign keys the database declares
+  const refs = keep ? { own: was.references ?? [], after: [...file.tables.filter((e) => e.table !== table), { ...bare, ...(was.references ? { references: was.references } : {}) }],
+    others: [], referencesWritten: [], referencesLeftOut: [] } : plannedReferences(file, db, t, bare, was);
+  const entry = { ...bare, ...(refs.own.length ? { references: refs.own } : {}) };
   // the entry itself, as the run will read it: a --key that does not tell the rows apart is refused here, not at the copy
-  const own = entryProblems(t, entry, db.tables, db.database, effectiveSync(file, entry).sync);
+  const own = entryProblems(t, entry, db.tables, db.database, effectiveSync(file, entry).sync, refs.after);
   if (own.length) throw new Refusal(400, own.join("; "));
-  return { entry, was, keep, addedKey: chosen.addedKey, skipped: chosen.skipped, bigOff, notReplicated };
+  return { entry, was, keep, addedKey: chosen.addedKey, skipped: chosen.skipped, bigOff, notReplicated,
+    others: refs.others, referencesWritten: refs.referencesWritten, referencesLeftOut: refs.referencesLeftOut };
 }
 
 /** Why logical replication cannot keep a table, in `mason add`'s words, or null: synced by a `key:` (`keyed`: it has no
@@ -349,14 +460,16 @@ export function listTables(file: SourceFile, db: EditCatalog): ListedTable[] {
   });
 }
 
-/** What `mason remove` did: the tables (schema.table) whose entries it cut, and the sources file, absolute. */
-export interface RemoveResult { removed: string[]; file: string }
+/** What `mason remove` did: the tables (schema.table) whose entries it cut, the sources file, absolute, and the
+ *  references the entries that stay held to them, taken out with them. */
+export interface RemoveResult { removed: string[]; file: string; referencesRemoved: ReferenceFact[] }
 
 /**
  * REMOVE TABLES from the sources file: each one's entry cut (`withoutTable`), every other byte of the file as it was. A
  * name the file does not have is refused with the closest one it has; the entries that stay must hold against the
  * database — else the run's re-read refuses the file, keeps the removed table and goes on copying it while the command
- * said "Removed".
+ * said "Removed". A reference an entry that stays holds to a removed table is taken out of it (`withReferences`), and
+ * said: the file never names a table it does not sync.
  */
 export function removeEntries(at: EditTarget, db: EditCatalog, names: readonly string[]): RemoveResult {
   const entries = names.map((n) => {
@@ -364,14 +477,25 @@ export function removeEntries(at: EditTarget, db: EditCatalog, names: readonly s
     if ("problem" in e) throw new Refusal(e.usage ? 400 : 404, e.problem);
     return e;
   });
-  othersHold(at, db, entries.map((e) => e.table), `remove ${names.join(" ")}`);
+  const gone = entries.map((e) => e.table);
+  othersHold(at, db, gone, `remove ${names.join(" ")}`);
+  const cant = (problem: string): Refusal => new Refusal(409, `${path.relative(at.root, at.file)} cannot be edited: ${problem}`);
   let out = at.text;
+  const referencesRemoved: ReferenceFact[] = [];
+  for (const o of at.parsed.tables) {
+    const cut = (o.references ?? []).filter((r) => gone.includes(r.table));
+    if (gone.includes(o.table) || !cut.length) continue;
+    const r = withReferences(out, o, (o.references ?? []).filter((x) => !gone.includes(x.table)));
+    if ("problem" in r) throw cant(r.problem);
+    out = r.text;
+    referencesRemoved.push(...cut.map((x) => ({ table: o.table, columns: x.columns, references: x.table, targetColumns: x.targetColumns })));
+  }
   for (const e of entries) {
     const r = withoutTable(out, e.table);
     if (r === null) continue;
-    if ("problem" in r) throw new Refusal(409, `${path.relative(at.root, at.file)} cannot be edited: ${r.problem}`);
+    if ("problem" in r) throw cant(r.problem);
     out = r.text;
   }
   fs.writeFileSync(at.file, out);
-  return { removed: [...new Set(entries.map((e) => e.table))], file: at.file };
+  return { removed: [...new Set(gone)], file: at.file, referencesRemoved };
 }

@@ -93,6 +93,8 @@ tables:
   orders:                     # a bare name means the `public` schema; write `billing.invoices` for another schema
     columns: [id, customer_id, status, amount, created_at, payload]
     sync: poll 30s            # this table is polled every 30 seconds
+    references:               # its foreign keys: this column holds a customers.id
+      customer_id: customers.id
   customers: {}               # syncs every column
   events:
     exclude: [raw_body]       # syncs every column except these
@@ -104,6 +106,10 @@ tables:
   how the table stays up to date.
 - `mason add` leaves out columns that look like secrets (`password`, `token`, `api_key`, …), and lists them under
   `exclude:`. Name one with `--include` to sync it.
+- `references:` says how a table joins the others. It lists the table's foreign keys, on the table that holds them.
+  `mason add` writes the ones your database declares, between tables the file syncs. When you add the table a foreign
+  key points to later, `mason add` writes it then. You can add a relationship your database doesn't declare by hand.
+  A foreign key of several columns is written as in SQL: `(tenant_id, customer_id): customers (tenant_id, id)`.
 - While Mason runs, `mason add` and `mason remove` take effect at once. A change you make by hand applies at the next
   `mason start`. If an entry has a mistake, Mason names the key and says how to fix it. You never write column types.
 - A column the file leaves out stays out until you confirm it, even if you rename it, its table or its schema on your

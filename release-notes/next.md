@@ -15,6 +15,14 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
     57014, as Postgres does.
   - The request log has a new column, `waited_ms`: how long a heavy query waited for its turn. It is empty for a
     light query. `mason logs --requests --id <request>` shows it.
+- **The sources file says how tables join: `references:`.** Each table's entry can list its foreign keys, on the table
+  that holds them: `customer_id: customers.id`. A foreign key of several columns is written as in SQL:
+  `(tenant_id, customer_id): customers (tenant_id, id)`. Queries don't use them yet.
+  - `mason add` writes the foreign keys your database declares between tables the file syncs. When you add the table a
+    foreign key points to, it writes that key on the table that holds it. It says each foreign key it left out, and why.
+  - `mason remove` takes the references to a removed table out of the other entries, and says so.
+  - A reference to a table the file doesn't sync, or to a column it doesn't sync, stops `mason start` with the file, the
+    key and the way out. `mason tables --json` shows each table's references in its `entry`.
 - **`mason login` and `mason logout` name the hosted service Mason Cloud** in their help, with its address
   (https://app.masondata.ai) and `MASON_CLOUD_URL` for another service. What they do is unchanged.
 

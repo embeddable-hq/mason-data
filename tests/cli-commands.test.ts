@@ -595,7 +595,10 @@ test("mason add and mason remove with Mason stopped: the entry written and cut a
   assert.deepEqual([d.table, d.fits, d.resync, typeof d.estimateBytes, d.freeBytes > 0], ["public.orders", true, false, "number", true]);
   delete addAnswer.added[0]!.disk;
   assert.deepEqual(addAnswer, { added: [{ table: "public.orders", entry: "orders", columns: null, exclude: [], key: null, addedKey: [], skippedSecrets: [], already: false,
-    sync: { value: "off", from: "default" }, bigOff: false, pollCost: null, notReplicated: null }],
+    sync: { value: "off", from: "default" }, bigOff: false, pollCost: null, notReplicated: null,
+    // its foreign key to a table the file does not sync: not written, and said why (issue 1143)
+    referencesWritten: [], referencesLeftOut: [{ table: "public.orders", columns: ["customer_id"], references: "public.customers", targetColumns: ["id"],
+      reason: "customers is not in the sources file: mason add customers syncs it and writes this reference" }] }],
     file: s.file, next: [{ command: "mason start", what: "Mason in the background, for this project: the first sync of every added table begins" },
       { command: "mason wait", what: "then, until every added table is synced and served" }] });
   assert.equal(fs.readFileSync(s.file, "utf8"), `kind: postgres\nurl: ${s.url}\ntables:\n  orders: {}\n`, "the entry, every other byte as it was");
@@ -604,7 +607,9 @@ test("mason add and mason remove with Mason stopped: the entry written and cut a
   assert.equal(person.code, 0, person.stdout + person.stderr);
   assert.match(person.stdout, /✓ Added public\.customers to mason\/sources\/shop\.yml: id, name\n {4}sync: off \(the default\): after its first sync it is read again only by mason sync customers — mason add customers --sync "poll 5m" polls it every 5 minutes\n {4}key added: id \(a synced table always has its key\)\n/);
   assert.match(person.stdout, /Next:\n {2}mason start +Mason in the background, for this project: the first sync of every added table begins\n/);
-  assert.equal(fs.readFileSync(s.file, "utf8"), `kind: postgres\nurl: ${s.url}\ntables:\n  orders: {}\n  customers:\n    columns: [id, name]\n`);
+  // the table a foreign key points to, added: the reference written on the entry that holds it (issue 1143)
+  assert.match(person.stdout, /\n {4}wrote the database's foreign key as references: orders\.customer_id → customers\.id\n/);
+  assert.equal(fs.readFileSync(s.file, "utf8"), `kind: postgres\nurl: ${s.url}\ntables:\n  orders:\n    references:\n      customer_id: customers.id\n  customers:\n    columns: [id, name]\n`);
   // remove --dry-run: the entries that would go, the file not written (and neither the run nor the database asked)
   const fileBefore = fs.readFileSync(s.file, "utf8");
   const dry = await run(["remove", "customers", "orders", "--dry-run", "--json"]);
@@ -622,6 +627,9 @@ test("mason add and mason remove with Mason stopped: the entry written and cut a
   const rm = await run(["remove", "customers", "--json"]);
   assert.equal(rm.code, 0, rm.stdout + rm.stderr);
   assert.deepEqual(JSON.parse(rm.stdout).removed, ["public.customers"]);
+  // the reference orders held to it, taken out with it: the file never names a table it does not sync
+  assert.deepEqual(JSON.parse(rm.stdout).referencesRemoved, [{ table: "public.orders", columns: ["customer_id"], references: "public.customers", targetColumns: ["id"] }]);
+  assert.equal(fs.readFileSync(s.file, "utf8"), `kind: postgres\nurl: ${s.url}\ntables:\n  orders: {}\n`);
   assert.deepEqual(JSON.parse(rm.stdout).removedTables, ["public.customers"], "removedTables, the clearer name, beside removed until 1.0");
   assert.equal(JSON.parse(rm.stdout).dryRun, false);
   assert.deepEqual(nextOf(rm.stdout), ["mason start", "mason status"]);
@@ -739,6 +747,72 @@ test("mason add leaves out a camelCase secret too: passwordHash and apiKey are e
   }
 });
 
+// ISSUE 1143: THE FOREIGN KEYS A REAL POSTGRES DECLARES, read from its catalog (src/cli/preflight.ts TABLES_SQL) and
+// written by mason add as references: — one column and several, its columns paired in the key's order (not the table's),
+// and one to a partitioned table named once, never once more for each partition Postgres made it on.
+test("mason add writes the foreign keys Postgres declares as references:, one column and several, a partitioned table's once; mason tables --json shows them", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mason-references-")));
+  const source = await DemoSource.open({ dir: path.join(root, "db"), port: 0, log: () => {} });
+  try {
+    const c = new pg.Client({ connectionString: source.url });
+    await c.connect();
+    try {
+      await c.query(`CREATE TABLE tenants (id bigint PRIMARY KEY);
+        CREATE TABLE accounts (id bigint NOT NULL, tenant_id bigint NOT NULL REFERENCES tenants, name text, PRIMARY KEY (tenant_id, id));
+        CREATE TABLE invoices (id bigint PRIMARY KEY, account_id bigint, tenant_id bigint, total numeric,
+          CONSTRAINT invoices_account FOREIGN KEY (tenant_id, account_id) REFERENCES accounts (tenant_id, id));
+        CREATE TABLE visits (id bigint NOT NULL, day date NOT NULL, PRIMARY KEY (id, day)) PARTITION BY RANGE (day);
+        CREATE TABLE visits_2026 PARTITION OF visits FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
+        CREATE TABLE visits_2027 PARTITION OF visits FOR VALUES FROM ('2027-01-01') TO ('2028-01-01');
+        CREATE TABLE visit_notes (id bigint PRIMARY KEY, visit_id bigint, day date, FOREIGN KEY (visit_id, day) REFERENCES visits (id, day))`);
+    } finally { await c.end(); }
+    const app = path.join(root, "app");
+    const file = path.join(app, "mason", "sources", "shop.yml");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.mkdirSync(path.join(app, ".mason"), { mode: 0o700 });
+    writeRunning(root, null);
+    const head = `kind: postgres\nurl: ${source.url}\n`;
+    fs.writeFileSync(file, `${head}tables: {}\n`);
+    type Added = { referencesWritten: unknown[]; referencesLeftOut: Array<{ references: string; reason: string }> };
+    const add = async (...args: string[]): Promise<Added> => {
+      const r = await runMason(app, ["add", ...args, "--json"], matrixEnv());
+      assert.equal(r.code, 0, r.stdout + r.stderr);
+      return (JSON.parse(r.stdout) as { added: Added[] }).added[0]!;
+    };
+    // a partitioned table's foreign key named once: its partitions are no tables Mason lists
+    const notes = await add("visit_notes");
+    assert.deepEqual(notes.referencesLeftOut, [{ table: "public.visit_notes", columns: ["visit_id", "day"], references: "public.visits", targetColumns: ["id", "day"],
+      reason: "visits is not in the sources file: mason add visits syncs it and writes this reference" }]);
+    await add("visits");
+    // the key's columns in the key's order, not the table's (account_id comes first in invoices)
+    const inv = await add("invoices");
+    assert.deepEqual(inv.referencesLeftOut.map((x) => x.references), ["public.accounts"]);
+    await add("accounts");
+    assert.equal(fs.readFileSync(file, "utf8"), `${head}tables:
+  visit_notes:
+    references:
+      (visit_id, day): visits (id, day)
+  visits: {}
+  invoices:
+    references:
+      (tenant_id, account_id): accounts (tenant_id, id)
+  accounts: {}
+`);
+    // mason tables --json: an added table's entry as the file says it, one not added as mason add would write it
+    const listed = await runMason(app, ["tables", "invoices", "tenants", "--json"], matrixEnv());
+    assert.equal(listed.code, 0, listed.stdout + listed.stderr);
+    assert.deepEqual((JSON.parse(listed.stdout) as { tables: Array<{ entry: unknown }> }).tables.map((t) => t.entry),
+      [{ invoices: { references: { "(tenant_id, account_id)": "accounts (tenant_id, id)" } } }, { tenants: {} }]);
+    // the table accounts points to, added last: the reference written on accounts' entry
+    const tenants = await add("tenants");
+    assert.deepEqual(tenants.referencesWritten, [{ table: "public.accounts", columns: ["tenant_id"], references: "public.tenants", targetColumns: ["id"] }]);
+    assert.match(fs.readFileSync(file, "utf8"), /\n {2}accounts:\n {4}references:\n {6}tenant_id: tenants\.id\n {2}tenants: \{\}\n$/);
+  } finally {
+    await source.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // ISSUE 794, ITS SECOND HALF:`mason doctor --json --tables` checks the database AND lists its tables on ONE connection,
 // from the catalog the checks read (src/cli/doctor.ts databaseChecks), in mason tables --json's shape. The connections are
 // counted by the database itself: every client's startup is traced (src/demo/source.ts `trace`).
@@ -838,7 +912,8 @@ test("mason doctor --tables: mason tables --json's tables on the checks' one con
 test("mason add of a table a replicating file cannot replicate says it was written sync: poll 5m, why, and the alternatives", async () => {
   const { addedLines } = await import("../src/cli/commands.ts");
   const b = { table: "public.events", file: "/app/mason/sources/app.yml", entry: "events", columns: null, exclude: [], key: ["tenant_id", "id"], addedKey: [], skippedSecrets: [], already: false,
-    sync: { value: "poll 5m", from: "entry" as const }, bigOff: false, pollCost: null, disk: null, notReplicated: "it has no primary key, so logical replication cannot apply its changes by its key:" };
+    sync: { value: "poll 5m", from: "entry" as const }, bigOff: false, pollCost: null, disk: null, notReplicated: "it has no primary key, so logical replication cannot apply its changes by its key:",
+    referencesWritten: [], referencesLeftOut: [] };
   assert.deepEqual(addedLines(b, "mason/sources/app.yml"), { line: "Added public.events to mason/sources/app.yml: every column, keyed by tenant_id, id", notes: [
     "sync: poll 5m written on its entry, not the file's replication: it has no primary key, so logical replication cannot apply its changes by its key: — " +
     "mason add events --sync \"poll 1h\" polls it hourly; mason add events --sync off reads it only by mason sync events"] });

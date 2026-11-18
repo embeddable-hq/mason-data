@@ -84,7 +84,7 @@ tables:
   orders_two: all
   public.customers: {}
 `), [
-    "tables.orders: unexpected key colums — did you mean `columns`? — a table takes columns, exclude, key and sync",
+    "tables.orders: unexpected key colums — did you mean `columns`? — a table takes columns, exclude, key, sync and references",
     "tables.customers: columns and exclude together — columns names what is synced, exclude what is left out of every column; keep one",
     "tables.events.columns: is the columns synced, a list of column names: [id, status]",
     "tables.sessions.key: is the columns that tell its rows apart, a list of column names: [id, status]",
@@ -534,7 +534,7 @@ test("sync: every mistake on one report, at its key, with the line to write — 
   assert.equal(one("poll", "entry"), "tables.orders.sync: poll needs its interval: write poll 5s, poll 5m or poll 1h (at least 1s)");
   // the key misspelt, at the top and on an entry: did you mean
   assert.deepEqual(problems(`${head}synk: off\ntables: {}\n`), ["unexpected key synk — did you mean `sync`? — a source file takes kind, url, database, sync, publication, tables"]);
-  assert.deepEqual(problems(`${head}tables:\n  orders:\n    Sync: off\n`), ["tables.orders: unexpected key Sync — did you mean `sync`? — a table takes columns, exclude, key and sync"]);
+  assert.deepEqual(problems(`${head}tables:\n  orders:\n    Sync: off\n`), ["tables.orders: unexpected key Sync — did you mean `sync`? — a table takes columns, exclude, key, sync and references"]);
   // all of a file's mistakes on ONE report
   assert.deepEqual(problems(`${head}sync: poll\ntables:\n  orders: { sync: polling 5s }\n  customers: { sync: poll 500ms }\n`), [
     "sync: poll needs its interval: write poll 5s, poll 5m or poll 1h (at least 1s)",
@@ -1204,5 +1204,225 @@ test("names the synced data holds as one: columns or tables whose names differ o
     // the line it names is taken, and É and é are every column
     assert.deepEqual(E.addEntry(edit(top), cat, "public.t", ["id", "U", "note"]).columns, ["id", "U", "note"]);
     assert.equal(E.addEntry(edit(top), cat, "public.accents").columns, null);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+// ISSUE 1143: AN ENTRY NAMES ITS TABLE'S FOREIGN KEYS (`references:`), from the side that holds them. One column is
+// `customer_id: customers.id`; several are written as SQL's FOREIGN KEY … REFERENCES writes them. `mason add` writes the
+// ones the database declares, on whichever entry holds them; validation at load names the file and the key.
+const tenants = table({ table: "tenants" });
+const accounts = table({ table: "accounts", key: ["tenant_id", "id"], columns: [col("tenant_id", "bigint", true), col("id", "bigint", true), col("name"), col("email")],
+  references: [{ columns: ["tenant_id"], target: "public.tenants", targetColumns: ["id"] }] });
+const invoices2 = table({ table: "invoices", columns: [col("id", "bigint", true), col("tenant_id", "bigint"), col("account_id", "bigint"), col("customer_id", "bigint"), col("total", "numeric")],
+  references: [{ columns: ["tenant_id", "account_id"], target: "public.accounts", targetColumns: ["tenant_id", "id"] },
+    { columns: ["customer_id"], target: "public.customers", targetColumns: ["id"] }, { columns: ["tenant_id"], target: "public.tenants", targetColumns: ["id"] }] });
+const REFS_CATALOG = [orders, customers, tenants, accounts, invoices2];
+const HEAD = "kind: postgres\nurl: postgres://me@localhost/shop\n";
+
+test("references: one column as customer_id: customers.id, several as SQL's (a, b): table (c, d), read from the file as written (issue 1143)", () => {
+  const f = parse(`${HEAD}tables:
+  orders:
+    references:
+      customer_id: customers.id     # the customer who placed it
+  invoices:
+    references:
+      (tenant_id, account_id): accounts (tenant_id, id)
+      "customer_id": billing.customers.id
+  accounts:
+    references: {}
+`) as Sources.SourceFile;
+  assert.deepEqual(f.tables.map((e) => [e.name, e.references]), [
+    ["orders", [{ columns: ["customer_id"], to: "customers", table: "public.customers", targetColumns: ["id"] }]],
+    ["invoices", [{ columns: ["tenant_id", "account_id"], to: "accounts", table: "public.accounts", targetColumns: ["tenant_id", "id"] },
+      { columns: ["customer_id"], to: "billing.customers", table: "billing.customers", targetColumns: ["id"] }]],
+    ["accounts", undefined],
+  ]);
+  // what the writer writes is what the reader reads: the same entry back
+  const e = f.tables[1]!;
+  const back = parse(`${HEAD}tables:\n${S.entryText(e, "  ")}`) as Sources.SourceFile;
+  assert.deepEqual(back.tables[0], e);
+  assert.equal(S.entryText(e, "  "), "  invoices:\n    references:\n      (tenant_id, account_id): accounts (tenant_id, id)\n      customer_id: billing.customers.id\n");
+});
+
+test("references: every mistake in its spelling at its key, with the line to write (issue 1143)", () => {
+  const way = "write customer_id: customers.id (the table it references, a dot, and that table's column), or (tenant_id, customer_id): customers (tenant_id, id) for a foreign key of several columns";
+  assert.deepEqual(problems(`${HEAD}tables:
+  a:
+    references: [customer_id]
+  b:
+    references:
+      customer_id: customers
+      account_id:
+      x_id: 3
+      (tenant_id): tenants.id
+      (tenant_id, ): tenants.id
+      (a, a): t (x, y)
+      (c, d): t (x)
+      e: t (x)
+      f: one.two.three.x
+      (g, h): t (x, x)
+`), [
+    `tables.a.references: is one line per foreign key, like references: { customer_id: customers.id } — ${way}`,
+    `tables.b.references.customer_id: customers names no table and column — ${way}`,
+    `tables.b.references.account_id: names no table — ${way}`,
+    `tables.b.references.x_id: 3 is read by YAML as a number, not a name — ${way}`,
+    "tables.b.references.(tenant_id): is one column: write it without the parentheses, tenant_id: …",
+    `tables.b.references.(tenant_id, ): is a list of column names in parentheses, like (tenant_id, customer_id) — ${way}`,
+    "tables.b.references.(a, a): names a twice",
+    "tables.b.references.(c, d): names 2 columns of this table and 1 of t — a foreign key's columns pair up, one for one",
+    "tables.b.references.e: is one column: write e: t.x",
+    "tables.b.references.f: one.two.three has 3 parts, and a table is schema.table (billing.invoices) or its name alone in public (orders): this project has one source, so a table's name has at most two",
+    "tables.b.references.(g, h): names t.x twice",
+  ]);
+  assert.deepEqual(problems(`${HEAD}tables:\n  orders:\n    refrences: {}\n`), ["tables.orders: unexpected key refrences — did you mean `references`? — a table takes columns, exclude, key, sync and references"]);
+});
+
+test("references: held to the database and the file at load, each at its key with the way out — a column either side lacks or does not sync, a table the file does not sync (issue 1143)", () => {
+  const failed = (text: string): string[] => {
+    const r = S.addedTables(parse(`${HEAD}${text}`) as Sources.SourceFile, REFS_CATALOG, "shop", "/app");
+    return Array.isArray(r) ? [] : (r.why ?? r.message).split("\n").map((l) => l.replace(/^- |^mason\/sources\/app\.yml: /, ""));
+  };
+  assert.deepEqual(failed("tables:\n  orders:\n    references:\n      customer_id: customers.id\n  customers: {}\n"), [], "a reference that holds");
+  assert.deepEqual(failed(`tables:
+  orders:
+    columns: [id, status]
+    references:
+      customer_id: customer.id
+      custmer_id: customers.id
+  customers: {}
+  invoices:
+    exclude: [account_id]
+    references:
+      (tenant_id, account_id): accounts (tenant_id, id)
+      customer_id: customers.idd
+  accounts:
+    columns: [name]
+    references:
+      tenant_id: tenants.id
+      email: customers.name
+`), [
+    "tables.orders.references.customer_id: customer_id is not synced (its columns: leaves it out) — sync it, or take this reference out",
+    "tables.orders.references.customer_id: public.customer is not in this file — did you mean `customers`? — mason add customer syncs it, or take this reference out",
+    "tables.orders.references.custmer_id: public.orders has no column custmer_id — did you mean `customer_id`? (its columns: id, customer_id, status, amount, api_token, payload)",
+    "tables.invoices.references.(tenant_id, account_id): account_id is not synced (its exclude: names it) — sync it, or take this reference out",
+    "tables.invoices.references.customer_id: public.customers has no column idd — did you mean `id`? (its columns: id, name)",
+    "tables.accounts.references.tenant_id: public.tenants is not in this file — mason add tenants syncs it, or take this reference out",
+    "tables.accounts.references.email: email is not synced (its columns: leaves it out) — sync it, or take this reference out",
+  ]);
+  // the referenced side's column, left out there
+  assert.deepEqual(failed("tables:\n  orders:\n    references:\n      status: customers.name\n  customers:\n    exclude: [name]\n"),
+    ["tables.orders.references.status: public.customers.name is not synced (tables.customers: exclude: names it) — sync it there, or take this reference out"]);
+  // a reference never decides what is synced: the run's tables are the same with it or without it
+  const plain = S.addedTables(parse(`${HEAD}tables:\n  orders: {}\n  customers: {}\n`) as Sources.SourceFile, REFS_CATALOG, "shop", "/app");
+  const withRefs = S.addedTables(parse(`${HEAD}tables:\n  orders:\n    references:\n      status: customers.name\n  customers: {}\n`) as Sources.SourceFile, REFS_CATALOG, "shop", "/app");
+  assert.deepEqual(withRefs, plain);
+});
+
+test("mason add writes the foreign keys the database declares as references — one column and several, on the entry that holds each, comments kept — and says each it left out and why (issue 1143)", async () => {
+  const E = await import("../src/cli/source-edit.ts" as string) as typeof import("../src/cli/source-edit.ts");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mason-add-refs-"));
+  const folder = path.join(root, "mason");
+  fs.mkdirSync(path.join(folder, "sources"), { recursive: true });
+  const file = path.join(folder, "sources", "app.yml");
+  const edit = (text?: string) => { if (text !== undefined) fs.writeFileSync(file, text); return E.sourceToEdit(folder, root, () => S.readSource(folder, root, {})); };
+  const db = { tables: REFS_CATALOG, database: "shop" };
+  const tail = () => fs.readFileSync(file, "utf8").slice(HEAD.length);
+  try {
+    // the table that holds them added first: the keys to tables the file does not sync are left out, said with the way
+    const inv = E.addEntry(edit(`${HEAD}tables:   # what the dashboards read\n  customers: {}   # people\n`), db, "public.invoices");
+    assert.deepEqual(inv.referencesWritten, [{ table: "public.invoices", columns: ["customer_id"], references: "public.customers", targetColumns: ["id"] }]);
+    assert.deepEqual(inv.referencesLeftOut, [
+      { table: "public.invoices", columns: ["tenant_id", "account_id"], references: "public.accounts", targetColumns: ["tenant_id", "id"],
+        reason: "accounts is not in the sources file: mason add accounts syncs it and writes this reference" },
+      { table: "public.invoices", columns: ["tenant_id"], references: "public.tenants", targetColumns: ["id"],
+        reason: "tenants is not in the sources file: mason add tenants syncs it and writes this reference" }]);
+    assert.equal(tail(), "tables:   # what the dashboards read\n  customers: {}   # people\n  invoices:\n    references:\n      customer_id: customers.id\n");
+    // a comment the person writes on a reference is theirs
+    fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("customer_id: customers.id\n", "customer_id: customers.id   # who pays\n"));
+    // the referenced table added later: the reference that points to it written on the entry that holds it, its other
+    // lines as they were; and its own foreign key to a table the file does not sync, left out
+    const acc = E.addEntry(edit(), db, "public.accounts");
+    assert.deepEqual(acc.referencesWritten, [{ table: "public.invoices", columns: ["tenant_id", "account_id"], references: "public.accounts", targetColumns: ["tenant_id", "id"] }]);
+    assert.deepEqual(acc.referencesLeftOut.map((x) => x.reason), ["tenants is not in the sources file: mason add tenants syncs it and writes this reference"]);
+    assert.equal(tail(), "tables:   # what the dashboards read\n  customers: {}   # people\n  invoices:\n    references:\n      customer_id: customers.id   # who pays\n" +
+      "      (tenant_id, account_id): accounts (tenant_id, id)\n  accounts: {}\n");
+    // what the file says now holds at the next start
+    assert.ok(Array.isArray(S.addedTables(edit().parsed, REFS_CATALOG, "shop", "/app")));
+    // the table both point to: each entry gets its own, a flow entry written a key a line
+    const ten = E.addEntry(edit(), db, "public.tenants");
+    assert.deepEqual(ten.referencesWritten.map((x) => x.table), ["public.invoices", "public.accounts"]);
+    assert.equal(tail(), "tables:   # what the dashboards read\n  customers: {}   # people\n  invoices:\n    references:\n      customer_id: customers.id   # who pays\n" +
+      "      (tenant_id, account_id): accounts (tenant_id, id)\n      tenant_id: tenants.id\n  accounts:\n    references:\n      tenant_id: tenants.id\n  tenants: {}\n");
+    // added again: nothing to write, nothing left out
+    const again = E.addEntry(edit(), db, "public.tenants");
+    assert.deepEqual([again.already, again.referencesWritten, again.referencesLeftOut], [true, [], []]);
+    // the person's lines: what it wrote, and each it did not, in SQL's words
+    const { addedLines } = await import("../src/cli/commands.ts");
+    assert.deepEqual(addedLines(inv, "f").notes.slice(-3), [
+      "wrote the database's foreign key as references: invoices.customer_id → customers.id",
+      "foreign key invoices (tenant_id, account_id) → accounts (tenant_id, id) not written as a reference: accounts is not in the sources file: mason add accounts syncs it and writes this reference",
+      "foreign key invoices.tenant_id → tenants.id not written as a reference: tenants is not in the sources file: mason add tenants syncs it and writes this reference"]);
+
+    // A COLUMN NOT SYNCED on either side: left out, said; and mason tables' entry is what mason add writes
+    const narrow = E.addEntry(edit(`${HEAD}tables:\n  customers:\n    columns: [name]\n`), db, "public.orders", ["id", "status"]);
+    assert.deepEqual(narrow.referencesLeftOut.map((x) => x.reason), ["orders.customer_id is not synced"]);
+    const listed = E.listTables(edit(`${HEAD}tables:\n  customers: {}\n  tenants: {}\n`).parsed, db);
+    assert.deepEqual(listed.find((t) => t.table === "public.invoices")!.entry,
+      { invoices: { references: { customer_id: "customers.id", tenant_id: "tenants.id" } } }, "mason tables --json: the references mason add would write");
+    assert.deepEqual(listed.find((t) => t.table === "public.customers")!.entry, { customers: {} });
+
+    // A REFERENCE ANOTHER ENTRY HOLDS that the table added again would break: refused, nothing written
+    const held = `${HEAD}tables:\n  orders:\n    references:\n      status: customers.name\n  customers: {}\n`;
+    assert.throws(() => E.addEntry(edit(held), db, "public.customers", ["id"]),
+      { message: "public.customers cannot be added as asked: tables.orders.references.status: public.customers.name is not synced (tables.customers: columns: leaves it out) — sync it there, or take this reference out" });
+    assert.equal(fs.readFileSync(file, "utf8"), held, "nothing written");
+    // the table's own reference that its new columns no longer sync: left out, and said
+    const own = E.addEntry(edit(`${HEAD}tables:\n  orders:\n    references:\n      customer_id: customers.id\n  customers: {}\n`), db, "public.orders", ["id", "status"]);
+    assert.deepEqual(own.referencesLeftOut.map((x) => [x.columns, x.reason]), [[["customer_id"], "orders.customer_id is not synced"]]);
+    assert.equal(tail(), "tables:\n  orders:\n    columns: [id, status]\n  customers: {}\n");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("mason remove takes the references to a removed table out of the entries that stay, comments and other lines kept, and says them (issue 1143)", async () => {
+  const E = await import("../src/cli/source-edit.ts" as string) as typeof import("../src/cli/source-edit.ts");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mason-remove-refs-"));
+  const folder = path.join(root, "mason");
+  fs.mkdirSync(path.join(folder, "sources"), { recursive: true });
+  const file = path.join(folder, "sources", "app.yml");
+  const edit = (text: string) => { fs.writeFileSync(file, text); return E.sourceToEdit(folder, root, () => S.readSource(folder, root, {})); };
+  const db = { tables: REFS_CATALOG, database: "shop" };
+  const text = `${HEAD}tables:
+  invoices:
+    sync: poll 5m   # hourly is too slow
+    references:
+      customer_id: customers.id   # who pays
+      (tenant_id, account_id): accounts (tenant_id, id)
+      tenant_id: tenants.id
+  orders:
+    references: { customer_id: customers.id }
+  accounts:
+    references:
+      tenant_id: tenants.id
+  customers: {}
+  tenants: {}
+`;
+  try {
+    const r = E.removeEntries(edit(text), db, ["tenants", "customers"]);
+    assert.deepEqual(r.referencesRemoved.map((x) => `${x.table} ${x.columns.join(",")} ${x.references}`),
+      ["public.invoices customer_id public.customers", "public.invoices tenant_id public.tenants", "public.orders customer_id public.customers", "public.accounts tenant_id public.tenants"]);
+    assert.equal(fs.readFileSync(file, "utf8"), `${HEAD}tables:
+  invoices:
+    sync: poll 5m   # hourly is too slow
+    references:
+      (tenant_id, account_id): accounts (tenant_id, id)
+  orders: {}
+  accounts: {}
+`);
+    // the file left holds at the next start
+    assert.ok(Array.isArray(S.addedTables(S.parseSourceText(fs.readFileSync(file, "utf8"), "app", file) as Sources.SourceFile, REFS_CATALOG, "shop", "/app")));
+    // the last reference of an entry with other keys: its references: line goes too
+    const r2 = E.removeEntries(edit(fs.readFileSync(file, "utf8")), db, ["accounts"]);
+    assert.equal(r2.referencesRemoved.length, 1);
+    assert.equal(fs.readFileSync(file, "utf8"), `${HEAD}tables:\n  invoices:\n    sync: poll 5m   # hourly is too slow\n  orders: {}\n`);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

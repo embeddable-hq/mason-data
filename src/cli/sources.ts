@@ -20,6 +20,10 @@
  *       exclude: [raw_body]       every column but these
  *     sessions:
  *       key: [tenant_id, id]      only for a table with no primary key: the unique columns to copy it by
+ *     invoices:
+ *       references:               its foreign keys, from this table's columns to another synced table's (`Reference`)
+ *         customer_id: customers.id
+ *         (tenant_id, order_id): orders (tenant_id, id)
  *
  * The file's name is the source's name; one source per project for now. Types are NOT in it: the run reads them from
  * the source at every start. Every mistake is said with the file, the key, what is wrong and the way out — all of a
@@ -45,7 +49,7 @@ import { DEFAULT_SYNC, parseSync, syncText, type SourcesTop, type TableSync } fr
 
 export const SOURCES_DIR = "sources";
 const KEYS = ["kind", "url", "database", "sync", "publication", "tables"] as const;
-const ENTRY_KEYS = ["columns", "exclude", "key", "sync"] as const;
+const ENTRY_KEYS = ["columns", "exclude", "key", "sync", "references"] as const;
 const ENV_REF = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/;
 
 /**
@@ -73,6 +77,23 @@ export interface TableEntry {
   key: string[] | null;
   /** how it is kept current, as its entry says (null: the file's `sync:`, else the default: `effectiveSync`) */
   sync: TableSync | null;
+  /** its foreign keys as its `references:` names them, in the file's order; absent when it names none */
+  references?: Reference[];
+}
+
+/**
+ * A FOREIGN KEY AN ENTRY NAMES (`references:`, SQL's word), on the table that holds it (the "many" side): its own
+ * columns, and the columns of another table the file syncs that they hold values of. One column is written
+ * `customer_id: customers.id`; several as SQL's FOREIGN KEY … REFERENCES writes them, `(tenant_id, customer_id):
+ * customers (tenant_id, id)`. Read and shown, nothing else yet: no query reads it.
+ */
+export interface Reference {
+  /** its own columns, in order */
+  columns: string[];
+  /** the table it references as the file names it (`customers`, `billing.invoices`), and as `schema.table` */
+  to: string; table: string;
+  /** that table's columns, in the same order as `columns` */
+  targetColumns: string[];
 }
 
 export interface SourceFile {
@@ -303,7 +324,7 @@ export function parseSourceText(text: string, name: string, file: string): Sourc
       if (raw !== null && !isPlain(raw)) { problems.push(`${at}: is {} (every column), { columns: [...] }, { exclude: [...] }, { key: [...] } or { sync: poll 5m }`); continue; }
       const e = raw ?? {};
       const stray = Object.keys(e).filter((k) => !(ENTRY_KEYS as readonly string[]).includes(k));
-      for (const k of stray) problems.push(`${at}: unexpected key ${k}${didYouMean(k, ENTRY_KEYS)} — a table takes columns, exclude, key and sync`);
+      for (const k of stray) problems.push(`${at}: unexpected key ${k}${didYouMean(k, ENTRY_KEYS)} — a table takes columns, exclude, key, sync and references`);
       const both = e.columns !== undefined && e.exclude !== undefined;
       if (both) problems.push(`${at}: columns and exclude together — columns names what is synced, exclude what is left out of every column; keep one`);
       const columns = e.columns === undefined ? null : nameList(e.columns, `${at}.columns`, "the columns synced");
@@ -312,12 +333,69 @@ export function parseSourceText(text: string, name: string, file: string): Sourc
       for (const x of [columns, exclude, ownKey]) if (typeof x === "string") problems.push(x);
       const ownSync = e.sync === undefined ? null : parseSync(e.sync);
       if (ownSync !== null && "problem" in ownSync) problems.push(`${at}.sync: ${ownSync.problem}`);
+      const refs = e.references === undefined ? null : referencesOf(e.references, at);
+      if (refs !== null && "problems" in refs) problems.push(...refs.problems);
       if (typeof columns === "string" || typeof exclude === "string" || typeof ownKey === "string" || stray.length || both || (ownSync !== null && "problem" in ownSync)) continue;
-      tables.push({ name: key, table, columns, exclude, key: ownKey, sync: ownSync });
+      if (refs !== null && "problems" in refs) continue;
+      tables.push({ name: key, table, columns, exclude, key: ownKey, sync: ownSync, ...(refs !== null && refs.length ? { references: refs } : {}) });
     }
   }
   if (problems.length || kind === null || url === null || "problem" in named) return { problems };
   return { name, file, kind, url, database: named.database, sync, publication, tables };
+}
+
+/** A reference's key and value as the file writes them (`Reference`): `customer_id` and `customers.id`, or
+ *  `(tenant_id, customer_id)` and `customers (tenant_id, id)`. */
+export const referenceKey = (r: Pick<Reference, "columns">): string => r.columns.length === 1 ? r.columns[0]! : `(${r.columns.join(", ")})`;
+export const referenceValue = (r: Pick<Reference, "to" | "targetColumns">): string =>
+  r.targetColumns.length === 1 ? `${r.to}.${r.targetColumns[0]!}` : `${r.to} (${r.targetColumns.join(", ")})`;
+
+const REFERENCE_WAY = "write customer_id: customers.id (the table it references, a dot, and that table's column), " +
+  "or (tenant_id, customer_id): customers (tenant_id, id) for a foreign key of several columns";
+
+/** The columns a reference's key names: one name as written, or a list in parentheses; else the problem with it. */
+function referenceColumns(k: string): string[] | string {
+  const m = /^\((.*)\)$/s.exec(k.trim());
+  if (m === null) return [k];
+  const names = m[1]!.split(",").map((n) => n.trim());
+  if (names.some((n) => n === "")) return `is a list of column names in parentheses, like (tenant_id, customer_id) — ${REFERENCE_WAY}`;
+  if (names.length === 1) return `is one column: write it without the parentheses, ${names[0]!}: …`;
+  const twice = names.find((n, i) => names.indexOf(n) !== i);
+  return twice !== undefined ? `names ${twice} twice` : names;
+}
+
+/** An entry's `references:` read (`Reference`), or every problem with it, each at its key. */
+function referencesOf(v: unknown, at: string): Reference[] | { problems: string[] } {
+  if (v === null) return [];
+  if (!isPlain(v)) return { problems: [`${at}.references: is one line per foreign key, like references: { customer_id: customers.id } — ${REFERENCE_WAY}`] };
+  const out: Reference[] = [];
+  const problems: string[] = [];
+  for (const [k, raw] of Object.entries(v)) {
+    const here = `${at}.references.${k}`;
+    const columns = referenceColumns(k);
+    if (typeof columns === "string") { problems.push(`${here}: ${columns}`); continue; }
+    if (typeof raw !== "string" || raw.trim() === "") {
+      problems.push(`${here}: ${raw === null || raw === undefined || raw === "" ? "names no table" : yamlRead(raw)} — ${REFERENCE_WAY}`);
+      continue;
+    }
+    const value = raw.trim();
+    const several = /^(.*?)\s*\((.*)\)$/s.exec(value);
+    const dot = value.lastIndexOf(".");
+    const [to, targets] = several !== null ? [several[1]!, several[2]!.split(",").map((n) => n.trim())]
+      : dot > 0 ? [value.slice(0, dot), [value.slice(dot + 1)]] : ["", []];
+    if (to === "" || targets.length === 0 || targets.some((n) => n === "")) { problems.push(`${here}: ${value} names no table and column — ${REFERENCE_WAY}`); continue; }
+    const badName = tableNameProblem(to);
+    if (badName !== null) { problems.push(`${here}: ${badName}`); continue; }
+    const twice = targets.find((n, i) => targets.indexOf(n) !== i);
+    if (twice !== undefined) { problems.push(`${here}: names ${to}.${twice} twice`); continue; }
+    if (targets.length !== columns.length) {
+      problems.push(`${here}: names ${columns.length} ${columns.length === 1 ? "column" : "columns"} of this table and ${targets.length} of ${to} — a foreign key's columns pair up, one for one`);
+      continue;
+    }
+    if (several !== null && targets.length === 1) { problems.push(`${here}: is one column: write ${k}: ${to}.${targets[0]!}`); continue; }
+    out.push({ columns, to, table: sourceOf(to), targetColumns: targets });
+  }
+  return problems.length ? { problems } : out;
 }
 
 /** Where a project's source files are: `<folder>/sources/`. */
@@ -545,8 +623,13 @@ function tableClashProblems(src: Pick<SourceFile, "tables">): string[] {
   });
 }
 
-/** Why a table cannot be copied as its entry says, each at its key, against the database's catalog; none when it can. */
-export function entryProblems(t: SourceTable | undefined, e: TableEntry, all: readonly SourceTable[], database: string, sync: TableSync): string[] {
+/**
+ * Why a table cannot be copied as its entry says, each at its key, against the database's catalog; none when it can.
+ * `file` is every entry of the file, which its `references:` are held to (`referenceProblems`); a reference to a table
+ * of `skipTo` is not checked here (an edit checks those against the file as it will be written).
+ */
+export function entryProblems(t: SourceTable | undefined, e: TableEntry, all: readonly SourceTable[], database: string, sync: TableSync,
+  file: readonly TableEntry[], skipTo: readonly string[] = []): string[] {
   const at = `tables.${e.name}`;
   if (t === undefined) {
     const names = all.map((x) => entryName(x.source));
@@ -583,6 +666,52 @@ export function entryProblems(t: SourceTable | undefined, e: TableEntry, all: re
   if (sync.mode === "replication" && t.replicaIdentity === "n" && e.key === null) {
     out.push(`${at}: ${t.source} has REPLICA IDENTITY NOTHING, and a publication carrying it would make your app's own UPDATEs and DELETEs on it fail (sync: replication) — ` +
       `give its entry sync: poll <interval> (poll 5m), or sync: off; or ALTER TABLE ${t.source} REPLICA IDENTITY DEFAULT on the database`);
+  }
+  out.push(...referenceProblems(t, e, all, file, skipTo));
+  return out;
+}
+
+/** The foreign keys a table declares on the database, of one column or several (`SourceTable.references`; a catalog
+ *  built without them, its single-column `foreignKeys`). */
+export function declaredReferences(t: Pick<SourceTable, "references" | "foreignKeys">): Array<{ columns: string[]; target: string; targetColumns: string[] }> {
+  return t.references ?? t.foreignKeys.map((f) => ({ columns: [f.column], target: f.target, targetColumns: [f.targetColumn] }));
+}
+
+/** Why an entry's column is not synced, in the file's words: its `columns:` leaves it out, or its `exclude:` names it. */
+const notSyncedWhy = (e: Pick<TableEntry, "columns">): string => e.columns !== null ? "its columns: leaves it out" : "its exclude: names it";
+
+/**
+ * WHY AN ENTRY'S `references:` CANNOT STAND, each at its key: a column this table or the referenced one lacks, a column
+ * either side does not sync, or a referenced table the file does not sync. The referenced table's own problems are its
+ * entry's. A reference to a table of `skipTo` is not checked.
+ */
+export function referenceProblems(t: SourceTable, e: TableEntry, all: readonly SourceTable[], file: readonly TableEntry[], skipTo: readonly string[] = []): string[] {
+  const out: string[] = [];
+  const lacks = (x: SourceTable, c: string): string => {
+    const have = x.columns.map((y) => y.name);
+    return `${x.source} has no column ${c}${didYouMean(c, have)} (its columns: ${have.join(", ")})`;
+  };
+  for (const r of e.references ?? []) {
+    if (skipTo.includes(r.table)) continue;
+    const here = `tables.${e.name}.references.${referenceKey(r)}`;
+    const own = copiedColumns(t, e);
+    for (const c of r.columns) {
+      if (!t.columns.some((x) => x.name === c)) out.push(`${here}: ${lacks(t, c)}`);
+      else if (!own.includes(c)) out.push(`${here}: ${c} is not synced (${notSyncedWhy(e)}) — sync it, or take this reference out`);
+    }
+    const te = file.find((x) => x.table === r.table);
+    if (te === undefined) {
+      out.push(`${here}: ${r.table} is not in this file${didYouMean(r.to, file.map((x) => x.name))} — mason add ${r.to} syncs it, or take this reference out`);
+      continue;
+    }
+    // a referenced table the database lacks is its own entry's problem, said there
+    const tt = te.table === t.source ? t : all.find((x) => x.source === te.table);
+    if (tt === undefined) continue;
+    const theirs = copiedColumns(tt, te);
+    for (const c of r.targetColumns) {
+      if (!tt.columns.some((x) => x.name === c)) out.push(`${here}: ${lacks(tt, c)}`);
+      else if (!theirs.includes(c)) out.push(`${here}: ${tt.source}.${c} is not synced (tables.${te.name}: ${notSyncedWhy(te).replace(/^its /, "")}) — sync it there, or take this reference out`);
+    }
   }
   return out;
 }
@@ -641,15 +770,16 @@ function keyProblems(t: SourceTable, key: readonly string[], at: string): string
  * THE TABLES THE RUN COPIES (`AddedTable`, src/duck/sync.ts): each entry against the database's catalog, narrowed to the
  * columns it copies (`copiedColumns`) and its foreign keys out of them. A `key:` is the key the table is copied by, and
  * `primaryKey` keeps the source's own (none): the catalog declares only what the source does. Every entry's problems on
- * one report (`sourceFailure`).
+ * one report (`sourceFailure`). Its `references:` are checked, never carried: no query reads them yet (`skipTo`: see
+ * `entryProblems`).
  */
-export function addedTables(src: SourceFile, tables: readonly SourceTable[], database: string, root: string): AddedTable[] | Failure {
+export function addedTables(src: SourceFile, tables: readonly SourceTable[], database: string, root: string, skipTo: readonly string[] = []): AddedTable[] | Failure {
   const problems: string[] = tableClashProblems(src);
   const out: AddedTable[] = [];
   for (const e of src.tables) {
     const t = tables.find((x) => x.source === e.table);
     const sync = effectiveSync(src, e).sync;
-    const p = entryProblems(t, e, tables, database, sync);
+    const p = entryProblems(t, e, tables, database, sync, src.tables, skipTo);
     if (p.length || t === undefined) { problems.push(...p); continue; }
     const keep = new Set(copiedColumns(t, e));
     const at = `${shownPath(root, src.file)}: tables.${e.name}`;
@@ -926,25 +1056,36 @@ export function everyColumnLeavesOut(t: SourceTable, key: readonly string[] | nu
 /** A name as YAML writes it: plain when it is an identifier YAML reads as a string, else quoted. */
 const yamlName = (n: string): string => /^[A-Za-z_][A-Za-z0-9_$.]*$/.test(n) && !/^(true|false|null|yes|no|on|off|y|n)$/i.test(n) ? n : JSON.stringify(n);
 const flowList = (xs: readonly string[]): string => `[${xs.map(yamlName).join(", ")}]`;
+/** A reference's key or value as YAML writes it (`referenceKey`, `referenceValue`): plain when it holds only names,
+ *  dots, commas, spaces and parentheses, which a block map reads as written; else quoted. */
+const yamlReference = (s: string): string =>
+  /^[A-Za-z_(][A-Za-z0-9_$., ()]*$/.test(s) && !s.endsWith(" ") && !/^(true|false|null|yes|no|on|off|y|n)$/i.test(s) ? s : JSON.stringify(s);
+/** A reference's line as the file writes it under `references:`. */
+export const referenceLine = (r: Reference): string => `${yamlReference(referenceKey(r))}: ${yamlReference(referenceValue(r))}`;
+const referencesText = (rs: readonly Reference[], indent: string): string => rs.map((r) => `${indent}${referenceLine(r)}\n`).join("");
 
-/** An entry as `mason add` writes it: its columns, key and its own sync (none: it follows the file's) */
-export type WrittenEntry = Pick<TableEntry, "name" | "table" | "columns" | "exclude" | "key"> & { sync?: TableSync | null };
+/** An entry as `mason add` writes it: its columns, key, its own sync (none: it follows the file's) and its references */
+export type WrittenEntry = Pick<TableEntry, "name" | "table" | "columns" | "exclude" | "key" | "references"> & { sync?: TableSync | null };
 
 /** An entry's value as the sources file holds it, under its name in `tables:` — `{}`, or the keys it writes (`columns`,
- *  `exclude`, `key`, `sync`) — the ONE place an entry's keys are chosen: `entryText` writes them, and `mason tables --json`
- *  gives them as data (src/cli/source-edit.ts `listTables`). */
-export type EntryFields = { columns?: string[]; exclude?: string[]; key?: string[]; sync?: string };
-export function entryFields(e: Pick<WrittenEntry, "columns" | "exclude" | "key" | "sync">): EntryFields {
+ *  `exclude`, `key`, `sync`, `references`) — the ONE place an entry's keys are chosen: `entryText` writes them, and
+ *  `mason tables --json` gives them as data (src/cli/source-edit.ts `listTables`). */
+export type EntryFields = { columns?: string[]; exclude?: string[]; key?: string[]; sync?: string; references?: Record<string, string> };
+export function entryFields(e: Pick<WrittenEntry, "columns" | "exclude" | "key" | "sync" | "references">): EntryFields {
   return {
     ...(e.columns !== null ? { columns: [...e.columns] } : e.exclude.length ? { exclude: [...e.exclude] } : {}),
     ...(e.key !== null ? { key: [...e.key] } : {}),
     ...(e.sync ? { sync: syncText(e.sync) } : {}),
+    ...(e.references?.length ? { references: Object.fromEntries(e.references.map((r) => [referenceKey(r), referenceValue(r)])) } : {}),
   };
 }
 
-/** An entry's lines at `indent`: `name: {}` on one line, else its keys a line each under it (`entryFields`). */
+/** An entry's lines at `indent`: `name: {}` on one line, else its keys a line each under it (`entryFields`), its
+ *  references a line each under `references:`. */
 export function entryText(e: Omit<WrittenEntry, "table">, indent: string): string {
-  const body = Object.entries(entryFields(e)).map(([k, v]) => `${k}: ${typeof v === "string" ? v : flowList(v)}`);
+  const body = Object.entries(entryFields(e)).map(([k, v]) => k === "references"
+    ? `${k}:\n${referencesText(e.references ?? [], `${indent}    `).replace(/\n$/, "")}`
+    : `${k}: ${typeof v === "string" ? v : flowList(v as string[])}`);
   if (!body.length) return `${indent}${yamlName(e.name)}: {}\n`;
   return `${indent}${yamlName(e.name)}:\n${body.map((b) => `${indent}  ${b}\n`).join("")}`;
 }
@@ -1035,11 +1176,11 @@ function withTableLf(text: string, e: WrittenEntry): { text: string } | { proble
  * an entry written as a flow map (`{}`, `{ columns: [...] }`) — the entry written again a key a line, a comment after it
  * on the key's line kept. `e` is the entry as the file reads (its columns and key, for a flow map written again).
  */
-export function withEntrySync(text: string, e: Pick<TableEntry, "name" | "table" | "columns" | "exclude" | "key">, sync: TableSync | null): { text: string } | { problem: string } {
+export function withEntrySync(text: string, e: Pick<TableEntry, "name" | "table" | "columns" | "exclude" | "key" | "references">, sync: TableSync | null): { text: string } | { problem: string } {
   return inOwnLineEndings(text, (t) => withEntrySyncLf(t, e, sync));
 }
 
-function withEntrySyncLf(text: string, e: Pick<TableEntry, "name" | "table" | "columns" | "exclude" | "key">, sync: TableSync | null): { text: string } | { problem: string } {
+function withEntrySyncLf(text: string, e: Pick<TableEntry, "name" | "table" | "columns" | "exclude" | "key" | "references">, sync: TableSync | null): { text: string } | { problem: string } {
   const r = forEdit(text);
   if ("problem" in r) return r;
   const { pair, lineStart, lineEnd } = r;
@@ -1106,6 +1247,71 @@ function withoutTableLf(text: string, table: string): { text: string } | { probl
     out = `${out.slice(0, colon + 1)} {}${out.slice(colon + 1)}`;
   }
   return { text: out };
+}
+
+/**
+ * The file with ONE entry's `references:` set to `refs` (`e`, the entry as the file reads it), and every other byte as it
+ * was: a reference `refs` no longer names has its line cut, a new one a line of its own after the last, and a reference
+ * kept keeps its line and its comment (`mason add customers` writing the reference `orders` holds to it; `mason remove
+ * customers` taking it out). `references:` written as a flow map, or an entry written as one, is written again a key a
+ * line, a comment on the entry's key line kept.
+ */
+export function withReferences(text: string, e: TableEntry, refs: readonly Reference[]): { text: string } | { problem: string } {
+  return inOwnLineEndings(text, (t) => withReferencesLf(t, e, refs));
+}
+
+function withReferencesLf(text: string, e: TableEntry, refs: readonly Reference[]): { text: string } | { problem: string } {
+  const r = forEdit(text);
+  if ("problem" in r) return r;
+  const { pair, lineStart, lineEnd } = r;
+  const map = pair?.value;
+  if (!isMap(map)) return { problem: `it names no table ${e.name}` };
+  if ((map as YAMLMap).flow) return { problem: FLOW_MAP };
+  const same = entryPairs(map as YAMLMap).find((x) => x.table === e.table);
+  if (same === undefined) return { problem: `it names no table ${e.name}` };
+  const next: TableEntry = { ...e, name: same.name, references: [...refs] };
+  if (!refs.length) delete next.references;
+  const columnsOf = (k: unknown): string => JSON.stringify(referenceColumns(String(k)));
+  const wanted = new Map(refs.map((x) => [columnsOf(referenceKey(x)), x]));
+  const end = (p: Pair): number => lineEnd((p.value as Ranged | null)?.range ? (p.value as Ranged).range![1] : (p.key as Ranged).range![1]);
+  const value = same.pair.value as (Ranged & YAMLMap) | null;
+  if (isMap(value) && !value.flow && value.items.length > 0) {
+    const own = value.items.find((p) => isScalar(p.key) && p.key.value === "references") as Pair | undefined;
+    const keyIndent = text.slice(lineStart((value.items[0]!.key as Ranged).range![0]), (value.items[0]!.key as Ranged).range![0]);
+    if (own === undefined) {
+      if (!refs.length) return { text };
+      const at = end(value.items[value.items.length - 1] as Pair);
+      return { text: `${text.slice(0, at)}${at > 0 && text[at - 1] !== "\n" ? "\n" : ""}${keyIndent}references:\n${referencesText(refs, `${keyIndent}  `)}${text.slice(at)}` };
+    }
+    const refMap = own.value as (Ranged & YAMLMap) | null;
+    // its only key, and none left: the entry is `{}` again
+    if (!refs.length && value.items.length === 1) return withTableLf(text, next);
+    if (!refs.length) return { text: `${text.slice(0, lineStart((own.key as Ranged).range![0]))}${text.slice(end(own))}` };
+    if (isMap(refMap) && !refMap.flow && refMap.items.length > 0) {
+      const items = refMap.items as Pair[];
+      const had = new Set(items.map((p) => columnsOf((p.key as { value: unknown }).value)));
+      const lineIndent = text.slice(lineStart((items[0]!.key as Ranged).range![0]), (items[0]!.key as Ranged).range![0]);
+      const added = refs.filter((x) => !had.has(columnsOf(referenceKey(x))));
+      // splices from the end back, so each one's positions are the text's as read
+      const at = end(items[items.length - 1]!);
+      let out = `${text.slice(0, at)}${at > 0 && text[at - 1] !== "\n" ? "\n" : ""}${referencesText(added, lineIndent)}${text.slice(at)}`;
+      for (const p of [...items].reverse()) {
+        if (wanted.has(columnsOf((p.key as { value: unknown }).value))) continue;
+        out = `${out.slice(0, lineStart((p.key as Ranged).range![0]))}${out.slice(end(p))}`;
+      }
+      return { text: out };
+    }
+    // `references: { … }` or `references: {}`: its lines written again, a line per reference
+    return { text: `${text.slice(0, lineStart((own.key as Ranged).range![0]))}${keyIndent}references:\n${referencesText(refs, `${keyIndent}  `)}${text.slice(end(own))}` };
+  }
+  // a flow map (`orders: {}`, `orders: { columns: [id] }`) or nothing: the entry written again, a comment on its line kept
+  const k = same.pair.key as Ranged, v = value as Ranged | null;
+  const after = v?.range && v.range[1] > v.range[0] ? v.range[1] : k.range![1];
+  const to = lineEnd(after);
+  const comment = /(\s+#.*)$/.exec(text.slice(after, to).replace(/\n$/, ""))?.[1] ?? "";
+  const lines = entryText(next, text.slice(lineStart(k.range![0]), k.range![0])).split("\n");
+  lines[0] = `${lines[0]}${comment}`;
+  return { text: `${text.slice(0, lineStart(k.range![0]))}${lines.join("\n")}${text.slice(to)}` };
 }
 
 /** The entry naming a table — by its key, or by schema.table — or why there is none, with the closest name; `usage` when
