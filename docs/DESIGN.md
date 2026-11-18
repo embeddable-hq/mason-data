@@ -4393,8 +4393,8 @@ definition, `USING COMPRESSION`, which wins over the instance's (src/duck/text-c
   compressed, so those columns keep ZSTD.
 
 The inputs come from one sample of the source, read in the copy's transaction (`beginCopy`, `textStorageOf`). It reads
-about 100 pages chosen at random (`TABLESAMPLE SYSTEM … REPEATABLE`) and at most 10,000 rows, and sends back one row of
-aggregates. Lengths come first, read from each value's header (`octet_length` of a text; `pg_column_size` of a json or
+about 100 pages chosen at random (`TABLESAMPLE SYSTEM … REPEATABLE`), and sends back one row of aggregates. It reads
+at most 10,000 rows, and a wide table gives far fewer: about 1,900 rows from 100 pages of a table of 527 pages. Lengths come first, read from each value's header (`octet_length` of a text; `pg_column_size` of a json or
 jsonb, whose text would have to be made whole, with `pg_column_compression` from Postgres 14), so no large value is
 taken out of its TOAST table. Only the long columns the dictionary could hold are then hashed for their distinct values
 (`hashtextextended`, which a FIPS-mode Postgres allows where it refuses `md5`), on the same pages. The rows hashed are
@@ -4469,7 +4469,8 @@ exception, 11 % larger. ZSTD reads such a column 1.5 to 3 times slower when it i
 groups on short codes, not on unique documents, and a cold read pays for a column's bytes. So from 64 bytes: ZSTD. Values that repeat are many times smaller in the
 dictionary at any length, until there are too many distinct values for a block's dictionary: 1,000 of 220 B or of 700 B
 still repeat, 3,000 of 700 B and 5,000 of 220 B no longer do. A sample of 10,000 rows sees 1,000 distinct at a tenth,
-3,000 at about three tenths, so the line is an eighth.
+3,000 at about three tenths, so the line is an eighth. A smaller sample, from a wide table, sees a larger share
+distinct, so it calls fewer columns repeated.
 
 **The cold benchmark's columns, and why the threshold is 64 bytes.** The rule first gave the dictionary to everything
 under 256 bytes. On the cold benchmark at 100 M orders (`scripts/bench-replica-cold.ts` `coldDataSql`), that made a
