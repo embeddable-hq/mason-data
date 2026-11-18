@@ -23,7 +23,7 @@ import { sampleRefusal } from "./tablesample.ts";
 import type { CopyState } from "./sync.ts";
 import { giveTurns, datumText, masonCalls, rewrite, treeDifference, Unrewritable, type EnumTypes, type RowColumn } from "./rewrite.ts";
 import type { CollationResolver, StatementCollations } from "./collation.ts";
-import { exposes, hideKept, readKey, searchSchemas, type KeptLookup, type KeptRoutes } from "./kept-route.ts";
+import { exposes, hideKept, readKey, searchSchemas, VISIBLE_CATALOG, type KeptLookup, type KeptRoutes } from "./kept-route.ts";
 import { distinctCountTables, distinctKeyCounts, groupedLimitTables, primaryKeysOf, uniqueColumnsOf, uniqueColumnsSql } from "./distinct-key.ts";
 import type { PrimaryKeys } from "./distinct-key.ts";
 import { enforceGrants, type RoleGrants } from "./grants.ts";
@@ -33,6 +33,7 @@ import type { PgAnalysis } from "./analyze.ts";
 import type { ScaleLookup } from "./rewrite.ts";
 import { scaledOf } from "./scale-column.ts";
 import { mayKeepRows } from "./admission.ts";
+import { routeLookups } from "./key-lookup.ts";
 
 const JSON_OID = 114, JSONB_OID = 3802, NUMERIC_OID = 1700;
 /** pg_catalog.pg_typeof(any): its argument's type named by the catalog (src/duck/rewrite.ts) */
@@ -665,6 +666,12 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   }
   // only a statement with its filtered reads in place: no other statement's text changes, whatever it names its subqueries
   if (walls !== null && wallSwitch.statistics) wallStatistics(tree, { alias: walls.alias, reads: walls.reads + (lateWall?.added ?? 0) });
+  // A LOOKUP BY A SCATTERED KEY reads its table's side table (src/duck/key-lookup.ts), on the finished tree: what the rules
+  // above wrote of a key's comparison is what it routes. Never a statement whose tables are swapped for others below
+  if (relations === undefined || relations.size === 0) {
+    const lookups = new Map(copies().flatMap((c) => c.lookup?.column != null && c.phase === "copied" ? [[c.source, { column: c.lookup.column, columns: c.syncedColumns ?? null }] as const] : []));
+    await routeLookups(tree, { lookups, schemas: searchSchemas(searchPath), visible: VISIBLE_CATALOG, own, parse: parseSql });
+  }
   // on the finished tree, so no rule above meets it; `masonCalls` below does not count it as a function called
   giveTurns(tree);
   if (relations !== undefined && relations.size > 0) swapRelations(tree, relations, searchSchemas(searchPath));

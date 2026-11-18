@@ -27,6 +27,16 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
     `mason logs` shows `dropped <table>'s synced data`, then run `mason add <table>`. The table is not served in
     between.
   - Generated tables are stored as before.
+- **A lookup by a random key reads a few megabytes, not the whole key column.** A synced table has no index. Before,
+  `WHERE id = $1` on a table keyed by a random UUID read every value of its key. One order of 100 M took 13 s on the
+  README's cold benchmark. Now Mason keeps a sorted list of such a table's keys beside it, and a lookup by key reads
+  that list. Measured at 100 M rows, a lookup read 2 MiB of the synced data where it read 1.6 GiB.
+  - Mason chooses the tables by how scattered their keys are, not by the key's type. A table whose keys arrive in order
+    needs no list. A serial key that heavy updates have scattered gets one.
+  - The list costs disk: about 19 bytes a row for a UUID key (1.8 GiB at 100 M rows). It is made after a table's first
+    sync, in the background. At 100 M rows that took about 9 s. Lookups read the table as before until it is ready.
+  - It is sorted again once 1 % of the table's rows were written since. Queries are answered meanwhile.
+  - It applies to `WHERE key = …` and `WHERE key IN (…)` on one table, with a key of one column.
 - **`mason login` and `mason logout` name the hosted service Mason Cloud** in their help, with its address
   (https://app.masondata.ai) and `MASON_CLOUD_URL` for another service. What they do is unchanged.
 
