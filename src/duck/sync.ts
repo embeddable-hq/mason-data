@@ -5454,6 +5454,27 @@ export class Sync {
           const told = { source: t.source, first, end, reader: k, pages: chunkSize, ceiling, sizedBy };
           const c0 = slot.since;
           let inTx = false;
+          // THE CHUNK COMMITTED: its range and rows are the copy's and its rate is measured. Once a chunk: after its COMMIT
+          // answered, or after a failure its ledger row says it survived (`committedRows`)
+          let accounted = false;
+          const committed = async (rows: number): Promise<void> => {
+            const seconds = (Date.now() - c0) / 1000;
+            p = { ...p, filenode, done: [...p.done, range], rows: p.rows + rows };
+            accounted = true;
+            if (!recopy) kept(p);
+            // the measured rate, and the copy's progress, before anything else hears of the commit
+            rate = nextRate(rate, { pages: chunkSize, rows, seconds, blockSize });
+            const at = live.reading.indexOf(slot);
+            if (at >= 0) live.reading.splice(at, 1);
+            live.chunksDone++; live.pagesDone += chunkSize; live.rowsDone = p.rows; live.rate = rate;
+            live.rowsPerPage = live.pagesDone > 0 ? live.rowsDone / live.pagesDone : live.rowsPerPage;
+            live.chunkPages = nextChunkPages(ceiling, rate, this.copyChunkSeconds);
+            const now = this.states.get(t.source);
+            if (now !== undefined && now.phase === "copying") this.states.set(t.source, { ...now, rowsSoFar: p.rows, rowsEstimate: t.rows });
+            await this.onChunk?.({ ...told, rows, phase: "committed", seconds });
+            chunks++;
+            chunkMs += Date.now() - c0;
+          };
           try {
             if (!recopy) { await c.run("BEGIN TRANSACTION"); inTx = true; }
             const rows = await this.interruptible(lane, async (): Promise<number> => {
@@ -5484,20 +5505,7 @@ export class Sync {
             if (failure === null && this.cutting.has(t.source)) fail(new Removed(t.source));
             if (failure !== null) throw (failure as { error: unknown }).error;
             if (!recopy) await c.run("COMMIT");
-            const seconds = (Date.now() - c0) / 1000;
-            p = { ...p, filenode, done: [...p.done, range], rows: p.rows + rows };
-            if (!recopy) kept(p);
-            // the measured rate, and the copy's progress, before anything else hears of the commit
-            rate = nextRate(rate, { pages: chunkSize, rows, seconds, blockSize });
-            live.reading.splice(live.reading.indexOf(slot), 1);
-            live.chunksDone++; live.pagesDone += chunkSize; live.rowsDone = p.rows; live.rate = rate;
-            live.rowsPerPage = live.pagesDone > 0 ? live.rowsDone / live.pagesDone : live.rowsPerPage;
-            live.chunkPages = nextChunkPages(ceiling, rate, this.copyChunkSeconds);
-            const now = this.states.get(t.source);
-            if (now !== undefined && now.phase === "copying") this.states.set(t.source, { ...now, rowsSoFar: p.rows, rowsEstimate: t.rows });
-            await this.onChunk?.({ ...told, rows, phase: "committed", seconds });
-            chunks++;
-            chunkMs += Date.now() - c0;
+            await committed(rows);
           } catch (e) {
             const at = live.reading.indexOf(slot);
             if (at >= 0) live.reading.splice(at, 1);
@@ -5514,12 +5522,38 @@ export class Sync {
               catch (r) {
                 const said = this.errorText(r);
                 // the engine ended the transaction itself (measured: "cannot rollback - no transaction is active" after a
-                // COMMIT, or a read, out of memory): nothing of the chunk is left to roll back
+                // COMMIT, or a read, out of memory). Whether its chunk committed is the ledger's to say, below, never this
                 if (endedTransaction(r)) { rolledBack = true; break; }
                 if (attempt < 20 && pgErrorOf(r, "").fields.code === "53200") { await new Promise((ok) => setTimeout(ok, 100)); continue; }
                 this.log(`a chunk of ${t.source}'s sync could not be rolled back after it failed (its connection is closed with the sync): ${said}`);
                 break;
               }
+            }
+            // DID IT COMMIT? A COMMIT can answer with an error after its chunk committed (issue 1152: a chunk's COMMIT ran
+            // out of memory, its ROLLBACK answered "no transaction is active", and the range given back was read again
+            // into the ledger's key). So the chunk's ledger row decides, never the error: a chunk whose row is there
+            // committed and is the copy's. One whose row cannot be read fails the copy, which continues from the ledger
+            // at its retry (fail closed)
+            let landed: boolean | null = accounted;
+            if (!landed && !recopy && rolledBack && failure === null) {
+              let rows: number | null = null;
+              try { rows = await this.committedRows(c, t, range); }
+              catch (l) {
+                this.log(`whether a chunk of ${t.source}'s sync committed could not be read after it failed: ${this.errorText(l)}`);
+                landed = null;
+              }
+              if (rows !== null) { landed = true; await committed(rows); }
+            }
+            if (landed === null) { fail(e); return; }
+            if (outOfMemory && failure === null && rolledBack && landed) {
+              // committed, so nothing to read again; but the memory was short, so the copy reads on as when a chunk ran out
+              memoryPages = Math.max(1, Math.min(memoryPages, Math.floor(chunkSize / 2)));
+              live.readers = 1;
+              live.chunkPages = Math.min(memoryPages, live.chunkPages);
+              if (was.sole === null || was.memoryPages !== memoryPages) {
+                this.log(`a chunk of ${chunkSize} page(s) of ${t.source} committed, but its commit ran out of memory: reading on one chunk at a time, ${memoryPages} page(s) each`);
+              }
+              continue;
             }
             if (outOfMemory && failure === null && rolledBack) {
               giveBack(gaps, range);
@@ -5766,6 +5800,17 @@ export class Sync {
   /** a chunk committed, in its own transaction on its reader's connection (`CopyProgress`): appended, never an update */
   private async recordChunk(c: DuckConnection, t: AddedTable, r: PageRange, rows: number, filenode: number): Promise<void> {
     await c.run(`INSERT INTO ${MASON_SCHEMA}.copy_chunks VALUES (${literal(t.source)}, ${r.first}, ${r.end === null ? "NULL" : r.end}, ${rows}, ${filenode}, now())`);
+  }
+
+  /** THE ROWS OF A CHUNK THAT COMMITTED, from its ledger row, read on its reader's connection once its transaction ended;
+   *  null when no chunk committed at its first page (issue 1152: whether a chunk that failed committed is the ledger's to
+   *  say). A row there for another range is a Mason bug, thrown. */
+  private async committedRows(c: DuckConnection, t: AddedTable, r: PageRange): Promise<number | null> {
+    const row = (await c.runAndReadAll(`SELECT end_page, "rows" FROM ${MASON_SCHEMA}.copy_chunks WHERE source = ${literal(t.source)} AND first_page = ${r.first}`)).getRowsJS()[0] as [bigint | null, bigint] | undefined;
+    if (row === undefined) return null;
+    const end = row[0] === null ? null : Number(row[0]);
+    if (end !== r.end) throw new Error(`the sync of ${t.source} read pages ${r.first} to ${r.end ?? "the end"}, but its ledger holds a chunk of pages ${r.first} to ${end ?? "the end"} (Mason bug: report it, with mason logs)`);
+    return Number(row[1]);
   }
 
   /**
