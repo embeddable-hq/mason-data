@@ -343,7 +343,8 @@ function renderCold(f: ColdFixture): { section: string; headline: string } {
   const pgVersion = /^PostgreSQL [\d.]+/.exec(env.postgres.version)?.[0] ?? env.postgres.version;
   // an image built from a branch says "dev": then the commit the run recorded, else the image's ref
   const masonVersion = /\d+\.\d+\.\d+\S*/.exec(env.mason.version)?.[0] ?? (env.mason.commit !== undefined ? `at commit ${env.mason.commit.slice(0, 12)}` : `from the ${env.mason.image} image`);
-  const date = env.date.slice(0, 10);
+  // a run of Mason alone holds times of two runs: both dates, the earlier first
+  const date = [...new Set([env.postgresFrom?.date.slice(0, 10), env.date.slice(0, 10)].filter((d): d is string => d !== undefined))].join(" and ");
   const headline = `${HEADLINE_START}
 ${lead}
 
@@ -1010,6 +1011,8 @@ test("a Mason-alone run renders where its Postgres times came from, in the lead 
   const said = "Postgres's count by status and revenue by month times are from the run of 2026-11-17, where its answers were the same. Its lookup times, and all of Mason's, are from the run of 2026-11-18.";
   const headline = renderReplicaHeadline(alone), section = renderReplicaSection(alone);
   assert.ok(headline.split("\n").find((l) => l.startsWith("Mason and Postgres answered"))!.endsWith(said), "the README's lead");
+  assert.match(headline, /against PostgreSQL 18\.1 and Mason 0\.23\.0, on 2026-11-17 and 2026-11-18\. \[docs/, "measured on both runs' dates");
+  assert.match(renderReplicaHeadline(f), /against PostgreSQL 18\.1 and Mason 0\.23\.0, on 2026-11-17\. \[docs/, "a run of both engines: its one date");
   assert.ok(section.split("\n").find((l) => l.startsWith("Mason and Postgres answered"))!.endsWith(said), "MEASUREMENTS' lead");
   assert.ok(section.includes(`\n- **The order**: each cell ran 3 times, Postgres and Mason taking turns to go first where both were measured.\n- **Two runs**: ${said} The earlier run's cells are copied unchanged, every run and what it read (measured at commit 9cd1f48e2065).`), section);
   assert.doesNotMatch(section, /tests\/fixtures\/bench-replica\.json`?\)/, "never the file a later run writes over");

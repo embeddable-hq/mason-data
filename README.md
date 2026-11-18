@@ -364,7 +364,7 @@ Mason and Postgres answered the same 3 queries over the same rows. The primary k
 |  | 100 M | 1 | 0.0233 | 13.3 | 570× slower |
 |  | 100 M | 10 | 0.0278 | 13.5 | 485× slower |
 
-Mason is for scans and aggregates. A lookup through an index is faster on Postgres ([docs/DESIGN.md](docs/DESIGN.md) "Heap order, no index"). Cold times on Postgres depend on the disk's throughput. Each engine had 4 CPUs, 8 GiB of memory and no swap, on a disk of EBS gp3, 125 MB/s, 3000 IOPS. It was measured on m7g.xlarge, 4 vCPU, 16 GiB RAM, against PostgreSQL 18.7 and Mason at commit 06326be85161, on 2026-11-18. [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md) has every run and how it was measured.
+Mason is for scans and aggregates. A lookup through an index is faster on Postgres ([docs/DESIGN.md](docs/DESIGN.md) "Heap order, no index"). Cold times on Postgres depend on the disk's throughput. Each engine had 4 CPUs, 8 GiB of memory and no swap, on a disk of EBS gp3, 125 MB/s, 3000 IOPS. It was measured on m7g.xlarge, 4 vCPU, 16 GiB RAM, against PostgreSQL 18.7 and Mason at commit 06326be85161, on 2026-11-17 and 2026-11-18. [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md) has every run and how it was measured.
 <!-- END GENERATED -->
 
 Use Mason for analytical queries, and keep your application's own reads and writes on Postgres. Mason is fast because
