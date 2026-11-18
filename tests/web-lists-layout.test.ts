@@ -151,6 +151,24 @@ const MEASURE = `(() => {
   return [...new Set(out)];
 })()`;
 
+/**
+ * Resolves once the page has been laid out at `width` and its resize observers have run (issue 1150). A chart takes
+ * its holder's width in a ResizeObserver (src/web/charts.js). The browser runs those in a rendering step, after the
+ * step's layout. Measured before that step, a chart still has the width before. At the widths where the charts' grid
+ * goes from one column to two (970 and 1140 px), a chart in the right column then stood out of the page by 387 px.
+ *
+ * Two animation frames were not that step. Under load, Chromium ran both callbacks at the new `innerWidth` before the
+ * step that sent the resize event and ran the observers. So this waits on an observer of its own. A new observer
+ * reports in the next step that runs the observers. When it reports at `width`, a second new observer waits for the
+ * step after, so every observer of that step, the page's included, has run. It gives up after 10 s.
+ */
+const atWidth = (width: number) => `new Promise((resolve, reject) => {
+  const timer = setTimeout(() => reject(new Error("the page was never laid out at ${width} px (it is " + window.innerWidth + " px wide)")), 10000);
+  const nextStep = (then) => { const o = new ResizeObserver(() => { o.disconnect(); then(); }); o.observe(document.documentElement); };
+  const step = () => nextStep(() => window.innerWidth === ${width} ? nextStep(() => { clearTimeout(timer); resolve(null); }) : step());
+  step();
+})`;
+
 async function open(hash: string, ready: string, width: number, colorScheme: "light" | "dark"): Promise<Page> {
   browser ??= await playwright!.chromium.launch();
   const p = await browser.newPage({ viewport: { width, height: 900 }, colorScheme });
@@ -177,7 +195,7 @@ for (const page of PAGES) {
       const found: string[] = [];
       for (const width of WIDTHS) {
         await p.setViewportSize({ width, height: 900 });
-        await p.evaluate("new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))");
+        await p.evaluate(atWidth(width));
         for (const s of await p.evaluate<string[]>(MEASURE)) found.push(`${width} px: ${s}`);
       }
       await p.close();

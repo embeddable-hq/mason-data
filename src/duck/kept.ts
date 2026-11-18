@@ -194,6 +194,9 @@ export interface KeptHost {
   recorded(): Promise<ReadonlyMap<string, readonly string[]>>;
   /** a rebuild of it is under way: its copy, or its catch-up poll, which writes the table from another connection */
   rebuilding(source: string): boolean;
+  /** in a write's transaction, before an UPDATE that may move rows (DuckDB writes one of a list column as a delete and
+   *  an insert): what the table's side table covers lowered (src/duck/key-lookup.ts `lowerCovered`); absent: none has one */
+  lowerCovered?(source: string): Promise<void>;
   log(line: string): void;
 }
 
@@ -1017,6 +1020,7 @@ export class KeptJsonPaths implements KeptRoutes {
     const w = this.store.writer;
     await w.run("BEGIN TRANSACTION");
     try {
+      await this.host.lowerCovered?.(p.source);
       const n = Number((await w.run(`UPDATE ${tableOf(p.source)} SET ${ident(p.name)} = ${this.valueSql(p, ident(p.column))} WHERE ${where}${ident(p.name)} IS NULL`)).rowsChanged);
       await w.run(`UPDATE ${PATHS_TABLE} SET rows_done = rows_done + ${n} WHERE name = ${literal(p.name)}`);
       await w.run("COMMIT");

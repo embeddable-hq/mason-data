@@ -792,6 +792,71 @@ its owner name each synced table whole, never with a column list.
 `tests/integration/duck-stream.itest.ts` ("Mason's own publication names each table whole", "a publication an earlier
 Mason made with column lists").
 
+### A lookup by key (issue 1148; 2026-11-18)
+
+**The problem.** A synced table has no index. `WHERE id = $1` scans the key column, and only each row group's min and
+max can skip a row group. On the cold benchmark at 100 M orders, one order by its uuid key took 13 s (Postgres 0.02 s).
+Every uuid falls inside every row group's min and max, so DuckDB read 1.8 GB of keys from disk.
+
+**The decision: a side table of keys and row ids, sorted by key, for a table whose key is scattered.**
+`_mason."key_lookup:<schema>.<table>"` holds `(k, rid)`, sorted by `k`. Its own min and max cut a lookup to one row
+group. The planner replaces `key = <constant>` or `key IN (<constants>)` with `rowid IN (<the side table's row ids>
+UNION ALL <the rows written since it was built>)`. DuckDB pushes the few row ids into the table's scan, one row group
+a row. `src/duck/key-lookup.ts` has the design in its header.
+
+**Chosen by the table's own row groups, not by the key's type** (the owner's suggestion, measured). A sample of 256
+keys, one a row-id step across the table, is held against each row group's min and max of the key column
+(`pragma_storage_info`, metadata). A table is given a side table when a key falls in 8 or more row groups on average
+(`LOOKUP_MIN_ROW_GROUPS`). Measured at 20 M rows on DuckDB 2.0.0, a fresh engine for each lookup, the table's blocks
+it loaded:
+
+| table (20 M rows) | row groups | a key in | plain lookup loads | with a side table | side table on disk |
+|---|---|---|---|---|---|
+| bigint key, appended in order | 163 | 1 | 0.3 MiB | 1.5 MiB | 0.75 MiB |
+| bigint key, 1 % of rows updated | 165 | 3 | 1.3 MiB | 1.3 MiB | 59 MiB |
+| bigint key, 30 % of rows updated | 223 | 61 | 24.5 MiB | 1.0 MiB | 61 MiB |
+| uuid key (random) | 163 | 163 | 325.8 MiB | 1.8 MiB | 346 MiB |
+
+An update is written as a delete and an insert at the table's end, so a heavily updated serial table's newest row
+groups each hold keys from the whole range. Type alone ("uuid yes, integers no") would leave that table reading 25
+times what it needs. It would also build a side table for an append-only uuid-v7 table, whose keys are in order. The
+measured spread chooses right in both. Warm, a routed lookup costs about 1 ms where a plain one on an ordered key costs
+0.3 ms, so a clustered table is left alone. A table without a side table is measured again at most hourly
+(`LOOKUP_REMEASURE_MS`), as an update load can scatter it.
+
+At 100 M uuid rows: the spread read took 1.2 s, the build 8.1 s (a sort of 100 M keys), and the side table 1.8 GiB
+(about 19 bytes a row: a random uuid does not compress). A plain lookup loaded 1,628 MiB, a routed one 2.0 MiB. Warm,
+lookups took 27–87 ms plain and 4–15 ms routed. The OS page cache was warm in these runs. The cold benchmark is the
+measure of record.
+
+**What it holds, and why no write path writes it.** The ledger `_mason.key_lookups` keeps `covered` for each table.
+Every visible row whose row id is below `covered` has its entry, and no entry below `covered` names another key's row.
+Rows at and past `covered` are read from the table itself, by row-id range (the tail). An insert appends past
+`covered`. A deleted or updated row's old entry names a deleted row, which no read sees. So the side table needs no
+write in a write's transaction. That is as well, since DuckDB gives a transaction's own rows row ids from `MAX_ROW_ID`
+up until it commits. It is built again, sorted, once its tail passes 1 % of the table's rows (`LOOKUP_TAIL_SHARE`).
+At 100 M rows that is a rebuild for each million rows written, about 9 s on the rebuilds' connection.
+
+**A row id is given again** (measured on DuckDB 2.0.0, `max_vacuum_tasks` 0). Once the rows at a table's end are all
+deleted and a checkpoint drops their row groups, the next insert takes the first row id past the rows left. That row
+would fall below `covered` with no entry, and a lookup would miss it. So every transaction that may add rows to a
+table with a side table first lowers `covered` to the rows' end (`lowerCovered`). That covers a poll's and a stream
+batch's writes, and the stored JSON fills. An UPDATE that DuckDB writes as a delete and an insert (a list or struct
+column, measured) goes through the same writes. It reads one row group's row ids: 0.6 ms at 20 M rows, 3 ms at 100 M.
+A build takes its snapshot on the writer's turn, and keeps its end as `floor`. Every lowering lowers `floor` too, and
+the swap sets `covered` to `floor`. A table replaced whole (a copy, a compaction) has new row ids. Its side table covers
+nothing from that swap on (`coverNothing`, in the swap's transaction) until it is built again.
+
+**Why the key's conjunct is replaced, not kept beside the route.** With `key = v` kept, DuckDB pushes it into the
+table's scan and reads every row group's keys before the row-id filter. Replaced, it pushes `rowid = N` (one row
+group). The invariant above makes the replacement exact.
+
+**What is left out.** A lookup inside a join, or by a key of two columns, is not routed. A table whose key is a type
+DuckDB keeps no min and max of is not given one.
+
+**Where.** `src/duck/key-lookup.ts`, `src/duck/sync.ts` (`buildLookup`, `lookupDue`, `writeStaged`, `applyChanges`),
+`src/duck/plan.ts`; `tests/duck-key-lookup.test.ts`, `tests/integration/duck-key-lookup.itest.ts`.
+
 ## The statement path
 
 ### How a statement is answered: Postgres decides, DuckDB computes
@@ -2559,15 +2624,16 @@ together, or the start is refused naming what is missing. The owner's spec (2026
   both. A user's "connects from" ranges are judged on that address by the endpoint and, through the PROXY header the
   door's connection carries, by the listener at login and before every statement; the request log names it. No setting
   bypasses the check (an earlier draft's `MASON_MCP_FROM=token` is gone), and nothing here changes the Postgres API's.
-- **Presets for a hosted agent's addresses**: the Users page's Connects from offers "Claude (Anthropic)", the outbound
+- **Presets for a hosted agent's addresses**: the Users page's Connects from offers, under "A hosted agent's servers",
+  "claude.ai" (named "Claude (Anthropic)" until issue 1155, when a person using Claude Code chose it and was refused), the outbound
   ranges Anthropic publishes for MCP tool calls (https://platform.claude.com/docs/en/api/ip-addresses, "Outbound IP
-  addresses"), and "ChatGPT (OpenAI)", the file OpenAI's page of IP egress ranges
+  addresses"), and "ChatGPT on the web", the file OpenAI's page of IP egress ranges
   (https://developers.openai.com/api/docs/guides/ip-addresses, "Outbound IP addresses": "ChatGPT integrations —
   Plugins, connectors, GPT Actions, and agentic commerce") names for them, https://openai.com/chatgpt-connectors.json
   (289 ranges, its `creationTime` 2026-11-06; `chatgpt-actions.json` beside it is GPT Actions' alone and not used), so a
   user held to them connects through this endpoint from that agent alone (`src/cli/address-presets.ts`, `/api/state`
   `addressPresets`). The ranges are written as a user's ranges are kept (one address without its `/32`), so a user given a
-  company's list is shown as that company's ("from ChatGPT (OpenAI)'s addresses (289 ranges)"), the choice names the
+  company's list is shown as that company's ("from ChatGPT's servers (289 ranges)"), the choice names the
   company (`preset:<id>`), never a wall of CIDRs in the box, and a user takes up to 1,000 ranges (`MAX_RANGES`, 100
   before, which OpenAI's list did not fit). **They ship with the release; Mason never fetches them at run time** (a vendor's page
   changing under a run would change who connects without anyone deciding it). **How they stay up to date**:

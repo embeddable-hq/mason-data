@@ -16,6 +16,7 @@
 import type { ExplainOptions } from "../api/postgres/explain.ts";
 import type { CopyState, KeptCurrent } from "./sync.ts";
 import { agoText, CATCHING_UP, inCatchUp, syncText } from "../lib/table-sync.ts";
+import { MASON_SCHEMA } from "./store.ts";
 
 type Body = Record<string, unknown>;
 
@@ -118,7 +119,8 @@ export function scannedTables(nodes: readonly PlanNode[]): TableName[] {
   const out: TableName[] = [];
   const walk = (n: PlanNode): void => {
     const t = scannedTable(n);
-    if (t !== null && !out.some((o) => o.schema === t.schema && o.name === t.name)) out.push(t);
+    // Mason's own tables are no synced table: a lookup by key reads its table's side table (src/duck/key-lookup.ts)
+    if (t !== null && t.schema !== MASON_SCHEMA && !out.some((o) => o.schema === t.schema && o.name === t.name)) out.push(t);
     n.children.forEach(walk);
   };
   nodes.forEach(walk);

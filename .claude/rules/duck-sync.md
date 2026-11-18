@@ -20,6 +20,9 @@ paths:
   - "tests/duck-compact.test.ts"
   - "tests/duck-compact-room.test.ts"
   - "tests/integration/duck-compact.itest.ts"
+  - "src/duck/key-lookup.ts"
+  - "tests/duck-key-lookup.test.ts"
+  - "tests/integration/duck-key-lookup.itest.ts"
 ---
 
 <!-- Loaded only when a matching file is read or edited (the paths above). CLAUDE.md lists every rules file. -->
@@ -304,6 +307,14 @@ paths:
   stream's last position; `caughtUp` waits for the spill; a stop or a replay that fails before it ends leaves it
   `behind`, as its mark says. DETECTOR: `tests/duck-compact.test.ts`, `tests/integration/duck-compact.itest.ts`, the
   bulk test of `tests/integration/duck-stream.itest.ts` (compaction checked every 3 s).
+- **Every transaction that may add rows to a table with a side table for its lookups by key first lowers its
+  `covered`** (`lowerCovered`, src/duck/key-lookup.ts; issue 1148; docs/DESIGN.md "A lookup by key"). Once a table's
+  last row groups are all deleted and a checkpoint drops them, DuckDB gives their row ids again, below what the side
+  table covers, and a lookup would miss the new row. A poll's and a batch's `writeStaged`, the stream's
+  `applyChanges` and the stored JSON fills lower it. A new writer of a synced table must too. A table replaced whole
+  (a copy's swap, a compaction's) calls `coverNothing` in the swap's transaction. A build takes its snapshot on the
+  writer's turn (`beginBuild`), and swaps on it (`swapBuilt`). No write path writes the side table. DETECTOR:
+  `tests/duck-key-lookup.test.ts` "a row id given again", `tests/integration/duck-key-lookup.itest.ts`.
 - **No INSERT … SELECT into an empty CREATE TABLE AS of the same transaction** (`writeByKey`; the review of PR 856):
   DuckDB 2.0.0 reads back NOTHING of a table made by `CREATE TABLE AS … LIMIT 0` and filled by one INSERT … SELECT of a
   row group's rows (122,880) or more in that transaction (`count(*)` says them all; lost even after the COMMIT), and a
@@ -393,3 +404,6 @@ Run each probe that applies: the implementer before each push, and the fresh rev
 - A replicated table leaving the stream for a re-sync whose column change is reverted before it swaps: back in the
   stream with no catch-up (issue 79).
 - A slot invalidated for another reason (a conflict on a standby): blamed on `max_slot_wal_keep_size` (issue 74).
+- A table with a side table for its lookups by key (`lookup: { minRowGroups: 0 }`), its last row group's rows all
+  deleted at the source, synced, a checkpoint, then new rows inserted by a poll and by the stream: each new row found
+  by `WHERE id = $1`, and the same through a compaction and a copy (issue 1148).

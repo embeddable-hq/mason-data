@@ -3,7 +3,7 @@
  * POST /api/users/<name>/from, /disable and /enable, DELETE /api/users/<name>. An added user's password lives in this page's memory while its one-time dialog is open, never in
  * storage, a URL or a log line.
  */
-import { actId, badge, button, code, copyable, copyBlock, copyClick, details, duration, empty, esc, json, pop, renderFailure, ROOMS, serverHostNote, status, utcMinute, readOnlyLine, usersReadOnly, sendButton, failurePop, listTable } from "../shared.js";
+import { actId, badge, button, code, copyable, copyBlock, copyClick, createOpenSet, details, duration, empty, esc, json, pop, renderFailure, ROOMS, serverHostNote, status, utcMinute, readOnlyLine, usersReadOnly, sendButton, failurePop, listTable } from "../shared.js";
 import { VIEW_HASHES } from "../routes.js";
 
 /** The users as the page reads them: with each one's last use (`mason user list` asks the same), then every 30 s. */
@@ -51,34 +51,47 @@ export const presetsOf = (state) => Array.isArray(state?.addressPresets) ? state
 export const presetOf = (from, presets = []) => Array.isArray(from)
   ? presets.find((p) => p.ranges.length === from.length && p.ranges.every((r, i) => r === from[i])) : undefined;
 
-/** Where a user connects from, in its row: "from anywhere", "from" a company's addresses when its ranges are exactly the
- *  ones that company publishes (a list of some 300 is a choice, never a wall of CIDRs), or "from" its ranges (`rangesText`). */
+/** Where a user connects from, in its row: "from anywhere", "from" a hosted agent's servers when its ranges are exactly
+ *  the ones its company publishes ("from claude.ai's servers (2 ranges)": a list of some 300 is a choice, never a wall of
+ *  CIDRs), or "from" its ranges (`rangesText`). */
 export const fromText = (from, presets = []) => {
   if (from === null || from === undefined) return "from anywhere";
   const p = presetOf(from, presets);
-  return p !== undefined ? `from ${p.label}'s addresses (${from.length} ${from.length === 1 ? "range" : "ranges"})` : `from ${rangesText(from)}`;
+  return p !== undefined ? `from ${p.name ?? p.label}'s servers (${from.length} ${from.length === 1 ? "range" : "ranges"})` : `from ${rangesText(from)}`;
 };
+
+/** The heading of the hosted agents' choices in Connects from: whose servers they are, so no one takes one for an app on
+ *  their own computer (issue 1155). */
+export const PRESETS_GROUP = "A hosted agent's servers";
+/** The line on a hosted agent's servers, seen while one is chosen under Connects from (issue 1155: a person using
+ *  Claude Code chose "Claude (Anthropic)" and was refused). */
+export const PRESET_HINT = "Only that agent's connectors connect from these, in its app or on the web. Claude Code and Cursor: choose anywhere, or your computer's address.";
 
 /**
  * THE "CONNECTS FROM" CHOICE, as `mason user add --help` says it: a dropdown, anywhere (no --from, the default: no
  * `from` is sent) or only these addresses (--from <range>, a comma list as `--from a,b` takes it), the address box
- * beside it; or a hosted agent's company (`presets`: `/api/state` `addressPresets`, src/cli/address-presets.ts), which sends
+ * beside it; or a hosted agent's servers (`presets`: `/api/state` `addressPresets`, src/cli/address-presets.ts, under
+ * `PRESETS_GROUP`, each named for the product that calls from them), which sends
  * the ranges it publishes for its connectors (its option's value names it, `preset:<id>`, and `rangesOf` sends its ranges:
  * a company's list may be some 300, never written into the page twice nor into the box),
  * chosen when a user's ranges are exactly a company's. The box is shown only while "only these addresses" is chosen, and its place is kept while "anywhere" is
- * (the stylesheet hides it by `visibility`, never `display`), so nothing in the form moves when the choice changes.
+ * (the stylesheet hides it by `visibility`, never `display`), so nothing in the form moves when the choice changes. While
+ * a hosted agent's servers are chosen, a line in the address box's place says only that agent connects from them (`PRESET_HINT`), its place
+ * kept the same way while another is chosen. `hint: false`: the form says it elsewhere (the add form, under its line).
  * `id`: the form's own, so two forms on the page never share an input's id; `from`: the ranges it opens with (null:
  * anywhere). The page never judges a range: the run reads each, and its refusal is said as the run words it (one
  * grammar, the server's).
  */
-export function connectsChoice(id, from = null, presets = []) {
+export function connectsChoice(id, from = null, presets = [], { hint = true } = {}) {
   const chosen = presetOf(from, presets);
   const only = Array.isArray(from) && chosen === undefined;
   return `<span class="connects"><label for="${esc(id)}-connects">Connects from</label> ` +
     `<select id="${esc(id)}-connects" name="connects"><option value="any"${only ? "" : " selected"}>anywhere</option><option value="only"${only ? " selected" : ""}>only these addresses</option>` +
-    presets.map((p) => `<option value="preset:${esc(p.id)}"${p === chosen ? " selected" : ""}>${esc(p.label)}</option>`).join("") + `</select>` +
+    (presets.length === 0 ? "" : `<optgroup label="${esc(PRESETS_GROUP)}">` +
+      presets.map((p) => `<option value="preset:${esc(p.id)}"${p === chosen ? " selected" : ""}>${esc(p.label)}</option>`).join("") + `</optgroup>`) + `</select>` +
     ` <span class="ranges"><label class="sr" for="${esc(id)}-from">Address ranges, comma-separated</label>` +
-    `<input id="${esc(id)}-from" name="from" spellcheck="false" autocapitalize="off" placeholder="e.g. 192.0.2.0/24, 2001:db8::/32" value="${esc(only ? from.join(", ") : "")}"></span></span>`;
+    `<input id="${esc(id)}-from" name="from" spellcheck="false" autocapitalize="off" placeholder="e.g. 192.0.2.0/24, 2001:db8::/32" value="${esc(only ? from.join(", ") : "")}">` +
+    (presets.length === 0 || !hint ? "" : `<span class="preset-hint">${esc(PRESET_HINT)}</span>`) + `</span></span>`;
 }
 
 /**
@@ -241,35 +254,64 @@ export function mcpSnippets(url, version) {
   };
 }
 
-/**
- * HOW AN MCP CLIENT CONNECTS (issue 1114), under the Postgres client or BI tool's box (renderUsersConnect) and from the same facts (`/api/state`
- * `postgres`, the URL with `<user>:<password>`, and `engine.version`): Claude Code's line, and the JSON for Claude
- * Desktop, Cursor and other clients, each with Copy. The client runs `mason mcp` on its own computer through npx, so
- * that computer needs Node. Shown where that box is, with the same note on a server. "" when the run
- * did not say where a tool connects. `mcp`: mason serve's MCP endpoint (`/api/state` `mcp`, issue 1115), whose
- * address a hosted agent takes as a custom connector, with the steps; null when it is off.
- */
-export function renderUsersMcp(pg, served = false, version = null, mcp = null) {
-  if (!pg || typeof pg.shown !== "string") return "";
-  const s = mcpSnippets(pg.shown, version);
-  return `<div class="connect connect-mcp"><p class="connect-title">Connect an MCP client</p>` +
-    `<p class="mcp-for">Claude Code: run this in a terminal.</p>${copyBlock("users-mcp-claude-code", s.claudeCode)}` +
-    `<p class="mcp-for">Claude Desktop, Cursor and other clients: add this to the client's MCP settings.</p>${copyBlock("users-mcp-json", s.json)}` +
-    serverHostNote(pg, served) +
-    `<p class="tip"><span>Put a user's name and password in place of ${code("<user>")} and ${code("<password>")}. The client's computer needs Node ${esc(MCP_NODE)} or later.</span></p>` +
-    (mcp && typeof mcp.url === "string" ? renderHostedMcp(mcp)
-      : `<p class="tip">The web versions of ChatGPT and claude.ai can't connect this way yet.</p>`) + `</div>`;
+/** What a client given the MCP endpoint's address (`/api/state` `mcp.url`) is given: Claude Code's line, and the server
+ *  for Cursor's mcp.json. Each signs in in the browser, so neither carries a password. */
+export function mcpUrlSnippets(url) {
+  return {
+    claudeCode: `claude mcp add --transport http mason ${url}`,
+    cursor: JSON.stringify({ mcpServers: { mason: { url } } }, null, 2),
+  };
 }
 
-/** A hosted agent's way in (issue 1115): the MCP endpoint's address with Copy, and how to add it as a custom connector. */
-export function renderHostedMcp(mcp) {
-  return `<p class="mcp-for">claude.ai, ChatGPT and other hosted agents: add this address as a custom connector.</p>` +
-    `<dl class="facts"><dt>URL</dt><dd>${copyable("users-mcp-url", mcp.url)}</dd></dl>` +
-    `<ol class="mcp-steps"><li>In the agent's settings, add a custom connector and paste the URL (in claude.ai: Settings, then Connectors, then Add custom connector).</li>` +
-    `<li>Paste only the URL. Leave the OAuth client ID, client secret, bearer token and header fields empty: you sign in in your browser.</li>` +
-    `<li>Connect, and sign in when the agent asks. You sign in at ${code(mcp.issuer)}, and the agent's queries run as the Mason user your sign-in names.</li></ol>` +
-    `<p class="tip">A user limited to some addresses connects this way only from the agent's own: choose its company under Connects from.</p>` +
-    `<p class="tip">A desktop app (Claude Code, Cursor, the ChatGPT desktop app's Streamable HTTP server) connects from your own computer, not from its company's addresses: give its user your computer's address, or anywhere.</p>`;
+/** Where each client connects from, for a user's Connects from (issue 1155): a client on the person's computer, or its
+ *  company's servers. Claude Desktop's custom connectors are its company's: they connect from Anthropic's servers. */
+export const MCP_FROM = "Claude Code and Cursor connect from your computer. claude.ai, Claude Desktop and ChatGPT connect from their companies' servers.";
+
+/**
+ * HOW AN AI AGENT CONNECTS, the one body of the Users page's box (`renderUsersMcp`) and of New user added's section
+ * (`renderAdded`), so the two cannot drift (issue 1155). `p`: the ids' prefix (`users-mcp`, `added-mcp`); `pgUrl`: the
+ * Postgres URL `mason mcp` is given (the run's with `<user>:<password>`, or the user's own); `mcp`: mason serve's MCP
+ * endpoint (`/api/state` `mcp`, issue 1115), or null when it is off; `user`: the user just added (the dialog's), else
+ * null; `note`: the server's note on the Postgres URL; `isOpen`: the page's open details, by key; `urlRow`: false where
+ * the endpoint's address is shown already (New user added's MCP URL row).
+ * - The endpoint on: its address with Copy first, then a line per client saying where it goes, one line of sign-in, one
+ *   on where each connects from; the `mason mcp` way, with a password, under a closed "For a client that can't sign in
+ *   in a browser".
+ * - The endpoint off: the `mason mcp` way alone, and that claude.ai and ChatGPT on the web can't connect this way yet.
+ */
+function mcpBody(p, { pgUrl, version = null, mcp = null, user = null, note = "", isOpen = () => false, urlRow = true }) {
+  const once = user !== null ? badge("Shown once", "warn") : "";
+  const s = mcpSnippets(pgUrl, version);
+  const local = `<p class="mcp-for">Claude Code: run this.</p>${copyBlock(`${p}-claude-code`, s.claudeCode, once)}` +
+    (user !== null ? `<p class="tip">This line saves the password in your shell history. The JSON in a client's settings file doesn't.</p>` : "") +
+    `<p class="mcp-for">Claude Desktop, Cursor and others: add this to their MCP settings.</p>${copyBlock(`${p}-json`, s.json, once)}` +
+    note +
+    `<p class="tip"><span>${user !== null ? "" : `Put a user's name and password in place of ${code("<user>")} and ${code("<password>")}. `}Needs Node ${esc(MCP_NODE)} or later.</span></p>`;
+  if (!mcp || typeof mcp.url !== "string") return local + `<p class="tip">claude.ai and ChatGPT on the web can't connect this way yet.</p>`;
+  const u = mcpUrlSnippets(mcp.url);
+  return (urlRow ? `<p class="mcp-lead">Add this address to your agent, then sign in in your browser.</p>` +
+    `<dl class="facts"><dt>URL</dt><dd>${copyable(`${p}-url`, mcp.url)}</dd></dl>` : `<p class="mcp-lead">Add the MCP URL to your agent, then sign in in your browser.</p>`) +
+    `<ul class="mcp-clients">` +
+    `<li><b>claude.ai and Claude Desktop</b>: Customize, then Connectors, then Add custom connector.</li>` +
+    `<li><b>ChatGPT</b>: turn on Developer mode in its settings, then create an app with the address.</li>` +
+    `<li><b>Claude Code</b>: run this, then sign in from <code>/mcp</code>.${copyBlock(`${p}-claude-code-url`, u.claudeCode)}</li>` +
+    `<li><b>Cursor</b>: add this to ${code("~/.cursor/mcp.json")}.${copyBlock(`${p}-cursor`, u.cursor)}</li></ul>` +
+    `<p class="tip">Paste only the address: leave any OAuth client ID, secret, token or header fields empty. ` +
+    (user !== null ? `If the sign-in page asks for a Mason user, sign in as ${esc(user)}, with the password above.` : "Sign in as a Mason user.") + `</p>` +
+    `<p class="tip">${esc(MCP_FROM)}</p>` +
+    details(`${p}-fallback`, "For a client that can't sign in in a browser", local, isOpen(`${p}-fallback`), "mcp-fallback");
+}
+
+/**
+ * HOW AN AI AGENT CONNECTS (issues 1114, 1115, 1155), under the Postgres client or BI tool's box (renderUsersConnect),
+ * from the same facts (`/api/state` `postgres`, the URL with `<user>:<password>`, `engine.version`) and mason serve's MCP
+ * endpoint (`mcp`), in the body New user added shares (`mcpBody`). Shown where that box is, with the same note on a
+ * server. "" when the run did not say where a tool connects. `isOpen`: the page's open details, by key.
+ */
+export function renderUsersMcp(pg, served = false, version = null, mcp = null, isOpen = () => false) {
+  if (!pg || typeof pg.shown !== "string") return "";
+  return `<div class="connect connect-mcp"><p class="connect-title">Connect an AI agent</p>` +
+    mcpBody("users-mcp", { pgUrl: pg.shown, version, mcp, note: serverHostNote(pg, served), isOpen }) + `</div>`;
 }
 
 // ------------------------------------------------------------------ Temporary cloud tunnel (mason share, from the page)
@@ -538,9 +580,12 @@ export function renderAddUser(state, inBox = false, { busy = false, sent = null 
   // the form is the same whatever writes it; none once a user is added
   return `<form id="add-user"${inBox ? "" : ` class="formcard"`} autocomplete="off"><span class="name-field"><label for="user-name">Name</label> ` +
     `<input id="user-name" name="name" required placeholder="e.g. metabase" spellcheck="false" autocapitalize="off"${sent?.name ? ` value="${esc(sent.name)}"` : ""}></span>` +
-    roleChoice(state.roles, sent?.role ?? "") + connectsChoice("add-user", sent?.from ?? null, presetsOf(state)) +
+    roleChoice(state.roles, sent?.role ?? "") + connectsChoice("add-user", sent?.from ?? null, presetsOf(state), { hint: false }) +
     // Add a user → Adding… in the room of both; its refusal a popover beside it (`renderAddUser`'s page: `action`)
-    `${sendButton("Add a user", "Adding…", {}, "primary", { id: "add-user-submit", busy, submit: true })}${ROLES_LINE}</form>`;
+    `${sendButton("Add a user", "Adding…", {}, "primary", { id: "add-user-submit", busy, submit: true })}` +
+    // under the line, the line on roles; while a hosted agent's servers are chosen, the line on them in its place (one
+    // grid cell, so the form keeps its height whatever is chosen: the box beside the choice is too narrow for it)
+    (presetsOf(state).length === 0 ? ROLES_LINE : `<div class="form-notes">${ROLES_LINE}<p class="preset-hint">${esc(PRESET_HINT)}</p></div>`) + `</form>`;
 }
 
 /** Where the README says how to write roles (its "Access control" section, on the public repository): the one site
@@ -589,16 +634,11 @@ const onceFacts = (rows, passwordId, under = {}) => `<dl class="facts">${rows.fi
   `<dt>${esc(k)}</dt><dd>${id === null ? esc(v) : copyable(id, v, id === passwordId ? badge("Shown once", "warn") : "")}</dd>` +
   (under[k] ? `<dd class="under">${under[k]}</dd>` : "")).join("")}</dl>`;
 
-/** A user just added's MCP lines (issue 1114): Connect an MCP client's two snippets, built by the box's own `mcpSnippets`
- *  with this user's URL, its password in it, so each is "Shown once" as the password is; a closed section under the URL. */
-const addedMcp = (url, version) => {
-  const s = mcpSnippets(url, version);
-  const once = badge("Shown once", "warn");
-  return details("added-mcp", "Connect an MCP client",
-    `<p class="mcp-for">Claude Code: run this in a terminal.</p>${copyBlock("added-mcp-claude-code", s.claudeCode, once)}` +
-    `<p class="tip">Running this line saves the password in your shell history. Pasting the JSON into the client's settings file avoids that.</p>` +
-    `<p class="mcp-for">Claude Desktop, Cursor and other clients: add this to the client's MCP settings.</p>${copyBlock("added-mcp-json", s.json, once)}`, false, "once-mcp");
-};
+/** A user just added's way in for an AI agent (issues 1114, 1155): the box's own body (`mcpBody`) with this user's URL,
+ *  its password in it, so each `mason mcp` line is "Shown once" as the password is, and the sign-in names the user; a
+ *  closed section under the URL. */
+const addedMcp = (a, version, mcp, isOpen) =>
+  details("added-mcp", "Connect an AI agent", mcpBody("added-mcp", { pgUrl: a.url, version, mcp, user: a.user, isOpen, urlRow: false }), isOpen("added-mcp"), "once-mcp");
 
 /**
  * A USER JUST ADDED (`mason user add --json`'s shape), as the parts of the one-time dialog (index.html `#once`, a modal
@@ -610,15 +650,18 @@ const addedMcp = (url, version) => {
  * line: the password is only shown once. No Database row: the URL already carries the database, and the Database, Host,
  * Port and SSL mode are the run's, said by Connect a Postgres client or BI tool on the same page (renderUsersConnect);
  * `mason user add` in a terminal prints them all. No psql line: the URL is the same thing, pasted after `psql`. Under
- * the URL, a closed "Connect an MCP client" (`addedMcp`, issue 1114), its lines pinned to `o.version`: the run's version
- * when the user was added. A field the JSON does not carry (the URL while Mason does not run) is not shown, nor its MCP
+ * the URL — and, with the MCP endpoint on (`o.mcp`), an MCP URL row with Copy, the endpoint's address — a closed
+ * "Connect an AI agent" (`addedMcp`, issues 1114, 1155), its lines pinned to `o.version` and `o.mcp`:
+ * the run's version and MCP endpoint when the user was added; `o.isOpen`: the page's open details, by key. A field the JSON does not carry (the URL while Mason does not run) is not shown, nor its MCP
  * section. Mason keeps no copy, so it is never shown again.
  */
 export function renderAdded(a, o = {}) {
+  // the MCP endpoint on as the user was added: its address a row of its own, under the Postgres URL (issue 1155)
+  const hosted = typeof o.mcp?.url === "string";
   return {
     "once-head": `<p class="once-title" id="once-title">New user added</p>` +
-      onceFacts([["URL", a.url, "added-url"], ["User", a.user, null], ["Password", a.password, "added-password"]], "added-password",
-        typeof a.url === "string" ? { URL: addedMcp(a.url, o.version ?? null) } : {}),
+      onceFacts([["URL", a.url, "added-url"], ["MCP URL", hosted ? o.mcp.url : undefined, "added-mcp-url"], ["User", a.user, null], ["Password", a.password, "added-password"]], "added-password",
+        typeof a.url === "string" ? { [hosted ? "MCP URL" : "URL"]: addedMcp(a, o.version ?? null, o.mcp ?? null, o.isOpen ?? (() => false)) } : {}),
     "once-status": connectedLine(o.connected === true),
     "once-foot": `<p class="tip">The password is only shown once</p>`,
   };
@@ -650,12 +693,14 @@ export const page = {
     // show: the list's tab, the hash's (`route`: #users?show=removed)
     // addSent: what the last Add a user sent ({ name, role, from }), the form written with it while it is sent and once it
     // is refused; fromSent: what a From… sent ({ name, from }), its form written with it while it is sent
-    const m = { actionFailure: null, added: null, addedVersion: null, addedSeen: false, confirming: null, refused: null, held: null, show: "active", addKind: "user", addSent: null, fromSent: null };
+    const m = { actionFailure: null, added: null, addedVersion: null, addedMcp: null, addedSeen: false, confirming: null, refused: null, held: null, show: "active", addKind: "user", addSent: null, fromSent: null };
     // addKind: what the add box creates, "user" (New user) or "share" (Temporary cloud tunnel): the box's own choice
     const users = () => ctx.read(USERS)?.body ?? null;
     // the cloud tunnel, the add box's second kind: its own model, beats and actions
     const share = createShare(ctx);
     m.share = share.m;
+    // the open details of the AI agent's box and of New user added's section (the fallback, the section): a rewrite keeps them
+    const opened = createOpenSet();
     const actions = {
       /** `role`: the Role choice's, sent as mason user add --role; "" or none: no role, as with no --role. `from`: the
        *  ranges, as mason user add --from; null or none: none sent, from anywhere */
@@ -670,6 +715,7 @@ export const page = {
           // the run's version as the user is added, for its MCP lines: kept with the password, so a later read never
           // rewrites the dialog the person copies from
           m.addedVersion = ctx.read(STATE)?.body?.engine?.version ?? null;
+          m.addedMcp = ctx.read(STATE)?.body?.mcp ?? null;
           m.addedSeen = false;
           m.addSent = null;
         } });
@@ -723,7 +769,7 @@ export const page = {
         } });
         return "body" in r;
       },
-      dismissAdded() { m.added = null; m.addedVersion = null; m.addedSeen = false; },
+      dismissAdded() { m.added = null; m.addedVersion = null; m.addedMcp = null; m.addedSeen = false; for (const k of ["added-mcp", "added-mcp-fallback"]) opened.open.delete(k); },
       dismissRefused() { m.refused = null; },
       /** Add a user's refusal dismissed: the form keeps what was sent, for the person to change */
       dismissAddFailure() { m.actionFailure = null; },
@@ -782,9 +828,9 @@ export const page = {
           "add-share-box": offer ? renderSharePane(s, share.m, ctx.read(SHARE_CHOICES)) : "",
           "users-connect": renderUsersConnect(s?.postgres, s?.served === true, offer),
           // how an MCP client connects, from the same facts, under it
-          "users-mcp": renderUsersMcp(s?.postgres, s?.served === true, s?.engine?.version ?? null, s?.mcp ?? null),
+          "users-mcp": renderUsersMcp(s?.postgres, s?.served === true, s?.engine?.version ?? null, s?.mcp ?? null, opened.has),
           // a user just added, or a cloud tunnel just opened: the one-time dialog's parts (the shell opens it while `once()` names it)
-          ...(m.added ? renderAdded(m.added, { connected: m.addedSeen, version: m.addedVersion }) : renderShareOnce(s, share.m, ctx.now().getTime())),
+          ...(m.added ? renderAdded(m.added, { connected: m.addedSeen, version: m.addedVersion, mcp: m.addedMcp, isOpen: opened.has }) : renderShareOnce(s, share.m, ctx.now().getTime())),
           // what the box made, under it: a cloud tunnel
           added: renderShareCard(s, { ...share.m, stopping: ctx.sending("share-stop") }, ctx.now().getTime()),
           // Add a user refused: a popover beside its button, with Dismiss, which moves nothing under the form
@@ -798,6 +844,7 @@ export const page = {
         return actions.addUser(input.value.trim(), form.elements.role?.value ?? "", rangesOf(form.elements, presetsOf(ctx.read(STATE)?.body))).then((ok) => { if (ok) input.value = ""; });
       },
       input: (target) => share.input(target),
+      toggle: (target) => opened.toggle(target),
       click(d, button, { doc, win }) {
         if (d.addKind !== undefined) { if (d.addKind === "user" || d.addKind === "share") m.addKind = d.addKind; return true; }
         const shared = share.click(d);
