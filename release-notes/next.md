@@ -45,3 +45,7 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 - **The web page's Users list cut "not used in the last 7 days" short, with no way to read it.** Its Last used column
   is narrower than those words. Now a hover shows them whole, as it does for every other value a list cuts.
+- **A first sync could fail with `Duplicate key "source: <table>, first_page: <n>"` after it ran out of memory.** It
+  happened when the synced data reported running out of memory as a part of the table was saved, though that part
+  was saved. Mason then read that part again and stopped there. The table was not synced at that pass, and was only
+  tried again later. Now Mason checks its own record of what was saved, and goes on. No row was lost or doubled.

@@ -377,6 +377,101 @@ test("a chunk out of memory switches the copy to one reader as it is seen: while
   }
 });
 
+// A CHUNK'S COMMIT THAT ANSWERS WITH AN ERROR AFTER IT COMMITTED (issue 1152: the engine's COMMIT ran out of memory with
+// the chunk committed, its ROLLBACK answered "no transaction is active", and the range given back was read again into
+// the ledger's key: `Duplicate key "source: public.cfg, first_page: 64"`, a first sync failed). The ledger decides
+// whether a chunk committed, never the error: the copy goes on, no range read twice, and the table equals the source.
+// A failure that is not out of memory fails the copy after its chunk committed, and the retry continues from the ledger.
+test("a chunk whose COMMIT answers out of memory after it committed is the copy's: no range read twice, and after a failure the retry continues from the ledger, the table equal to the source", async () => {
+  const s = await shared();
+  const dir = tmp("landed");
+  dirs.push(dir);
+  const c = await connect(s);
+  let facts;
+  try { facts = await readSourceFacts(c, new Map()); } finally { c.close(); }
+  const parsed = parseSource(s.url);
+  if ("problem" in parsed) throw new Error(parsed.problem);
+  const logged: string[] = [];
+  // THE COMMIT THAT LANDS AND FAILS: a chunk's COMMIT (the one after its ledger row) whose number is in `failAt` commits,
+  // then answers with `error` (the engine's words)
+  let error = "", failAt = new Set<number>(), chunkCommits = 0;
+  const open = async (file: string): Promise<DuckStore> => {
+    const store = await DuckStore.open(path.join(dir, file), (l) => logged.push(l), { memoryLimit: "256MB" });
+    const real = store.instance.connect.bind(store.instance);
+    (store.instance as { connect: typeof real }).connect = async () => {
+      const conn = await real();
+      const run = conn.run.bind(conn);
+      let last = "";
+      conn.run = async (sql, values) => {
+        const after = last;
+        last = sql;
+        const r = await run(sql, values);
+        if (sql === "COMMIT" && after.includes("_mason.copy_chunks VALUES") && failAt.has(++chunkCommits)) throw new Error(error);
+        return r;
+      };
+      return conn;
+    };
+    return store;
+  };
+  let store = await open("oom.db");
+  const events: ChunkEvent[] = [];
+  const onChunk = (e: ChunkEvent): void => { events.push(e); };
+  const digest = "count(*), count(DISTINCT id), sum(id), sum(order_id), sum(product_id), sum(quantity), sum(unit_price)";
+  const pgc = await connect(s);
+  let source;
+  try { source = (await pgc.query(`SELECT ${digest} FROM order_items`)).rows[0]!.map(String); } finally { pgc.close(); }
+  const table = facts.tables.filter((t) => t.table === "order_items");
+  const tiles = (said: string): void => {
+    const committed = events.filter((e) => e.phase === "committed").sort((a, b) => a.first - b.first);
+    committed.forEach((e, i) => assert.equal(e.first, i === 0 ? 0 : committed[i - 1]!.end, `every page read once: ${JSON.stringify(committed.map((x) => [x.first, x.end]))}\n${said}`));
+    assert.equal(committed.at(-1)!.end, null, "the last chunk is open-ended");
+  };
+  // OUT OF MEMORY at the second chunk's COMMIT, and at the fourth's: the copy goes on, one reader at a time
+  error = "Out of Memory Error: failed to allocate data of size 16.0 MiB (241.6 MiB/244.1 MiB used)";
+  failAt = new Set([2, 4]);
+  let sync = new Sync(store, parsed.source, "demo", (l) => logged.push(l), 3_600_000, "poll", null, { copyParallel: 3, copyChunkRows: 1_200, onChunk });
+  try {
+    await sync.open();
+    await sync.setTables(table);
+    await sync.once();
+    const said = logged.join("\n");
+    assert.deepEqual(sync.state().map((x) => [x.source, x.phase, x.error]), [["public.order_items", "copied", null]], said);
+    assert.equal(chunkCommits >= 4, true, `the fourth chunk committed: ${chunkCommits}\n${said}`);
+    assert.ok(logged.some((l) => /^a chunk of \d+ page\(s\) of public\.order_items committed, but its commit ran out of memory: reading on one chunk at a time, \d+ page\(s\) each$/.test(l)), said);
+    tiles(said);
+    assert.deepEqual((await store.writer.runAndReadAll(`SELECT ${digest} FROM public.order_items`)).getRowsJS()[0]!.map(String), source, "the synced table equals the source");
+  } finally { await sync.stop(); await store.close(); }
+  // ANOTHER ERROR at the third chunk's COMMIT, after it committed: the copy fails; the retry continues from the ledger
+  store = await open("failed.db");
+  events.length = 0; chunkCommits = 0;
+  error = "IO Error: the disk answered with an error";
+  failAt = new Set([3]);
+  const from = logged.length;
+  sync = new Sync(store, parsed.source, "demo", (l) => logged.push(l), 3_600_000, "poll", null, { copyParallel: 3, copyChunkRows: 1_200, onChunk });
+  try {
+    await sync.open();
+    await sync.setTables(table);
+    await sync.once();
+    assert.deepEqual(sync.state().map((x) => [x.source, x.phase]), [["public.order_items", "failed"]], logged.slice(from).join("\n"));
+    assert.match(sync.state()[0]!.error ?? "", /IO Error: the disk answered with an error/);
+  } finally { await sync.stop(); }
+  // a restart tries a failed copy again at once
+  failAt = new Set();
+  sync = new Sync(store, parsed.source, "demo", (l) => logged.push(l), 3_600_000, "poll", null, { copyParallel: 3, copyChunkRows: 1_200, onChunk });
+  try {
+    await sync.open();
+    await sync.setTables(table);
+    await sync.once();
+    const said = logged.slice(from).join("\n");
+    assert.deepEqual(sync.state().map((x) => [x.source, x.phase, x.error]), [["public.order_items", "copied", null]], said);
+    tiles(said);
+    assert.deepEqual((await store.writer.runAndReadAll(`SELECT ${digest} FROM public.order_items`)).getRowsJS()[0]!.map(String), source, "the synced table equals the source after the retry");
+  } finally {
+    await sync.stop();
+    await store.close();
+  }
+});
+
 test("a sync asked by hand (mason sync, the page's Sync now) is a synced event in mason sync's words; a scheduled poll that succeeds is a polled event in them", async () => {
   const s = await shared();
   const dir = tmp("synced");
