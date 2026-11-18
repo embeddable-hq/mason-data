@@ -41,6 +41,40 @@ const codeOf = (status: number): FailureCode => status === 400 ? "usage" : statu
 /** The sources file to edit: where it is, its text, what it says, and the file read as the run reads it (its URL resolved). */
 export interface EditTarget { root: string; file: string; text: string; parsed: SourceFile; read: ProjectSource }
 
+/** An entry as one line a person can write: its name and its keys as a flow map (JSON, which YAML reads). */
+const entryLine = (e: TableEntry): string => `${e.name}: ${JSON.stringify(entryFields(e))}`;
+
+/** An entry as the file says it, to compare: every key, its sync and references in the file's words. */
+const entryShape = (e: TableEntry): string => JSON.stringify([e.name, e.table, e.columns, e.exclude, e.key, e.sync ? syncText(e.sync) : null,
+  (e.references ?? []).map((r) => [r.columns, r.to, r.table, r.targetColumns])]);
+
+/**
+ * EVERY EDIT IS READ BACK BEFORE IT IS WRITTEN (the reviews of PR 1145: a cut that ran on took the next entry, a splice
+ * left a stray bracket). `text` is the file as the edit would leave it, and `expected` every entry it must then hold.
+ * It must read as a sources file, keep the file's own keys as they were (kind, url, database, sync, publication), and
+ * hold exactly the entries expected. Else nothing is written, and the edit is refused with what to write by hand
+ * (`byHand`). An edit that cannot be checked never reports success.
+ */
+function writeChecked(at: EditTarget, text: string, expected: readonly TableEntry[], byHand: string): void {
+  const rel = path.relative(at.root, at.file) || at.file;
+  const refuse = (what: string): never => {
+    throw new Refusal(409, `${rel} could not be edited safely, so nothing was written: ${what}. Edit it by hand: ${byHand}`);
+  };
+  const now = parseSourceText(text, at.parsed.name, at.file);
+  if ("problems" in now) return refuse(`the edit would leave it unreadable (${now.problems[0]!})`);
+  const own = (f: SourceFile): string => JSON.stringify([f.kind, f.url, f.database, f.sync ? syncText(f.sync) : null, f.publication]);
+  if (own(now) !== own(at.parsed)) return refuse("the edit would change its keys outside tables:");
+  const want = new Map(expected.map((e) => [e.table, entryShape(e)]));
+  for (const e of now.tables) {
+    const w = want.get(e.table);
+    if (w === undefined) return refuse(`the edit would leave an entry tables.${e.name} it should not`);
+    if (w !== entryShape(e)) return refuse(`the edit would leave tables.${e.name} other than it should be`);
+    want.delete(e.table);
+  }
+  for (const t of want.keys()) return refuse(`the edit would lose tables.${entryName(t)}`);
+  fs.writeFileSync(at.file, text);
+}
+
 /** The database an edit is checked against: its catalog (preflight.ts readSourceFacts) and its name; `measured`, with
  *  Mason up, what the run measured of a table (a poll's cost is estimated from it: `pollCost`). Whether a table can be
  *  replicated is its entry's sync and the catalog's (src/cli/sources.ts entryProblems), never the run's. */
@@ -246,7 +280,10 @@ export function addEntry(at: EditTarget, db: EditCatalog, table: string, columns
     // the references a table the file syncs already holds to this one, each on its own entry (its other lines as they were)
     for (const o of p.others) if (!("problem" in r)) r = withReferences(r.text, o.entry, o.references);
     if ("problem" in r) throw new Refusal(409, `${path.relative(at.root, at.file)} cannot be edited: ${r.problem}`);
-    fs.writeFileSync(at.file, r.text);
+    const mine: TableEntry = { name: entry.name, table, columns: entry.columns, exclude: entry.exclude, key: entry.key, sync: entry.sync, ...(entry.references?.length ? { references: entry.references } : {}) };
+    const others = p.others.map((x) => ({ ...x.entry, references: x.references }));
+    const expected = [...at.parsed.tables.filter((e) => e.table !== table).map((e) => others.find((x) => x.table === e.table) ?? e), mine];
+    writeChecked(at, r.text, expected, [`write its entry as ${entryLine(mine)}`, ...others.map((x) => `on tables.${x.name}, write references: ${JSON.stringify(entryFields(x).references ?? {})}`)].join(", and "));
   }
   const eff = effectiveSync(at.parsed, entry);
   return { table, file: at.file, entry: entry.name, columns: entry.columns, exclude: entry.exclude, key: entry.key, addedKey: p.addedKey, skippedSecrets: p.skipped, already: same,
@@ -501,6 +538,12 @@ export function removeEntries(at: EditTarget, db: EditCatalog, names: readonly s
     if ("problem" in r) throw cant(r.problem);
     out = r.text;
   }
-  fs.writeFileSync(at.file, out);
+  const expected = at.parsed.tables.filter((e) => !gone.includes(e.table)).map((e) => {
+    const kept = (e.references ?? []).filter((x) => !gone.includes(x.table));
+    const { references: _was, ...rest } = e;
+    return kept.length ? { ...rest, references: kept } : rest;
+  });
+  writeChecked(at, out, expected, `delete the entries of ${entries.map((e) => `tables.${e.name}`).join(", ")}` +
+    (referencesRemoved.length ? `, and the references to ${entries.length === 1 ? "it" : "them"} in ${[...new Set(referencesRemoved.map((x) => `tables.${entryName(x.table)}.references`))].join(", ")}` : ""));
   return { removed: [...new Set(gone)], file: at.file, referencesRemoved };
 }

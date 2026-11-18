@@ -36,7 +36,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { isMap, isScalar, parseDocument, type Document, type Pair, type YAMLMap } from "yaml";
+import { isMap, isPair, isScalar, isSeq, parseDocument, type Document, type Pair, type YAMLMap } from "yaml";
 import { databaseNameProblem, DEFAULT_DATABASE } from "../lib/database-name.ts";
 import { appEnvValue, ENV_FILE } from "../lib/dotenv.ts";
 import { closest, didYouMean } from "../lib/did-you-mean.ts";
@@ -1093,42 +1093,73 @@ export function entryText(e: Omit<WrittenEntry, "table">, indent: string): strin
 type Ranged = { range?: [number, number, number] | null };
 const FLOW_MAP = "its tables: is written as a { … } map with entries: write it one table per line to have mason add and mason remove edit it";
 
-/** The file parsed for an edit: its `tables:` pair (null when it has none), and the line helpers over its text. */
-function forEdit(text: string): { pair: Pair | null; lineStart: (at: number) => number; lineEnd: (at: number) => number; pairEnd: (p: Pair) => number } | { problem: string } {
+/** The file parsed for an edit: its `tables:` pair (null when it has none), the line helpers over its text, and where
+ *  each pair under `tables:` ends (`pairEnd`). */
+function forEdit(text: string): { pair: Pair | null; lineStart: (at: number) => number; lineEnd: (at: number) => number; pairEnd: (p: Pair) => number; indentOf: (at: number) => string } | { problem: string } {
   const doc = parseDocument(text, { uniqueKeys: true });
   if (doc.errors.length) return { problem: `it is not YAML (${doc.errors[0]!.message.split("\n")[0]})` };
   if (!isMap(doc.contents)) return { problem: "it is not a mapping" };
-  const pair = (doc.contents as YAMLMap).items.find((p) => isScalar(p.key) && p.key.value === "tables") ?? null;
-  const lineStart = (at: number): number => text.lastIndexOf("\n", at - 1) + 1;
-  const lineEnd = (at: number): number => { if (at > 0 && text[at - 1] === "\n") return at; const n = text.indexOf("\n", at); return n < 0 ? text.length : n + 1; };
-  return { pair: pair as Pair | null, lineStart, lineEnd, pairEnd: (p) => pairEnd(text, (p.key as Ranged).range![0], lineStart, lineEnd) };
+  const top = (doc.contents as YAMLMap).items as Pair[];
+  const at = top.findIndex((p) => isScalar(p.key) && p.key.value === "tables");
+  const pair = at < 0 ? null : top[at]!;
+  const lineStart = (i: number): number => text.lastIndexOf("\n", i - 1) + 1;
+  const lineEnd = (i: number): number => { if (i > 0 && text[i - 1] === "\n") return i; const n = text.indexOf("\n", i); return n < 0 ? text.length : n + 1; };
+  const ends = new Map<Pair, number>();
+  // each pair of a block map, bounded by the line its next sibling starts on (the last: by its parent's end)
+  const walk = (items: readonly Pair[], bound: number): void => {
+    items.forEach((p, i) => {
+      const next = items[i + 1];
+      const end = pairEnd(text, p, next !== undefined ? lineStart((next.key as Ranged).range![0]) : bound, lineStart, lineEnd);
+      ends.set(p, end);
+      if (isMap(p.value) && !(p.value as YAMLMap).flow) walk((p.value as YAMLMap).items as Pair[], end);
+    });
+  };
+  if (pair !== null && isMap(pair.value) && !(pair.value as YAMLMap).flow) {
+    const after = top[at + 1];
+    walk((pair.value as YAMLMap).items as Pair[], after !== undefined ? lineStart((after.key as Ranged).range![0]) : text.length);
+  }
+  // a line's indent: its leading spaces alone, never an anchor or a tag before its key (`&c customers:`)
+  const indentOf = (i: number): string => /^[ \t]*/.exec(text.slice(lineStart(i)))![0];
+  return { pair, lineStart, lineEnd, pairEnd: (p) => ends.get(p) ?? lineEnd((p.key as Ranged).range![1]), indentOf };
+}
+
+/** Where a node's own text ends, by the parser's positions: a block map's or list's at its last item's, recursively (its
+ *  own range runs on over comment lines after it, to the next key); a scalar's or a flow collection's at its range's
+ *  value end (a flow collection's closing bracket included, on whatever line it sits). */
+function contentEnd(n: unknown, fallback: number): number {
+  if ((isMap(n) || isSeq(n)) && !(n as YAMLMap).flow) {
+    const last = (n as YAMLMap).items[(n as YAMLMap).items.length - 1] as unknown;
+    if (last === undefined) return (n as Ranged).range?.[1] ?? fallback;
+    return isPair(last) ? contentEnd(last.value, Math.max(fallback, (last.key as Ranged).range![1])) : contentEnd(last, fallback);
+  }
+  const r = (n as Ranged | null)?.range;
+  return r ? Math.max(r[1], fallback) : fallback;
 }
 
 /**
- * WHERE A KEY'S LINES END, the ONE answer every edit cuts or splices at: just after the last line that is its own. The
- * `yaml` package's value range is not that answer: a nested block that ends in a comment line has its range run on to
- * the next key, so a cut there took the next entry with it (the review of PR 1145: `mason remove customers` deleted
- * `billing.accounts`). Read from the text instead: after the key's own line, a line is the key's while it is indented
- * deeper than the key (a comment too), or is a `-` item at the key's own indent (a block list YAML lets sit there).
- * Blank lines count only between two of its lines, so a blank line after it stays outside. A line at the key's indent
- * or less, a comment included, belongs to what follows.
+ * WHERE A KEY'S LINES END, the ONE answer every edit cuts or splices at (the reviews of PR 1145). Two of the parser's
+ * positions bound it: it reaches at least to the end of the line its value ends on (`contentEnd`: a closing bracket on a
+ * line of its own included), and never past `bound`, the line its next sibling starts on (an anchor or a tag before
+ * that key included), or its parent's end. Between the two, a comment line indented deeper than the key is the key's;
+ * one at the key's indent or less belongs to what follows. A blank line counts only before another of its lines, so a
+ * blank line after it stays outside.
  */
-function pairEnd(text: string, keyAt: number, lineStart: (at: number) => number, lineEnd: (at: number) => number): number {
-  const indent = keyAt - lineStart(keyAt);
-  let end = lineEnd(keyAt);
-  for (let at = end; at < text.length;) {
-    // the end of the line that starts at `at` (lineEnd answers a line's start with itself)
-    const nl = text.indexOf("\n", at);
+function pairEnd(text: string, p: Pair, bound: number, lineStart: (at: number) => number, lineEnd: (at: number) => number): number {
+  const keyAt = (p.key as Ranged).range![0];
+  const ls = lineStart(keyAt);
+  const indent = text.slice(ls).length - text.slice(ls).trimStart().length;
+  let end = Math.min(lineEnd(contentEnd(p.value, Math.max(keyAt, (p.key as Ranged).range![1]))), Math.max(bound, lineEnd(keyAt)));
+  for (let i = end; i < bound;) {
+    // the end of the line that starts at `i` (lineEnd answers a line's start with itself)
+    const nl = text.indexOf("\n", i);
     const next = nl < 0 ? text.length : nl + 1;
-    const line = text.slice(at, next).replace(/\r?\n$/, "");
-    const lead = line.length - line.trimStart().length;
+    const line = text.slice(i, next).replace(/\r?\n$/, "");
     const body = line.trimStart();
     if (body !== "") {
-      const own = lead > indent || (lead === indent && (body === "-" || body.startsWith("- ")));
-      if (!own) break;
+      if (!(body.startsWith("#") && line.length - body.length > indent)) break;
       end = next;
     }
-    at = next;
+    i = next;
   }
   return end;
 }
@@ -1165,7 +1196,7 @@ function inOwnLineEndings<R extends { text: string } | { problem: string } | nul
 function withTableLf(text: string, e: WrittenEntry): { text: string } | { problem: string } {
   const r = forEdit(text);
   if ("problem" in r) return r;
-  const { pair, lineStart, lineEnd, pairEnd } = r;
+  const { pair, lineStart, lineEnd, pairEnd, indentOf } = r;
   if (pair === null) return { text: `${text}${text === "" || text.endsWith("\n") ? "" : "\n"}tables:\n${entryText(e, "  ")}` };
   const key = pair.key as Ranged;
   const value = pair.value as (Ranged & ({ value?: unknown } | YAMLMap)) | null;
@@ -1183,7 +1214,7 @@ function withTableLf(text: string, e: WrittenEntry): { text: string } | { proble
   if (value.flow) return { problem: FLOW_MAP };
   const entries = entryPairs(value);
   const first = entries[0]!.pair.key as Ranged;
-  const indent = text.slice(lineStart(first.range![0]), first.range![0]);
+  const indent = indentOf(first.range![0]);
   const same = entries.find((x) => x.table === e.table);
   if (same) {
     const k = same.pair.key as Ranged;
@@ -1208,7 +1239,7 @@ export function withEntrySync(text: string, e: Pick<TableEntry, "name" | "table"
 function withEntrySyncLf(text: string, e: Pick<TableEntry, "name" | "table" | "columns" | "exclude" | "key" | "references">, sync: TableSync | null): { text: string } | { problem: string } {
   const r = forEdit(text);
   if ("problem" in r) return r;
-  const { pair, lineStart, lineEnd, pairEnd } = r;
+  const { pair, lineStart, lineEnd, pairEnd, indentOf } = r;
   const map = pair?.value;
   if (!isMap(map)) return withTableLf(text, { ...e, sync });
   if ((map as YAMLMap).flow) return { problem: FLOW_MAP };
@@ -1223,11 +1254,14 @@ function withEntrySyncLf(text: string, e: Pick<TableEntry, "name" | "table" | "c
       if (sync === null && value.items.length === 1) return withTableLf(text, { ...e, name: same.name, sync: null });
       if (sync === null) return { text: `${text.slice(0, lineStart(k.range![0]))}${text.slice(pairEnd(own as Pair))}` };
       if (!v?.range) return { problem: `its ${e.name}.sync: has no value to replace` };
-      return { text: `${text.slice(0, v.range[0])}${syncText(sync)}${text.slice(v.range[1])}` };
+      // a block scalar's range (`sync: >-` and its lines) takes the line break after it: kept, or the next line would join this one
+      let to = v.range[1];
+      while (to > v.range[0] && /[\r\n]/.test(text[to - 1]!)) to--;
+      return { text: `${text.slice(0, v.range[0])}${syncText(sync)}${text.slice(to)}` };
     }
     if (sync === null) return { text };
     const first = value.items[0]!.key as Ranged;
-    const indent = text.slice(lineStart(first.range![0]), first.range![0]);
+    const indent = indentOf(first.range![0]);
     const at = pairEnd(value.items[value.items.length - 1] as Pair);
     return { text: `${text.slice(0, at)}${at > 0 && text[at - 1] !== "\n" ? "\n" : ""}${indent}sync: ${syncText(sync)}\n${text.slice(at)}` };
   }
@@ -1238,7 +1272,7 @@ function withEntrySyncLf(text: string, e: Pick<TableEntry, "name" | "table" | "c
   const after = v?.range && v.range[1] > v.range[0] ? v.range[1] : k.range![1];
   const end = Math.min(lineEnd(after), pairEnd(same.pair));
   const comment = /(\s+#.*)$/.exec(text.slice(after, end).replace(/\n$/, ""))?.[1] ?? "";
-  const indent = text.slice(lineStart(k.range![0]), k.range![0]);
+  const indent = indentOf(k.range![0]);
   const lines = entryText({ ...e, name: same.name, sync }, indent).split("\n");
   lines[0] = `${lines[0]}${comment}`;
   return { text: `${text.slice(0, lineStart(k.range![0]))}${lines.join("\n")}${text.slice(end)}` };
@@ -1286,7 +1320,7 @@ export function withReferences(text: string, e: TableEntry, refs: readonly Refer
 function withReferencesLf(text: string, e: TableEntry, refs: readonly Reference[]): { text: string } | { problem: string } {
   const r = forEdit(text);
   if ("problem" in r) return r;
-  const { pair, lineStart, lineEnd, pairEnd } = r;
+  const { pair, lineStart, lineEnd, pairEnd, indentOf } = r;
   const map = pair?.value;
   if (!isMap(map)) return { problem: `it names no table ${e.name}` };
   if ((map as YAMLMap).flow) return { problem: FLOW_MAP };
@@ -1300,7 +1334,7 @@ function withReferencesLf(text: string, e: TableEntry, refs: readonly Reference[
   const value = same.pair.value as (Ranged & YAMLMap) | null;
   if (isMap(value) && !value.flow && value.items.length > 0) {
     const own = value.items.find((p) => isScalar(p.key) && p.key.value === "references") as Pair | undefined;
-    const keyIndent = text.slice(lineStart((value.items[0]!.key as Ranged).range![0]), (value.items[0]!.key as Ranged).range![0]);
+    const keyIndent = indentOf((value.items[0]!.key as Ranged).range![0]);
     if (own === undefined) {
       if (!refs.length) return { text };
       const at = end(value.items[value.items.length - 1] as Pair);
@@ -1313,7 +1347,7 @@ function withReferencesLf(text: string, e: TableEntry, refs: readonly Reference[
     if (isMap(refMap) && !refMap.flow && refMap.items.length > 0) {
       const items = refMap.items as Pair[];
       const had = new Set(items.map((p) => columnsOf((p.key as { value: unknown }).value)));
-      const lineIndent = text.slice(lineStart((items[0]!.key as Ranged).range![0]), (items[0]!.key as Ranged).range![0]);
+      const lineIndent = indentOf((items[0]!.key as Ranged).range![0]);
       const added = refs.filter((x) => !had.has(columnsOf(referenceKey(x))));
       // splices from the end back, so each one's positions are the text's as read
       const at = end(items[items.length - 1]!);
@@ -1332,7 +1366,7 @@ function withReferencesLf(text: string, e: TableEntry, refs: readonly Reference[
   const after = v?.range && v.range[1] > v.range[0] ? v.range[1] : k.range![1];
   const to = Math.min(lineEnd(after), pairEnd(same.pair));
   const comment = /(\s+#.*)$/.exec(text.slice(after, to).replace(/\n$/, ""))?.[1] ?? "";
-  const lines = entryText(next, text.slice(lineStart(k.range![0]), k.range![0])).split("\n");
+  const lines = entryText(next, indentOf(k.range![0])).split("\n");
   lines[0] = `${lines[0]}${comment}`;
   return { text: `${text.slice(0, lineStart(k.range![0]))}${lines.join("\n")}${text.slice(to)}` };
 }

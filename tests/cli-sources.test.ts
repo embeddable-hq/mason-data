@@ -1498,3 +1498,67 @@ test("mason add of a table added already keeps its entry byte for byte, its comm
     assert.equal(fs.readFileSync(file, "utf8"), `${HEAD}tables:\n  customers: {}\n${own}    references:\n      customer_id: customers.id\n`);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+// THE SECOND REVIEW OF PR 1145: an entry's end read from indentation alone left a closing bracket on a line of its own
+// behind, and an entry whose key has an anchor or a tag lost its lines. The parser's own positions now bound it, and every
+// edit is read back before it is written.
+test("an entry ends where the parser says: a flow collection's bracket on a line of its own, a key with an anchor or a tag, a block scalar's line break (second review of PR 1145)", async () => {
+  const E = await import("../src/cli/source-edit.ts" as string) as typeof import("../src/cli/source-edit.ts");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mason-ends-parser-"));
+  const folder = path.join(root, "mason");
+  fs.mkdirSync(path.join(folder, "sources"), { recursive: true });
+  const file = path.join(folder, "sources", "app.yml");
+  const edit = (text: string) => { fs.writeFileSync(file, text); return E.sourceToEdit(folder, root, () => S.readSource(folder, root, {})); };
+  const db = { tables: ENDS_CATALOG, database: "shop" };
+  const off = { sync: { mode: "off" as const }, keep: true };
+  const after = (f: () => unknown): string => { f(); return fs.readFileSync(file, "utf8").slice(HEAD.length); };
+  const tables = (s: string) => `${HEAD}tables:\n${s}`;
+  try {
+    // a flow map closed on a line of its own, at the key's indent
+    const flowMap = tables("  customers: {\n    columns: [id]\n  }\n  visits: {}\n  User: {}\n");
+    assert.equal(after(() => E.removeEntries(edit(flowMap), db, ["customers"])), "tables:\n  visits: {}\n  User: {}\n");
+    assert.equal(after(() => E.addEntry(edit(flowMap), db, "public.customers", ["*"], null, off)), "tables:\n  customers:\n    columns: [id]\n    sync: off\n  visits: {}\n  User: {}\n");
+    assert.equal(after(() => E.addEntry(edit(flowMap), db, "public.customers")), "tables:\n  customers: {}\n  visits:\n    references:\n      customer_id: customers.id\n  User: {}\n");
+    // a flow list closed the same way: a sync: line after it, never inside it
+    assert.equal(after(() => E.addEntry(edit(tables("  customers:\n    columns: [\n      id,\n    ]\n  visits: {}\n")), db, "public.customers", ["*"], null, off)),
+      "tables:\n  customers:\n    columns: [\n      id,\n    ]\n    sync: off\n  visits: {}\n");
+    // a reference written on an entry that is a flow map over several lines, and a sync: after a references: map over several
+    assert.equal(after(() => E.addEntry(edit(tables("  customers: {}\n  visits: { columns: [\n      id, customer_id\n    ] }\n  User: {}\n")), db, "public.customers")),
+      "tables:\n  customers: {}\n  visits:\n    columns: [id, customer_id]\n    references:\n      customer_id: customers.id\n  User: {}\n");
+    assert.equal(after(() => E.addEntry(edit(tables("  customers: {}\n  visits:\n    references: {\n      customer_id: customers.id\n    }\n  User: {}\n")), db, "public.visits", ["*"], null, off)),
+      "tables:\n  customers: {}\n  visits:\n    references: {\n      customer_id: customers.id\n    }\n    sync: off\n  User: {}\n");
+    // a key with an anchor or a tag before it: its lines go with it, and an entry added after is at the entries' indent
+    for (const key of ["&c customers", "!!str customers"]) {
+      const text = tables(`  ${key}:\n    columns: [id]\n  visits: {}\n`);
+      assert.equal(after(() => E.removeEntries(edit(text), db, ["customers"])), "tables:\n  visits: {}\n", key);
+      assert.equal(after(() => E.addEntry(edit(text), db, "public.customers")), "tables:\n  customers: {}\n  visits:\n    references:\n      customer_id: customers.id\n", key);
+      assert.equal(after(() => E.addEntry(edit(text), db, "public.User", ["id"])), `tables:\n  ${key}:\n    columns: [id]\n  visits: {}\n  User:\n    columns: [id]\n`, key);
+    }
+    // a sync: written as a block scalar: its value replaced, the line break after it kept (on main the next entry joined it)
+    assert.equal(after(() => E.addEntry(edit(tables("  customers:\n    sync: >-\n      poll 5m\n  visits: {}\n  User: {}\n")), db, "public.customers", ["*"], null, off)),
+      "tables:\n  customers:\n    sync: off\n  visits: {}\n  User: {}\n");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("an edit that would not leave the file as asked writes nothing and refuses, naming the file and what to write by hand (second review of PR 1145)", async () => {
+  const E = await import("../src/cli/source-edit.ts" as string) as typeof import("../src/cli/source-edit.ts");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mason-edit-checked-"));
+  const folder = path.join(root, "mason");
+  fs.mkdirSync(path.join(folder, "sources"), { recursive: true });
+  const file = path.join(folder, "sources", "app.yml");
+  const edit = (text: string) => { fs.writeFileSync(file, text); return E.sourceToEdit(folder, root, () => S.readSource(folder, root, {})); };
+  const db = { tables: ENDS_CATALOG, database: "shop" };
+  // an explicit key (`? customers` / `: columns: [id]`): a sync: line spliced at its value's indent would read as a
+  // table named sync (on main, written: the file then refused at the next start)
+  const text = `${HEAD}tables:\n  ? customers\n  : columns: [id]\n  visits: {}\n`;
+  try {
+    assert.throws(() => E.addEntry(edit(text), db, "public.customers", ["*"], null, { sync: { mode: "off" }, keep: true }),
+      { message: "mason/sources/app.yml could not be edited safely, so nothing was written: the edit would leave it unreadable " +
+        "(tables.sync: is {} (every column), { columns: [...] }, { exclude: [...] }, { key: [...] } or { sync: poll 5m }). " +
+        "Edit it by hand: write its entry as customers: {\"columns\":[\"id\"],\"sync\":\"off\"}" });
+    assert.equal(fs.readFileSync(file, "utf8"), text, "nothing written");
+    // the edits it can make there, it makes
+    E.addEntry(edit(text), db, "public.User");
+    assert.equal(fs.readFileSync(file, "utf8"), `${text}  User: {}\n`);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
