@@ -103,6 +103,23 @@ node scripts/bench-replica.ts --cold --sizes 100k --runs 1 --memory 8GiB --out /
 node scripts/bench-replica.ts --cold --label "m7g.xlarge, 4 vCPU, 16 GiB RAM" --disk "EBS gp3, 125 MB/s, 3000 IOPS" --memory 8GiB --out /tmp/bench-cold.json
 ```
 
+**Mason alone.** When only Mason changed, `--engines mason` measures Mason and keeps Postgres's cells from an earlier
+run, `--postgres-from` (by default the published `tests/fixtures/bench-replica.json`). It takes about half the time.
+Postgres still runs as Mason's source, and is restarted before each of Mason's runs, but is not measured. Before
+anything with a side effect, the run refuses an earlier run that did not end, or that differs from this one in its data,
+statements, `--clients`, `--runs`, `--settle`, `--cpus`, `--memory`, `--postgres-image`, `--disk` or `--label`, or that
+lacks a size this run measures. Once its Postgres answers, it refuses one of another version or settings. Each size asks
+for the earlier run's lookup rows, and the run refuses if one is not in the data. The order ids are random, so data made
+again has other ones: run it against the Postgres and data the earlier run kept (`--keep-postgres`), with
+`--reuse-postgres --keep-postgres`, so the data stays for the next run.
+Postgres's answers must be the earlier run's, and Mason's must be Postgres's, before anything is timed. The fixture
+records where Postgres's cells came from, and the README and docs/MEASUREMENTS.md say so beside the times. Give
+`--out` another file, and copy it over once the run is complete.
+
+```bash
+node scripts/bench-replica.ts --cold --engines mason --reuse-postgres --keep-postgres --label "m7g.xlarge, 4 vCPU, 16 GiB RAM" --disk "EBS gp3, 125 MB/s, 3000 IOPS" --memory 8GiB --out /tmp/bench-cold-mason.json
+```
+
 `tests/integration/bench-replica-cold.itest.ts` runs a smoke at 1 M rows and checks its fixture, when
 `IT_BENCH_COLD=1`. CI does not run it by default: it would add about ten minutes to every PR, on a runner shared with
 other jobs.

@@ -15,6 +15,19 @@
  *     --keep-postgres       leave the bench-pg container, its data and the bench-replica network for the next run
  *     --reuse-postgres      adopt the bench-pg container a --keep-postgres run left, once that run has ended
  *     --resume              keep the sizes --out finished, measure the rest
+ *     --engines mason       measure Mason alone, and keep Postgres's cells from --postgres-from (default postgres,mason)
+ *     --postgres-from <f>   with --engines mason: the earlier cold run whose Postgres cells are kept
+ *                           (default tests/fixtures/bench-replica.json). Give --out another file
+ *
+ * MASON ALONE (--engines mason) re-measures Mason after a change to Mason only, in about half the time. Postgres still
+ * runs, as Mason's source, and is restarted before each of Mason's runs as before, but is not measured. Its cells are
+ * copied unchanged from --postgres-from, and the fixture says so (environment.postgresFrom). The run refuses, before
+ * anything with a side effect, an earlier run that is not a complete cold run, or that differs from this one in its
+ * data, statements, clients, runs, settle, limits, Postgres image, disk or label, or lacks a size this run measures.
+ * Once its Postgres answers, it refuses one of another version or settings. Each size asks for the earlier run's
+ * lookup rows, refused if one is not in the data: the order ids are random, so run it against the Postgres and data the
+ * earlier run kept, with --reuse-postgres --keep-postgres. Postgres's answers must be the earlier run's, and Mason's
+ * must be Postgres's, before anything is timed.
  *
  * THE DATA (COLD_DATA, `coldDataSql`): the warm mode's orders and customers, with random UUID primary keys and no
  * index on status, in databases of their own (`bench_replica_cold_<rows>`). The fixture records it.
@@ -66,7 +79,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
-import { DATA_DAYS, DATA_START, TENANTS, Usage, customersOf, docker, ensureData, fmtRows, freePort, median, parseCount, postgresFacts, replicaSettings, round } from "./bench-replica.ts";
+import { DATA_DAYS, DATA_START, TENANTS, Usage, commit, customersOf, docker, ensureData, fmtRows, freePort, median, parseCount, postgresFacts, replicaSettings, round } from "./bench-replica.ts";
 import type { DataShape } from "./bench-replica.ts";
 
 const SCRIPT = fileURLToPath(import.meta.url);
@@ -211,6 +224,23 @@ async function pickLookupIds(conn: pg.ClientConfig, rows: number, n: number): Pr
   } finally { await c.end(); }
 }
 
+/** the earlier run's ids at this size, each checked to be in the live data: the same rows, or the run refuses */
+async function earlierLookupIds(conn: pg.ClientConfig, earlier: ColdFixture, rows: number, file: string): Promise<string[]> {
+  const ids = earlier.sizes.find((z) => z.rows === rows)!.lookupIds;
+  for (const id of ids) statementSql(COLD_STATEMENTS.find((s) => s.lookup === true)!, id);
+  const c = new pg.Client(conn);
+  await c.connect();
+  try {
+    const found = ((await c.query("SELECT id::text AS id FROM orders WHERE id = ANY($1::uuid[])", [ids])).rows as Array<{ id: string }>).map((r) => r.id);
+    const missing = missingLookupIds(ids, found);
+    if (missing.length > 0) {
+      throw new Usage(`--engines mason: ${missing.length} of the ${ids.length} rows ${file} looked up at ${fmtRows(rows)} rows are not in this data (${missing.join(", ")}). ` +
+        "The order ids are random, so data generated again has other ones: measure Mason alone against the data that run measured (--reuse-postgres a Postgres it kept), or measure both engines");
+    }
+    return ids;
+  } finally { await c.end(); }
+}
+
 // --------------------------------------------------------------------------------------------- one run's times
 
 export interface ClientTime { client: number; latencyMs: number; endMs: number }
@@ -333,6 +363,10 @@ export interface ColdFixture {
     method: { sizes: number[]; clients: number[]; runs: number; settleSeconds: number; timeZone: string };
     /** the disk both engines read, in words (--disk), or null when not said */
     disk: string | null;
+    /** the checkout the run's script ran from (git HEAD, "+dirty" when src/ had changes), when recorded */
+    commit?: string;
+    /** --engines mason: the earlier run Postgres's cells were copied from, unchanged */
+    postgresFrom?: PostgresFrom;
   };
   /** what the data is: its keys and indexes (COLD_DATA) */
   data: ColdData;
@@ -342,6 +376,9 @@ export interface ColdFixture {
   cells: ColdCell[];
   complete: boolean;
 }
+
+/** where a Mason-alone run's Postgres cells came from: that run's date, its commit when recorded, and its file */
+export interface PostgresFrom { date: string; measuredAt: string | null; file: string }
 
 /**
  * What is wrong with a cold run's fixture, in words (none: a run that ended, with every cell its method names): the
@@ -368,8 +405,73 @@ export function coldFixtureProblems(f: ColdFixture): string[] {
       if (cell.slowestMs !== round(median(cell.runs.map((r) => r.slowestMs)), 3)) out.push(`${where}: its time is not the median of its runs' slowest`);
     }
   }
+  const from = f.environment.postgresFrom;
+  if (from !== undefined && !(Date.parse(from.date) <= Date.parse(f.environment.date))) {
+    out.push(`its Postgres cells are from a run dated ${JSON.stringify(from.date)}, not one before this run's ${f.environment.date}`);
+  }
   if (!f.complete) out.push("the run did not end (complete: false)");
   return out;
+}
+
+/**
+ * Why an earlier cold run's Postgres cells cannot stand beside a Mason-alone run with these options, in words (none:
+ * they can). Read before anything with a side effect. The live Postgres's version and settings are checked once it
+ * answers (`livePostgresProblems`).
+ */
+export function postgresFromProblems(earlier: ColdFixture, o: ColdOptions): string[] {
+  const out: string[] = [];
+  const file = o.postgresFrom;
+  if (earlier.mode !== "cold") return [`${file} is not a cold run (mode ${JSON.stringify(earlier.mode)})`];
+  if (!earlier.complete) out.push(`${file} is of a run that did not end (complete: false)`);
+  if (JSON.stringify(earlier.data ?? null) !== JSON.stringify(COLD_DATA)) out.push(`${file} measured other data than this run makes (COLD_DATA)`);
+  if (JSON.stringify(earlier.statements.map((s) => [s.name, s.sql])) !== JSON.stringify(COLD_STATEMENTS.map((s) => [s.name, s.sql]))) out.push(`${file} sent other statements than this run sends`);
+  const e = earlier.environment, m = e.method;
+  const differs = (what: string, was: unknown, now: unknown): void => {
+    if (JSON.stringify(was) !== JSON.stringify(now)) out.push(`${file} has ${what} ${JSON.stringify(was)}, and this run ${JSON.stringify(now)}`);
+  };
+  differs("--clients", m.clients, o.clients);
+  differs("--runs", m.runs, o.runs);
+  differs("--settle", m.settleSeconds, o.settleSeconds);
+  differs("the time zone", m.timeZone, "UTC");
+  differs("--cpus", e.limits.cpus, o.cpus);
+  differs("--memory (bytes)", e.limits.memoryBytes, o.memoryBytes);
+  differs("--postgres-image", e.postgres.image, o.postgresImage);
+  differs("--disk", e.disk, o.disk);
+  differs("--label", e.label, o.label);
+  for (const rows of o.sizes) {
+    const z = earlier.sizes.find((x) => x.rows === rows);
+    if (z === undefined) { out.push(`${file} did not measure ${fmtRows(rows)} rows, a size this run measures`); continue; }
+    for (const clients of o.clients) for (const st of COLD_STATEMENTS) {
+      if (!earlier.cells.some((c) => c.engine === "postgres" && c.rows === rows && c.clients === clients && c.statement === st.name)) out.push(`${file} has no Postgres cell for ${fmtRows(rows)} rows, ${clients} clients, ${st.name}`);
+    }
+  }
+  return out;
+}
+/** why the live Postgres is not the one the earlier run measured, in words (none: it is) */
+export function livePostgresProblems(earlier: ColdFixture, live: { version: string; settings: Record<string, string> }, file: string): string[] {
+  const out: string[] = [];
+  const was = earlier.environment.postgres;
+  if (was.version !== live.version) out.push(`${file}'s Postgres was ${JSON.stringify(was.version)}, and this run's is ${JSON.stringify(live.version)}`);
+  for (const k of [...new Set([...Object.keys(was.settings), ...Object.keys(live.settings)])].sort()) {
+    if (was.settings[k] !== live.settings[k]) out.push(`${file}'s Postgres had ${k} ${was.settings[k] ?? "unset"}, and this run's has ${live.settings[k] ?? "unset"}`);
+  }
+  return out;
+}
+/** the earlier run's lookup ids that the live data lacks: none, or the rows are not the ones it measured */
+export function missingLookupIds(ids: readonly string[], found: readonly string[]): string[] {
+  const have = new Set(found.map((x) => x.toLowerCase()));
+  return ids.filter((id) => !have.has(id.toLowerCase()));
+}
+/** the answers (by key) where the live Postgres's md5 is not the earlier run's: none, or its data is not the same */
+export function postgresAnswerChanges(earlier: ColdSize, live: Record<string, string>): string[] {
+  const keys = [...new Set([...Object.keys(earlier.answers), ...Object.keys(live)])].sort();
+  return keys.filter((k) => earlier.answers[k]?.postgres !== live[k]);
+}
+/** the earlier run's Postgres cell, unchanged: every run, each client's time and what it read */
+export function earlierPostgresCell(earlier: ColdFixture, rows: number, clients: number, statement: string): ColdCell {
+  const c = earlier.cells.find((x) => x.engine === "postgres" && x.rows === rows && x.clients === clients && x.statement === statement);
+  if (c === undefined) throw new Error(`no Postgres cell for ${rows} rows, ${clients} clients, ${statement} in the earlier run`);
+  return structuredClone(c);
 }
 
 // --------------------------------------------------------------------------------------------- arguments
@@ -379,6 +481,10 @@ export interface ColdOptions {
   settleSeconds: number; work: string; reserveGb: number; label: string; out: string; keepPostgres: boolean; reusePostgres: boolean; resume: boolean;
   /** the disk, in words, for the fixture (--disk) */
   disk: string | null;
+  /** the engines measured: both, or Mason alone (--engines mason) */
+  engines: ColdEngine[];
+  /** with Mason alone: the earlier cold run whose Postgres cells are kept (--postgres-from) */
+  postgresFrom: string;
 }
 /** a container's memory: 8GiB, 8g, 8192MiB, 8192m (GiB and MiB, as Docker reads g and m) */
 export function memoryBytesOf(s: string): number {
@@ -389,7 +495,9 @@ export function memoryBytesOf(s: string): number {
 export function parseColdArgs(argv: readonly string[], machine: { cpus: number; ramBytes: number; version: string }): ColdOptions {
   const o: ColdOptions = { sizes: [1e6, 1e7, 1e8], clients: [1, 10], runs: 3, cpus: machine.cpus, memoryBytes: Math.floor(machine.ramBytes / 2 / 2 ** 30) * 2 ** 30,
     masonImage: `ghcr.io/embeddable-hq/mason-data:${machine.version}`, postgresImage: "postgres:18", settleSeconds: 10, work: os.tmpdir(), reserveGb: 60,
-    label: "a server", out: path.join(REPO, "tests/fixtures/bench-replica.json"), keepPostgres: false, reusePostgres: false, resume: false, disk: null };
+    label: "a server", out: path.join(REPO, "tests/fixtures/bench-replica.json"), keepPostgres: false, reusePostgres: false, resume: false, disk: null,
+    engines: ["postgres", "mason"], postgresFrom: path.join(REPO, "tests/fixtures/bench-replica.json") };
+  let fromGiven = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     const v = (): string => { const x = argv[++i]; if (x === undefined) throw new Usage(`${a} needs a value`); return x; };
@@ -412,6 +520,14 @@ export function parseColdArgs(argv: readonly string[], machine: { cpus: number; 
       case "--keep-postgres": o.keepPostgres = true; break;
       case "--reuse-postgres": o.reusePostgres = true; break;
       case "--resume": o.resume = true; break;
+      case "--engines": {
+        const e = v().split(",").map((x) => x.trim()).filter(Boolean).sort().join(",");
+        if (e === "mason") o.engines = ["mason"];
+        else if (e === "mason,postgres") o.engines = ["postgres", "mason"];
+        else throw new Usage(`--engines ${JSON.stringify(e)}: give postgres,mason (both, the default) or mason (Mason alone, Postgres's cells from --postgres-from)`);
+        break;
+      }
+      case "--postgres-from": o.postgresFrom = path.resolve(v()); fromGiven = true; break;
       case "--postgres": throw new Usage("--cold restarts its own Postgres before every run, and --postgres names a server it may not restart: leave --postgres out");
       default: throw new Usage(`--cold: unknown option ${a} (--cold --help lists them)`);
     }
@@ -419,6 +535,9 @@ export function parseColdArgs(argv: readonly string[], machine: { cpus: number; 
   if (o.sizes.length === 0 || o.sizes.some((n) => n < 1)) throw new Usage("--sizes: one row count or more, each 1 or more");
   if (o.memoryBytes < 3 * 2 ** 30) throw new Usage(`--memory ${(o.memoryBytes / 2 ** 30).toFixed(1)} GiB: Mason's container needs 3 GiB or more (deploy/mason-data/README.md "Memory")`);
   if (o.cpus > machine.cpus) throw new Usage(`--cpus ${o.cpus}: this machine has ${machine.cpus}`);
+  const masonAlone = o.engines.length === 1;
+  if (fromGiven && !masonAlone) throw new Usage("--postgres-from gives Postgres's cells to a run of Mason alone: add --engines mason");
+  if (masonAlone && o.out === o.postgresFrom) throw new Usage(`--engines mason: --out is ${o.out}, the run --postgres-from reads. Give --out another file, and copy it there once the run is complete`);
   const most = Math.max(...o.clients);
   if (o.sizes.some((n) => n < most)) throw new Usage(`--sizes ${o.sizes.map(fmtRows).join(",")}: the lookup needs a different row for each of ${most} clients`);
   return o;
@@ -659,6 +778,17 @@ const gibText = (bytes: number): string => `${(bytes / 2 ** 30).toFixed(bytes < 
 
 // --------------------------------------------------------------------------------------------- the run
 
+/** --postgres-from's fixture, read and checked against this run's options: refused with every difference named */
+function readEarlier(o: ColdOptions): ColdFixture {
+  let earlier: ColdFixture;
+  try { earlier = JSON.parse(fs.readFileSync(o.postgresFrom, "utf8")) as ColdFixture; } catch (e) {
+    throw new Usage(`--postgres-from ${o.postgresFrom}: ${(e as Error).message}`);
+  }
+  const problems = postgresFromProblems(earlier, o);
+  if (problems.length > 0) throw new Usage(`--engines mason: Postgres's cells from ${o.postgresFrom} cannot stand beside this run:\n  ${problems.join("\n  ")}`);
+  return earlier;
+}
+
 /** the doc comment at the top of this file: --cold --help */
 export function coldHelp(): string {
   const text = fs.readFileSync(SCRIPT, "utf8");
@@ -672,6 +802,9 @@ export async function mainCold(argv: string[], at: { lockFile?: string; procRoot
   const o = parseColdArgs(argv, { cpus: os.cpus().length, ramBytes: os.totalmem(), version });
   const log = (l: string): void => { process.stdout.write(`${l}\n`); };
   if (process.platform !== "linux") throw new Usage("--cold drops Linux's page cache before every run: run it on a Linux server");
+  // Mason alone: the earlier run whose Postgres cells are kept, refused now if it cannot stand beside this one
+  const masonAlone = o.engines.length === 1;
+  const earlier = masonAlone ? readEarlier(o) : null;
   // before anything with a side effect: a refused run must not touch another's containers, nor drop the page cache
   // under its measurement. The lock first: a run in progress holds it whatever it is doing
   const procRoot = at.procRoot ?? "/proc";
@@ -773,6 +906,10 @@ export async function mainCold(argv: string[], at: { lockFile?: string; procRoot
       throw new Usage(`--cold records what each engine reads from disk, from its container's cgroup v2 io.stat, and could not read ${PG_CONTAINER}'s: ${(e as Error).message}`);
     }
     const pgFacts = await postgresFacts(admin);
+    if (earlier !== null) {
+      const problems = livePostgresProblems(earlier, pgFacts, o.postgresFrom);
+      if (problems.length > 0) throw new Usage(`--engines mason: this run's Postgres is not the one ${o.postgresFrom} measured:\n  ${problems.join("\n  ")}`);
+    }
     const pgClientEnv = path.join(secrets, "client-postgres.env");
     writeSecret(pgClientEnv, { PGPASSWORD: pgPassword, PGTZ: "UTC" });
 
@@ -789,6 +926,9 @@ export async function mainCold(argv: string[], at: { lockFile?: string; procRoot
         client: { image: o.postgresImage, pgbench: pgbenchVersion, command: "pgbench -n -c <clients> -j <clients> -t 1 -f <script> --log" },
         method: { sizes: o.sizes, clients: o.clients, runs: o.runs, settleSeconds: o.settleSeconds, timeZone: "UTC" },
         disk: o.disk,
+        commit: commit(),
+        ...(earlier === null ? {} : { postgresFrom: earlier.environment.postgresFrom ??
+          { date: earlier.environment.date, measuredAt: earlier.environment.commit ?? null, file: path.relative(REPO, o.postgresFrom) } }),
       },
       data: { version: COLD_DATA.version, keys: COLD_DATA.keys, indexes: [...COLD_DATA.indexes] },
       statements: COLD_STATEMENTS.map((s) => ({ name: s.name, title: s.title, sql: s.sql })),
@@ -843,12 +983,17 @@ export async function mainCold(argv: string[], at: { lockFile?: string; procRoot
       try {
         if (fixture.environment.mason.engineMemory === "unknown") fixture.environment.mason.engineMemory = mason.engineMemory;
         const masonConn: pg.ClientConfig = { host: "127.0.0.1", port: mason.port, user: "bench", password: mason.password, database: mason.database, ssl: { rejectUnauthorized: false } };
-        const ids = await pickLookupIds(pgConn, rows, Math.max(...o.clients));
+        const ids = earlier === null ? await pickLookupIds(pgConn, rows, Math.max(...o.clients)) : await earlierLookupIds(pgConn, earlier, rows, o.postgresFrom);
         // ---- the answers, before anything is timed
         const a = await answersOf(pgConn, ids), b = await answersOf(masonConn, ids);
         const answers = Object.fromEntries([...a.keys()].map((k) => [k, { postgres: md5(a.get(k)!), mason: md5(b.get(k) ?? "") }]));
         const differences = [...a.keys()].filter((k) => a.get(k) !== b.get(k)).map((k) => `${k}: Postgres ${a.get(k)!.slice(0, 300)}; Mason ${(b.get(k) ?? "none").slice(0, 300)}`);
         log(differences.length === 0 ? "  every statement's answer is the same on both" : `  ANSWERS DIFFER (a Mason defect; measured anyway):\n    ${differences.join("\n    ")}`);
+        if (earlier !== null) {
+          const changed = postgresAnswerChanges(earlier.sizes.find((z) => z.rows === rows)!, Object.fromEntries([...a].map(([k, v]) => [k, md5(v)])));
+          if (changed.length > 0) throw new Usage(`--engines mason: at ${fmtRows(rows)} rows, Postgres's answers are not the ones ${o.postgresFrom} recorded (${changed.join(", ")}): its rows are not the ones that run measured`);
+          log(`  Postgres's answers are the ones ${path.relative(REPO, o.postgresFrom)} recorded`);
+        }
         const size: ColdSize = { rows, customers: customersOf(rows), generatedSeconds: data.generatedSeconds, postgresBytes, masonBytes: mason.bytes, syncSeconds: mason.syncSeconds,
           lookupIds: ids, answers, answersEqual: differences.length === 0, differences };
 
@@ -880,7 +1025,7 @@ export async function mainCold(argv: string[], at: { lockFile?: string; procRoot
             const runs: Record<ColdEngine, ColdRun[]> = { postgres: [], mason: [] };
             fs.writeFileSync(path.join(clientDir, "script.sql"), coldScript(stmt, clients, ids));
             for (let n = 0; n < o.runs; n++) {
-              for (const engine of (n % 2 === 0 ? ["postgres", "mason"] : ["mason", "postgres"]) as ColdEngine[]) {
+              for (const engine of ((n % 2 === 0 ? ["postgres", "mason"] : ["mason", "postgres"]) as ColdEngine[]).filter((e) => o.engines.includes(e))) {
                 const readyMs = await cold(engine);
                 const at = new Date().toISOString();
                 // what the measured engine (and, beside Mason, the idle Postgres) read from disk while pgbench ran
@@ -894,7 +1039,10 @@ export async function mainCold(argv: string[], at: { lockFile?: string; procRoot
                 log(`[${fmtRows(rows)} · ${stmt.name} · ${clients} client${clients === 1 ? "" : "s"} · ${engine.padEnd(8)} · run ${n + 1}] slowest ${secondsText(r.slowestMs)}, mean ${secondsText(r.meanMs)}; read ${(r.readBytes / 1e6).toFixed(1)} MB; answered the probe ${secondsText(r.readyMs)} after its start`);
               }
             }
-            for (const e of ["postgres", "mason"] as const) cells.push(coldCell(rows, clients, e, stmt.name, runs[e]));
+            for (const e of ["postgres", "mason"] as const) {
+              // Mason alone: Postgres's cell as the earlier run measured it, unchanged
+              cells.push(earlier !== null && e === "postgres" ? earlierPostgresCell(earlier, rows, clients, stmt.name) : coldCell(rows, clients, e, stmt.name, runs[e]));
+            }
           }
         }
         fixture.sizes.push(size);
