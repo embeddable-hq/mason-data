@@ -25,7 +25,6 @@
  *
  * What a run keeps between runs (the API key, the copy, the users, the logs) is in the project's `.mason/`.
  */
-import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Server } from "node:http";
 import { choosePgPort, freePort } from "./ports.ts";
@@ -44,7 +43,8 @@ import { createRunServer, listenOnLoopback, metricsFacts, usageFacts, type RunCo
 import { UiErrors } from "./ui-errors.ts";
 import type { RunMetrics } from "./metrics.ts";
 import { readGenerated } from "./generated-files.ts";
-import { addedTables, effectiveSync, entryName, excludeOf, goneNotes, leftOutText, LeftOutRecord, replicatedEntries, rereadSources, shownPath, syncWritten, withTable, type LeftOut, type RunSources, type SourceFile } from "./sources.ts";
+import { addedTables, effectiveSync, entryName, excludeOf, goneNotes, leftOutText, LeftOutRecord, replicatedEntries, rereadSources, shownPath, syncWritten, type LeftOut, type RunSources, type SourceFile } from "./sources.ts";
+import { Refusal, writeLeftOut } from "./source-edit.ts";
 import { newToken } from "./security.ts";
 import { alive, liveRun, processStart } from "./runs.ts";
 import { DEMO_DIR, DUCK_FILE, projectReadOnlySetting, projectSource, projectWriteRefusal, startSettingRefusal, theProject, writeConfig, type PostgresListener, type ProjectConfig } from "./project.ts";
@@ -582,15 +582,10 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
       // every entry or none: read, edited and written at once, between two reads of the run (one thread: an edit by
       // mason add is never interleaved). What fails is said, and the columns left out for this run all the same
       try {
-        let text = fs.readFileSync(file.file, "utf8");
-        for (const a of arrived) {
-          const r = withTable(text, { ...a.entry, exclude: excludeOf(a) });
-          if ("problem" in r) throw new Error(`it cannot be edited: ${r.problem}`);
-          text = r.text;
-        }
-        fs.writeFileSync(file.file, text);
+        // exclude: alone written on each, every other line and comment as it was, read back before it is written
+        writeLeftOut(project.root, file.file, file.name, arrived.map((a) => ({ table: a.entry.table, exclude: excludeOf(a) })));
         written = true;
-      } catch (e) { why = `${shown}: ${(e as Error).message}`; }
+      } catch (e) { why = e instanceof Refusal ? e.message : `${shown}: ${(e as Error).message}`; }
     }
     for (const a of arrived) {
       // written, the file holds the whole exclude: now (`excludeOf` of the entry as the run took it); else kept for this run
