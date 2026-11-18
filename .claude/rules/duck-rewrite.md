@@ -18,6 +18,8 @@ paths:
   - "src/duck/plan.ts"
   - "src/duck/resolved.ts"
   - "src/duck/rewrite.ts"
+  - "src/duck/reference-keys.ts"
+  - "tests/duck-reference-keys.test.ts"
   - "src/duck/row-filter.ts"
   - "src/duck/to-char.ts"
   - "src/duck/types.ts"
@@ -528,6 +530,16 @@ paths:
   Never `JSON.stringify` a program, nor recurse over one without a memo: a DAG's tree is k^depth. Detector:
   tests/duck-plan-time.test.ts (`numericShapes` at depth 32 within the bound, the record linear), `tests/duck-wire.test.ts`
   "issue 484", tests/pg-numeric.test.ts "a shared program", tests/duck-generated-round11-13-14.test.ts "round 14, a numeric".
+- **A join on a numbered reference reads its hidden integer keys, only where FALSE and NULL do the same**
+  (`referenceJoins`, src/duck/reference-keys.ts, issue 1144). An equality of a reference's key columns, every column of
+  the key, is written as the equality of the two rows' hidden numbers only as a top-level conjunct of a JOIN's ON or of
+  a WHERE. A NULL key's numbers are -1 and 0, so they never match, which is FALSE where `=` says NULL: a value, a NOT,
+  an OR or a CASE would tell them apart. Each column is a VAR of a table of the same query (`levelsUp` 0, no subquery's
+  column, no USING or NATURAL), read by its FROM item's name, compared by an operator of `NUMBERED_EQUALITY`. A `*` over
+  a synced table plans the statement without numbers (`exposes`): its view does not list them. The plan keeps the
+  statement without numbers beside it (`PlannedSql.numbers.plain`), and the runner runs that one where a row is not
+  numbered yet (src/duck/store.ts `numbersHold`). A generated table's run never reads numbers. DETECTOR:
+  tests/duck-reference-keys.test.ts, the oracle's "reference: …" statements.
 
 ## What a column is
 

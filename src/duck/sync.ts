@@ -62,6 +62,7 @@ import { DEFAULT_MEMORY_RULE, endedTransaction, freeBytesAt, MASON_SCHEMA, NO_RO
 const GENERATED_SESSION = "generated";
 import { GeneratedTables, type GeneratedOptions } from "./generated.ts";
 import { KeptJsonPaths, type KeptOptions } from "./kept.ts";
+import { ReferenceNumbers } from "./reference-keys.ts";
 import type { Source, SourceColumnInfo, SourceTable, SourceView } from "../cli/preflight.ts";
 import { DuckDBEnumType, DuckDBListType, type DuckDBType } from "@duckdb/node-api";
 import type { DuckConnection } from "./executor.ts";
@@ -112,6 +113,9 @@ export function syncModeOf(env: NodeJS.ProcessEnv): SyncMode {
  *  database still enforces it (src/cdc/key-held.ts, issue 1027). */
 export type AddedTable = Pick<SourceTable, "source" | "schema" | "table" | "key" | "columns" | "foreignKeys" | "bytes" | "rows"> & Partial<Pick<SourceTable, "rowTypeOid" | "uniqueKeys" | "shape" | "oid">> &
   { primaryKey?: string[]; sync?: TableSync; replicaIdentity?: SourceTable["replicaIdentity"];
+    /** its foreign keys as the sources file's `references:` names them, each to a table the file syncs (`schema.table`):
+     *  what src/duck/reference-keys.ts numbers. Absent: none named, or a test's table */
+    fileReferences?: Array<{ columns: string[]; table: string; targetColumns: string[] }>;
     /** where the sources file names it (`mason/sources/app.yml: tables.logs`), for a refusal that names the file and the
      *  key (`keyNotHeld`); none for a test's table */
     entryAt?: string;
@@ -1389,6 +1393,13 @@ export class Sync {
   readonly kept: KeptJsonPaths;
   /** THE GENERATED TABLES (src/duck/generated.ts): every commit that changes a copy marks them, the rebuild queue runs them */
   readonly generated: GeneratedTables;
+  /** THE REFERENCES' HIDDEN INTEGER KEYS (src/duck/reference-keys.ts, issue 1144): made and numbered on the writer's
+   *  turn (`numbersRun`), in a stream batch's and a writer's poll's own transaction, and in a side table before its swap */
+  readonly numbers: ReferenceNumbers;
+  /** the next numbering turn, while rows are left to number or a table was written (`numbersSoon`) */
+  private numbersTimer: ReturnType<typeof setTimeout> | null = null;
+  /** the numbering's last failure, said once until its words change */
+  private numbersFailed: string | null = null;
   /** the connection their runs read and write on (`open`), set up as a session: what `stop` interrupts */
   private generatedLane: Lane | null = null;
   /** the generated lane's session set-up: settled before each plan and run (`GeneratedHost.settle`) */
@@ -1441,6 +1452,12 @@ export class Sync {
     this.onReplication = options.onReplication;
     this.currentSchema = { database, tables: [] };
     this.writerLane = { conn: store.writer, inFlight: false };
+    this.numbers = new ReferenceNumbers({
+      // never beside a write off the writer's turn: a catch-up's poll, a compaction (a whole read writes its side table)
+      busy: (source) => (this.rebuildingNow?.source === source && this.rebuildingNow.kind !== "copy") || this.catchingUp?.source === source || this.spilling.has(source),
+      recorded: (source) => this.states.get(source)?.phase === "copied" ? this.copiedColumns.get(source)?.map((c) => c.name) : undefined,
+      log: (line) => this.log(line),
+    });
     this.kept = new KeptJsonPaths(store, {
       onWriter: (f) => this.onWriter(f),
       // every copy served, by its own columns (a table removed serves until the pass drops it)
@@ -1814,6 +1831,9 @@ export class Sync {
         this.heldFrom.delete(source);
         this.refreshStreamed();
       });
+      // its replayed changes' rows numbered (src/duck/reference-keys.ts)
+      this.numbers.forget(source);
+      this.numbersSoon();
     }
   }
 
@@ -1976,6 +1996,9 @@ export class Sync {
     const before = this.tables;
     this.tables = new Map(tables.map((t) => [t.source, t]));
     this.placeColumns(tables, new Map((o.confirmed ?? []).map((c) => [c.table, c.shape])), o.readOnly === true);
+    // the references the sources file names: their hidden keys made, dropped and numbered on the writer's turn
+    this.numbers.set(tables);
+    this.numbersSoon();
     // said as it happens: what is added, each table as its records say it is (`addedText`), and what is no longer
     // (dropped at the next pass)
     const added = tables.filter((t) => !before.has(t.source));
@@ -2583,6 +2606,7 @@ export class Sync {
     if (this.wake !== null) { this.wake.cancel(); this.wake = null; }
     if (this.reportTimer !== null) { clearInterval(this.reportTimer); this.reportTimer = null; }
     if (this.compactTimer !== null) { this.compactTimer.cancel(); this.compactTimer = null; }
+    if (this.numbersTimer !== null) { clearTimeout(this.numbersTimer); this.numbersTimer = null; }
     // a removed table's sync being cut short (`cutShort`) is now the stop's to interrupt, with everything else
     if (this.cutTimer !== null) { clearInterval(this.cutTimer); this.cutTimer = null; }
     // the stream, the pass and the rebuild end together: a batch waiting for the writer's turn behind a poll must not
@@ -3854,6 +3878,8 @@ export class Sync {
         if (rows !== known) await w.run(`UPDATE ${MASON_SCHEMA}.copy_state SET "rows" = $1 WHERE source = $2`, [rows, name]);
         rowsAfter.set(name, rows);
       }
+      // THE ROWS IT WROTE NUMBERED in the batch's own transaction (src/duck/reference-keys.ts), so they commit numbered
+      for (const name of rowsAfter.keys()) await this.numbers.fillIn(w, name);
       // what else commits with the batch: a compacted table's spilled changes, a replayed piece's rows out of the spill
       await o.inTransaction?.();
       if (position !== null) await w.run(`INSERT OR REPLACE INTO ${MASON_SCHEMA}.stream_state VALUES ($1, $2, $3::TIMESTAMPTZ)`, [this.replication!.slot, formatLsn(position.lsn), position.at]);
@@ -3928,8 +3954,10 @@ export class Sync {
     }
     const on = t.key.map((k) => `t.${ident(k)} = p.${ident(k)}`).join(" AND ");
     // a stored JSON path of a JSON column it carries, computed from the new value (one it does not carry is unchanged)
+    // and a reference's hidden key whose columns it sets, unnumbered: numbered again before the batch commits
+    // (src/duck/reference-keys.ts `fillIn`)
     const assign = [...set.map((c) => `${ident(c)} = p.${ident(c)}`), ...scales.map((c) => `${ident(scaleColumn(c, cols))} = p.${ident(scaleColumn(c, cols))}`),
-      ...this.kept.storedSet(t.source, set, (c) => `p.${ident(c)}`)];
+      ...this.kept.storedSet(t.source, set, (c) => `p.${ident(c)}`), ...this.numbers.unnumberedSet(t.source, set)];
     const matched = set.length === 0 ? 0 : Number((await w.run(`UPDATE ${target} AS t SET ${assign.join(", ")} FROM ${WRITE_PARTIAL} p WHERE ${on}`)).rowsChanged);
     // only when some row was not there: another scan, to say which
     const missing = matched === rows.length ? [] : (await w.runAndReadAll(`SELECT p.${ident(WRITE_ROW)} FROM ${WRITE_PARTIAL} p ANTI JOIN ${target} t ON ${on}`)).getRowsJS().map((r) => Number(r[0]));
@@ -4221,8 +4249,9 @@ export class Sync {
     this.unplaced.delete(source);
     this.movedUnder.delete(source);
     await this.forgetSynced(source);
-    // its stored JSON paths and its view
+    // its stored JSON paths and its view, and its hidden keys found again
     await this.kept.removed(source);
+    this.numbers.forget(source);
     for (const s of namesakes) {
       await this.forgetSynced(s);
       await this.kept.removed(s);
@@ -4348,7 +4377,47 @@ export class Sync {
     try { await this.work(replicationReady); }
     finally { await this.onWriter(() => this.detach()); }
     await this.rebuildSchema();
+    this.numbersSoon();
     if (replicationFailed !== null) throw replicationFailed;
+  }
+
+  /**
+   * THE REFERENCES' HIDDEN KEYS, ON THE WRITER'S TURN (src/duck/reference-keys.ts): made and dropped as the sources file
+   * says (`ensure`), and a chunk of each written table's unnumbered rows numbered (`fill`). Soon after a write, a swap
+   * or the tables set, and again while rows are left. A failure is said once (its words) and tried again in 30 s: a
+   * row left unnumbered costs a join on its keys' numbers, never an answer (a statement checks them first:
+   * src/duck/store.ts `numbersHold`).
+   */
+  private numbersSoon(ms = 50): void {
+    if (this.stopped || this.numbersTimer !== null) return;
+    this.numbersTimer = setTimeout(() => { this.numbersTimer = null; void this.numbersRun(); }, ms);
+    this.numbersTimer.unref?.();
+  }
+  private async numbersRun(): Promise<void> {
+    if (this.stopped) return;
+    let changed = false, left = false, numbered = 0, failed = false;
+    // the references the schema tells the listener of (`schemaBuilt`): built again when they change, a hidden column
+    // made here or found in a table swapped in with it (src/duck/reference-keys.ts `fillSide`)
+    const told = (): string => JSON.stringify(this.numbers.published().map((r) => [r.from.hidden, r.to.hidden]));
+    const before = told();
+    try {
+      await this.onWriter(async () => {
+        if (this.stopped) return;
+        changed = await this.numbers.ensure(this.store.writer);
+        ({ left, numbered } = await this.numbers.fill(this.store.writer));
+      });
+      this.numbersFailed = null;
+    } catch (e) {
+      failed = true;
+      left = true;
+      // said once until its words change (decided on its raw words, said through errorText)
+      const m = messageOf(e);
+      if (this.numbersFailed !== m) this.log(`the hidden keys of the sources file's references could not be numbered (a join on them reads the keys themselves meanwhile; tried again in 30 s): ${this.errorText(e)}`);
+      this.numbersFailed = m;
+    }
+    if (changed || told() !== before) await this.rebuildSchema().catch((e: unknown) => this.log(`the catalog could not be rebuilt (it is at the next pass): ${this.errorText(e)}`));
+    // rows left: the next chunk at once; only a table busy meanwhile (its rebuild): a second from now
+    if (left) this.numbersSoon(failed ? 30_000 : numbered > 0 ? 50 : 1_000);
   }
 
   /** a pass's queueing and polls, the source attached; a replicated table is copied or caught up only once the publication
@@ -4814,6 +4883,9 @@ export class Sync {
     this.copiedColumns.set(t.source, [...t.columns]);
     // committed: a new copy, so a generated table over it is behind from here
     this.generated.changed(t.source);
+    // and its hidden keys are found again, its unnumbered rows numbered (src/duck/reference-keys.ts)
+    this.numbers.forget(t.source);
+    this.numbersSoon();
     // the copy's view of its visible columns, made again (its own transaction: DuckDB writes one database a transaction)
     await this.kept.swapped(t.source, t.columns.map((c) => c.name));
     if (o.snapshot !== null) {
@@ -4989,6 +5061,12 @@ export class Sync {
           pending.set(t.source, rows);
         }
       });
+      // THE ROWS IT WROTE NUMBERED in its own transaction, on the writer (src/duck/reference-keys.ts); a catch-up's (the
+      // rebuilds' connection, which gives no key a number) are numbered on the writer's turn after it
+      if (lane === this.writerLane && into === undefined) {
+        doing = "numbering the references' hidden keys of the rows it wrote";
+        for (const t of tables) if (!pieced.some((p) => p.t.source === t.source)) await this.numbers.fillIn(w, t.source);
+      }
       doing = "committing the poll";
       await w.run("COMMIT");
     } catch (e) {
@@ -5049,6 +5127,8 @@ export class Sync {
     }
     // committed: a generated table over a table that changed is behind from here (a side table's, once it is swapped in)
     if (into === undefined) for (const f of found) if (f.added > 0 || f.updated > 0 || f.deleted > 0) this.generated.changed(f.table);
+    // and what is left unnumbered (a catch-up's rows, a piece's) is numbered on the writer's turn
+    if (into === undefined) { for (const f of found) this.numbers.written(f.table); this.numbersSoon(); }
     return found;
   }
 
@@ -5176,6 +5256,8 @@ export class Sync {
       // its stored JSON paths filled, so the table swapped in has every one whole (src/duck/kept.ts fillSide): after its
       // catch-up, whose rows carry none
       await this.kept.fillSide(w, t.source, side, t.columns.map((c) => c.name), (sql) => this.interruptible(this.rebuilder, async () => Number((await w.run(sql)).rowsChanged)));
+      // and its references' hidden keys, numbered from the dictionaries as they are (src/duck/reference-keys.ts)
+      await this.numbers.fillSide(w, t.source, side, (sql) => this.interruptible(this.rebuilder, async () => Number((await w.run(sql)).rowsChanged)));
       // THE SWAP, on the writer's turn: one transaction, between two of the stream's or the polls'. It carries the
       // catch-up's watermark and removes the copy's progress; the changes the stream held since the catch-up began are
       // applied in the same turn, and the table joins the stream (`swapCaughtUp`). In recopy mode, its one snapshot
@@ -6088,8 +6170,15 @@ export class Sync {
       tables.push({ name: g.table, schema: g.schema, primaryKey: [], columns, joins: [], ...(g.comment !== null ? { description: g.comment } : {}) });
     }
     const views = this.views, collations = this.collations;
-    const key = JSON.stringify([tables, views, collations]);
-    if (key !== this.schemaKey) { this.schemaKey = key; this.currentSchema = { database: this.currentSchema.database, tables, ...(views.length > 0 ? { views } : {}), ...(collations.length > 0 ? { collations } : {}) }; }
+    // THE REFERENCES WHOSE KEYS ARE NUMBERED (src/duck/reference-keys.ts): both sides served, each with its hidden column
+    const served = (s: { schema: string; table: string; hidden: string }): boolean => tables.some((t) => t.schema === s.schema && t.name === s.table);
+    const references = this.numbers.published().filter((r) => served(r.from) && served(r.to))
+      .map((r) => ({ from: { schema: r.from.schema, table: r.from.table, columns: r.from.columns, hidden: r.from.hidden }, to: { schema: r.to.schema, table: r.to.table, columns: r.to.columns, hidden: r.to.hidden } }));
+    const key = JSON.stringify([tables, views, collations, references]);
+    if (key !== this.schemaKey) {
+      this.schemaKey = key;
+      this.currentSchema = { database: this.currentSchema.database, tables, ...(views.length > 0 ? { views } : {}), ...(collations.length > 0 ? { collations } : {}), ...(references.length > 0 ? { references } : {}) };
+    }
   }
 }
 

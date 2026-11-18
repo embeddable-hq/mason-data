@@ -154,6 +154,10 @@ paths:
   never listed (the copy's view of its visible columns, stored JSON paths on or off), and the rewrite reads it only to
   print (`scaleOf`): keys, filters and aggregates stay the engine's DECIMAL. A copy without it is read again once
   (`SCALE_LAYOUT`). Why: Postgres prints `12.5` beside `12.49`, and one DECIMAL scale printed `12.50`.
+- **A reference's hidden integer keys are a column a side table gets before its swap** (src/duck/reference-keys.ts
+  `fillSide`, issue 1144): added to the side table and numbered from the dictionary, read only, on the rebuilds'
+  connection, in chunks the stop can interrupt. Never listed, like the scale column. A key the dictionary lacks stays
+  NULL until the writer numbers it.
 - **Each text column is compressed by its own values** (`src/duck/text-compression.ts`, issue 1140): `beginCopy` reads
   one sample of the source in the copy's snapshot (`sourceLengthsSql`, then `sourceDistinctSql`: about 100 pages by
   `TABLESAMPLE SYSTEM`, at most 10,000 rows, one row of aggregates back each), and gives each VARCHAR or JSON column

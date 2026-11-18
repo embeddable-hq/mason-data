@@ -63,7 +63,7 @@ import { mutations, KEY_OF, SCHEMA, STAMPING, seed, TABLES } from "./oracle/data
 import { compareRows, NUMERIC_OID } from "./oracle/compare.ts";
 import { CASES, MIXED_SCALE, QUERY_CASES, REFUSED_CASES, T, U, Z } from "./postgres-cases.ts";
 import { BI_SHAPES, META } from "./oracle/bi-shapes.ts";
-import { TYPE_MATRIX, TYPED, typedMutations } from "./oracle/type-matrix.ts";
+import { referenceMutations, TYPE_MATRIX, TYPED, typedMutations } from "./oracle/type-matrix.ts";
 import { MERGE_COPIED, UNORDERED_LIMITS, UNORDERED_ROW_SHAPES, withinWhole, type UnorderedLimit } from "./oracle/unordered-limit.ts";
 import { GAP_CASES } from "./oracle/gap-cases.ts";
 import { COLLATION_CASES, COLLS_SCHEMA, collsMutations } from "./oracle/collations.ts";
@@ -130,7 +130,13 @@ function psql(url: string, sql: string): string {
 }
 
 /** every table the oracle copies: the shop's, `one`, and the type matrix's (oracle/type-matrix.ts TYPED) */
-const COPIED = [...TABLES, "one", "dup", "dup2", "typed", "mapped", "grouped", "typed_arrays", "plain_n", "castable", "cased", "own_named", "jcased", "jpath", "jcontain", "coll", "coll_top", "coll_rep", "colls", "colls_case", "moods", "defaults", "late", "late_c", ...MERGE_COPIED, "top_a", "top_b", "top_c", "top_n", "top_r", "top_rc", "pnums", "bins", "star_o", "star_b", "instants", "docs", "nullish", "jorder", "keyed", "pairs", "vkeys", "moodlog", ...LATEST_TABLES];
+const COPIED = [...TABLES, "one", "dup", "dup2", "typed", "mapped", "grouped", "typed_arrays", "plain_n", "castable", "cased", "own_named", "jcased", "jpath", "jcontain", "coll", "coll_top", "coll_rep", "colls", "colls_case", "moods", "defaults", "late", "late_c", ...MERGE_COPIED, "top_a", "top_b", "top_c", "top_n", "top_r", "top_rc", "pnums", "bins", "star_o", "star_b", "instants", "docs", "nullish", "jorder", "keyed", "pairs", "vkeys", "moodlog", "rparent", "rchild", ...LATEST_TABLES];
+/** the references the oracle's sources file names (src/duck/reference-keys.ts): a join on each reads hidden integer
+ *  keys once they are numbered, and is held to Postgres so (oracle/type-matrix.ts "reference: …") */
+const REFERENCES: Record<string, Array<{ columns: string[]; table: string; targetColumns: string[] }>> = {
+  rchild: [{ columns: ["u"], table: "public.rparent", targetColumns: ["u"] }, { columns: ["code"], table: "public.rparent", targetColumns: ["code"] },
+    { columns: ["t", "n"], table: "public.rparent", targetColumns: ["t", "n"] }, { columns: ["big"], table: "public.rparent", targetColumns: ["big"] }],
+};
 
 /** the one-row table every dialect case reads, so DuckDB (not the catalog Postgres) answers it */
 const ONE = "CREATE TABLE public.one (id int PRIMARY KEY); INSERT INTO public.one VALUES (1);";
@@ -340,7 +346,8 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   const facts = await readSourceFacts(conn.pg);
   conn.pg.close();
   // top_n has no primary key: it is copied as a sources file's `key:` would copy it, and the catalog declares none
-  const added = facts.tables.filter((t) => COPIED.includes(t.table) && t.schema === "public").map((t) => t.table === "top_n" ? { ...t, key: ["a", "b"], primaryKey: [] } : t);
+  const added = facts.tables.filter((t) => COPIED.includes(t.table) && t.schema === "public").map((t) => t.table === "top_n" ? { ...t, key: ["a", "b"], primaryKey: [] } : t)
+    .map((t) => REFERENCES[t.table] !== undefined ? { ...t, fileReferences: REFERENCES[t.table] } : t);
   assert.equal(added.length, COPIED.length, `the oracle's tables in the catalog: ${facts.tables.map((t) => t.source).join(", ")}`);
   // the row filters' own shop (oracle/row-filters.ts), copied beside the rest and read by `rowFilterCases` alone
   const shop = facts.tables.filter((t) => t.schema === "shop");
@@ -356,6 +363,19 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   sync.setCollations(facts.collations ?? []);
   await fixedClock.time("first sync", () => sync!.once());
   assert.deepEqual(sync.state().filter((x) => x.phase !== "copied").map((x) => `${x.source} ${x.phase} ${x.error}`), [], "every table copied");
+  // every reference numbered, its rows too, before a statement is asked: the joins on them are held to Postgres on the
+  // numbers (a row not numbered would run them on the keys)
+  await fixedClock.time("references numbered", async () => {
+    const unnumbered = async (): Promise<number> => {
+      const cols = (await store!.writer.runAndReadAll("SELECT table_name, column_name FROM duckdb_columns() WHERE schema_name = 'public' AND table_name IN ('rparent', 'rchild') AND starts_with(column_name, '__mason_ref_')")).getRowsJS();
+      let n = cols.length === 0 ? 1 : 0;
+      for (const [t, c] of cols) n += Number((await store!.writer.runAndReadAll(`SELECT count(*) FROM public."${String(t)}" WHERE "${String(c)}" IS NULL`)).getRowsJS()[0]![0]);
+      return n;
+    };
+    for (const end = Date.now() + 60_000; (sync!.schema().references ?? []).length < 4 || await unnumbered() > 0; await new Promise((r) => setTimeout(r, 50))) {
+      if (Date.now() > end) assert.fail(`the oracle's references were not numbered in 60 s: ${JSON.stringify(sync!.schema().references ?? [])}\n${log.slice(-10).join("\n")}`);
+    }
+  });
   // THE ORACLE RUNS AS A USER'S INSTALL DOES, with the copy's extensions from this platform's package (src/duck/extensions.ts):
   // autoinstall off and both files the package's, so every statement it holds equal is answered with nothing
   // downloaded, and a regression to downloading fails here rather than passing on the engine's own install
@@ -601,7 +621,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   }
   for (const round of [1, 2]) {
     await fixedClock.time(`changes round ${round}`, async () => {
-      psql(dbUrl, mutations(round) + typedMutations(round) + ";\n" + collsMutations(round));
+      psql(dbUrl, mutations(round) + typedMutations(round) + ";\n" + collsMutations(round) + ";\n" + referenceMutations(round));
       await theSync.once();
     });
     await run(PHASES[round]!);
@@ -1055,8 +1075,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   // the first differences in the log too, whichever assertion below fails first (a difference can be why a decision
   // is stale or a verified entry dropped, and CI keeps only the log)
   for (const d of differences.slice(0, 5)) console.log(`duck oracle: differs: [${d.phase}] ${d.group} / ${d.kind}: ${d.name}\n  ${d.detail}\n  ${d.sql.replace(/\s+/g, " ")}`);
-  console.log(`duck oracle: ${nodesPlacedTwice().length} node(s) a rewrite placed twice${nodesPlacedTwice().length > 0 ? `: ${nodesPlacedTwice().slice(0, 10).join(" | ")}` : ""}`);
-  if (EAGER_JSON) {
+  console.log(`duck oracle: ${nodesPlacedTwice().length} node(s) a rewrite placed twice${nodesPlacedTwice().length > 0 ? `: ${nodesPlacedTwice().slice(0, 10).join(" | ")}` : ""}`);  if (EAGER_JSON) {
     // the run read JSON from stored columns: how many paths, and none left unfilled
     const paths = theSync.kept.status();
     const orders = paths.filter((p) => p.state === "ready" && p.steps.startsWith("order:"));

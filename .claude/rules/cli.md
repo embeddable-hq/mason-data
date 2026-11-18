@@ -181,7 +181,7 @@ CLI lacks).
   of entries: `{}` every column, `columns:` those (the key always copied), `exclude:` every column but those (never
   both), `sync:` how it is kept current (`off`, `poll <interval>`, `replication`; the file's top `sync:` is every entry's
   default, and none written is `off`, said at `mason start`), `key:` only for a table with no primary key (refused on
-  one that has one; refused under `sync: replication`, whose changes the stream applies by key), `references:` the table's foreign keys from the side that holds them (`customer_id: customers.id`; several columns as SQL writes them, `(a, b): customers (c, d)`; held at load to columns both sides sync and a table the file syncs; read and shown, never read by a query yet: issue 1143), and `publication:` at
+  one that has one; refused under `sync: replication`, whose changes the stream applies by key), `references:` the table's foreign keys from the side that holds them (`customer_id: customers.id`; several columns as SQL writes them, `(a, b): customers (c, d)`; held at load to columns both sides sync and a table the file syncs; the run numbers a reference's keys where they are larger than a small integer, and a join on it reads the numbers: src/duck/reference-keys.ts, issue 1144), and `publication:` at
   the top (the publication replication reads, `${PG_PUBLICATION}` allowed; the literal `publication: null` is Mason's own, on purpose). Types are never in the file: the run reads them at every start. A
   second file is refused ("one source per project for now"). ONE reader (`readSource`, `parseSourceText`, then
   `addedTables` against the catalog, src/cli/sources.ts) for the run, `mason tables`, `mason add` and `serve`; every

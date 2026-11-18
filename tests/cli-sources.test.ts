@@ -1312,10 +1312,13 @@ test("references: held to the database and the file at load, each at its key wit
   // the referenced side's column, left out there
   assert.deepEqual(failed("tables:\n  orders:\n    references:\n      status: customers.name\n  customers:\n    exclude: [name]\n"),
     ["tables.orders.references.status: public.customers.name is not synced (tables.customers: exclude: names it) — sync it there, or take this reference out"]);
-  // a reference never decides what is synced: the run's tables are the same with it or without it
+  // a reference never decides what is synced: the run's tables are the same with it or without it, the reference
+  // carried beside them (src/duck/reference-keys.ts numbers its keys)
   const plain = S.addedTables(parse(`${HEAD}tables:\n  orders: {}\n  customers: {}\n`) as Sources.SourceFile, REFS_CATALOG, "shop", "/app");
   const withRefs = S.addedTables(parse(`${HEAD}tables:\n  orders:\n    references:\n      status: customers.name\n  customers: {}\n`) as Sources.SourceFile, REFS_CATALOG, "shop", "/app");
-  assert.deepEqual(withRefs, plain);
+  assert.ok(Array.isArray(withRefs) && Array.isArray(plain));
+  assert.deepEqual(withRefs.map(({ fileReferences: _, ...t }) => t), plain);
+  assert.deepEqual(withRefs.map((t) => t.fileReferences ?? null), [[{ columns: ["status"], table: "public.customers", targetColumns: ["name"] }], null]);
 });
 
 test("mason add writes the foreign keys the database declares as references — one column and several, on the entry that holds each, comments kept — and says each it left out and why (issue 1143)", async () => {

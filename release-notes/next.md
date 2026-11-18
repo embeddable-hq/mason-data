@@ -17,7 +17,7 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
     light query. `mason logs --requests --id <request>` shows it.
 - **The sources file says how tables join: `references:`.** Each table's entry can list its foreign keys, on the table
   that holds them: `customer_id: customers.id`. A foreign key of several columns is written as in SQL:
-  `(tenant_id, customer_id): customers (tenant_id, id)`. Queries don't use them yet.
+  `(tenant_id, customer_id): customers (tenant_id, id)`. A join on one reads less (the next item).
   - `mason add` writes the foreign keys your database declares between tables the file syncs. When you add the table a
     foreign key points to, it writes that key on the table that holds it. It says each foreign key it left out, and why.
   - `mason remove` takes the references to a removed table out of the other entries, and says so.
@@ -26,6 +26,19 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
     giving a sync to a table written as `{ … }`, wrote its entry again and lost its comments.
   - A reference to a table the file doesn't sync, or to a column it doesn't sync, stops `mason start` with the file, the
     key and the way out. `mason tables --json` shows each table's references in its `entry`.
+- **A join on a reference reads small numbers in place of its key.** For each reference in the sources file whose key
+  is a UUID, a text, several columns, or a sparse integer, Mason gives each key value a number. It stores the number in
+  a hidden column of both tables. A query that joins the two tables on the reference's columns joins on the numbers.
+  The answers are the same.
+  - On a benchmark of 100 M orders and 5 M customers, the orders' key column a join reads went from 1.60 GiB to
+    0.31 GiB for a UUID key, and from 1.20 GiB to 0.31 GiB for a text key. On a laptop, a join on a text key went from
+    1.42 s to 0.83 s. A join on a UUID key read from disk went from about 1.1 s to 0.85 s. On a slower disk, such as a
+    cloud volume, the saving is larger: a query reads up to 1.3 GiB less.
+  - The synced data grows. The hidden columns took about 310 MiB for each reference on the 100 M orders, so the synced
+    data went from 4.04 GiB to 5.19 GiB with three references. Its first sync took 53 s instead of 41 s.
+  - A dense integer key, such as a serial, gets no number. The key is already as small.
+  - The upgrade syncs no table again. Mason numbers the tables it has synced in the background, a part at a time.
+    Until a table is numbered, a join on it reads the keys, as before.
 - **Short text columns are stored many times smaller, so a dashboard that groups or filters on them reads less.** When
   Mason syncs a table, it now chooses how to compress each text column from a sample of its values. A column of short
   or repeated values, such as a status, a type, a country code or a name, is stored with a dictionary. Values of 64 bytes

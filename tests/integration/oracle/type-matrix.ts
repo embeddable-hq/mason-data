@@ -410,6 +410,14 @@ export const TYPED = `${MAPPED_TABLE} CREATE EXTENSION IF NOT EXISTS citext; CRE
   "INSERT INTO public.pairs VALUES (1, 1, 'a'), (1, 2, 'a'), (2, 1, 'A'), (2, 2, NULL), (3, 1, 'b'), (5, 1, 'none'), (5, 2, ''), (5, 3, 'c'); " +
   "CREATE TABLE public.vkeys (id varchar(8) PRIMARY KEY, label text); " +
   "INSERT INTO public.vkeys VALUES ('a', 'one'), ('A', 'one'), ('b', NULL), ('', 'empty'), ('zz', 'two'), ('none', 'two');" +
+  // A JOIN ON A DECLARED REFERENCE (src/duck/reference-keys.ts, issue 1144): `rchild`'s references to `rparent` by a
+  // uuid, a text (from a varchar), a key of two columns and a sparse bigint are numbered in hidden columns (the
+  // oracle's sources file names them: duck-oracle.itest.ts REFERENCES). The parent's keys repeat and hold NULLs, a case
+  // pair, a trailing blank, an empty text and a composed é; the child's hold keys no parent has and the decomposed é
+  "CREATE TABLE public.rparent (pk int PRIMARY KEY, u uuid, code text, t int, n int, big bigint, label text); " +
+  "INSERT INTO public.rparent VALUES (1, '00000000-0000-4000-8000-000000000001', 'a', 1, 1, 9000001000000000000, 'one'), (2, '00000000-0000-4000-8000-000000000002', 'A', 1, 2, 9000002000000000000, 'two'), (3, '00000000-0000-4000-8000-000000000002', 'b', 2, 1, NULL, 'three'), (4, NULL, NULL, NULL, 1, 9000004000000000000, 'four'), (5, '00000000-0000-4000-8000-000000000005', 'b ', 2, NULL, 9000005000000000000, NULL), (6, '00000000-0000-4000-8000-000000000006', '', 3, 3, 9000006000000000000, 'six'), (7, '00000000-0000-4000-8000-000000000007', 'é', 3, 4, 9000007000000000000, 'seven');" +
+  "CREATE TABLE public.rchild (id int PRIMARY KEY, u uuid, code varchar(4), t int, n int, big bigint, v int); " +
+  "INSERT INTO public.rchild VALUES (1, '00000000-0000-4000-8000-000000000001', 'a', 1, 1, 9000001000000000000, 10), (2, '00000000-0000-4000-8000-000000000002', 'A', 1, 2, 9000002000000000000, 20), (3, '00000000-0000-4000-8000-000000000002', 'b', 2, 1, 9000004000000000000, 30), (4, NULL, NULL, NULL, 1, NULL, 40), (5, '00000000-0000-4000-8000-000000000099', 'zz', 9, 9, 7, 50), (6, '00000000-0000-4000-8000-000000000005', 'b ', 2, NULL, 9000005000000000000, 60), (7, '00000000-0000-4000-8000-000000000006', '', 3, 3, 9000006000000000000, 70), (8, '00000000-0000-4000-8000-000000000001', 'a', 1, 1, 9000001000000000000, 80), (9, '00000000-0000-4000-8000-000000000007', 'e' || chr(769), 3, 4, 9000009000000000000, 90);" +
   FROM_ITEM_VIEWS
 
 /** a round of changes the poll carries: values move, a row goes, one comes */
@@ -425,6 +433,16 @@ function typedRows(round: number): string {
       "INSERT INTO public.typed (id, i2, i4, i8, f8, n, t, d, tz, iv, jb, ai, at) VALUES (11, 11, 11, 11, 11.5, 11.25, 'new', '2026-10-24', '2026-10-24 12:00:00+00', '11 minutes', '{\"n\": 11}', '{11}', '{new}')"
     : "UPDATE public.typed SET i8 = NULL, t = NULL, jb = NULL, ai = NULL WHERE id = 11; UPDATE public.typed SET b = NOT b, d = d + 1 WHERE id < 10; " +
       "UPDATE public.typed_arrays SET ca = ca || 'Z'::citext, ia = ia || '192.168.0.1'::inet, jba = jba || '{\"m\": 2}'::jsonb, n = n + 1 WHERE id IN (1, 4)";
+}
+
+/** a round of changes to the references' tables (src/duck/reference-keys.ts): a key the parent did not have, a child's
+ *  key changed and set NULL, a parent's key changed, a parent deleted and inserted again */
+export function referenceMutations(round: number): string {
+  return round === 1
+    ? "INSERT INTO public.rparent VALUES (8, '00000000-0000-4000-8000-000000000099', 'zz', 9, 9, 7, 'eight'); UPDATE public.rchild SET u = '00000000-0000-4000-8000-000000000006', code = 'é' WHERE id = 1; " +
+      "UPDATE public.rchild SET u = NULL, code = NULL, t = NULL, big = NULL WHERE id = 2; UPDATE public.rparent SET code = 'B' WHERE pk = 3; INSERT INTO public.rchild VALUES (10, '00000000-0000-4000-8000-000000000099', 'B', 9, 9, 7, 100)"
+    : "DELETE FROM public.rparent WHERE pk = 1; INSERT INTO public.rparent VALUES (9, '00000000-0000-4000-8000-000000000001', 'a', 1, 1, 9000001000000000000, 'one again'); " +
+      "UPDATE public.rparent SET u = '00000000-0000-4000-8000-000000000003', big = 9000003000000000000 WHERE pk = 2; INSERT INTO public.rchild VALUES (11, '00000000-0000-4000-8000-000000000003', 'A', 1, 2, 9000003000000000000, 110)";
 }
 
 const ORDINARY = "id < 100";
@@ -2093,6 +2111,23 @@ function* matrix(): Generator<Matrixed> {
   yield q("count(DISTINCT id) over a join to a composite key's table (repeated)", "SELECT count(DISTINCT k.id), count(k.id) FROM keyed k JOIN pairs p ON p.id = k.id");
   yield q("count(DISTINCT id) over a join on a partial unique index's column (repeated)", "SELECT count(DISTINCT k.id), count(k.id) FROM keyed k JOIN keyed r ON r.part = k.part");
   yield q("count(DISTINCT id) of a composite key's table joined on the other's key", "SELECT k.code, count(DISTINCT p.id), count(DISTINCT p.line) FROM pairs p LEFT JOIN keyed k ON k.id = p.id GROUP BY 1 ORDER BY 1 NULLS FIRST");
+  // ---- a join on a declared reference, on its hidden integer keys (src/duck/reference-keys.ts, issue 1144): each kind of
+  // key, an inner, LEFT, RIGHT and FULL join, the WHERE of a list of tables, two references at once, a sort and a limit
+  // over it; and what reads the keys themselves: `=` as a value, USING, IN, a subquery's column ------------------------
+  yield q("reference: a uuid key joined, grouped", "SELECT p.label, count(*), sum(c.v) FROM rchild c JOIN rparent p ON c.u = p.u GROUP BY 1 ORDER BY 1 NULLS FIRST");
+  yield q("reference: a text key from a varchar, LEFT", "SELECT c.id, p.pk FROM rchild c LEFT JOIN rparent p ON p.code = c.code ORDER BY 1, 2");
+  yield q("reference: a key of two columns, FULL", "SELECT c.id, p.pk FROM rchild c FULL JOIN rparent p ON c.t = p.t AND c.n = p.n ORDER BY 1, 2");
+  yield q("reference: a sparse bigint key in a WHERE", "SELECT c.id, p.label FROM rchild c, rparent p WHERE c.big = p.big ORDER BY 1, 2");
+  yield q("reference: RIGHT, sorted and limited", "SELECT c.id, p.pk FROM rparent p RIGHT JOIN rchild c ON p.u = c.u WHERE c.v > 20 ORDER BY c.v DESC, p.pk LIMIT 3");
+  yield q("reference: two at once, LEFT from the parent", "SELECT p.pk, count(c.id) FROM rparent p LEFT JOIN rchild c ON c.u = p.u AND c.code = p.code GROUP BY 1 ORDER BY 1");
+  yield q("reference: DISTINCT over a text key's join", "SELECT DISTINCT p.label FROM rchild c JOIN rparent p ON c.code = p.code ORDER BY 1 NULLS FIRST");
+  yield q("reference: a key of two columns, the late select list", "SELECT c.id, p.label FROM rchild c JOIN rparent p ON c.t = p.t AND c.n = p.n ORDER BY c.v DESC LIMIT 2");
+  yield q("reference: two keys in one ON", "SELECT count(*), sum(c.v) FROM rchild c JOIN rparent p ON c.u = p.u AND c.big = p.big");
+  yield q("reference: a window over the join", "SELECT c.id, p.pk, row_number() OVER (PARTITION BY p.pk ORDER BY c.id) FROM rchild c JOIN rparent p ON p.u = c.u ORDER BY 1, 2");
+  yield q("reference: = as a value reads the keys", "SELECT c.id, p.pk, c.u = p.u, c.code = p.code FROM rchild c JOIN rparent p ON p.pk = c.id ORDER BY 1");
+  yield q("reference: USING reads the keys", "SELECT c.id, p.pk FROM rchild c JOIN rparent p USING (u) ORDER BY 1, 2");
+  yield q("reference: IN a subquery reads the keys", "SELECT c.id FROM rchild c WHERE c.code IN (SELECT p.code FROM rparent p) ORDER BY 1");
+  yield q("reference: a subquery's column reads the keys", "SELECT c.id, s.label FROM rchild c JOIN (SELECT u, label FROM rparent) s ON s.u = c.u ORDER BY 1, 2");
   yield q("window frames", "SELECT id, sum(i4) OVER (ORDER BY id RANGE BETWEEN 2 PRECEDING AND CURRENT ROW), count(*) OVER (ORDER BY ts RANGE BETWEEN interval '1 day' PRECEDING AND interval '1 day' FOLLOWING), sum(i4) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND 2 FOLLOWING), max(i4) OVER (ORDER BY id GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW), sum(i4) OVER (ORDER BY id ROWS UNBOUNDED PRECEDING EXCLUDE CURRENT ROW), sum(i4) OVER (ORDER BY id RANGE UNBOUNDED PRECEDING) FROM typed WHERE id < 100 ORDER BY id");
 }
 
