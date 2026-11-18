@@ -32,6 +32,7 @@ import { attributeRefused, expandRowFilters, wallStatistics, wallSwitch, type Wa
 import type { PgAnalysis } from "./analyze.ts";
 import type { ScaleLookup } from "./rewrite.ts";
 import { scaledOf } from "./scale-column.ts";
+import { mayKeepRows } from "./admission.ts";
 
 const JSON_OID = 114, JSONB_OID = 3802, NUMERIC_OID = 1700;
 /** pg_catalog.pg_typeof(any): its argument's type named by the catalog (src/duck/rewrite.ts) */
@@ -170,6 +171,12 @@ export interface PlannedSql {
    * refused (`numeric-array-parameter`, src/api/postgres/server.ts `duckValues`). Absent: none
    */
   readonly wholeNumericArrays?: readonly number[];
+  /**
+   * it only scans and filters: no join, group, sort, window or aggregate that keeps rows (src/duck/admission.ts
+   * `mayKeepRows`, read off the tree), so it is light however many rows it reads and is never weighed before it runs.
+   * Absent: it may keep rows, and the engine's plan says how many (`keptRows`)
+   */
+  readonly keepsNone?: true;
   readonly [PLANNED]: true;
 }
 
@@ -671,7 +678,8 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
       detail: `read back: ${difference}; the rewritten SQL: ${sql}` }, text);
   }
   const planned = { text: sql, functions: masonCalls(tree), ...(unboundedLateral ? { unboundedLateral: true } : {}),
-    ...(pathParams.length > 0 ? { pathParams } : {}), ...(wholeNumericArrays.length > 0 ? { wholeNumericArrays } : {}) } as unknown as PlannedSql;
+    ...(pathParams.length > 0 ? { pathParams } : {}), ...(wholeNumericArrays.length > 0 ? { wholeNumericArrays } : {}),
+    ...(mayKeepRows(tree) ? {} : { keepsNone: true }) } as unknown as PlannedSql;
   return { sql: planned, params: analysis.params, fields: fields?.map((f) => ({ ...f, size: pgTyplen(f.oid) })) ?? null, withTies, ...(exact.length > 0 ? { exact, own } : {}), resolved: keys, argumentTypes: argumentTypes(analysis.tree), ...(outputs ? { outputs: outputExpressions(analysis.tree) ?? [] } : {}),
     ...(Object.keys(clock).length > 0 ? { clock } : {}), ...(jsonReads.length > 0 ? { jsonReads: jsonReads.map(readKey) } : {}), ...(reads !== undefined ? { reads } : {}),
     timing: { analysisMs: analysed - started, rewriteMs: performance.now() - analysed } };

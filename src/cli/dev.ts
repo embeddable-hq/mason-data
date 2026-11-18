@@ -67,6 +67,7 @@ import { UI } from "./ui.ts";
 import { cliPinProblem, ensurePin } from "./pin.ts";
 import { DEFAULT_MEMORY_LIMIT, DuckStore, DUCKDB_VERSION, machineMemory, memoryProblems, memoryProblemText, memoryWarning } from "../duck/store.ts";
 import { copyChunkSecondsOf, copyParallelOf, humanBytes, Sync, syncModeOf, type CopyState } from "../duck/sync.ts";
+import { heavyQueriesOf } from "../duck/admission.ts";
 import { storeJsonPathsOf } from "../duck/kept.ts";
 import { libcOrderNote, readLibcOrder, type LibcOrder } from "../duck/libc-order.ts";
 import { isLibcCollation, type SourceCollation } from "../duck/collation.ts";
@@ -492,6 +493,10 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   let storeJsonPaths: boolean;
   try { storeJsonPaths = storeJsonPathsOf(process.env); }
   catch (e) { say(`mason start: ${(e as Error).message}`); return 1; }
+  // how many heavy statements run at once (src/duck/admission.ts), unless derived from the memory and the CPUs
+  let heavyQueries: number | null;
+  try { heavyQueries = heavyQueriesOf(process.env); }
+  catch (e) { say(`mason start: ${(e as Error).message}`); return 1; }
 
   begin("Opening the synced data");
   const duckFile = path.join(home, DUCK_FILE);
@@ -500,7 +505,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const memoryLimit = process.env.MASON_DUCKDB_MEMORY || undefined;
   // what statements may spill (src/duck/store.ts spillCeiling): past it a statement fails alone, and the disk is kept
   const spillLimit = process.env.MASON_SPILL_LIMIT || undefined;
-  try { store = await DuckStore.open(duckFile, (l) => logLine(`[engine] ${l}`), { ...(memoryLimit === undefined ? {} : { memoryLimit }), ...(spillLimit === undefined ? {} : { spillLimit }) }); }
+  try { store = await DuckStore.open(duckFile, (l) => logLine(`[engine] ${l}`), { ...(memoryLimit === undefined ? {} : { memoryLimit }), ...(spillLimit === undefined ? {} : { spillLimit }), heavyQueries }); }
   catch (e) { fail("Opening the synced data"); say(`  ${(e as Error).message}`); return 1; }
   // THE COPY'S THREAD DYING (src/duck/executor.ts: V8 out of heap there, an uncaught error), or the synced data
   // invalidated by a fatal error (a checkpoint on a full disk, issue 830), ends the run, said, for its supervisor (or
@@ -512,7 +517,8 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     if (crash !== null) crash(reason);
     else say(`  ! the engine stopped: ${reason}`);
   });
-  done(`the synced data in ${path.relative(project.root, duckFile)} (mason destroy deletes it; engine ${DUCKDB_VERSION}), at most ${(memoryLimit ?? DEFAULT_MEMORY_LIMIT).trim()} of memory (MASON_DUCKDB_MEMORY), spilling at most ${humanBytes(store.spillLimitBytes)} to ${path.relative(project.root, duckFile)}.tmp (MASON_SPILL_LIMIT)`);
+  done(`the synced data in ${path.relative(project.root, duckFile)} (mason destroy deletes it; engine ${DUCKDB_VERSION}), at most ${(memoryLimit ?? DEFAULT_MEMORY_LIMIT).trim()} of memory (MASON_DUCKDB_MEMORY), spilling at most ${humanBytes(store.spillLimitBytes)} to ${path.relative(project.root, duckFile)}.tmp (MASON_SPILL_LIMIT), ` +
+    `${store.admission.turns === 1 ? "1 heavy query" : `${store.admission.turns} heavy queries`} at once (MASON_HEAVY_QUERIES)`);
   // UNDER THE MEMORY FLOOR the run goes on and warns (src/duck/store.ts memoryWarning, the one text): here at its start,
   // in its log, and in its warnings, which mason status, --json and the web page read for as long as it runs
   const memoryWarned = memoryWarning(machineMemory(), process.env);

@@ -70,6 +70,9 @@ export interface ApiLogRow {
   /** WHERE A STATEMENT ANSWERED XX000 FAILED (src/lib/failure-facts.ts `originOf`): the first frame in Mason's own code,
    *  a file and a line (`src/duck/store.ts:897`); absent for every other row and where no Mason frame was found */
   origin?: string | undefined;
+  /** A HEAVY STATEMENT'S WAIT FOR ITS TURN, ms (src/duck/admission.ts): 0 when a turn was free; absent for a light
+   *  statement, which takes none, and for one that never reached the engine */
+  waitedMs?: number | undefined;
   /** A SLOW STATEMENT'S PLAN (src/api/postgres/slow-plan.ts): a plain EXPLAIN of it, run once it ended, off its
    *  answer's path. The ledger holds the row until this settles (bounded) and writes the two together; it settles to
    *  null where none was recorded. Absent: none asked (not slow, refused, cancelled, or another plan was being recorded) */

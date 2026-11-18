@@ -778,6 +778,7 @@ whatever the session runs at that moment is stopped, as a `CancelRequest` stops 
 | `MASON_PG_PLAIN` | unset | `1`: a plain listener off loopback is on a private network; without it (or TLS) such a listener refuses to start |
 | `MASON_PG_CATALOG_TIMEOUT_MS` | 10000 | how long a catalog statement may take before the embedded Postgres is discarded and the statement refused |
 | `MASON_STATEMENT_TIMEOUT` | 5min | the longest one statement may run (Postgres's units; 0 for none); a session's `statement_timeout` may only shorten it |
+| `MASON_HEAVY_QUERIES` | one for each GiB of the engine's memory, at most one for each CPU, at least one | how many heavy queries run at once: a join, a group by or a sort whose plan keeps many rows in memory. The rest wait their turn, and their cancel and `statement_timeout` work while they wait. A light query (a lookup, a filter, a group by into a few groups) never waits. The request log's `waited_ms` says how long a heavy one waited |
 | `MASON_HISTORY_DAYS` | 7 | how many days of the request log (and the sync's events, the usage samples and the synced tables' sizes) are kept |
 | `MASON_STORE_JSON_PATHS` | on | `off`: never store the JSON paths statements keep reading as columns of the synced table (`payload ->> 'customer_id'` read by 3 statements, or by one taking 1 s, is stored, and read from there; `mason status` lists them), and drop those stored, at that start |
 | `MASON_PG_TRACE` | unset | `1`: log every statement text a session receives |

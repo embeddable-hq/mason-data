@@ -49,6 +49,7 @@ import type { PlannedSql } from "./plan.ts";
 import type { ExactColumn } from "./rewrite.ts";
 import type { LibcOrder } from "./libc-order.ts";
 import { beats, CANCEL_SLOTS, cancelStatement, cancelTable, resetSlot } from "./cancel.ts";
+import { Admission, LIGHT, type Admitted } from "./admission.ts";
 // a cycle (store.ts opens the executor): read at run time only
 import { failureOf } from "./store.ts";
 
@@ -294,6 +295,9 @@ export class Executor {
   private closing = false;
   private readonly exited: Promise<void>;
   private readonly crashed: Array<(reason: string) => void> = [];
+  /** THE HEAVY STATEMENTS' TURNS (src/duck/admission.ts), shared by every session of the instance: the store sets them
+   *  once it is open (`DuckStore.open`); until then none is heavy and none is weighed */
+  admission = new Admission(Infinity, Infinity);
   /** the cancel table, shared with the worker (src/duck/cancel.ts), and its free slots */
   readonly cancels = cancelTable();
   private readonly free: number[] = Array.from({ length: CANCEL_SLOTS }, (_, i) => CANCEL_SLOTS - 1 - i);
@@ -446,6 +450,9 @@ export class Executor {
       this.worker.postMessage({ ...m, id }, transfer);
     });
   }
+
+  /** a line of the engine's log */
+  say(line: string): void { this.log(line); }
 
   /** a message needing no answer (an interrupt, a connection's close); nothing once the worker is gone */
   post(m: Record<string, unknown>): void {
@@ -624,6 +631,37 @@ class RemoteRunner implements DuckRunner {
         this.ex.background({ op: "answer.close", runner: this.id, seq });
       },
     };
+  }
+
+  /**
+   * THE STATEMENT'S TURN (src/duck/admission.ts), before it runs: weighed by the engine's estimates on the worker, and,
+   * when heavy, a turn of the instance's waited for HERE, on the listener's thread, under the statement's own signal —
+   * a waiting statement holds nothing on the worker or in libuv's pool. Its cancel or its timeout, while it is weighed or
+   * while it waits, is its failure (57014), as for a running statement. A weight that cannot be read is said, and the
+   * statement counted heavy: it waits for a turn, and runs as before.
+   */
+  async admit(sql: PlannedSql, params: readonly (string | null)[], session: Session, signal: AbortSignal): Promise<Admitted> {
+    const a = this.ex.admission;
+    if (a.heavyRows === Infinity || sql.keepsNone === true) return LIGHT;
+    let rows: number;
+    const seq = ++this.seq;
+    const unwatch = this.watch(seq, sql, signal);
+    try { rows = await this.ex.call<number>({ op: "runner.weigh", runner: this.id, seq, sql, params, session, aborted: reasonOf(signal) }); }
+    catch (e) {
+      // its cancel or its timeout, or the engine gone: the statement's own failure, as its run would have met it
+      if (signal.aborted) return { failure: failureOf(signal, e, sql.text) };
+      if (e instanceof ExecutorGone) return { failure: goneError(e, sql.text) };
+      // anything else: a turn taken all the same (a check that cannot tell holds it back, never refuses it); the
+      // statement's run says its own error if it has one
+      this.ex.say(`the engine's estimate of a statement could not be read (${e instanceof Error ? e.message : String(e)}): it waits for a heavy statement's turn`);
+      rows = Infinity;
+    } finally { unwatch(); }
+    if (rows < a.heavyRows) return LIGHT;
+    const asked = performance.now();
+    const release = await a.admit(signal);
+    const waitedMs = performance.now() - asked;
+    if (release === null) return { waitedMs, failure: failureOf(signal, null, sql.text) };
+    return { heavy: true, waitedMs, release };
   }
 
   async explain(sql: PlannedSql, params: readonly (string | null)[], session: Session, signal: AbortSignal,

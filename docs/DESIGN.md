@@ -3196,7 +3196,8 @@ every thread at the pool's first task and aborts with no message if one cannot b
 process with exit 133. 64 was the first choice and the table's; the review chose 32, because nothing was measured past
 eight statements, 16 already fixed five, and the old queue was the only limit on how much memory statements take at
 once. So 32 covers the same data with half the thread exposure (at 2 vCPU, eight heavy, one run: p50 321 ms, worst 1.5 s, 32 s of wall time). An admission
-limit would be the one fact to derive this from; it would be new behaviour, so it was not added here.
+limit would be the one fact to derive this from; it would be new behaviour, so it was not added here. Heavy statements
+later got one, and light ones none ("Heavy statements take a turn"), so the pool still sizes the light ones.
 
 **A thread limit is read, because its failure is silent.** A platform restarting a process that aborts with no message
 is a loop nobody can read. `src/cli/pool-size.cjs` reads `pids.max` (both cgroup versions) and `Max processes` first, and
@@ -3213,6 +3214,74 @@ parking its threads on FIFOs. On 22.13 the pool had started with four threads be
 static import, because the ES loader reads its files through it; on 24 and 26 it had not, and a first import is enough.
 A CommonJS entry got its size on all three, so `src/cli/mason.cjs` is the `bin`, the image's `mason` and the run's
 command, and `main.ts` imports `pool-size.cjs` first for `node src/cli/main.ts` in a checkout, which needs 23.6 or later.
+
+### Heavy statements take a turn (2026-11-17, issue 1132)
+
+**Measured on the published machine** (4 CPUs, the engine at 4 GiB, Mason 0.23.0, docs/MEASUREMENTS.md): ten clients
+each sent a join of 100 M orders to 5 M customers on a UUID key at once, and it took 659 to 669 s against 17.9 s for one.
+Each join's hash table was about 170 MiB. Past about six at once the engine switched to a partitioned join and spilled:
+48.7 GB written to its temporary file, most of it read back, at the disk's 130 MB/s. The same ten against the engine
+alone with at most N at once: N=1 50.8 s, N=4 40.7 s with nothing spilled, about 6 41.2 s with 0.5 GB, about 8 519 s
+with 38 GB. 5.5 GiB did not stop the spill. `UV_THREADPOOL_SIZE=4` took the cell to 37.6 s, but that is "The pool"'s
+failure: small statements behind big ones.
+
+**Measured here** (a laptop, 10 cores, the engine's threads set to 4; synthetic, 50 M orders and 2.5 M customers on UUID
+keys, warm), the same join through the listener, ten clients at once, runs alternating main and the change:
+
+| | engine memory | ten joins, wall | peak spilled | a lookup by key sent during them (alone: about 30 ms) |
+|---|---|---|---|---|
+| main | 2 GiB | 16.3, 7.8, 13.6, 22.3, 21.1 s | 7.3, 1.8, 6.2, 9.1, 10.6 GB | 13.9, 5.8, 10.8, 19.3, 17.5 s |
+| two turns (derived) | 2 GiB | 7.4, 7.9, 6.8, 7.4, 7.5 s | 0 | 128, 188, 65, 137, 149 ms |
+| main | 4 GiB | 5.9, 10.1 s | 0, 0.7 GB | 4.1, 8.1 s |
+| four turns | 4 GiB | 6.1, 6.2 s | 0 | 0.7, 1.1 s |
+
+One join alone took 0.8 to 1.2 s either way. Sixty-four of the joins at once, at 2 GiB with a pool of 64, took 44 s
+with nothing spilled and none failed, the lookup beside them 46 to 130 ms. Ten "count by status" at once took 1.1 s either way, never counted heavy.
+The lookup waited on main because the engine's threads run tasks first come, first served, and ten joins' tasks were
+ahead of its own: no turn is involved, it is light. With four joins running it still shares the four threads, which is
+the 0.7 to 1.1 s.
+
+**Which statement is heavy is the engine's plan**, read before the statement runs with a plain EXPLAIN on its own
+connection (`SessionRunner.weigh`): the rows a join's build side, a group by's groups, a sort, a window and a
+materialized CTE keep, summed (`keptRows`). An aggregate that holds every value (a median, `string_agg`, `array_agg`)
+keeps its input. Measured with the engine at 4 threads, the peak of `duckdb_memory()` beside one statement: a build side
+of 2 M rows of a UUID and a timestamp 110 MB (55 B a row), a sort of 20 M rows 1,016 MB (53 B a row), a group by into
+2 M groups over 20 M rows 805 MB (400 B a group, a partial table on each thread), a group by month 5 MB. So
+`KEPT_ROW_BYTES` is 64, the low end. A statement is heavy when its rows times that pass its share of the memory with the
+32 statements all running, the pool's default size (`heavyRowsFor`, `LIGHT_AT_ONCE`): at 4 GiB, about 2.1 M rows. That
+many light ones can then run at once and fit. It is not read from `UV_THREADPOOL_SIZE`: statements are not held to the
+pool (at a pool of 1, ten joins still ran together and spilled 0.5 GB), and a small pool must not make every join
+light.
+- The engine estimates a group by of an expression (`date_trunc('month', x)`, `payload ->> 'source'`) at half its
+  input, having no statistics for it, so such a group by over a large table is counted heavy though it keeps a few
+  groups. It waits only while every turn is taken, and it is a full scan that would share the threads anyway. A group by
+  of a column (`status`) is estimated from the column's distinct count, and is light.
+- A statement whose tree has no join, no FROM of several items, no subquery expression, no WITH, no set operation, no
+  GROUP BY, DISTINCT, ORDER BY or window, and no aggregate that is DISTINCT, ordered or holds every value keeps nothing
+  (`mayKeepRows`, `PlannedSql.keepsNone`), and is not weighed: the EXPLAIN cost 0.5 ms on a small statement (p50
+  0.76 ms on main, 1.27 ms weighed, 0.77 ms not weighed). A statement that may keep rows pays it.
+- The top N over every column is a semi join of the table to its own top rows on the row id, estimated at every row: a
+  join on `rowid = rowid` gives at most its build side's rows, so it is light.
+
+**How many turns is one a GiB of `store.memoryLimitBytes`, at most one a thread of the engine** (`heavyTurns`): 4 GiB
+gives the four that were fastest on the published machine. A heavy statement uses every thread, so a fifth at once on
+4 CPUs only splits them. The threads are the engine's own `threads` setting, which reads a container's CPU limit. Not a
+budget of estimated bytes: the engine's group-by estimate (above) would have run the 100 M join alone, and one at a time
+was slower (50.8 s) than four. `MASON_HEAVY_QUERIES` sets it.
+
+**Where it waits: the listener's thread, in `RemoteRunner.admit`.** The executor holds one `Admission` for the instance
+whose memory it guards. The statement's signal is there, so its cancel and its statement_timeout end the wait as they
+end a run (57014, the timeout's words). The listener's dispatch would have had the signal too, but not the engine, and
+the worker has the engine but hears a cancel only once its loop turns. A waiting statement holds nothing on the worker
+and no libuv thread, so "The pool" still serves the light ones. The listener asks for the turn before `run` (and an
+EXPLAIN ANALYZE's `explain`), and holds it until the answer's first rows (`heldUntilFirstRows`), its wait on its row (`waited_ms`).
+PR 1136's review found the first version held the turn until the answer ended. A client that stopped reading kept it: a
+named portal suspended by an Execute's row limit and left idle past its COMMIT, or an unnamed one suspended before a Sync
+(Execute and Flush, as a streaming cursor reads). Another session's heavy statement then waited without end, or until its
+statement_timeout. So the turn is now released at the first rows. What a heavy statement keeps is built before them: a
+join's build side, a group by's groups, a sort's rows each end a pipeline the rows come out of only once it is done. What
+is left is a scan and a probe at the client's pace. A portal left suspended still holds its memory (its hash table), as it
+does in Postgres, but no turn.
 
 ### Local gates (2026-10-30)
 

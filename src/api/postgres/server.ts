@@ -59,6 +59,7 @@
  */
 import type { ExactColumn } from "../../duck/rewrite.ts";
 import type { PlannedSql } from "../../duck/plan.ts";
+import { heldUntilFirstRows, LIGHT, type Admitted, type Turn } from "../../duck/admission.ts";
 import { copyFacts, type CopyFacts } from "../../duck/explain.ts";
 import { utf8Fatal } from "../../duck/text.ts";
 import { scaledKey } from "../../duck/scale-column.ts";
@@ -189,6 +190,10 @@ export interface DuckRunner {
     how: ExplainHow): Promise<string[]>;
   /** closes the connection once its answers are released: never under the executor (src/duck/store.ts) */
   close(): Promise<void>;
+  /** THE STATEMENT'S TURN, asked before `run` (and an EXPLAIN ANALYZE's `explain`): a heavy statement waits for one of
+   *  the engine's few turns, a light one takes none (src/duck/admission.ts). Never throws for the statement: a cancel or
+   *  a timeout while it waited is its `failure`. Absent: no statement waits */
+  admit?(sql: PlannedSql, params: readonly (string | null)[], session: DuckSession, signal: AbortSignal): Promise<Admitted>;
 }
 /** what an EXPLAIN is run with beside its plan: its options, the plan's columns and exact numerics, its planning times,
  *  and the sync's facts of every copy (`DuckOptions.copies`), which say how each copy it reads is kept current */
@@ -767,11 +772,15 @@ interface DuckCursor { answer: DuckAnswer; formats: readonly number[]; controlle
  *  rows sent so far while it runs */
 interface Asked { sql: string; method: string; startedAt: number; sentAt: number; carried?: number; jsonReads?: readonly string[]; rows?: number;
   /** set once the statement reached the engine: what its plan is recorded from, should it prove slow (`Ran`) */
-  ran?: Ran }
+  ran?: Ran;
+  /** a heavy statement's wait for its turn, ms (src/duck/admission.ts), set however the wait ended: its row's
+   *  `waited_ms` where it never ran (cancelled or timed out while it waited) */
+  waitedMs?: number }
 
 /** A STATEMENT THE ENGINE RAN, as a slow one's plan is recorded from it (src/api/postgres/slow-plan.ts): the plan it ran
- *  (never planned again), the values it was bound with (its parameters' and the clock's) and the session it ran under */
-interface Ran { plan: DuckPlan; values: readonly (string | null)[]; session: DuckSession }
+ *  (never planned again), the values it was bound with (its parameters' and the clock's) and the session it ran under;
+ *  `waitedMs`, a heavy statement's wait for its turn (its row's `waited_ms`, however many Executes page its rows) */
+interface Ran { plan: DuckPlan; values: readonly (string | null)[]; session: DuckSession; waitedMs?: number }
 
 // ---------------------------------------------------------------------------------------------------------------------
 // one connection
@@ -1614,6 +1623,8 @@ class Session {
     const durationMs = Date.now() - startedAt;
     const plan = this.slowPlan(answer, asked?.ran, durationMs);
     const origin = answer instanceof PgError ? originOfAnswer(answer) : undefined;
+    // a heavy statement's wait for its turn: the run's, however many Executes paged it, else the wait that ended it
+    const waitedMs = asked?.ran?.waitedMs ?? asked?.waitedMs;
     this.server.options.record({
       requestId: crypto.randomUUID(), at: new Date(startedAt), method: asked?.method ?? "QUERY", durationMs,
       client: `postgres:${this.vars.applicationName || "unnamed"}`, session: this.id, payload: stored.text, payloadTruncated: stored.truncated,
@@ -1623,6 +1634,7 @@ class Session {
       ...(role !== undefined ? { role } : {}),
       ...(this.token?.attributes !== undefined && Object.keys(this.token.attributes).length > 0 ? { attributes: this.token.attributes } : {}),
       ...(asked?.jsonReads !== undefined && asked.jsonReads.length > 0 ? { jsonReads: asked.jsonReads } : {}),
+      ...(waitedMs !== undefined ? { waitedMs } : {}),
       ...(answer instanceof PgError
         ? { status: answer.status, sqlstate: answer.fields.code, error: answer.fields.message,
             ...(answer.fields.detail ? { detail: answer.fields.detail } : {}), ...(answer.fields.hint ? { hint: answer.fields.hint } : {}),
@@ -2102,10 +2114,16 @@ class Session {
     this.running = controller;
     try {
       const values = filtered.length > 0 ? [] : await this.duckValues(e.plan, params, clock, bound.own);
-      const lines = await runner.explain(e.plan.sql, values, await this.duckSession(), controller.signal,
-        { options: e.options, fields: e.plan.fields, exact: e.plan.exact ?? [], planning: e.plan.timing ?? { analysisMs: 0, rewriteMs: 0 },
-          // how each copy is kept current, as the sync says it to mason status, read now (src/duck/sync.ts KeptCurrent)
-          copies: copyFacts(this.server.options.duck.copies?.() ?? []), ...(filtered.length > 0 ? { rowFilters: filtered, reads: (e.plan.reads ?? []).map((r) => r.table) } : {}) });
+      const session = await this.duckSession();
+      // ANALYZE RUNS IT: a heavy one waits for its turn as its run would (src/duck/admission.ts), and holds it to the end
+      const turn = e.options.analyze ? await this.turnOf(runner, e.plan.sql, values, session, controller.signal) : LIGHT;
+      let lines: string[];
+      try {
+        lines = await runner.explain(e.plan.sql, values, session, controller.signal,
+          { options: e.options, fields: e.plan.fields, exact: e.plan.exact ?? [], planning: e.plan.timing ?? { analysisMs: 0, rewriteMs: 0 },
+            // how each copy is kept current, as the sync says it to mason status, read now (src/duck/sync.ts KeptCurrent)
+            copies: copyFacts(this.server.options.duck.copies?.() ?? []), ...(filtered.length > 0 ? { rowFilters: filtered, reads: (e.plan.reads ?? []).map((r) => r.table) } : {}) });
+      } finally { turn.release(); }
       return { field: explainField(e.options, formatAt(resultFormats, 0)), rows: lines.map((l) => dataRow([Buffer.from(l)])) };
     } finally { this.settled(); }
   }
@@ -2167,9 +2185,15 @@ class Session {
     try {
       const values = await this.duckValues(plan, params, clock, read);
       const session = await this.duckSession();
-      const a = await runner.run(plan.sql, values, session, controller.signal, plan.fields, plan.exact ?? []);
+      // A HEAVY STATEMENT WAITS FOR ITS TURN (src/duck/admission.ts), under this statement's signal: its cancel and its
+      // timeout end the wait as they end a run. The turn is held until its first rows, never while it waits on the client
+      const turn = await this.turnOf(runner, plan.sql, values, session, controller.signal);
+      let a: DuckAnswer;
+      try { a = await runner.run(plan.sql, values, session, controller.signal, plan.fields, plan.exact ?? []); }
+      catch (e) { turn.release(); throw e; }
+      if (turn.heavy) a = heldUntilFirstRows(a, turn.release);
       // it reached the engine: its plan can be recorded should it prove slow, answered or failed (recordRequest)
-      const ran: Ran = { plan, values, session };
+      const ran: Ran = { plan, values, session, ...(turn.heavy ? { waitedMs: turn.waitedMs } : {}) };
       if (this.asked !== null) this.asked.ran = ran;
       // a SELECT's analysis always has its RowDescription; without one, DuckDB's own columns are said as they are
       const fields = plan.fields !== null
@@ -2177,6 +2201,16 @@ class Session {
         : a.columns.map((c, i) => ({ name: c.name, typeOid: c.oid, typeSize: c.size, typeModifier: -1, format: formatAt(resultFormats, i) }));
       return { fields, cursor: { answer: a, formats: resultFormats, controller, pending: [], sent: 0, done: false, startedAt: this.asked?.startedAt ?? Date.now(), ran } };
     } finally { this.settled(); }
+  }
+
+  /** THE STATEMENT'S TURN (DuckRunner.admit): a light one's at once; a heavy one's once it is given, its wait set on the
+   *  statement being asked (its row's `waited_ms`); a cancel or a timeout while it waited thrown as its failure */
+  private async turnOf(runner: DuckRunner, sql: PlannedSql, values: readonly (string | null)[], session: DuckSession, signal: AbortSignal): Promise<Turn> {
+    if (runner.admit === undefined) return LIGHT;
+    const t: Admitted = await runner.admit(sql, values, session, signal);
+    if (t.waitedMs !== undefined && ("failure" in t || t.heavy) && this.asked !== null) this.asked.waitedMs = t.waitedMs;
+    if ("failure" in t) throw t.failure;
+    return t;
   }
 
   /**

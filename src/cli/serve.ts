@@ -209,6 +209,9 @@ export const SERVE: CommandSpec = {
     MASON_SPILL_LIMIT       what statements may spill to disk, 40GB or 512MiB (default half of what is free, followed as
                             the disk fills; never past 90% of it); a statement past it fails alone with 53400
     MASON_STATEMENT_TIMEOUT   each statement's limit, as Postgres's statement_timeout (default 5min; 0 for none)
+    MASON_HEAVY_QUERIES     how many heavy queries run at once, 1 to 1024: a join, a group by or a sort that keeps many
+                            rows in memory; the rest wait their turn, and a light query never waits (default one for
+                            each GiB of MASON_DUCKDB_MEMORY, at most one for each CPU, at least one)
     MASON_HISTORY_DAYS      how many days Mason keeps its history: the request log, the sync's events, the usage
                             samples and the synced tables' sizes (default 7)
     MASON_STORE_JSON_PATHS  on (the default) stores the JSON paths statements keep reading as columns; off stores none

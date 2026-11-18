@@ -2022,7 +2022,8 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
     bytesSent, durationMs, query, queryTruncated, plan (a statement that took ${(SLOW_MS / 1000).toLocaleString("en-US")} s or more: the
     engine's plan of it, recorded once it ended — the tables and how fresh each was, the SQL sent to the engine, its
     operators with their estimated rows — or why none could be; else null), planTruncated (cut at 8 KiB), origin (an internal error, XX000:
-    where it failed in Mason, a file and a line such as src/duck/store.ts:897; else null) }], keptDays,
+    where it failed in Mason, a file and a line such as src/duck/store.ts:897; else null), waitedMs (a heavy query: how
+    long it waited for its turn, 0 when one was free; null for a light query, which never waits) }], keptDays,
     before (the position of the page before,
     or null: none older) }; with --events { events: [{ at, kind (full_sync_failed, poll_failed,
     catch_up_failed, stream_failed, source_unreachable, generated_failed, compact_failed, sync_failed (a sync asked by hand failed),
@@ -2074,6 +2075,8 @@ export function requestLine(r: LedgerRequest, st: Style): string {
 export function requestDetail(r: LedgerRequest, st: Style): string {
   const facts: Array<[string, string]> = [
     ["request", r.requestId], ["started", r.startedAt], ["ended", r.endedAt], ["took", statementMsText(r.durationMs)],
+    // a heavy query's wait for its turn, part of the time it took (src/duck/admission.ts)
+    ...(r.waitedMs !== null && r.waitedMs !== undefined ? [["waited", `${statementMsText(r.waitedMs)} for a heavy query's turn`] as [string, string]] : []),
     ["outcome", `${r.outcome}${r.sqlstate ? ` (SQLSTATE ${r.sqlstate})` : ""}`], ["method", r.method],
     ["session", r.session === null ? "-" : String(r.session)], ["client", r.applicationName || "(no application_name)"],
     ...(r.clientAddress !== null && r.clientAddress !== undefined ? [["address", r.clientAddress] as [string, string]] : []),
