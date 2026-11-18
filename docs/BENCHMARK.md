@@ -113,7 +113,12 @@ effect, the run refuses an earlier run that did not end, or that differs from th
 `--clients`, `--runs`, `--settle`, `--cpus`, `--memory`, `--postgres-image`, `--disk` or `--label`, or that lacks a size
 this run measures. Once its Postgres answers, it refuses one of another version or settings, and a size where a copied
 statement's answer is not the earlier run's. The fixture marks each copied cell, and the README and docs/MEASUREMENTS.md
-say which times came from which run. Give `--out` another file, and copy it over once the run is complete.
+say which times came from which run. Give `--out` another file, and copy it over once the run is complete. `--resume`
+refuses a file of the other engines, or with Postgres's cells from another run.
+
+An image built from a branch says its version is "dev". Give `--mason-commit <sha>`, the commit it was built from, and
+the page names Mason by it. Without it, the page names the image. The commit of the checkout the script runs from is
+recorded apart, and is never named as Mason's.
 
 ```bash
 node scripts/bench-replica.ts --cold --engines mason --label "m7g.xlarge, 4 vCPU, 16 GiB RAM" --disk "EBS gp3, 125 MB/s, 3000 IOPS" --memory 8GiB --out /tmp/bench-cold-mason.json

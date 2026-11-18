@@ -300,8 +300,13 @@ function renderCold(f: ColdFixture): { section: string; headline: string } {
   const statements = f.statements.filter((s) => f.cells.some((c) => c.statement === s.name));
   const grid = statements.flatMap((s) => sizes.flatMap((rows) => clients.map((c) => ({ s, rows, c, p: cellOf(rows, c, "postgres", s.name), m: cellOf(rows, c, "mason", s.name) }))));
   const runs = env.method.runs;
-  // a run of Mason alone: which statements' Postgres cells are an earlier run's (marked `copied`), from the fixture
+  // a run of Mason alone: which statements' Postgres cells are an earlier run's (marked `copied`), from the fixture.
+  // A statement is said to be copied only when every one of its Postgres cells is: one copied in part is refused
   const copiedFrom = f.cells.find((c) => c.copied !== undefined)?.copied?.from;
+  for (const st of statements) {
+    const pg = f.cells.filter((c) => c.engine === "postgres" && c.statement === st.name), copied = pg.filter((c) => c.copied !== undefined).length;
+    if (copied > 0 && copied < pg.length) throw new Error(`the fixture's ${st.name} Postgres cells are copied at some sizes and measured at others: run it again`);
+  }
   const nameOf = (st: { name: string }): string => st.name.replace(/_/g, " ");
   const copiedStatements = statements.filter((st) => f.cells.some((c) => c.statement === st.name && c.copied !== undefined));
   const measuredStatements = statements.filter((st) => !copiedStatements.includes(st));
@@ -336,7 +341,7 @@ function renderCold(f: ColdFixture): { section: string; headline: string } {
 
   const pgVersion = /^PostgreSQL [\d.]+/.exec(env.postgres.version)?.[0] ?? env.postgres.version;
   // an image built from a branch says "dev": then the commit the run recorded, else the image's ref
-  const masonVersion = /\d+\.\d+\.\d+\S*/.exec(env.mason.version)?.[0] ?? (env.commit !== undefined ? `at commit ${env.commit}` : `from the ${env.mason.image} image`);
+  const masonVersion = /\d+\.\d+\.\d+\S*/.exec(env.mason.version)?.[0] ?? (env.mason.commit !== undefined ? `at commit ${env.mason.commit}` : `from the ${env.mason.image} image`);
   const date = env.date.slice(0, 10);
   const headline = `${HEADLINE_START}
 ${lead}
@@ -374,7 +379,7 @@ ${note("docs/DESIGN.md")} It was measured on ${env.label}, against ${pgVersion} 
       (idle.length === 0 ? "" : ` While Mason was measured, the idle Postgres read at most ${numText(Math.max(...idle) / 1e6)} MB.`),
     `- **The limits**: Postgres and Mason each ran in a container with \`--cpus ${env.limits.cpus} --memory ${flag} --memory-swap ${flag}\`. That is ${env.limits.cpus} CPUs and ${memory} of memory, with no swap. A container's memory counts its page cache, so both had the same cache.`,
     `- **Postgres**: ${pgVersion}, the \`${env.postgres.image}\` image, with a read replica's settings for that memory: ${settings}.`,
-    `- **Mason**: ${/^\d/.test(masonVersion) ? `${masonVersion}, the` : "the"} \`${env.mason.image}\` image${env.commit !== undefined && !/^\d/.test(masonVersion) ? `, built at commit ${env.commit}` : ""}.${engineMemory} It synced both tables from that Postgres, over the containers' own network. Its tables were \`sync: off\`, so nothing polled the source while it was measured.`,
+    `- **Mason**: ${/^\d/.test(masonVersion) ? `${masonVersion}, the` : "the"} \`${env.mason.image}\` image${env.mason.commit !== undefined && !/^\d/.test(masonVersion) ? `, built at commit ${env.mason.commit}` : ""}.${engineMemory} It synced both tables from that Postgres, over the containers' own network. Its tables were \`sync: off\`, so nothing polled the source while it was measured.`,
     `- **The client**: \`pgbench\` ${pgbenchVersion} from the \`${env.client.image}\` image, in a container of its own on the host's network: \`${env.client.command}\`. Each client sent the query once, and the clients started together. A client's time is from pgbench's log of each transaction. It does not count the connection.`,
     `- **Cold**: before every run, the container measured was restarted. The run waited until it answered \`SELECT 1 FROM orders LIMIT 0\`, then ${env.method.settleSeconds} s more. Then it dropped the OS page cache.`,
     "- **One at a time**: Mason was stopped while Postgres was measured. Postgres stayed up while Mason was measured, because Mason reads its source's catalog when it starts. Postgres was restarted first, and was idle.",
@@ -953,6 +958,51 @@ test("--engines mason copies a Postgres cell only where Postgres's answer is the
     ["1000000 rows, 1 clients, lookup, postgres: 0 cells"]);
 });
 
+test("a fixture whose statement's Postgres cells are copied at some sizes and measured at others is named, and never rendered", async () => {
+  const { coldFixtureProblems } = await coldModule();
+  const { alone } = await masonAloneCold();
+  // a Mason-alone run stopped after 1 M and 10 M, resumed with both engines: 100 M's Postgres cells measured
+  const mixed: ColdFixture = { ...alone, cells: alone.cells.map(({ copied, ...c }) => c.rows === 1e8 || copied === undefined ? c : { ...c, copied }) };
+  assert.deepEqual(coldFixtureProblems(mixed), ["count_by_status: its Postgres cells are copied at some sizes or client counts and measured at others",
+    "revenue_by_month: its Postgres cells are copied at some sizes or client counts and measured at others"]);
+  assert.throws(() => renderReplicaHeadline(mixed), /the fixture's count_by_status Postgres cells are copied at some sizes and measured at others/);
+});
+
+test("--resume refuses a file of other engines, or with Postgres's cells from another run, before any side effect", async () => {
+  const { resumeEnginesProblem, postgresFromOf } = await coldModule();
+  const { earlier, alone } = await masonAloneCold();
+  const from = alone.environment.postgresFrom!;
+  assert.equal(resumeEnginesProblem(alone, from, "/tmp/x.json"), null, "the same Mason-alone run");
+  assert.equal(resumeEnginesProblem(earlier, null, "/tmp/x.json"), null, "the same run of both engines");
+  assert.equal(resumeEnginesProblem(alone, null, "/tmp/x.json"),
+    "--resume: /tmp/x.json is a run of Mason alone, with Postgres's cells from the run of 2026-11-17 (tests/fixtures/bench-replica.json), and this run is of both engines: leave out --resume, or give --out another file");
+  assert.match(resumeEnginesProblem(earlier, from, "/tmp/x.json") ?? "", /is a run of both engines, and this run is of Mason alone/);
+  assert.match(resumeEnginesProblem(alone, { ...from, date: "2026-11-10T00:00:00.000Z" }, "/tmp/x.json") ?? "", /from the run of 2026-11-17 .*, and this run is of Mason alone, with Postgres's cells from the run of 2026-11-10/);
+  assert.deepEqual(postgresFromOf(alone, "/tmp/alone.json"), from, "a Mason-alone run's own source, not the run itself");
+  assert.deepEqual(postgresFromOf(earlier, path.join(ROOT, "tests/fixtures/bench-replica.json")), { date: earlier.environment.date, measuredAt: null, file: "tests/fixtures/bench-replica.json" });
+  // through the run: a Mason-alone run stopped part way, resumed with both engines
+  await withTemp((dir) => {
+    const out = path.join(dir, "partial.json");
+    fs.writeFileSync(out, JSON.stringify({ ...alone, complete: false }));
+    const lock = path.join(dir, "resume.lock");
+    const r = coldRunWithFakes(dir, "resume", { FAKE_EXISTING: "" }, ["--resume", "--out", out], lock);
+    assert.match(r.out, /REFUSED --resume: \S+partial\.json is a run of Mason alone, with Postgres's cells from the run of 2026-11-17 \(tests\/fixtures\/bench-replica\.json\), and this run is of both engines/, r.out);
+    assert.deepEqual(r.docker, [], "not one docker call");
+    untouched(r, "a resume of another engines' run");
+    assert.ok(!fs.existsSync(lock), "no lock taken");
+  });
+});
+
+test("--mason-commit names the commit the Mason image was built from: 7 to 40 hex characters, recorded apart from the measuring script's", async () => {
+  const { parseColdArgs } = await coldModule();
+  assert.equal(parseColdArgs([], MACHINE).masonCommit, null);
+  assert.equal(parseColdArgs(["--mason-commit", "06326BE8"], MACHINE).masonCommit, "06326be8");
+  assert.equal(parseColdArgs(["--mason-commit", "06326be8f00d06326be8f00d06326be8f00d0632"], MACHINE).masonCommit, "06326be8f00d06326be8f00d06326be8f00d0632");
+  for (const bad of ["06326", "main", "06326be8f00d06326be8f00d06326be8f00d06321", "06326be8 "+"x"]) {
+    assert.throws(() => parseColdArgs(["--mason-commit", bad], MACHINE), /--mason-commit .*: the commit the image was built from, 7 to 40 hex characters/);
+  }
+});
+
 test("a Mason-alone run renders where its Postgres times came from, in the lead and in how it was measured; Mason built from a branch is named by its commit or image", async () => {
   const f = await syntheticCold();
   const { alone } = await masonAloneCold();
@@ -971,7 +1021,11 @@ test("a Mason-alone run renders where its Postgres times came from, in the lead 
   const dev = { ...f, environment: { ...f.environment, mason: { ...f.environment.mason, image: "mason-data:branch", version: "dev" } } };
   assert.match(renderReplicaHeadline(dev), /against PostgreSQL 18\.1 and Mason from the mason-data:branch image, on 2026-11-17\./);
   assert.match(renderReplicaSection(dev), /- \*\*Mason\*\*: the `mason-data:branch` image\. Its engine/);
-  const atCommit = { ...dev, environment: { ...dev.environment, commit: "0123456789ab" } };
+  // the measuring script's checkout is never named as Mason's
+  const scriptOnly = { ...dev, environment: { ...dev.environment, commit: "fedcba987654" } };
+  assert.doesNotMatch(renderReplicaHeadline(scriptOnly) + renderReplicaSection(scriptOnly), /fedcba987654/);
+  assert.match(renderReplicaHeadline(scriptOnly), /and Mason from the mason-data:branch image, on 2026-11-17\./);
+  const atCommit = { ...scriptOnly, environment: { ...scriptOnly.environment, mason: { ...scriptOnly.environment.mason, commit: "0123456789ab" } } };
   assert.match(renderReplicaHeadline(atCommit), /and Mason at commit 0123456789ab, on 2026-11-17\./);
   assert.match(renderReplicaSection(atCommit), /- \*\*Mason\*\*: the `mason-data:branch` image, built at commit 0123456789ab\. Its engine/);
   assert.doesNotMatch(renderReplicaHeadline(atCommit) + renderReplicaSection(atCommit), /Mason dev\b/);
