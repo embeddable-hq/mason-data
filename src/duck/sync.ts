@@ -5455,7 +5455,7 @@ export class Sync {
           const c0 = slot.since;
           let inTx = false;
           // THE CHUNK COMMITTED: its range and rows are the copy's and its rate is measured. Once a chunk: after its COMMIT
-          // answered, or after a failure its ledger row says it survived (`committedRows`)
+          // answered, or after a failure its ledger row says it survived (`committedRow`)
           let accounted = false;
           const committed = async (rows: number): Promise<void> => {
             const seconds = (Date.now() - c0) / 1000;
@@ -5536,13 +5536,17 @@ export class Sync {
             // at its retry (fail closed)
             let landed: boolean | null = accounted;
             if (!landed && !recopy && rolledBack && failure === null) {
-              let rows: number | null = null;
-              try { rows = await this.committedRows(c, t, range); }
+              let row: { end: number | null; rows: number } | null = null;
+              try { row = await this.committedRow(c, t, range); }
               catch (l) {
                 this.log(`whether a chunk of ${t.source}'s sync committed could not be read after it failed: ${this.errorText(l)}`);
                 landed = null;
               }
-              if (rows !== null) { landed = true; await committed(rows); }
+              if (row !== null && row.end !== end) {
+                fail(new Error(`the sync of ${t.source} read pages ${first} to ${end ?? "the end"}, but its ledger holds a chunk of pages ${first} to ${row.end ?? "the end"} (Mason bug: report it, with mason logs)`));
+                return;
+              }
+              if (row !== null) { landed = true; await committed(row.rows); }
             }
             if (landed === null) { fail(e); return; }
             if (outOfMemory && failure === null && rolledBack && landed) {
@@ -5802,15 +5806,11 @@ export class Sync {
     await c.run(`INSERT INTO ${MASON_SCHEMA}.copy_chunks VALUES (${literal(t.source)}, ${r.first}, ${r.end === null ? "NULL" : r.end}, ${rows}, ${filenode}, now())`);
   }
 
-  /** THE ROWS OF A CHUNK THAT COMMITTED, from its ledger row, read on its reader's connection once its transaction ended;
-   *  null when no chunk committed at its first page (issue 1152: whether a chunk that failed committed is the ledger's to
-   *  say). A row there for another range is a Mason bug, thrown. */
-  private async committedRows(c: DuckConnection, t: AddedTable, r: PageRange): Promise<number | null> {
+  /** THE LEDGER ROW OF A CHUNK THAT COMMITTED at `r`'s first page (its end and rows), read on its reader's connection once
+   *  its transaction ended; null when none did (issue 1152: whether a chunk that failed committed is the ledger's to say) */
+  private async committedRow(c: DuckConnection, t: AddedTable, r: PageRange): Promise<{ end: number | null; rows: number } | null> {
     const row = (await c.runAndReadAll(`SELECT end_page, "rows" FROM ${MASON_SCHEMA}.copy_chunks WHERE source = ${literal(t.source)} AND first_page = ${r.first}`)).getRowsJS()[0] as [bigint | null, bigint] | undefined;
-    if (row === undefined) return null;
-    const end = row[0] === null ? null : Number(row[0]);
-    if (end !== r.end) throw new Error(`the sync of ${t.source} read pages ${r.first} to ${r.end ?? "the end"}, but its ledger holds a chunk of pages ${r.first} to ${end ?? "the end"} (Mason bug: report it, with mason logs)`);
-    return Number(row[1]);
+    return row === undefined ? null : { end: row[0] === null ? null : Number(row[0]), rows: Number(row[1]) };
   }
 
   /**

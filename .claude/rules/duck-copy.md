@@ -63,7 +63,7 @@ paths:
   checkpoint never merges the small row groups a copy of large values leaves (`max_vacuum_tasks` 0, read back at every
   open, `instanceSettingsProblem`): such a merge that did not fit invalidated the whole database (issue 371; docs/DESIGN.md
   "No checkpoint merges row groups"). `duck-poll.itest.ts` holds both shapes and the two out-of-memory paths (docs/DESIGN.md "Large values out of line").
-- **Whether a chunk that failed committed is its ledger row's to say, never the error's** (issue 1152; `committedRows`):
+- **Whether a chunk that failed committed is its ledger row's to say, never the error's** (issue 1152; `committedRow`):
   a COMMIT can answer out of memory after its chunk committed, and its ROLLBACK then says "no transaction is active".
   Read as rolled back, its range was given back and read again into `copy_chunks`' key, and the first sync failed with
   `Duplicate key … first_page`. So after any failure a chunk's row is read on its connection: there, the chunk is the
