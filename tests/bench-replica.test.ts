@@ -329,12 +329,20 @@ function renderCold(f: ColdFixture): { section: string; headline: string } {
     ...(f.data.keys === "uuid" ? ["The primary keys are random UUIDs."] : []),
     ...(statusIndexed ? [] : ["The status column has no index, so the count reads every row on both."]),
   ].join(" ");
+  // a run that waited for Mason's work after the first sync says so where the times are: a lookup is slower before it
+  const waited = bySize.every((z) => z.backgroundSeconds !== undefined);
+  const largest = bySize[bySize.length - 1];
+  const waitedText = !waited || largest === undefined ? "" :
+    "Mason was timed only after it finished its own work on the synced data. " +
+    "That work builds a side table to find an order by its id, and numbers the keys that join orders to customers. " +
+    `At ${countText(largest.rows)} rows, it took ${numText(largest.backgroundSeconds!)} s after the first sync.`;
   const lead = `Mason and Postgres answered the same ${statements.length} queries over the same rows. ` +
     (dataSentences === "" ? "" : `${dataSentences} `) +
     "Each query was sent the first time, after a restart with the page cache dropped. " +
     `${who.charAt(0).toUpperCase()}${who.slice(1)}. ` +
     `Each time is how long until every client had its answer, ${runs === 1 ? "from one run" : `the median of ${runs} runs`}. ` +
     `Mason and Postgres each ran in a container with the same ${env.limits.cpus} CPUs and ${gibShort(env.limits.memoryBytes)} of memory.` +
+    (waitedText === "" ? "" : ` ${waitedText}`) +
     // a run of Mason alone: Postgres's cells are an earlier run's, and the reader is told so where the times are
     (twoRuns === "" ? "" : ` ${twoRuns}`);
 
@@ -369,7 +377,6 @@ ${note("docs/DESIGN.md")} It was measured on ${env.label}, against ${pgVersion} 
       perRun(m.runs, "slowestMs"), perRun(m.runs, "meanMs"), reads(m.runs)]));
   const idle = f.cells.filter((c) => c.engine === "mason").flatMap((c) => c.runs.map((r) => r.idleReadBytes ?? NaN)).filter(Number.isFinite);
   // how long Mason's own work after the first sync took, where the run waited for it (a run before it did not)
-  const waited = bySize.every((z) => z.backgroundSeconds !== undefined);
   const dataTable = table(["orders", "customers", "in Postgres", "Mason's volume", "synced in (s)", ...(waited ? ["then ready in (s)"] : [])], ["---:", "---:", "---:", "---:", "---:", ...(waited ? ["---:"] : [])],
     bySize.map((z) => [rowsText(z.rows), rowsText(z.customers), gib(z.postgresBytes), gib(z.masonBytes), numText(z.syncSeconds), ...(waited ? [numText(z.backgroundSeconds!)] : [])]));
   const zoned = statements.filter((st) => st.timeZone !== undefined);
@@ -437,8 +444,8 @@ ${runsTable}
 The rows are synthetic: an \`orders\` table with a jsonb payload, and \`customers\`, one for every 20 orders, made by
 \`generate_series\`. ${dataSentences} Postgres has these indexes: ${listText([...f.data.indexes])}. *Synced in* is the
 time from Mason's first start until both tables were synced and served.${waited ? `
-*Then ready in* is the time after that until Mason finished its own work on the synced data. It builds a side table to
-find an order by its id, and numbers the keys that join orders to customers. Nothing was timed before it finished.` : ""}
+*Then ready in* is the time after that until Mason finished its own work on the synced data. Mason's volume was
+measured once that work was done.` : ""}
 
 ${dataTable}
 
@@ -912,7 +919,13 @@ test("the cold renderer: one table of every query × size × clients, the data a
   // a run that waited: how long, beside the sync's seconds, and what it waited for
   const waited = renderReplicaSection({ ...f, sizes: f.sizes.map((z) => ({ ...z, backgroundSeconds: z.rows / 1e6 * 0.5 })) });
   assert.match(waited, /\| orders \| customers \| in Postgres \| Mason's volume \| synced in \(s\) \| then ready in \(s\) \|\n[^\n]*\n\| 1,000,000 \| 50,000 \| 0\.35 GiB \| 0\.10 GiB \| 3\.00 \| 0\.50 \|\n[^]*\| 100,000,000 \| 5,000,000 \| 35\.0 GiB \| 9\.6 GiB \| 300 \| 50\.0 \|\n/);
-  assert.match(waited, /\*Then ready in\* is the time after that until Mason finished its own work on the synced data\. It builds a side table to\nfind an order by its id, and numbers the keys that join orders to customers\. Nothing was timed before it finished\.\n/);
+  assert.match(waited, /\*Then ready in\* is the time after that until Mason finished its own work on the synced data\. Mason's volume was\nmeasured once that work was done\.\n/);
+  // and the lead says it was waited for, and how long at the largest size, in the README and in the section alike
+  const waitedLead = "the same 4 CPUs and 8 GiB of memory. Mason was timed only after it finished its own work on the synced data. " +
+    "That work builds a side table to find an order by its id, and numbers the keys that join orders to customers. At 100 M rows, it took 50.0 s after the first sync.\n";
+  assert.ok(waited.includes(waitedLead), waited.split("\n").find((l) => l.startsWith("Mason and Postgres answered")));
+  assert.ok(renderReplicaHeadline({ ...f, sizes: f.sizes.map((z) => ({ ...z, backgroundSeconds: z.rows / 1e6 * 0.5 })) }).includes(waitedLead));
+  assert.doesNotMatch(headline + section, /Mason was timed only after/, "a run that did not wait says nothing of it");
   assert.match(section, /<details><summary>How it was measured<\/summary>\n\n- \*\*The machine\*\*: a test box, a CPU\. Linux 6\.8 \(arm64\)\.\n[^]*- \*\*The disk\*\*: EBS gp3, 125 MB\/s, 3000 IOPS\. A run's read is what the measured engine's container read from disk while pgbench ran, from its cgroup's `io\.stat`\. While Mason was measured, the idle Postgres read at most 2\.00 MB\.[^]*`--cpus 4 --memory 8g --memory-swap 8g`[^]*Its engine could use at most 4 GiB of the container's memory, half of it\.[^]*`pgbench` 18\.1 from[^]*picked at random from the data, as a quoted literal\. At 1 M rows, ids 00000000-0000-4000-8000-000000000001, [^]*\n\n<\/details>\n$/);
   for (const text of [headline, section]) {
     assert.doesNotMatch(text, /\bcop(y|ies|ied|ying)\b/i, "Mason syncs a table: never \"copy\" where a user reads it");
