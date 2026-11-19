@@ -1368,6 +1368,14 @@ export class Sync {
   private schemaKey = "";
   /** the tables the catalog could not read, and why (`catalogTypes`): each said once a reason */
   private readonly unread = new Map<string, string>();
+  /**
+   * A FIRST SYNC THE CATALOG HAS NOT READ YET (issue 920): marked just before its swap records it copied, when the
+   * catalog does not hold the table, and cleared by the first rebuild of the catalog that reads that record
+   * (`schemaBuilt`). Meanwhile `state()` says it is still syncing, so `/healthz`, `mason wait` and `mason status` never
+   * say a table is synced while a query of it meets 42P01. The record comes first and the rebuild after it, so without
+   * this a client that connected as soon as Mason said ready met the error.
+   */
+  private readonly joining = new Set<string>();
   /** REPLICATION, WHERE THE STREAM IS (`streamStatus`, the stream's log): the changes it applied this run by table, and
    *  since its last periodic line (`reportStream`, every `streamReportMs` when something moved) */
   private readonly appliedCounts = new Map<string, ChangeCounts>();
@@ -2417,6 +2425,9 @@ export class Sync {
     // in the project's order, whatever order the copies ran and were recorded in (`copyOrder`)
     return [...this.tables.keys()].flatMap((source) => this.states.get(source) ?? [])
       .map((s) => { const r = this.retired.get(s.source); return r !== undefined ? { ...s, retired: r.layout } : s; })
+      // A FIRST SYNC IS DONE ONCE A QUERY CAN READ IT (`joining`, issue 920): recorded copied, and still syncing here until
+      // the catalog has read that record, with every row it read
+      .map((s): CopyState => s.phase === "copied" && this.joining.has(s.source) ? { ...s, phase: "copying", rowsSoFar: s.rows } : s)
       // a copy's chunks as they are NOW: the rows the ones in flight have read by now at the measured rate
       .map((s) => { const l = this.copyLive.get(s.source); return s.phase === "copying" && l !== undefined ? { ...s, progress: copyProgressNow(l, Date.now()) } : s; })
       // its last poll as it is NOW: the rows its reads have passed so far, counted as they arrive (issue 1173)
@@ -4527,6 +4538,7 @@ export class Sync {
     this.copiedAs.delete(source);
     this.copiedColumns.delete(source);
     this.states.delete(source);
+    this.joining.delete(source);
     this.synced.delete(source);
     this.compactions.delete(source);
     this.compactRetries.delete(source);
@@ -5573,6 +5585,9 @@ export class Sync {
         swapped = true;
         seconds = (Date.now() - started) / 1000;
         copiedAt = new Date().toISOString();
+        // not served until the catalog reads this record (`joining`): marked before it, as `record` sets the phase
+        // before it awaits its write
+        if (!this.currentSchema.tables.some((x) => x.schema === t.schema && x.name === t.table)) this.joining.add(t.source);
         await this.record({ source: t.source, phase: "copied", rows, bytes: t.bytes, seconds, copiedAt, error: null }, t.columns, this.store.writer);
         this.copiedAs.set(t.source, columnsKey(t.columns));
         this.wholeErrors.delete(t.source);
@@ -6487,6 +6502,9 @@ export class Sync {
     const c = this.catalog ?? this.store.writer;
     const r = await c.runAndReadAll(`SELECT source, columns FROM ${MASON_SCHEMA}.copy_state WHERE phase = 'copied'`);
     const copied = new Map((r.getRowsJS() as [string, string | null][]).map(([s, c]) => [s, c === null ? [] : JSON.parse(c) as SourceColumnInfo[]]));
+    // the first syncs this rebuild decides (`joining`): their record is read here, so they are served once it ends, or
+    // left out and said (`catalogTypes`)
+    const decided = [...this.joining].filter((s) => copied.has(s));
     const tables: PgTable[] = [];
     for (const t of this.tables.values()) {
       const cols = copied.get(t.source);
@@ -6545,6 +6563,7 @@ export class Sync {
       this.schemaKey = key;
       this.currentSchema = { database: this.currentSchema.database, tables, ...(views.length > 0 ? { views } : {}), ...(collations.length > 0 ? { collations } : {}), ...(references.length > 0 ? { references } : {}) };
     }
+    for (const s of decided) this.joining.delete(s);
   }
 }
 

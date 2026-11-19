@@ -308,7 +308,8 @@ export async function duckParameters(catalog: (bytes: Uint8Array) => Promise<Uin
  * THE WAY OUT OF `relation "x" does not exist`, from the sync's copy state (`Sync.state`, the one reader: a
  * table added and still copying was told "mason add x copies it", which it already was). A table the catalog does not
  * hold is one of: added and waiting its turn, added and copying (how far), added and failed (why, and when it is tried
- * again), copied a moment ago (the catalog is rebuilt as each copy commits), or not added — the one `mason add` away.
+ * again), copied and left out of the catalog (its synced data could not be read, said in the log; a first sync the
+ * catalog has not read yet is still copying in `Sync.state`, issue 920), or not added — the one `mason add` away.
  * `relation` is the name as Postgres wrote it: qualified, or bare, which matches an added table of that name (public's first).
  */
 export function missingRelationHint(relation: string, copies: readonly CopyState[]): string {
