@@ -1,32 +1,33 @@
 {
-  "statements": 7675,
+  "statements": 8270,
   "mason": {
-    "exact": 7159,
+    "exact": 7736,
     "decided": 46,
-    "refused": 470,
+    "refused": 488,
     "differs": 0
   },
   "duckdb": {
-    "exact": 1951,
-    "name": 1420,
-    "refused": 1766,
-    "value": 1155,
+    "exact": 1952,
+    "name": 1558,
+    "refused": 1929,
+    "value": 1212,
     "rows": 636,
-    "text": 84,
-    "other": 663
+    "text": 86,
+    "other": 897
   },
   "gaps": {
     "copyPhase": {
       "refused": {
         "array-remove-type": { "planted": 1, "natural": 0 },
         "array-subquery-element": { "planted": 0, "natural": 9 },
+        "bc-timestamptz-zone": { "planted": 0, "natural": 10 },
         "bytea-forms": { "planted": 1, "natural": 0 },
         "citext-forms": { "planted": 0, "natural": 11 },
         "collation-unknown": { "planted": 1, "natural": 5 },
         "div-numeric": { "planted": 1, "natural": 0 },
         "enum-forms": { "planted": 1, "natural": 0 },
         "explain-option": { "planted": 1, "natural": 0 },
-        "extract-julian": { "planted": 1, "natural": 0 },
+        "extract-julian": { "planted": 1, "natural": 8 },
         "format-specifiers": { "planted": 1, "natural": 0 },
         "held-type-compare": { "planted": 1, "natural": 297 },
         "hypothetical-set": { "planted": 1, "natural": 0 },
@@ -94,18 +95,19 @@
       }
     },
     "everyAsk": {
-      "asked": 107730,
+      "asked": 113277,
       "refused": {
         "array-lower-bound": { "planted": 0, "natural": 2 },
         "array-remove-type": { "planted": 3, "natural": 0 },
         "array-subquery-element": { "planted": 0, "natural": 27 },
+        "bc-timestamptz-zone": { "planted": 0, "natural": 30 },
         "bytea-forms": { "planted": 3, "natural": 0 },
         "citext-forms": { "planted": 0, "natural": 95 },
         "collation-unknown": { "planted": 3, "natural": 15 },
         "div-numeric": { "planted": 3, "natural": 0 },
         "enum-forms": { "planted": 3, "natural": 0 },
         "explain-option": { "planted": 3, "natural": 0 },
-        "extract-julian": { "planted": 3, "natural": 0 },
+        "extract-julian": { "planted": 3, "natural": 24 },
         "format-specifiers": { "planted": 3, "natural": 0 },
         "held-type-compare": { "planted": 3, "natural": 1017 },
         "hypothetical-set": { "planted": 3, "natural": 0 },
