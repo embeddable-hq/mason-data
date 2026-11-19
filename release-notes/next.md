@@ -46,6 +46,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **Mason could say a new table was synced a moment before a query could read it.** After a table was added to a
+  running Mason, `/healthz`, `mason wait` and `mason status` could count it as synced while a query of it still failed
+  with `relation does not exist`. A client or a platform that queried as soon as Mason said the table was ready could
+  meet that error. Now a table counts as synced only once a query can read it.
 - **A sync asked by hand showed a full bar at 100% for as long as it ran.** After Sync now or `mason sync`, the Tables
   page said Syncing beside the table's bar from its last sync, full, with nothing moving, for the minutes a big table
   takes. Now the page and `mason status` say how far that sync is: the changed rows read so far, counted as they
