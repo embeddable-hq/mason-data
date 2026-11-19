@@ -258,8 +258,8 @@ export interface ServeSettings {
   /** the port of the page and the commands; `named`: MASON_UI_PORT said it, so it is that port or a refusal; `socket`:
    *  the Unix socket MASON_UI_SOCKET names, absolute, the page served there too (src/cli/ui-socket.ts), or null;
    *  `runFile`: the file MASON_UI_RUN_FILE names, absolute, the port and the token written there (src/cli/ui-run-file.ts), or null;
-   *  `titleFile`: the file MASON_UI_TITLE_FILE names, absolute, the header's label read from it (src/cli/ui-title.ts), or null */
-  ui: { port: number; named: boolean; socket: string | null; runFile: string | null; titleFile: string | null };
+   *  `titleFile`: the file MASON_UI_TITLE_FILE names, absolute, the header's label read from it (src/cli/ui-title.ts); absent when unset, so the settings are as before */
+  ui: { port: number; named: boolean; socket: string | null; runFile: string | null; titleFile?: string };
   /** the MCP endpoint (src/cli/mcp-oauth.ts), or null when none of its settings is set */
   mcp: McpSettings | null;
 }
@@ -364,7 +364,7 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
     project, data,
     health: { host: env.MASON_HEALTH_HOST || "0.0.0.0", port },
     ui: { port: uiPort, named: !!env.MASON_UI_PORT, socket: typeof socket === "string" ? socket : null, runFile: typeof runFile === "string" ? runFile : null,
-      titleFile: typeof titleFile === "string" ? titleFile : null },
+      ...(typeof titleFile === "string" ? { titleFile } : {}) },
     mcp: mcp !== null && !("problems" in mcp) ? mcp : null,
   };
 }
@@ -731,7 +731,7 @@ export async function serve(argv: string[]): Promise<number> {
         stopping: () => { state = { phase: "stopping" }; page?.close(); runFile?.remove(); void mcp?.close(); },
         failed: () => { state = { phase: "failed" }; engineStopped = true; page?.close(); runFile?.remove(); void mcp?.close(); },
         ...(s.mcp !== null ? { mcp: { url: s.mcp.url.href, issuer: s.mcp.issuer } } : {}),
-        ...(s.ui.titleFile !== null ? { titleFile: s.ui.titleFile } : {}),
+        ...(s.ui.titleFile !== undefined ? { titleFile: s.ui.titleFile } : {}),
         ...(page !== null ? { page: page.attach, socket: page.file } : {}) } });
   } finally {
     // removed whatever ended the run: a stop, a crash of the engine's thread, or a start that failed

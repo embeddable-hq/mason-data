@@ -165,7 +165,7 @@ test("the setting: a path, relative to the folder mason serve runs in; never rea
   assert.ok(!("message" in s), "a file that does not exist yet does not refuse the start");
   if (!("message" in s)) assert.equal(s.ui.titleFile, "/nowhere/label.txt");
   const unset = serveSettings(ENV, "/srv");
-  if (!("message" in unset)) assert.equal(unset.ui.titleFile, null);
+  if (!("message" in unset)) assert.ok(!("titleFile" in unset.ui), "unset: the settings are as before");
   assert.equal(startSettingRefusal(project(), { MASON_UI_TITLE_FILE: "/nowhere/label.txt" }, { serve: true }), null);
   for (const [wrong, hint] of [["MASON_UI_TITLE", " — did you mean `MASON_UI_TITLE_FILE`?"], ["MASON_UI_TITLE_PATH", ""]] as const) {
     const problem = `${wrong} is not a setting${hint}: the web page's label is read from a file, named by MASON_UI_TITLE_FILE`;
