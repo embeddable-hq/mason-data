@@ -2335,6 +2335,20 @@ function* unitSpellings(): Generator<Matrixed> {
   yield q("unit spellings: grouped by date_part('secs')", "SELECT date_part('secs', ts) AS s, count(*) FROM typed GROUP BY 1 ORDER BY 1 NULLS FIRST");
   yield q("unit spellings: filtered by date_part('ms')", "SELECT id FROM typed WHERE date_part('ms', ts) > 500 ORDER BY id");
   yield q("unit spellings: grouped by date_trunc('hrs') in Asia/Kathmandu", "SELECT date_trunc('hrs', tz) AS h, count(*) FROM typed GROUP BY 1 ORDER BY 1 NULLS FIRST", "Asia/Kathmandu");
+  // PR 1106's, carried over. A TIMETZ'S UNITS under every spelling, over `mapped`'s (offsets with seconds, 24:00): its
+  // epoch is its time of day less its offset east, in any session zone (it was the time of day alone)
+  for (const [unit, { all }] of spellings()) {
+    yield q(`unit spellings: date_part and extract of a timetz's ${unit}`, `SELECT id, ${list(all, (s) => `date_part('${s}', tz)`)}, ${list(all, (s) => `extract('${s}' FROM tz)`)} FROM mapped ORDER BY id`);
+  }
+  for (const zone of ["UTC", "America/New_York", "Asia/Kolkata"]) {
+    yield q(`unit spellings: a timetz's epoch in ${zone}`, "SELECT id, extract(epoch FROM tz), date_part('epoch', tz), extract(epoch FROM tz3), date_part('epoch', tz3), sum(extract(epoch FROM tz)) OVER () FROM mapped ORDER BY id", zone === "UTC" ? undefined : zone);
+  }
+  // A TIMESTAMP'S JULIAN DAY: Postgres's numeric quotient at its row's scale (28, 24 or 20 decimals), in every reader
+  // that writes its text, summed and averaged; and a quotient's text in concat, format and json (it was its double's)
+  yield q("unit spellings: a timestamp's Julian day's text in every reader", "SELECT id, extract('jd' from ts)::text, length(extract('julian' from ts)::text), concat(extract('j' from tz)), " +
+    `format('%s', extract('julian' from ts)), to_json(extract('jd' from tz)), json_build_object('j', extract('julian' from ts)), extract('julian' from ts) || '' FROM typed WHERE ${ORDINARY} ORDER BY id`);
+  yield q("unit spellings: a timestamp's Julian day summed", `SELECT avg(extract('jd' from ts)), sum(extract('julian' from tz)), min(extract('j' from ts)), max(extract('julian' from tz)) FROM typed WHERE ${ORDINARY}`);
+  yield q("unit spellings: a quotient's text in concat, format and json", `SELECT id, concat(n / 7), format('%s', n2 / 3), to_json(n / 7), json_build_object('q', n2 / 3), (n / 7) || '', concat(avg(n2) OVER ()) FROM typed WHERE ${ORDINARY} ORDER BY id`);
 }
 
 export const TYPE_MATRIX: Matrixed[] = [...matrix(), ...mappedTypes(), ...binCases(), ...wholeCases(), ...unitSpellings(), ...FROM_ITEMS_SORTED.map((f) => q(f.name, f.sql, f.zone)),

@@ -3411,6 +3411,9 @@ class Rewriter {
         const args = (b.args ?? []) as AstNode[];
         const plain = b.over === undefined && b.agg_within_group !== true;
         if (type !== NUMERIC) return asCell();
+        // extract(julian …) of a timestamp: Postgres's text of it, made natively (`julianText`); the engine holds a double
+        const julian = this.julianText(n);
+        if (julian !== null) return numeric(cell(julian, "text"));
         // percentile_disc or mode() picked by an exact order key: the picked row's exact text (`pickedByExactKey`)
         if (this.picksByExactKey(b)) {
           const text = this.pickedByExactKey(name, bodyOf(this.clone(n)), (key) => this.exactText(key));
@@ -3902,7 +3905,8 @@ class Rewriter {
       case "FuncCall": {
         const name = lastName(b.funcname);
         // a count (an avg's, made from the avg's node, carries the avg's type), and what the walk writes as a DECIMAL
-        if (WRITTEN_EXACT.has(name)) return true;
+        // (but a timestamp's Julian day, which the engine holds as a double: its program is its text, `julianText`)
+        if (WRITTEN_EXACT.has(name)) return this.timestampJulian(n) === null;
         // the engine's sign is a TINYINT (-1, 0, 1), whatever its argument: Postgres's numeric_sign is the same value
         // (issue 242: `sign(x)::int` stays the engine's, and `exp(…) * sign(x)` has a program)
         if (name === "sign" && b.over === undefined && args.length === 1) return true;
@@ -4523,6 +4527,9 @@ class Rewriter {
         levelsUp: null, datum: null, qualifier: null, renamed: null });
       return this.cutText(n, picked);
     }
+    // a timestamp's Julian day: its text made natively (`julianText`), as every reader that writes it reads it
+    const julian = this.julianText(n);
+    if (julian !== null) return julian;
     // arithmetic, a CASE or a coalesce over one: the scale Postgres's rules give the row (`rowScale`), never inside a
     // grouped SELECT's list (its columns are read per group there)
     if (["A_Expr", "CaseExpr", "CoalesceExpr"].includes(kindOf(n)) && this.displayScale(n) === null && !this.perGroup.has(bodyOf(n)) && !this.readsGroupedRef(n)) {
@@ -4629,7 +4636,9 @@ class Rewriter {
           const field = constString(args[0]);
           const unit = field === null ? null : readUnit(field).unit;
           if (unit === null) return null;
-          return this.typeOf(args[1]!) === DATE ? 0 : Number(INTERVAL_SCALE[unit] ?? "0");
+          if (this.typeOf(args[1]!) === DATE) return 0;
+          // (a timestamp's Julian day: its row's, `julianText`)
+          return unit === "julian" ? null : Number(INTERVAL_SCALE[unit] ?? "0");
         }
         // (latest, Mason's, answers one row's value: its scale is its argument's)
         // (any_value and first, the rewrite's read of a column per group, are one row's value too)
@@ -6538,6 +6547,9 @@ class Rewriter {
     if (type === null) return null;
     // a plain numeric's text at its row's own scale (issue 946)
     if (type === NUMERIC) { const text = this.plainNumericText(n); if (text !== null) return text; }
+    // a numeric the engine holds as a double (a quotient, an average, a timestamp's Julian day): its program's exact
+    // text, as its cast's (`typeCast`), never the double's digits (PR 1106)
+    if (type === NUMERIC && !this.duckExact(n)) { const text = this.exactText(n); if (text !== null) return text; }
     // an array of them, gathered (array_agg) or written (ARRAY[…]): each element's text so, the array's text of those
     if (type === NUMERIC_ARRAY) { const texts = this.plainNumericTexts(n); if (texts !== null) return fn("__mason_array_text", [texts, boolConst(false)]); }
     // a char(n)'s output is padded; its cast to text drops the padding
@@ -6607,16 +6619,17 @@ class Rewriter {
     const micros = (expr: AstNode, scale: string): AstNode => op("*", cast(expr, ["decimal", "38", "0"]), numConst(scale));
     switch (field) {
       case "epoch":
-        return type === DATE ? wholeNumeric(fn("epoch", [x])) : micros(fn("epoch_us", [x]), "0.000001");
+        return type === DATE ? wholeNumeric(fn("epoch", [x])) : micros(this.epochMicros(x, type), "0.000001");
       case "second": return micros(fn("microsecond", [x]), "0.000001");
       case "milliseconds": return micros(fn("microsecond", [x]), "0.001");
       case "microseconds": return wholeNumeric(fn("microsecond", [x]));
       // a date's Julian day is a whole number, its day count from 4714-11-24 BC (extract_date: date +
-      // POSTGRES_EPOCH_JDATE), 2440588 on 1970-01-01. A timestamp's adds the fraction of its day, a numeric quotient
-      // Postgres writes to its division's scale, which is not matched here: refused by name
+      // POSTGRES_EPOCH_JDATE), 2440588 on 1970-01-01. A timestamp's adds the fraction of its day, a numeric quotient:
+      // the engine holds its own double, which nothing prints. `duckExact` calls it inexact, so every reader reads its
+      // program, its exact text (`julianText`), as a quotient's
       case "julian":
         if (type === DATE) return wholeNumeric(op("+", op("-", x, cast(strConst("1970-01-01"), ["date"])), intConst(2440588)));
-        throw new Unrewritable("extract(julian …) of a timestamp is not supported by Mason", "compute it from extract(epoch …) / 86400 + 2440587.5", "extract-julian");
+        return fn("date_part", [strConst("julian"), x]);
       default: return null;
     }
   }
@@ -6645,9 +6658,61 @@ class Rewriter {
     switch (field) {
       case "second": return op("/", cast(fn("microsecond", [x]), ["double"]), numConst("1000000.0"));
       case "milliseconds": return op("/", cast(fn("microsecond", [x]), ["double"]), numConst("1000.0"));
-      case "epoch": return this.typeOf(x) === DATE ? cast(fn("epoch", [x]), ["double"]) : op("/", cast(fn("epoch_us", [x]), ["double"]), numConst("1000000.0"));
+      case "epoch": {
+        const type = this.typeOf(x);
+        if (type === DATE) return cast(fn("epoch", [x]), ["double"]);
+        const seconds = op("/", cast(fn("epoch_us", [type === TIMETZ ? this.clone(x) : x]), ["double"]), numConst("1000000.0"));
+        // (a timetz's in Postgres's order of operations, time / 1e6 + zone, so its double is Postgres's to the last bit)
+        return type === TIMETZ ? op("-", seconds, cast(fn("date_part", [strConst("timezone"), x]), ["double"])) : seconds;
+      }
       default: return null;
     }
+  }
+
+  /** a time's epoch in microseconds; a timetz's is its time of day less its zone's offset east (time->time + zone) */
+  private epochMicros(x: AstNode, type: number | null): AstNode {
+    if (type !== TIMETZ) return fn("epoch_us", [x]);
+    return op("-", fn("epoch_us", [this.clone(x)]), op("*", cast(fn("date_part", [strConst("timezone"), x]), ["bigint"]), intConst(1000000)));
+  }
+
+  /** extract(julian …) of a timestamp or a timestamptz: its argument and type; null for anything else (the unit is
+   *  read by src/duck/units.ts, at the call's entrance or here, before it) */
+  private timestampJulian(n: AstNode): { x: AstNode; type: number } | null {
+    if (kindOf(n) !== "FuncCall" || lastName(bodyOf(n).funcname) !== "extract") return null;
+    const args = (bodyOf(n).args ?? []) as AstNode[];
+    const text = args.length === 2 ? constString(args[0]) : null;
+    const type = args.length === 2 ? this.typeOf(args[1]!) : null;
+    if (text === null || readUnit(text).unit !== "julian" || (type !== TIMESTAMP && type !== TIMESTAMPTZ)) return null;
+    return { x: args[1]!, type };
+  }
+
+  /**
+   * THE TEXT POSTGRES WRITES FOR extract(julian …) OF A TIMESTAMP, made natively, no call a row (PR 1106):
+   * timestamp_part_common's numeric, the day's number plus the microseconds of its day divided by a day's (its wall
+   * clock's, a timestamptz's in the session's zone). numeric_div gives that quotient select_div_scale's scale, 28
+   * decimals under 865 µs, 24 under 8,650,000 µs, else 20, rounded half up. So the value is computed in a HUGEINT at 28
+   * decimals, and its text cut to its row's scale (`cutText`). NULL of NULL and of an infinity (the value itself refuses
+   * an infinity by name, infinite-extract). Every reader of the value's text reads it: its print and its casts through
+   * its program (`exactOf`), concat, format and to_json through `plainNumericText`. Null for anything but such a call.
+   */
+  private julianText(n: AstNode): AstNode | null {
+    const of = this.timestampJulian(n);
+    if (of === null) return null;
+    const { x, type } = of;
+    const wall = (): AstNode => type === TIMESTAMPTZ ? cast(this.clone(x), ["timestamp"]) : this.clone(x);
+    const pow = (k: number): AstNode => hugeConst(`1${"0".repeat(k)}`);
+    const us = (): AstNode => cast(fn("epoch_us", [cast(wall(), ["time"])]), ["hugeint"]);
+    // round(µs · 10^r / 86,400,000,000) half up, at 28 decimals
+    const fraction = (r: number): AstNode => {
+      const rounded = op("//", op("+", op("*", op("*", us(), pow(r)), hugeConst("2")), hugeConst("86400000000")), hugeConst("172800000000"));
+      return r === 28 ? rounded : op("*", rounded, pow(28 - r));
+    };
+    const day = op("+", cast(op("-", cast(wall(), ["date"]), cast(strConst("1970-01-01"), ["date"])), ["hugeint"]), hugeConst("2440588"));
+    const scaled = op("+", op("*", day, pow(28)), caseWhen([[op("<", us(), hugeConst("865")), fraction(28)], [op("<", us(), hugeConst("8650000")), fraction(24)]], fraction(20)));
+    const value = op("*", cast(scaled, ["decimal", "38", "0"]), numConst(`0.${"0".repeat(27)}1`));
+    const scale = caseWhen([[op("<", us(), hugeConst("865")), intConst(28)], [op("<", us(), hugeConst("8650000")), intConst(24)]], intConst(20));
+    // (an infinity has no day: NULL, never the engine's error of its time)
+    return caseWhen([[fn("isfinite", [this.clone(x)]), this.cutText(value, scale)]], null);
   }
 
   // --------------------------------------------------------------------------------------------- casts, constants
@@ -8319,6 +8384,11 @@ function decimalConst(text: string): AstNode {
  */
 /** the width a sum of whole numerics is read at (`funcCall`'s sum): its digits, and 38 minus it decimals beside a DECIMAL */
 const SUM_WIDTH = 28;
+
+/** a whole constant as a HUGEINT; one that fits an integer is written as one, so it reads back as the node it is */
+function hugeConst(digits: string): AstNode {
+  return cast(Number(digits) <= 2147483647 ? intConst(Number(digits)) : numConst(digits), ["hugeint"]);
+}
 
 function wholeNumeric(n: AstNode, digits = 19): AstNode {
   return cast(n, ["decimal", String(Math.min(38, Math.max(19, digits))), "0"]);

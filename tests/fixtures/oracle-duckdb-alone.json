@@ -1,19 +1,19 @@
 {
-  "statements": 8296,
+  "statements": 8323,
   "mason": {
-    "exact": 7763,
+    "exact": 7796,
     "decided": 46,
-    "refused": 487,
+    "refused": 481,
     "differs": 0
   },
   "duckdb": {
     "exact": 1952,
-    "name": 1558,
-    "refused": 1953,
-    "value": 1213,
+    "name": 1559,
+    "refused": 1961,
+    "value": 1218,
     "rows": 637,
     "text": 86,
-    "other": 897
+    "other": 910
   },
   "gaps": {
     "copyPhase": {
@@ -27,7 +27,6 @@
         "div-numeric": { "planted": 1, "natural": 0 },
         "enum-forms": { "planted": 1, "natural": 0 },
         "explain-option": { "planted": 1, "natural": 0 },
-        "extract-julian": { "planted": 1, "natural": 5 },
         "format-specifiers": { "planted": 1, "natural": 0 },
         "held-type-compare": { "planted": 1, "natural": 297 },
         "hypothetical-set": { "planted": 1, "natural": 0 },
@@ -95,7 +94,7 @@
       }
     },
     "everyAsk": {
-      "asked": 113740,
+      "asked": 114073,
       "refused": {
         "array-lower-bound": { "planted": 0, "natural": 2 },
         "array-remove-type": { "planted": 3, "natural": 0 },
@@ -107,7 +106,6 @@
         "div-numeric": { "planted": 3, "natural": 0 },
         "enum-forms": { "planted": 3, "natural": 0 },
         "explain-option": { "planted": 3, "natural": 0 },
-        "extract-julian": { "planted": 3, "natural": 15 },
         "format-specifiers": { "planted": 3, "natural": 0 },
         "held-type-compare": { "planted": 3, "natural": 1017 },
         "hypothetical-set": { "planted": 3, "natural": 0 },
