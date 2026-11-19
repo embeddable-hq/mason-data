@@ -47,7 +47,7 @@ import { pgTrim } from "./text.ts";
 import { NUMBERED_EQUALITY, type NumberedLookup, type NumberedRead } from "./reference-keys.ts";
 import { bucketGroups, shape, type BucketMark } from "./bucket-group.ts";
 import { sideFirst } from "./side-first.ts";
-import { callUnit, readUnit, type CallUnit, type Unit, type UnitCall } from "./units.ts";
+import { callUnit, readUnit, type CallUnit, type Unit, type UnitCall, type UnitParam } from "./units.ts";
 
 /** A parse-tree node (`{ Kind: body }`) and a body, as libpg-query's JSON has them. */
 type Body = Record<string, any>;
@@ -299,6 +299,10 @@ class Rewriter {
    * says which parameters would fold (`pathParams`), so the listener plans it again at the Execute with the values.
    */
   boundPaths: ReadonlyMap<number, string> = new Map();
+  /** the calls that refuse their unit which Postgres's planner folds, by analysed offset, with the parameters each waits
+   *  for (src/duck/plan.ts `foldedUnits`): refused here, or by an Execute that binds each (`unitParams`) */
+  unitFolds: ReadonlyMap<number, { params: number[] }> = new Map();
+  readonly unitParams: UnitParam[] = [];
   /** the plain numerics whose copy holds each value's own scale (`scaleOf`) */
   scales: ScaleLookup | null = null;
   /** the timestamptz columns whose copy holds each value's 15-minute bucket (src/duck/bucket-column.ts); null for none */
@@ -5996,7 +6000,14 @@ class Rewriter {
     if ((name === "extract" || name === "date_part" || name === "date_trunc") && args.length >= 2 && (t?.oid ?? 0) < FIRST_USER_OID) {
       const text = constString(args[0]);
       const read = text === null ? null : callUnit(name, text, argType(1));
-      if (read !== null && "code" in read) return this.unitRefused(name, read, args.slice(1), t?.type ?? null);
+      if (read !== null && "code" in read) {
+        // (where Postgres's planner folds the call, it refuses before a row is read: here, or at the Execute that binds
+        // the parameters it waits for; src/duck/plan.ts `foldedUnits`)
+        const fold = typeof b.location === "number" && b.location >= 0 ? this.unitFolds.get(b.location - this.base) : undefined;
+        if (fold !== undefined && fold.params.length === 0) throw new Unrewritable(read.message, "", { postgres: read.code });
+        if (fold !== undefined) this.unitParams.push({ params: fold.params, code: read.code, message: read.message, finiteOnly: read.finiteOnly });
+        return this.unitRefused(name, read, args.slice(1), t?.type ?? null);
+      }
       if (read !== null) args[0] = strConst(read.unit);
     }
     switch (name) {
@@ -6592,7 +6603,8 @@ class Rewriter {
 
   /**
    * A UNIT A CALL REFUSES (src/duck/units.ts `callUnit`), refused where Postgres refuses it: at a row whose value is
-   * not NULL, as the three functions are strict, never in the statement's analysis. So a query over no rows or over
+   * not NULL, as the three functions are strict, where the planner does not fold the call (src/duck/plan.ts
+   * `foldedUnits`, which the entrance refuses before a row is read). So a query over no rows or over
    * NULLs answers, as on Postgres (PR 1106). A timestamp's zone unit is NULL of an infinity, its refusal only of a
    * finite value. The call's place holds a NULL of its result's type.
    */
@@ -8827,6 +8839,8 @@ export interface RewriteOptions {
   keyCounts?: ReadonlySet<number>;
   /** the values an Execute bound to the parameters read as a json path, by number (`Rewriter.boundPaths`) */
   boundPaths?: ReadonlyMap<number, string>;
+  /** the calls that refuse their unit which Postgres's planner folds, by analysed offset (src/duck/plan.ts `foldedUnits`) */
+  unitFolds?: ReadonlyMap<number, { params: number[] }>;
   /** the plain numerics whose copy holds each value's own scale (src/duck/scale-column.ts, src/duck/plan.ts `scaleLookup`) */
   scales?: ScaleLookup | null;
   /** the references whose keys the synced data numbers (src/duck/reference-keys.ts, src/duck/plan.ts `numberedLookup`) */
@@ -8860,11 +8874,12 @@ export interface ScaleLookup {
 }
 
 export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(), citextHeld = new Set(), typeNames = new Map(), rowTypes = new Map(), timeZone = "UTC", dateStyle = "ISO, MDY", enums = { labels: new Map(), arrays: new Map() }, kept = null,
-  wireBound = false, keyCounts = new Set(), boundPaths = new Map(), scales = null, buckets = null, numbered = null, own: prefix = ownPrefix([stmt, analysis.tree]), rows = null }: RewriteOptions):
-  { tree: AstNode; withTies: boolean; exact: ExactColumn[]; clock: { parse?: number; exec?: number }; jsonReads: JsonRead[]; unboundedLateral: boolean; pathParams: number[]; wholeNumericArrays: number[];
+  wireBound = false, keyCounts = new Set(), boundPaths = new Map(), unitFolds = new Map(), scales = null, buckets = null, numbered = null, own: prefix = ownPrefix([stmt, analysis.tree]), rows = null }: RewriteOptions):
+  { tree: AstNode; withTies: boolean; exact: ExactColumn[]; clock: { parse?: number; exec?: number }; jsonReads: JsonRead[]; unboundedLateral: boolean; pathParams: number[]; wholeNumericArrays: number[]; unitParams: UnitParam[];
     numbers: NumberedRead[] } {
   const r = new Rewriter(analysis, base, collations, userTypes, rowTypes, timeZone, dateStyle, enums, kept, keyCounts, citextHeld, typeNames);
   r.boundPaths = boundPaths;
+  r.unitFolds = unitFolds;
   r.scales = scales;
   r.buckets = buckets;
   r.numbered = numbered;
@@ -8904,7 +8919,7 @@ export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(
   const tree = bucketGroups(walked, r.bucketMarks, r.bucketPlaceholder(), prefix,
     (n) => { const t = r.typeOf(n as AstNode); return t !== null && FLOATS.has(t); }) as AstNode;
   return { tree, withTies: r.wroteTies, exact, clock: r.clock, jsonReads: [...r.jsonReads.values()], unboundedLateral: r.unboundedLateral, pathParams: [...r.pathParams].sort((a, b) => a - b),
-    wholeNumericArrays: [...r.wholeNumericArrays].sort((a, b) => a - b), numbers: [...r.numbersRead.values()] };
+    wholeNumericArrays: [...r.wholeNumericArrays].sort((a, b) => a - b), unitParams: r.unitParams, numbers: [...r.numbersRead.values()] };
 }
 
 /** the functions whose every call is a new value (Postgres's volatile ones Mason answers) */

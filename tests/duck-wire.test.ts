@@ -1181,6 +1181,74 @@ test("PR 1106: a unit a type has not is refused at a row that holds a value, nev
   } finally { await c.end(); }
 });
 
+// the review of PR 1177: Postgres's planner folds an immutable call whose arguments are constants (or bound parameters)
+// once, before a row is read, so a unit refused there is refused over no rows too; a stable one (of a timestamptz, which
+// reads the session's zone) is left for each row. Each refusal arrives as Postgres sends it: no DETAIL, no HINT
+test("PR 1177: a unit refused where Postgres's planner folds the call, before a row is read, and per row elsewhere", async () => {
+  const c = await client();
+  try {
+    const said = async (run: Promise<unknown>): Promise<unknown> =>
+      run.then(() => "answered", (e: { code?: string; message: string; detail?: string; hint?: string }) => [e.code, e.message, e.detail ?? null, e.hint ?? null]);
+    const refusedAlike = async (sql: string, values?: unknown[]): Promise<void> => {
+      const [m, p] = [await said(c.query(sql, values)), await said(truth.query(sql, values))];
+      assert.notEqual(p, "answered", `${sql}: Postgres answered`);
+      assert.deepEqual(m, p, `${sql} ${JSON.stringify(values ?? [])}`);
+    };
+    const alike = async (sql: string, values?: unknown[]): Promise<void> => assert.deepEqual(await answer(c, sql, values), await postgres(sql, values), `${sql} ${JSON.stringify(values ?? [])}`);
+    // folded: a constant, a bound parameter, a constant expression, of each type whose call is immutable
+    for (const sql of ["SELECT extract('foo' FROM timestamp '2020-01-01') FROM parts WHERE id < 0", "SELECT id, extract('foo' FROM timestamp '2020-01-01') FROM parts WHERE false",
+      "SELECT count(*) FROM parts WHERE id < 0 AND extract('foo' FROM timestamp '2020-01-01') > 0",
+      "SELECT date_part('timezone', timestamp '2020-01-01' + interval '1 day') FROM parts WHERE id < 0",
+      "SELECT extract('foo' FROM '2020-01-01'::date) FROM parts WHERE id < 0", "SELECT extract(hour FROM date '2020-01-01') FROM parts WHERE id < 0",
+      "SELECT extract(day FROM time '12:00') FROM parts WHERE id < 0", "SELECT extract(day FROM '12:00+05'::timetz) FROM parts WHERE id < 0",
+      "SELECT date_trunc('foo', interval '1 day') FROM parts WHERE id < 0", "SELECT date_trunc('foo', timestamptz '2020-01-01', 'UTC') FROM parts WHERE id < 0",
+      "SELECT CASE WHEN id > 0 THEN extract('foo' FROM timestamp '2020-01-01') END FROM parts WHERE id < 0",
+      "SELECT extract('foo' FROM coalesce(timestamp '2020-01-01', ts)) FROM parts WHERE id < 0"]) await refusedAlike(sql);
+    await refusedAlike("SELECT extract('foo' FROM $1::timestamp) FROM parts WHERE id < 0", ["2020-01-01"]);
+    await refusedAlike("SELECT date_part('timezone', $1::timestamp) FROM parts WHERE id < 0", ["2020-01-01 12:00"]);
+    // left for each row: a timestamptz's call (stable), a NULL, ±infinity's zone unit (NULL), a cast through text, a subquery
+    for (const sql of ["SELECT extract('foo' FROM timestamptz '2020-01-01') FROM parts WHERE id < 0", "SELECT date_trunc('foo', timestamptz '2020-01-01') FROM parts WHERE id < 0",
+      "SELECT date_part('foo', timestamptz '2020-01-01') FROM parts WHERE id < 0", "SELECT extract('foo' FROM NULL::timestamp) FROM parts",
+      "SELECT date_part('timezone', timestamp 'infinity') FROM parts WHERE id < 0", "SELECT date_part('timezone', timestamp '-infinity') FROM parts",
+      "SELECT extract('foo' FROM '2020-01-01'::text::timestamp) FROM parts WHERE id < 0", "SELECT extract('foo' FROM (SELECT timestamp '2020-01-01')) FROM parts WHERE id < 0"]) await alike(sql);
+    await alike("SELECT extract('foo' FROM $1::timestamp) FROM parts WHERE id < 0", [null]);
+    await alike("SELECT date_part('timezone', $1::timestamp) FROM parts WHERE id < 0", ["infinity"]);
+    // a condition that reads no column is run once, before a row is read, stable or not: a WHERE, an inner join's ON, a
+    // HAVING, a subquery's WHERE
+    for (const sql of ["SELECT count(*) FROM parts WHERE id < 0 AND extract('foo' FROM timestamptz '2020-01-01') IS NULL",
+      "SELECT count(*) FROM parts WHERE id < 0 AND date_trunc('foo', timestamptz '2020-01-01') IS NULL",
+      "SELECT count(*) FROM parts WHERE id < 0 AND extract('foo' FROM '2020-01-01'::text::timestamp) IS NULL",
+      "SELECT count(*) FROM parts WHERE id < 0 AND extract('foo' FROM now()) IS NULL",
+      "SELECT count(*) FROM parts p JOIN parts q ON extract('foo' FROM timestamptz '2020-01-01') IS NULL WHERE p.id < 0 AND q.id < 0",
+      "SELECT id FROM parts WHERE id < 0 GROUP BY id HAVING extract('foo' FROM timestamptz '2020-01-01') IS NULL",
+      "SELECT count(*) FROM parts WHERE id < 0 AND EXISTS (SELECT 1 FROM parts q WHERE extract('foo' FROM timestamptz '2020-01-01') IS NULL)"]) await refusedAlike(sql);
+    await refusedAlike("SELECT count(*) FROM parts WHERE id < 0 AND extract('foo' FROM $1::timestamptz) IS NULL", ["2020-01-01"]);
+    // run for each row: a condition that reads a column, an outer join's ON, a NULL, ±infinity's zone unit
+    for (const sql of ["SELECT count(*) FROM parts WHERE id < 0 AND extract('foo' FROM ts) IS NULL",
+      "SELECT count(*) FROM parts p LEFT JOIN parts q ON extract('foo' FROM timestamptz '2020-01-01') IS NULL WHERE p.id < 0",
+      "SELECT count(*) FROM parts WHERE id < 0 AND extract('foo' FROM NULL::timestamptz) IS NULL",
+      "SELECT count(*) FROM parts WHERE id < 0 AND extract('timezone' FROM timestamp 'infinity') IS NULL"]) await alike(sql);
+    await alike("SELECT count(*) FROM parts WHERE id < 0 AND extract('foo' FROM $1::timestamptz) IS NULL", [null]);
+  } finally { await c.end(); }
+});
+
+test("PR 1177: a unit refused at a row arrives as Postgres sends it, with no DETAIL of the engine's", async () => {
+  const c = await client();
+  try {
+    const said = async (run: Promise<unknown>): Promise<unknown> =>
+      run.then(() => "answered", (e: { code?: string; message: string; detail?: string; hint?: string }) => [e.code, e.message, e.detail ?? null, e.hint ?? null]);
+    const refusedAlike = async (sql: string): Promise<void> => {
+      const [m, p] = [await said(c.query(sql)), await said(truth.query(sql))];
+      assert.notEqual(p, "answered", `${sql}: Postgres answered`);
+      assert.deepEqual(m, p, sql);
+    };
+    // (each arrived with `DETAIL: the engine: mason[22023]: …`, which Postgres does not send)
+    await refusedAlike("SELECT id, extract('foo' FROM ts) FROM parts ORDER BY id");
+    await refusedAlike("SELECT id, extract('foo' FROM timestamptz '2020-01-01') FROM parts ORDER BY id");
+    await refusedAlike("SELECT id, date_part('day', t) FROM parts ORDER BY id");
+  } finally { await c.end(); }
+});
+
 test("the rerun at 7957b687: a correlated series of times, a date plus a day count, an outer name in a UNION, a random window", async () => {
   const c = await client();
   try {

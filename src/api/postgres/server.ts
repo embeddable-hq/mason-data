@@ -2143,6 +2143,13 @@ class Session {
     }
     const own = params.length === 0 ? params
       : read ?? await this.server.options.duck.parameters((b) => this.server.catalog.run(b), plan.params, params, this.sessionState());
+    // a call that refuses its unit which Postgres's planner folds once these are bound (PlannedSql.unitParams): refused
+    // as Postgres refuses the Bind, before a row is read, unless one is bound NULL (the call is then NULL), or a zone
+    // unit of a timestamp is bound ±infinity (NULL too)
+    for (const u of plan.sql.unitParams ?? []) {
+      const bound = u.params.map((n) => own[n - 1] ?? null);
+      if (bound.every((v) => v !== null) && !(u.finiteOnly && bound.some((v) => /^-?infinity$/i.test(v!)))) throw new StatementError({ code: u.code, message: u.message }, "");
+    }
     const values = [...own];
     for (const [which, at] of Object.entries(plan.clock ?? {}) as Array<["parse" | "exec", number]>) values[at - 1] = instantText(clock[which]);
     return values;

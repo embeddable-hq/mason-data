@@ -9,7 +9,8 @@ import { deparseSync, QuoteUtils } from "pgsql-deparser";
 import type { Node } from "libpg-query";
 import { HELD_ROW_INPUT, HELD_TYPE_INPUT } from "../api/postgres/schema.ts";
 import { heldName, heldType, isHeldArray, PARAM_ARRAYS } from "./held-types.ts";
-import { collationOids, functionsCalled, outputExpressions, textOrdering, type TreeValue } from "./pgtree.ts";
+import { collationOids, folded, functionsCalled, holds, onceConditions, outputExpressions, textOrdering, type ProcFacts, type TreeValue } from "./pgtree.ts";
+import { refusedUnitCalls, type UnitParam } from "./units.ts";
 import { gapRefusal, StatementError, type DuckPlan } from "./statement.ts";
 import { parseSql } from "../api/postgres/parser.ts";
 import { analyze, catalogRows, readParameters } from "./analyze.ts";
@@ -233,6 +234,12 @@ export interface PlannedSql {
    * refused (`numeric-array-parameter`, src/api/postgres/server.ts `duckValues`). Absent: none
    */
   readonly wholeNumericArrays?: readonly number[];
+  /**
+   * the calls that refuse their unit where Postgres's planner folds them once their parameters are bound
+   * (src/duck/plan.ts `foldedUnits`): an Execute that binds each parameter of one a value is refused with Postgres's
+   * error before a row is read (src/api/postgres/server.ts `duckValues`), as Postgres refuses its Bind. Absent: none
+   */
+  readonly unitParams?: readonly UnitParam[];
   /**
    * it only scans and filters: no join, group, sort, window or aggregate that keeps rows (src/duck/admission.ts
    * `mayKeepRows`, read off the tree), so it is light however many rows it reads and is never weighed before it runs.
@@ -512,6 +519,44 @@ export async function ordersText(o: { catalog: (bytes: Uint8Array) => Promise<Ui
   return unpure.length === 0 ? "case" : null;
 }
 
+/**
+ * WHERE POSTGRES REFUSES A UNIT BEFORE A ROW IS READ (the review of PR 1177). A call that refuses its unit
+ * (src/duck/units.ts `refusedUnitCalls`) raises Postgres's error when the call runs: at a row, or in the planner, which
+ * runs an immutable call whose arguments are constants once (`folded`, eval_const_expressions). So `extract('foo' FROM
+ * timestamp '2020-01-01') FROM e` is refused over no rows, where `extract('foo' FROM ts)` and `extract('foo' FROM
+ * timestamptz '2020-01-01')` (stable: it reads the session's zone) are refused only at a row. Each call the planner
+ * folds, by its analysed offset, with the parameters it waits for: none, refused by the rewrite; some, refused by an
+ * Execute that binds each of them a value (`PlannedSql.unitParams`). A call in a condition Postgres runs once
+ * (`onceConditions`: a WHERE, an inner join's ON or a HAVING that reads no column of its query, and calls nothing
+ * volatile) is refused the same way unless its value is NULL, even if it is stable: `WHERE id < 0 AND extract('foo'
+ * FROM timestamptz '2020-01-01') IS NULL` is refused over no rows. A zone unit of a timestamp is NULL of an infinity,
+ * so a value holding one is left to its row. The functions' facts are the catalog's pg_proc, asked only where a call
+ * refuses its unit.
+ */
+async function foldedUnits(catalog: Parameters<typeof catalogRows>[0], tree: TreeValue): Promise<Map<number, { params: number[] }>> {
+  const out = new Map<number, { params: number[] }>();
+  const calls = refusedUnitCalls(tree);
+  if (calls.length === 0) return out;
+  const once = onceConditions(tree).filter((c) => calls.some(({ call }) => holds(c, call)));
+  const oids = [...functionsCalled([...calls.map((c) => c.call), ...once]).oids].filter((o) => o > 0);
+  const rows = await catalogRows(catalog, `SELECT oid::text, provolatile::text, proisstrict::text FROM pg_catalog.pg_proc WHERE oid IN (${oids.join(", ")})`);
+  const procs = new Map<number, ProcFacts>(rows.map(([oid, volatile, strict]) => [Number(oid), { immutable: volatile === "i", strict: strict === "t" || strict === "true" }]));
+  const volatile = new Set(rows.filter(([, v]) => v === "v").map(([oid]) => Number(oid)));
+  const runOnce = once.filter((c) => ![...functionsCalled(c).oids].some((o) => volatile.has(o)));
+  for (const { call, value: arg, refusal } of calls) {
+    const at = typeof call.location === "string" ? Number(call.location) : -1;
+    if (at < 0) continue;
+    // folded by the planner; else, in a condition run once, its value is: refused unless it is NULL (the three
+    // functions are strict), and refused where the planner cannot say (a stable call, a cast through text)
+    const f = folded(call, procs);
+    const value = f.kind === "value" ? f : runOnce.some((c) => holds(c, call)) ? folded(arg, procs) : null;
+    if (value === null || value.kind === "null") continue;
+    if (value.kind === "no") out.set(at, { params: [] });
+    else if (!(refusal.finiteOnly && value.infinite)) out.set(at, { params: value.params });
+  }
+  return out;
+}
+
 const NUMERIC = 1700, NUMERIC_ARRAY = 1231;
 /** the types a statement of no table that maps case may hold and still be the synced data's: text's, an unknown
  *  literal's, a name's, a boolean's, an integer's and a text array's */
@@ -662,7 +707,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
       typeNames.set(Number(oid), name!);
     }
   }
-  let tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams: number[], wholeNumericArrays: number[], numberedReads: NumberedRead[];
+  let tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams: number[], wholeNumericArrays: number[], unitParams: UnitParam[], numberedReads: NumberedRead[];
   // a table's row the source has otherwise (copied in part: no source OID for it) is not the source's row
   const sourceRows = new Map([...rowTypes].filter(([oid]) => userTypes.has(catalogTypes.get(oid) ?? "")));
   // IS [NOT] NULL of a composite reads its fields (a row of NULLs IS NULL), which the copy's text does not
@@ -685,6 +730,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   // generated table's run, whose stored columns hold none
   const buckets = outputs ? null : await bucketLookup(catalog, analysis.types, userTypes);
   const keyCounts = await distinctKeys(catalog, analysis.tree);
+  const unitFolds = await foldedUnits(catalog, analysis.tree);
   // WHAT EACH COLLATION OF THE ANALYSIS MEANS (src/duck/collation.ts), resolved before the rewrite reads any: a libc
   // order not read yet is read here, before the plan is made; a collation the source lacks or Mason cannot follow refused
   let collations: StatementCollations;
@@ -694,13 +740,13 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   // its columns read by a `*` included, whichever module writes it (the rewrite, the late select list, the libc bounds)
   const own = ownPrefix([stmt, analysis.tree], walls?.written ?? []);
   const analysed = performance.now();
-  const rewritten = (l = lookup, sc = scales, bu = buckets, nb = numbered): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, typeNames, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts, boundPaths, scales: sc, buckets: bu, numbered: nb, own, rows: copiedRows(copies(), searchSchemas(searchPath)) });
+  const rewritten = (l = lookup, sc = scales, bu = buckets, nb = numbered): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, typeNames, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts, boundPaths, unitFolds, scales: sc, buckets: bu, numbered: nb, own, rows: copiedRows(copies(), searchSchemas(searchPath)) });
   try {
-    ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams, wholeNumericArrays, numbers: numberedReads } = rewritten());
+    ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams, wholeNumericArrays, unitParams, numbers: numberedReads } = rewritten());
     // the oracle's (`eager`): every read stored before the plan is made, and the plan made again over them
     if (kept?.keepNow != null && lookup !== null && jsonReads.some((r) => kept.ready(r) === null)) {
       await kept.keepNow(jsonReads);
-      ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams, wholeNumericArrays, numbers: numberedReads } = rewritten());
+      ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams, wholeNumericArrays, unitParams, numbers: numberedReads } = rewritten());
     }
     // a statement that lists a copy's columns without naming them reads none from a stored column (hideKept): made
     // again with every read its call, the reads still recorded
@@ -708,7 +754,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
     // column's one scale there, `mixed-scale-numeric`; nor from a timestamptz's hidden bucket, its GROUP BY as before)
     // (nor a reference's hidden integer key, which that view does not list either: its joins read the keys)
     if ((lookup !== null || scales !== null || buckets !== null || numberedReads.length > 0) && exposes(tree)) {
-      ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams, wholeNumericArrays, numbers: numberedReads } = rewritten(lookup === null ? null : { at: (relid, attno) => lookup.at(relid, attno), ready: () => null }, null, null, null));
+      ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams, wholeNumericArrays, unitParams, numbers: numberedReads } = rewritten(lookup === null ? null : { at: (relid, attno) => lookup.at(relid, attno), ready: () => null }, null, null, null));
     }
   }
   catch (e) {
@@ -771,6 +817,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   const planned = { text: sql, functions: masonCalls(tree), ...(unboundedLateral ? { unboundedLateral: true } : {}),
     ...(plain !== null ? { numbers: { sides: numberedReads, plain } } : {}),
     ...(pathParams.length > 0 ? { pathParams } : {}), ...(wholeNumericArrays.length > 0 ? { wholeNumericArrays } : {}),
+    ...(unitParams.length > 0 ? { unitParams } : {}),
     ...(mayKeepRows(tree) ? {} : { keepsNone: true }) } as unknown as PlannedSql;
   return { sql: planned, params: analysis.params, fields: fields?.map((f) => ({ ...f, size: pgTyplen(f.oid) })) ?? null, withTies, ...(exact.length > 0 ? { exact, own } : {}), resolved: keys, argumentTypes: argumentTypes(analysis.tree), ...(outputs ? { outputs: outputExpressions(analysis.tree) ?? [] } : {}),
     ...(Object.keys(clock).length > 0 ? { clock } : {}), ...(jsonReads.length > 0 ? { jsonReads: jsonReads.map(readKey) } : {}), ...(reads !== undefined ? { reads } : {}),

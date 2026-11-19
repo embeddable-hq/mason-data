@@ -391,6 +391,132 @@ const argsOf = (n: TreeNode): TreeValue[] => {
   return [];
 };
 
+/** every call of the analysis to one of `funcids` (a FUNCEXPR), and its arguments */
+export function callsTo(tree: TreeValue, funcids: ReadonlySet<number>): Array<{ call: TreeNode; args: TreeValue[] }> {
+  const out: Array<{ call: TreeNode; args: TreeValue[] }> = [];
+  const visit = (v: TreeValue | undefined): void => {
+    if (Array.isArray(v)) { for (const x of v) visit(x); return; }
+    if (v === undefined || !isNode(v)) return;
+    if (v._node === "FUNCEXPR" && funcids.has(num(v.funcid ?? null) ?? -1)) out.push({ call: v, args: argsOf(v) });
+    for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x);
+  };
+  visit(tree);
+  return out;
+}
+
+/** a text CONST's value, null for its NULL; undefined for any other node */
+export const constTextOf = (v: TreeValue | undefined): string | null | undefined => v === undefined ? undefined : constText(v);
+
+/** a function's pg_proc facts that decide whether the planner folds a call of it */
+export interface ProcFacts { immutable: boolean; strict: boolean }
+
+/**
+ * WHAT POSTGRES'S PLANNER FOLDS AN EXPRESSION TO before a row is read (eval_const_expressions, simplify_function and
+ * evaluate_function in src/backend/optimizer/util/clauses.c, REL_18_STABLE):
+ *  - `null`: a NULL constant. A strict function with a NULL argument is folded to NULL whatever its other arguments are
+ *    and whatever its volatility, and is never called;
+ *  - `value`: a constant the planner computes, calling each function in it. Only an immutable function is called (a
+ *    stable one, such as extract of a timestamptz, which reads the session's zone, is left for each row). A bound
+ *    parameter is a constant (its custom plan folds it), so `params` lists the parameters the value waits for: it is
+ *    computed once they are bound, and is NULL if one is bound NULL. `infinite`: a date or timestamp constant in it is
+ *    ±infinity;
+ *  - `no`: left for each row (a column, a subquery, a cast through text, a CASE, anything else).
+ * `procs` holds the facts of each function the expression calls (`funcid`, an operator's `opfuncid`); one it lacks is
+ * not folded.
+ */
+export type Folded = { kind: "no" } | { kind: "null" } | { kind: "value"; params: number[]; infinite: boolean };
+
+export function folded(v: TreeValue | undefined, procs: ReadonlyMap<number, ProcFacts>): Folded {
+  const NO: Folded = { kind: "no" };
+  if (v === undefined || !isNode(v)) return NO;
+  switch (v._node) {
+    case "CONST": return v.constisnull === "true" ? { kind: "null" } : { kind: "value", params: [], infinite: infiniteConst(v) };
+    // (PARAM_EXTERN: a parameter the client binds)
+    case "PARAM": return num(v.paramkind ?? null) === 0 && num(v.paramid ?? null) !== null ? { kind: "value", params: [num(v.paramid)!], infinite: false } : NO;
+    case "RELABELTYPE": case "COLLATEEXPR": return folded(v.arg, procs);
+    case "FUNCEXPR": case "OPEXPR": {
+      if (v.funcretset === "true") return NO;
+      const proc = procs.get(num(v._node === "FUNCEXPR" ? v.funcid ?? null : v.opfuncid ?? null) ?? -1);
+      const args = argsOf(v).map((a) => folded(a, procs));
+      if (proc === undefined) return NO;
+      if (proc.strict && args.some((a) => a.kind === "null")) return { kind: "null" };
+      if (!proc.immutable || args.some((a) => a.kind !== "value")) return NO;
+      const values = args as Array<Extract<Folded, { kind: "value" }>>;
+      return { kind: "value", params: [...new Set(values.flatMap((a) => a.params))].sort((a, b) => a - b), infinite: values.some((a) => a.infinite) };
+    }
+    // COALESCE keeps its arguments up to the first constant that is not NULL (a bound parameter may be NULL: left)
+    case "COALESCEEXPR": {
+      for (const a of argsOf(v)) {
+        const f = folded(a, procs);
+        if (f.kind === "null") continue;
+        return f.kind === "value" && f.params.length === 0 ? f : NO;
+      }
+      return { kind: "null" };
+    }
+    default: return NO;
+  }
+}
+
+/**
+ * THE CONDITIONS POSTGRES RUNS ONCE, BEFORE A ROW IS READ: each conjunct of a query's WHERE, of an inner join's ON
+ * and of its HAVING (which the planner moves to the WHERE when it holds no aggregate) that reads no column of its own
+ * query and no aggregate of it. The planner makes such a condition a pseudoconstant: a One-Time Filter that the plan
+ * runs once when it starts, whether or not a table has rows (distribute_qual_to_rels and create_gating_plan in
+ * src/backend/optimizer, REL_18_STABLE). The caller drops one that calls a volatile function, which Postgres leaves for
+ * each row. A condition the plan never reaches (an arm of a join that is not run) is listed too: so the caller may
+ * refuse where Postgres answers, never the other way.
+ */
+export function onceConditions(tree: TreeValue): TreeNode[] {
+  const out: TreeNode[] = [];
+  const conjuncts = (q: TreeValue | undefined): TreeNode[] => !isNode(q ?? null) ? []
+    : (q as TreeNode)._node === "BOOLEXPR" && (q as TreeNode).boolop === "and" ? argsOf(q as TreeNode).flatMap((a) => conjuncts(a)) : [q as TreeNode];
+  // whether `v` reads a column or an aggregate of the query `depth` levels up from it
+  const readsLevel = (v: TreeValue | undefined, depth: number): boolean => {
+    if (Array.isArray(v)) return v.some((x) => readsLevel(x, depth));
+    if (v === undefined || !isNode(v)) return false;
+    if (v._node === "VAR" && (num(v.varlevelsup ?? null) ?? 0) === depth) return true;
+    if ((v._node === "AGGREF" || v._node === "GROUPINGFUNC") && (num(v.agglevelsup ?? null) ?? 0) === depth) return true;
+    if (v._node === "WINDOWFUNC" && depth === 0) return true;
+    return Object.entries(v).some(([k, x]) => k !== "_node" && readsLevel(x, v._node === "QUERY" ? depth + 1 : depth));
+  };
+  const visit = (v: TreeValue | undefined): void => {
+    if (Array.isArray(v)) { for (const x of v) visit(x); return; }
+    if (v === undefined || !isNode(v)) return;
+    if (v._node === "QUERY") {
+      const quals: TreeValue[] = [v.havingQual ?? null];
+      const from = (n: TreeValue | undefined): void => {
+        if (Array.isArray(n)) { for (const x of n) from(x); return; }
+        if (n === undefined || !isNode(n)) return;
+        if (n._node === "FROMEXPR") { quals.push(n.quals ?? null); from(n.fromlist); }
+        if (n._node === "JOINEXPR") { if (num(n.jointype ?? null) === 0) quals.push(n.quals ?? null); from(n.larg); from(n.rarg); }
+      };
+      from(v.jointree);
+      for (const q of quals) for (const c of conjuncts(q)) if (!readsLevel(c, 0)) out.push(c);
+    }
+    for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x);
+  };
+  visit(tree);
+  return out;
+}
+
+/** whether `inner` is `outer` or lies inside it */
+export function holds(outer: TreeValue | undefined, inner: TreeNode): boolean {
+  if (outer === inner) return true;
+  if (Array.isArray(outer)) return outer.some((x) => holds(x, inner));
+  if (outer === undefined || !isNode(outer)) return false;
+  return Object.entries(outer).some(([k, x]) => k !== "_node" && holds(x, inner));
+}
+
+/** a CONST of a date, a timestamp or a timestamptz holding ±infinity (DT_NOBEGIN, DT_NOEND: the type's least and greatest) */
+function infiniteConst(v: TreeNode): boolean {
+  const type = num(v.consttype ?? null);
+  const b = datumBytes(v.constvalue);
+  if (b === null || (type !== 1082 && type !== 1114 && type !== 1184)) return false;
+  const width = type === 1082 ? 4 : 8;
+  const n = BigInt.asIntN(width * 8, b.slice(0, width).reduceRight((acc, x) => (acc << 8n) | BigInt(x), 0n));
+  return n === BigInt.asIntN(width * 8, (1n << BigInt(width * 8 - 1)) - 1n) || n === -(1n << BigInt(width * 8 - 1));
+}
+
 /**
  * Every typed expression of the analysed tree, by the offset it came from — outermost first where several share one
  * (a cast and the coercion inside it). An implicit cast Postgres inserted has no offset of its own (-1) and is listed
