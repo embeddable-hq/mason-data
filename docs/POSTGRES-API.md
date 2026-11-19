@@ -520,9 +520,10 @@ MASON_MCP_ORIGINS=https://app.example.test            # browser origins a page m
 MASON_MCP_ICON=https://mason.example.com/icon.png     # the icon a client shows (default: Mason's logo)
 ```
 
-- **The server's icon**: `serverInfo` (in `initialize`, and under 2026-07-28 in `server/discover` and every result's
-  `_meta`; `mason mcp` on stdio too) carries `icons`, a `description` and `websiteUrl`, as MCP 2025-11-25's
-  `Implementation` has them. The icon is Mason's logo, a 128x128 PNG as a `data:` URI, unless `MASON_MCP_ICON` names
+- **The server's icon**: `serverInfo` (in `initialize`, `mason mcp` on stdio too, and under 2026-07-28 in
+  `server/discover`) carries `icons`, a `description` and `websiteUrl`, as MCP 2025-11-25's `Implementation` has them.
+  Every other 2026-07-28 result's `_meta` serverInfo names the server without `icons` (optional there): the icon is
+  sent once, not in every answer. The icon is Mason's logo, a 128x128 PNG as a `data:` URI, unless `MASON_MCP_ICON` names
   another: a `data:` URL of a PNG or SVG in base64 (at most 4096 bytes, read as `MASON_UI_ICON` is), or an `https://`
   address on `MASON_MCP_URL`'s own origin, which the spec asks a client to hold an icon to. Any other value refuses the
   start. A client decides what it shows: users report that claude.ai's custom connectors show the favicon of the

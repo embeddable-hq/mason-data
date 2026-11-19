@@ -217,10 +217,13 @@ export function modernRefusal(msg: unknown, headers: http.IncomingHttpHeaders): 
 }
 
 /** A 2026-07-28 result: `resultType` (every result, "Base protocol": "ResultType"), the server's identity in `_meta`, and a
- *  cached result's `ttlMs` and `cacheScope` ("Caching"). */
+ *  cached result's `ttlMs` and `cacheScope` ("Caching"). The icons are `server/discover`'s alone: a client learns them
+ *  there once, and every other result's identity leaves them out (`icons` is optional in the `Implementation` that a
+ *  result's `_meta` serverInfo is), so an answer does not carry an image of about 1.5 KB each time. */
 function modernResult(method: string, result: Record<string, unknown>, info: ServerInfo): Record<string, unknown> {
   const meta = typeof result._meta === "object" && result._meta !== null ? result._meta as Record<string, unknown> : {};
-  return { resultType: "complete", ...result, _meta: { ...meta, [META.server]: info }, ...(CACHED.has(method) ? { ttlMs: CACHE_TTL_MS, cacheScope: "public" } : {}) };
+  const { icons: _icons, ...identity } = info;
+  return { resultType: "complete", ...result, _meta: { ...meta, [META.server]: method === "server/discover" ? info : identity }, ...(CACHED.has(method) ? { ttlMs: CACHE_TTL_MS, cacheScope: "public" } : {}) };
 }
 
 /** McpServer's answer as 2026-07-28 says it: a result made `modernResult`; a resource not found -32602, not 2025-11-25's
@@ -243,8 +246,8 @@ export function mcpEndpoint(settings: McpSettings, o: { log: (line: string) => v
   const now = o.now ?? Date.now;
   const issuer = new Issuer(settings, { log, ...(o.fetch !== undefined ? { fetch: o.fetch } : {}), now });
   const metadataUrl = resourceMetadataUrl(settings);
-  // who this server is, with the endpoint's icons (MASON_MCP_ICON, else Mason's): initialize, server/discover and every
-  // 2026-07-28 result's _meta say the same
+  // who this server is, with the endpoint's icons (MASON_MCP_ICON, else Mason's): initialize and server/discover say it
+  // whole, every other 2026-07-28 result's _meta without the icons (modernResult)
   const info = serverInfo(settings.icons);
   // the metadata at RFC 9728's path for the public address's own path, at the well-known root, and for /mcp: a relay
   // forwards the one its address makes
