@@ -10,10 +10,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
     Mason synced. Every table in the join must be a synced table. No filter may limit the other tables. A filter on
     the smaller table itself is fine.
   - It applies only to a value that reads the smaller table alone, can never fail, and is not random. Examples are a
-    time cut to its month, year or other unit (`date_trunc`), a time's date (`::date`), a number compared with a
-    constant, `IS NULL`, `IN` a list of constants, and a `CASE` or `COALESCE` of these. `lower()` of a text applies
-    too, in a database whose locale is a libc one, such as `en_US.UTF-8`.
+    time cut to its month, year or other unit (`date_trunc`), a time's date (`::date`), `date_part()` of a time's
+    month, day, hour or most other parts, a number compared with a constant, `IS NULL`, `IN` a list of constants,
+    and a `CASE` or `COALESCE` of these with plain number or text constants.
+    `lower()` of a text applies too, where its collation is a libc one other than C, such as `en_US.UTF-8`.
   - On the side of an outer join that can have no matching row, the value must be NULL where its columns are. So a
     `COALESCE` there is worked out after the join.
-  - Anything else is worked out after the join, as before. That includes `upper()`, `extract()`, `date_part()`,
-    arithmetic on a number, and `lower()` under a C or ICU locale.
+  - Anything else is worked out after the join, as before. That includes `upper()`, `extract()`, arithmetic on a
+    number, and `lower()` under a C or ICU collation. It includes `date_part()` of a year or a longer unit, an epoch,
+    a Julian day, a second or a millisecond.
