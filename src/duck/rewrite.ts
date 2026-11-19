@@ -47,6 +47,7 @@ import { pgTrim } from "./text.ts";
 import { NUMBERED_EQUALITY, type NumberedLookup, type NumberedRead } from "./reference-keys.ts";
 import { bucketGroups, shape, type BucketMark } from "./bucket-group.ts";
 import { sideFirst } from "./side-first.ts";
+import { callUnit, readUnit, type Unit } from "./units.ts";
 
 /** A parse-tree node (`{ Kind: body }`) and a body, as libpg-query's JSON has them. */
 type Body = Record<string, any>;
@@ -105,10 +106,13 @@ const INT2 = 21, INT4 = 23, INT8 = 20, FLOAT4 = 700, FLOAT8 = 701, NUMERIC = 170
 const DATE = 1082, TIMESTAMP = 1114, TIMESTAMPTZ = 1184, INTERVAL = 1186, JSON_OID = 114, JSONB = 3802, UNKNOWN = 705, INET = 869, RECORD = 2249;
 const INTEGERS = new Set([INT2, INT4, INT8]);
 const FLOATS = new Set([FLOAT4, FLOAT8]);
-/** the fields of a time that grow with it, ±Infinity of an infinite one (Postgres 14+); the rest are NULL of it */
-const MONOTONIC = new Set(["year", "years", "decade", "decades", "century", "centuries", "millennium", "millennia", "isoyear", "epoch", "julian"]);
-/** an interval field's numeric scale: a second's is 6, a millisecond's 3, an epoch's 6 */
-const INTERVAL_SCALE: Record<string, string> = { second: "6", seconds: "6", millisecond: "3", milliseconds: "3", epoch: "6" };
+/** the fields of a time that grow with it, ±Infinity of an infinite one (Postgres 14+); the rest are NULL of it. Each
+ *  unit by its one name: every spelling is read into it first (src/duck/units.ts) */
+const MONOTONIC: ReadonlySet<string> = new Set<Unit>(["year", "decade", "century", "millennium", "isoyear", "epoch", "julian"]);
+/** extract's numeric scale of a unit: a second's is 6, a millisecond's 3, an epoch's 6, the rest whole */
+const INTERVAL_SCALE: Readonly<Record<string, string>> = { second: "6", milliseconds: "3", epoch: "6" } satisfies Partial<Record<Unit, string>>;
+/** the units of a time of day, which date_part of a date reads at midnight (0) */
+const TIME_OF_DAY: ReadonlySet<string> = new Set<Unit>(["microseconds", "milliseconds", "second", "minute", "hour"]);
 const NUMBER_TYPES = new Set([INT2, INT4, INT8, FLOAT4, FLOAT8, NUMERIC]);
 /** an array type's element (the numbers', where an IN list's element type decides a comparison) */
 const NUMBER_ELEMENT: Record<number, number> = { 1005: INT2, 1007: INT4, 1016: INT8, 1021: FLOAT4, 1022: FLOAT8, 1231: NUMERIC };
@@ -4622,9 +4626,10 @@ class Rewriter {
         // (extract's numeric: a second and an epoch to the microsecond, milliseconds to three places, the rest whole; a
         // date's every part whole, as the rewrite writes them, `extract`)
         if (lastName(b.funcname) === "extract" && args.length === 2) {
-          const field = (constString(args[0]) ?? "").toLowerCase();
-          if (field === "") return null;
-          return this.typeOf(args[1]!) === DATE ? 0 : Number(INTERVAL_SCALE[field] ?? "0");
+          const field = constString(args[0]);
+          const unit = field === null ? null : readUnit(field).unit;
+          if (unit === null) return null;
+          return this.typeOf(args[1]!) === DATE ? 0 : Number(INTERVAL_SCALE[unit] ?? "0");
         }
         // (latest, Mason's, answers one row's value: its scale is its argument's)
         // (any_value and first, the rewrite's read of a column per group, are one row's value too)
@@ -5975,6 +5980,16 @@ class Rewriter {
       this.original.add(bodyOf((b.agg_order as AstNode[])[0]!));
     }
     if (b.agg_within_group === true) return this.withinGroup(name, b);
+    // A DATE AND TIME UNIT, READ ONCE (src/duck/units.ts, issue 1167): every spelling Postgres takes (`seconds`, `secs`,
+    // `s`) is written as its unit's one name (`second`) before any rule below reads it, and the engine is sent that name.
+    // A unit the type does not have, or a spelling Postgres does not know, is refused in Postgres's words. Only a
+    // constant unit: one a row holds is the engine's, as before
+    if ((name === "extract" || name === "date_part" || name === "date_trunc") && args.length >= 2 && (t?.oid ?? 0) < FIRST_USER_OID) {
+      const text = constString(args[0]);
+      const read = text === null ? null : callUnit(name, text, argType(1));
+      if (read !== null && "code" in read) throw new Unrewritable(read.message, "", { postgres: read.code });
+      if (read !== null) args[0] = strConst(read.unit);
+    }
     switch (name) {
       case "every": b.funcname = [S("bool_and")]; return null;
       case "upper": case "lower": {
@@ -6031,10 +6046,10 @@ class Rewriter {
         }
         if (args.length !== 2) return null;
         {
-          const unit = (constString(args[0]) ?? "").toLowerCase();
+          // (the unit's one name, or "" where a row holds it: read at the entrance above)
+          const unit = constString(args[0]) ?? "";
           const own = this.typeOf(args[1]!);
           if (own === TIME) throw new Unrewritable("date_trunc() of a time is not supported by Mason", "date_trunc a timestamp, or extract the parts", "time-date-trunc");
-          if (argType(1) === INTERVAL && unit === "week") throw new Unrewritable(`unit "week" not supported for type interval`, "", { postgres: "0A000" });
           const x = argType(1) === TIMESTAMPTZ && own === DATE ? cast(args[1]!, ["timestamptz"]) : args[1]!;
           const wall = (v: AstNode): AstNode | null => (unit === "century" || unit === "millennium" || unit === "decade") && argType(1) !== INTERVAL
             ? this.truncWall(args[0]!, v, argType(1) === TIMESTAMPTZ ? TIMESTAMPTZ : TIMESTAMP)
@@ -6565,10 +6580,11 @@ class Rewriter {
 
   /** EXTRACT, as the exact numeric Postgres returns: `epoch` and `second` with their fraction, the rest whole */
   private extract(args: AstNode[]): AstNode | null {
-    const field = (constString(args[0]) ?? "").toLowerCase();
+    // the unit's one name, read and checked against the type at the call's entrance (`funcCall`, src/duck/units.ts);
+    // "" where a row holds it
+    const field = constString(args[0]) ?? "";
     const x = args[1]!;
     const type = this.typeOf(x);
-    this.unitSupported(field, type);
     // an interval's parts as Postgres computes them (src/duck/functions.ts intervalPart)
     if (type === INTERVAL) {
       const scale = INTERVAL_SCALE[field];
@@ -6582,14 +6598,6 @@ class Rewriter {
       return caseWhen([[not(fn("isfinite", [x])), fn("error", [strConst(`mason: extract(${field} …) of an infinite date or timestamp is not supported by Mason (Mason gap infinite-extract)`)])]], inner);
     }
     return this.extractFinite(field, x, type);
-  }
-
-  /** Postgres refuses a unit a type does not have (at run time, so its analysis does not): its words, its SQLSTATE */
-  private unitSupported(field: string, type: number | null): void {
-    const name = type === DATE ? "date" : type === TIMESTAMP ? "timestamp without time zone" : type === TIME ? "time without time zone" : null;
-    const refused = type === DATE ? ["hour", "minute", "second", "milliseconds", "microseconds", "timezone", "timezone_hour", "timezone_minute", "timezone_m"]
-      : type === TIMESTAMP || type === TIME ? ["timezone", "timezone_hour", "timezone_minute"] : [];
-    if (name !== null && refused.includes(field)) throw new Unrewritable(`unit "${field}" not supported for type ${name}`, "", { postgres: "0A000" });
   }
 
   private extractFinite(field: string, x: AstNode, type: number | null): AstNode | null {
@@ -6607,10 +6615,13 @@ class Rewriter {
 
   /** date_part: Postgres's double precision, a second with its fraction; ±Infinity of an infinite time */
   private datePart(args: AstNode[]): AstNode | null {
-    const field = (constString(args[0]) ?? "").toLowerCase();
+    // the unit's one name, read at the call's entrance (`funcCall`, src/duck/units.ts); "" where a row holds it
+    const field = constString(args[0]) ?? "";
     const x = args[1]!;
     const type = this.typeOf(x);
-    this.unitSupported(field, type);
+    // date_part of a date reads it as a timestamp at midnight (Postgres's `date_part($1, $2::timestamp)`): a part of
+    // the time of day is 0, and NULL of an infinite date, as of any infinite time
+    if (type === DATE && TIME_OF_DAY.has(field)) return caseWhen([[fn("isfinite", [x]), cast(intConst(0), ["double"])]], null);
     if (type === INTERVAL) return cast(fn("__mason_interval_part", [strConst(field), x]), ["double"]);
     if ((type === DATE || type === TIMESTAMP || type === TIMESTAMPTZ) && MONOTONIC.has(field)) {
       const inner = this.datePartFinite(field, this.clone(x)) ?? fn("date_part", [strConst(field), this.clone(x)]);
