@@ -54,6 +54,7 @@ import { SCALE_PREFIX } from "./scale-column.ts";
 import { unnumberedSql } from "./reference-keys.ts";
 import { BOM_PROBE, keepLeadingBom } from "./text.ts";
 import { Admission, heavyRowsFor, heavyTurns, keptRows } from "./admission.ts";
+import type { Tally } from "./tally.ts";
 
 export const MASON_SCHEMA = "_mason";
 
@@ -443,6 +444,9 @@ export class DuckStore {
 
   /** called once if the engine's thread dies while the run uses it (src/duck/executor.ts): the run exits with the reason */
   onCrash(f: (reason: string) => void): void { this.executor.onCrash(f); }
+  /** a slot counting the rows of one read as they arrive (src/duck/tally.ts: its `filter` in the read's WHERE), or null
+   *  when every slot is taken */
+  tally(): Tally | null { return this.executor.tallies.take(); }
   /** how many vectors each Mason function was called with so far, on the engine's thread (a test's, a measurement's) */
   functionCalls(): Promise<Map<string, number>> { return this.executor.functionCalls(); }
   /** how many rows each Mason function was handed so far, on the engine's thread (a plan's cost in calls) */

@@ -25,6 +25,7 @@ import { toCharNumber, toCharTime } from "./to-char.ts";
 import { atTimeZoneOf } from "../lib/timezone.ts";
 import { gapMark } from "./gaps.ts";
 import { beat, cancelTable, isCancelled, slotOf } from "./cancel.ts";
+import { addRows, tallyTable, TALLY_FUNCTION } from "./tally.ts";
 import type { CaseMapping } from "./collation.ts";
 import { arrayQuotes, recordQuotes } from "./text.ts";
 
@@ -946,9 +947,33 @@ function registerTurn(conn: DuckDBConnection): void {
   conn.registerScalarFunction(turn);
 }
 
+/** the tally table the counting reads add to: the executor's, shared with the sync (`useTallyTable`), else one of this thread's own */
+let tallies: BigInt64Array = tallyTable();
+export function useTallyTable(t: BigInt64Array): void { tallies = t; }
+
+/**
+ * THE ROWS OF A READ, COUNTED AS THEY ARRIVE (src/duck/tally.ts, issue 1173): `__mason_tally(<slot>)` is a condition
+ * every row passes, and each vector it is handed adds its row count to the slot, which the sync reads while the
+ * statement runs. Volatile, so DuckDB neither folds its constant argument nor moves it; no row's value is read (the
+ * bindings' own callback, as the turn's: one constant TRUE referenced, never a row written).
+ */
+function registerTally(conn: DuckDBConnection): void {
+  const tally = DuckDBScalarFunction.create({ name: TALLY_FUNCTION, returnType: BOOLEAN, parameterTypes: [INTEGER], specialHandling: true, volatile: true, mainFunction: () => undefined });
+  const yes = duckdb.create_bool(true);
+  duckdb.scalar_function_set_function(tally.scalar_function, (_info, input, output) => {
+    FUNCTION_CALLS.set(TALLY_FUNCTION, (FUNCTION_CALLS.get(TALLY_FUNCTION) ?? 0) + 1);
+    beat(cancels);
+    const chunk = new DuckDBDataChunk(input);
+    if (chunk.rowCount > 0) addRows(tallies, Number(chunk.getColumnVector(0).getItem(0)), chunk.rowCount);
+    duckdb.vector_reference_value(output, yes);
+  });
+  conn.registerScalarFunction(tally);
+}
+
 /** Registers the scalar functions on the instance (once: every connection of it sees them). */
 export function registerFunctions(conn: DuckDBConnection): void {
   registerTurn(conn);
+  registerTally(conn);
   for (const kind of Object.keys(PG_KINDS) as PgKind[]) viaPostgres(conn, kind);
   scalar(conn, "__mason_case", [VARCHAR, BOOLEAN, VARCHAR], VARCHAR, ([s, up, mode]) => pgCase(String(s), up === true, String(mode) as CaseMapping));
   scalar(conn, "__mason_initcap", [VARCHAR, VARCHAR], VARCHAR, ([s, mode]) => initcap(String(s), String(mode) as CaseMapping));

@@ -29,6 +29,15 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **A sync asked by hand showed a full bar at 100% for as long as it ran.** After Sync now or `mason sync`, the Tables
+  page said Syncing beside the table's bar from its last sync, full, with nothing moving, for the minutes a big table
+  takes. Now the page and `mason status` say how far that sync is: the changed rows read so far, counted as they
+  arrive, and the time since it began; then writing them, counting the table's rows on the database, and, when rows
+  were deleted there, how many of the table's keys are read to find them. A bar is shown only against a total Mason
+  knows: the keys, against the row count the sync already reads. The changed rows have no total, so there is no bar
+  while they are read. `mason status --json` and `/api/state` carry it as `tables[].syncProgress`. Nothing more is
+  asked of your database for it.
+
 - **A date or time unit could answer differently under another of its spellings.** Postgres reads a unit by any of
   its spellings. For example, `second`, `seconds`, `sec`, `secs` and `s` are one unit. Mason now reads every spelling
   Postgres reads, in `date_part()`, `extract()` and `date_trunc()`, and answers as for the unit's usual name. These

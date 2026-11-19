@@ -495,11 +495,23 @@ test("POST /api/sync answers as the sync starts, and /api/state follows it to it
     assert.deepEqual(queued.body.failure, { code: "busy", message: queued.body.error, fix: "Mason never starts a second sync beside it.", next: [] }, "the same way out as a sync by hand's");
     queuedNow.clear();
     assert.deepEqual(asked, [["public.orders"]], "one read, however many asks");
+    // HOW FAR IT IS (issue 1173), beside it on the table: its poll not begun, its turn; then its changed rows read so far,
+    // as the sync counts them, with no share (no total is known) — mason status and the page render this, never 100%
+    const progressOf = async (): Promise<Record<string, unknown> | undefined> =>
+      ((await call("GET", "/api/state")).body.tables as Array<{ table: string; syncProgress?: Record<string, unknown> }>).find((t) => t.table === "public.orders")!.syncProgress;
+    const waiting = await progressOf();
+    assert.deepEqual([waiting?.step, waiting?.startedAt, waiting?.changedRows, waiting?.share], ["waiting", sync.startedAt, null, null], JSON.stringify(waiting));
+    copies = [{ source: "public.orders", phase: "copied", rows: 3, bytes: 1, seconds: 1, copiedAt: "2026-10-24T10:00:00.000Z", error: null,
+      polling: { startedAt: new Date(Date.parse(sync.startedAt) + 5).toISOString(), step: "reading", changedRows: 41_000, keysRead: null, keysTotal: null, pieces: null } } as CopyState];
+    const reading = await progressOf();
+    assert.deepEqual([reading?.step, reading?.changedRows, reading?.share], ["reading", 41_000, null], JSON.stringify(reading));
+    copies = [];
     end();
     await new Promise((r) => setTimeout(r, 50));
     const done = await byHand("public.orders") as { endedAt: string };
     assert.deepEqual(done, { id: sync.id, tables: ["public.orders"], state: "synced", startedAt: sync.startedAt, endedAt: done.endedAt,
       answer: { at: "2026-10-24T10:05:00.000Z", tables: [{ table: "public.orders", added: 1, updated: 1, deleted: 1, rows: 3, ms: 40 }] } }, "then what it did");
+    assert.equal(await progressOf(), undefined, "and no progress once it ended");
     assert.ok(Date.parse(done.endedAt) >= Date.parse(sync.startedAt));
     // A SYNC THAT FAILS: its reason on the state, the run's log says it once; one refused once the pass ahead ended keeps its code
     pollGate = null;

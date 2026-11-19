@@ -13,14 +13,15 @@
 import { parentPort, workerData, type TransferListItem } from "node:worker_threads";
 import type { DuckDBConnection, DuckDBInstance, DuckDBValue } from "@duckdb/node-api";
 import { openDuck, SessionRunner } from "./store.ts";
-import { FUNCTION_CALLS, FUNCTION_ROWS, registerLibcOrder, useCancelTable } from "./functions.ts";
+import { FUNCTION_CALLS, FUNCTION_ROWS, registerLibcOrder, useCancelTable, useTallyTable } from "./functions.ts";
 import { stopPgEval } from "./pg-eval.ts";
 import type { DuckAnswer, DuckSession } from "../api/postgres/server.ts";
 import { StatementError } from "./statement.ts";
 import { invalidationOf, STOPPING, wireError, type Reply } from "./executor.ts";
 
-const { cancels } = workerData as { cancels: Int32Array };
+const { cancels, tallies } = workerData as { cancels: Int32Array; tallies: BigInt64Array };
 useCancelTable(cancels);
+useTallyTable(tallies);
 const port = parentPort!;
 
 let instance: DuckDBInstance | null = null;
