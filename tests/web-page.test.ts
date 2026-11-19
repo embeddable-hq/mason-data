@@ -1532,6 +1532,19 @@ function fakeRun(): { fetch: (p: string, init?: { method?: string; body?: string
   };
 }
 
+test("the header box (renderWhere): MASON_UI_TITLE_FILE's label, escaped as text; without one the database's name alone, never its source's (issue 1181)", () => {
+  const where = fn<[unknown], string>("renderWhere");
+  const source = { database: "shop", name: "billing" };
+  assert.equal(where({ source }), "shop", "no label: the database alone, the sources file's name not said");
+  assert.equal(where({ source: { database: "shop", name: "shop" } }), "shop");
+  assert.equal(where({ source, pageTitle: { label: null, problem: { code: "missing", message: "the file does not exist" } } }), "shop", "a file that gave no label: as without it");
+  assert.equal(where({ source, pageTitle: { label: "", problem: null } }), "shop");
+  assert.equal(where({ source, pageTitle: { label: "Production analytics (EU)", problem: null } }), "Production analytics (EU)");
+  assert.equal(where({ source, pageTitle: { label: `<img src=x onerror="alert('x')"> & co`, problem: null } }),
+    "&lt;img src=x onerror=&quot;alert(&#39;x&#39;)&quot;&gt; &amp; co", "markup and quotes are text, never HTML");
+  assert.equal(where({ source: { database: "<b>db</b>", name: null } }), "&lt;b&gt;db&lt;/b&gt;");
+});
+
 test("the app: a poll writes the shown page and when, reading only its endpoints; a poll that fails keeps what it knew and says what to do", async () => {
   const run = fakeRun();
   let clock = new Date(2026, 9, 27, 14, 3, 5).getTime();

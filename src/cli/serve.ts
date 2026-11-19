@@ -51,6 +51,7 @@ import { NAV_LINKS_MAX, navLines, navOf, uiNavSetting } from "./ui-nav.ts";
 import { UI_OVERVIEW_CARD_SETTING, overviewCardOf, uiOverviewCardSetting } from "./ui-host-view.ts";
 import { DEPLOY_DOCS_DEFAULT, UI_DEPLOY_DOCS_URL_SETTING, uiDeployDocsSetting } from "./ui-deploy-docs.ts";
 import { ICON_BYTES_MAX, UI_ICON_SETTING, iconOf, uiIconSetting } from "./ui-icon.ts";
+import { TITLE_BYTES_MAX, TITLE_CHARS_MAX, uiTitleFileSetting } from "./ui-title.ts";
 import { pgPublicUrlSetting, PUBLIC_SSLMODES } from "./pg-public-url.ts";
 import { changesRetiredText, pollMsRetiredText, type SourcesTop } from "../lib/table-sync.ts";
 import { historyDaysSetting, historyDaysWrongText } from "../duck/history.ts";
@@ -162,7 +163,14 @@ export const SERVE: CommandSpec = {
                             data:image/png;base64,… or data:image/svg+xml;base64,…, the image at most ${ICON_BYTES_MAX}
                             bytes; it is inline, so the browser makes no request for it; any other value is refused
                             (default unset: no icon)
-    MASON_MCP_URL           an MCP endpoint for a hosted agent (claude.ai, ChatGPT, a team's agent platform): mason
+    MASON_UI_TITLE_FILE     a file whose first line is the label in the web page's header box, in place of the
+                            database's name: Mason reads it again each time the page loads, so an edit shows with no
+                            restart. Every viewer of the page sees it. It is shown as plain text: Mason reads at most
+                            the first ${TITLE_BYTES_MAX} bytes, takes the first line, makes each control character a space,
+                            drops invisible ones, and cuts it to ${TITLE_CHARS_MAX} characters. A file that is missing, cannot
+                            be read, is not UTF-8 or has an empty first line leaves the box showing the database's
+                            name, and mason status says why (default unset: the database's name)
+    MASON_MCP_URL          an MCP endpoint for a hosted agent (claude.ai, ChatGPT, a team's agent platform): mason
                             mcp's tools over MCP's Streamable HTTP (revisions 2025-11-25 and 2026-07-28), at
                             ${MCP_PATH} on MASON_HEALTH_PORT. This is its PUBLIC address, as a client reaches it
                             through the relay in front (https://mason.example.com/mcp): the resource its metadata
@@ -249,8 +257,9 @@ export interface ServeSettings {
   health: { host: string; port: number };
   /** the port of the page and the commands; `named`: MASON_UI_PORT said it, so it is that port or a refusal; `socket`:
    *  the Unix socket MASON_UI_SOCKET names, absolute, the page served there too (src/cli/ui-socket.ts), or null;
-   *  `runFile`: the file MASON_UI_RUN_FILE names, absolute, the port and the token written there (src/cli/ui-run-file.ts), or null */
-  ui: { port: number; named: boolean; socket: string | null; runFile: string | null };
+   *  `runFile`: the file MASON_UI_RUN_FILE names, absolute, the port and the token written there (src/cli/ui-run-file.ts), or null;
+   *  `titleFile`: the file MASON_UI_TITLE_FILE names, absolute, the header's label read from it (src/cli/ui-title.ts), or null */
+  ui: { port: number; named: boolean; socket: string | null; runFile: string | null; titleFile: string | null };
   /** the MCP endpoint (src/cli/mcp-oauth.ts), or null when none of its settings is set */
   mcp: McpSettings | null;
 }
@@ -334,6 +343,9 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
   // the page's icon (src/cli/ui-icon.ts): a data: URL of a small PNG or SVG in base64, else refused here
   const icon = uiIconSetting(env);
   if (icon !== null && typeof icon !== "string") wrong.push(icon.problem);
+  // the header's label (src/cli/ui-title.ts): a file's path, never read here (it may come later); a wrong name refused
+  const titleFile = uiTitleFileSetting(env, cwd);
+  if (titleFile !== null && typeof titleFile !== "string") wrong.push(titleFile.problem);
   // the address a client reaches (src/cli/pg-public-url.ts): its one reading, refused here with the rest
   const publicUrl = pgPublicUrlSetting(env);
   if (publicUrl !== null && "problem" in publicUrl) wrong.push(publicUrl.problem);
@@ -351,7 +363,8 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
     name, apiKey, selfSignedTls: selfSigned === "1",
     project, data,
     health: { host: env.MASON_HEALTH_HOST || "0.0.0.0", port },
-    ui: { port: uiPort, named: !!env.MASON_UI_PORT, socket: typeof socket === "string" ? socket : null, runFile: typeof runFile === "string" ? runFile : null },
+    ui: { port: uiPort, named: !!env.MASON_UI_PORT, socket: typeof socket === "string" ? socket : null, runFile: typeof runFile === "string" ? runFile : null,
+      titleFile: typeof titleFile === "string" ? titleFile : null },
     mcp: mcp !== null && !("problems" in mcp) ? mcp : null,
   };
 }
@@ -718,6 +731,7 @@ export async function serve(argv: string[]): Promise<number> {
         stopping: () => { state = { phase: "stopping" }; page?.close(); runFile?.remove(); void mcp?.close(); },
         failed: () => { state = { phase: "failed" }; engineStopped = true; page?.close(); runFile?.remove(); void mcp?.close(); },
         ...(s.mcp !== null ? { mcp: { url: s.mcp.url.href, issuer: s.mcp.issuer } } : {}),
+        ...(s.ui.titleFile !== null ? { titleFile: s.ui.titleFile } : {}),
         ...(page !== null ? { page: page.attach, socket: page.file } : {}) } });
   } finally {
     // removed whatever ended the run: a stop, a crash of the engine's thread, or a start that failed

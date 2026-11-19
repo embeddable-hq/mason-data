@@ -290,9 +290,15 @@ export function renderAccount(account) {
 /** The line over the banner's Failure while the page shows what it read before (`app.stale()`): as of when, and why. */
 const staleNote = (stale, said) => stale === null || said ? "" : `<p class="stale-note">${esc(staleText(stale.at, stale.failure))} What this page shows is from then.</p>`;
 
-/** The heading's line: the database the run copies, and its sources file's name when that is another. */
-function renderWhere(s) {
-  return `${esc(s.source.database)}${s.source.name && s.source.name !== s.source.database ? ` · source ${esc(s.source.name)}` : ""}`;
+/**
+ * The header box's line: the operator's label (`/api/state` `pageTitle.label`: mason serve's MASON_UI_TITLE_FILE, its
+ * first line, cleaned by the run, src/cli/ui-title.ts), else the database's name alone. Escaped: the label is text,
+ * never HTML. The sources file's name is not said here (the box is too narrow to show it: the owner, issue 1181); the
+ * Overview's facts and mason status say it.
+ */
+export function renderWhere(s) {
+  const label = s.pageTitle?.label;
+  return typeof label === "string" && label !== "" ? esc(label) : esc(s.source.database);
 }
 
 /**

@@ -39,6 +39,7 @@ import { navOf, uiNavSetting } from "./ui-nav.ts";
 import { overviewCardOf, uiOverviewCardSetting } from "./ui-host-view.ts";
 import { DEPLOY_DOCS_DEFAULT, deployDocsOf, uiDeployDocsSetting } from "./ui-deploy-docs.ts";
 import { iconOf, uiIconSetting } from "./ui-icon.ts";
+import { TitleFile } from "./ui-title.ts";
 import { createRunServer, listenOnLoopback, metricsFacts, usageFacts, type RunContext } from "./run-server.ts";
 import { UiErrors } from "./ui-errors.ts";
 import type { RunMetrics } from "./metrics.ts";
@@ -121,6 +122,8 @@ export interface ServeHooks {
   socket?: string;
   /** the MCP endpoint's public address and issuer (src/cli/mcp-http.ts): `/api/state` `mcp` */
   mcp?: { url: string; issuer: string };
+  /** the file the page's header label is read from (MASON_UI_TITLE_FILE, src/cli/ui-title.ts), absolute */
+  titleFile?: string;
 }
 
 /** a line to the run's terminal, which a full disk never ends (src/cli/run-output.ts), a write under .mason/ that
@@ -797,6 +800,10 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   });
   const setupPort = o.exactPort === true ? o.port : await freePort(o.port, chosen);
   const token = newToken();
+  // MASON_UI_TITLE_FILE (src/cli/ui-title.ts): read once now, so a problem is in the log from the start; again as the
+  // page loads. A read never throws: what it found is said by mason status
+  const pageTitle = o.serve?.titleFile !== undefined ? new TitleFile(o.serve.titleFile, (l) => logLine(`[ui] ${l}`)) : null;
+  if (pageTitle !== null) void pageTitle.read();
   const runCtx: RunContext = {
     source, facts: () => catalog.facts(), freshFacts: async () => { await catalog.fresh({ waitMs: STATE_WAIT_MS }); }, factsNow: (carried) => actRead(catalog, carried, source.database), warnings: runWarnings, textOrder,
     // the slot and publication while a table's sync is replication (the run streams), as the sync says it now
@@ -824,6 +831,9 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     pageCard: o.serve !== undefined ? overviewCardOf(uiOverviewCardSetting(process.env)) : null,
     // MASON_UI_ICON: a server's page has the host's icon in its tab (mason start refuses it above)
     pageIcon: o.serve !== undefined ? iconOf(uiIconSetting(process.env)) : null,
+    // MASON_UI_TITLE_FILE: a server's header box shows the file's first line, read again as the page loads (mason start
+    // refuses it above)
+    pageTitle,
     // MASON_UI_SOCKET: the page on a Unix socket too (src/cli/ui-socket.ts), or null
     pageSocket: o.serve?.socket ?? null,
     mcp: o.serve?.mcp ?? null,

@@ -16,6 +16,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { asFailure, CommandFailed, endText, errorJson, failed, failureCode, jsonText, listFlag, nextBlock, noArguments, parseCommand, reportText, withEnd, type CommandSpec, type Failure, type NextStep, type Problem } from "./command.ts";
 import { err as styleErr, out as styleOut, stepRenderer, wrap, type Style } from "./style.ts";
+import { titleRow, type PageTitle } from "./ui-title.ts";
 import { alive, endRun, END_GRACE_MS, notAnswering, runState, theRun, type DevRun } from "./runs.ts";
 import { version } from "./version.ts";
 import { restartsFact, signalSupervisor, stopSupervisor, supervisorGone, type RestartsFact } from "./supervise.ts";
@@ -193,6 +194,10 @@ export interface RunState {
   /** the Unix socket the page is served on too (mason serve with MASON_UI_SOCKET), or null: src/cli/run-server.ts
    *  runState; a run from before it has none */
   pageSocket?: string | null;
+  /** the web page's header label (mason serve with MASON_UI_TITLE_FILE, src/cli/ui-title.ts): the file's first line as
+   *  last read, or null and why (`problem.code`: missing, not_a_file, no_permission, not_utf8, empty, unreadable).
+   *  Absent when the setting is unset, and from a run from before it */
+  pageTitle?: PageTitle;
   /** mason serve's MCP endpoint (MASON_MCP_URL, src/cli/mcp-http.ts): its public address, the authorization server and
    *  — or null when it is off: src/cli/run-server.ts runState; a run from before it has none */
   mcp?: { url: string; issuer: string } | null;
@@ -610,7 +615,10 @@ const STATUS_USAGE = `usage: mason status [--json]
     the page's sidebar, mason serve with MASON_UI_ACCOUNT — or null), pageDeployDocs (the URL the page's Tables page
     links to for changing a deployed project: mason serve's MASON_UI_DEPLOY_DOCS_URL, else the README's section), pageCard (the path, relative to
     the page's address, its Overview reads the host's card from: mason serve with MASON_UI_OVERVIEW_CARD — or null), pageSocket (the Unix socket the
-    page is served on too: mason serve with MASON_UI_SOCKET — or null), mcp ({ url, issuer }: mason serve's MCP endpoint
+    page is served on too: mason serve with MASON_UI_SOCKET — or null), pageTitle (only with mason serve's
+    MASON_UI_TITLE_FILE: { label, problem }, label the file's first line the page's header box shows, as last read,
+    or null with problem: { code (missing, not_a_file, no_permission, not_utf8, empty, unreadable), message }),
+    mcp ({ url, issuer }: mason serve's MCP endpoint
     for a hosted agent, its public address (MASON_MCP_URL) and its authorization server (MASON_MCP_ISSUER) — or null
     when it is off), addressPresets ([{ id, label, name, ranges }]: the address ranges a hosted agent's company publishes for its
     connectors (label: the product that calls from them, name: its short name), shipped with this release, which the web page's Connects from offers), next }.
@@ -661,7 +669,7 @@ export const STATUS: CommandSpec & { needs: "project" } = {
   usage: STATUS_USAGE,
   options: { json: { type: "boolean" } },
   json: ["running", "pid", "postgres", "source", "warnings", "folder", "project", "tables", "totals", "engine", "disk", "sessions", "stream", "jsonPaths", "generatedTables", "queries", "slowQueries", "refusedQueries",
-    "refusedTotal", "unsupported", "recentErrors", "readiness", "ui", "served", "sourcesReadOnly", "sourcesReadOnlyKind", "pageReadOnly", "pageReadOnlyAllow", "pageBack", "pageNav", "pageAccount", "pageDeployDocs", "pageCard", "pageSocket", "mcp", "addressPresets",
+    "refusedTotal", "unsupported", "recentErrors", "readiness", "ui", "served", "sourcesReadOnly", "sourcesReadOnlyKind", "pageReadOnly", "pageReadOnlyAllow", "pageBack", "pageNav", "pageAccount", "pageDeployDocs", "pageCard", "pageSocket", "pageTitle", "mcp", "addressPresets",
     "users", "roles", "share", "shareEnded", "lastRun", "lastStop", "hung", "next"],
 };
 
@@ -741,6 +749,8 @@ export async function status(argv: string[]): Promise<number> {
       // the web page (mason ui), without its one-time token: mason ui prints the URL that carries it, and opens it
       ...(s.ui === true ? [["Web UI", (s.served === true ? "from your machine: mason ui --ssh <user@server>" : `${run.control.url}/  (mason ui opens it)`) +
         (typeof s.pageSocket === "string" ? `; on this machine, the Unix socket ${s.pageSocket} too` : "")] as [string, string]] : []),
+      // the page's header label (MASON_UI_TITLE_FILE, src/cli/ui-title.ts): what it shows, or why it shows the database
+      ...(s.pageTitle ? [["Web UI label", s.pageTitle.label !== null ? titleRow(s.pageTitle) : st.red(titleRow(s.pageTitle))] as [string, string]] : []),
       // mason serve's MCP endpoint for a hosted agent (src/cli/mcp-http.ts): its address and who signs a client in
       ...(s.mcp ? [["MCP", `${s.mcp.url}  (for a hosted agent, signed in by ${s.mcp.issuer})`] as [string, string]] : []),
       // the roles file as the listener reads it now (mason user add --role): its roles, or what is wrong with it

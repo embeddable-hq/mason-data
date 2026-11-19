@@ -64,6 +64,7 @@ import { eventLimit, requestFilter, requestFilterText, SLOW_MS, timeOf } from ".
 import type { PgApiServer } from "../api/postgres/server.ts";
 import { tunnelReport, type RunShares } from "./share-run.ts";
 import { pageWithIcon } from "./ui-icon.ts";
+import type { TitleFile } from "./ui-title.ts";
 import { UI_ERROR_BODY_MAX, uiErrorReport, type UiErrors } from "./ui-errors.ts";
 import type { PageShares } from "./page-share.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
@@ -130,6 +131,10 @@ export interface RunContext {
   /** MASON_UI_ICON (src/cli/ui-icon.ts): the page's icon, a data: URL validated at the start, or null. Written into the
    *  page's HTML once, when the server starts (`pageWithIcon`) */
   pageIcon?: string | null;
+  /** MASON_UI_TITLE_FILE (src/cli/ui-title.ts): the file the header box's label is read from, read again when the page's
+   *  document is loaded (`GET /`) and when a command asks the whole state (`?columns=1`), never on the page's polls; or
+   *  null, and `/api/state` says no `pageTitle` */
+  pageTitle?: Pick<TitleFile, "read" | "last"> | null;
   /** MASON_UI_SOCKET (src/cli/ui-socket.ts): the Unix socket the page is served on too, or null */
   pageSocket?: string | null;
   /** mason serve's MCP endpoint (src/cli/mcp-http.ts): its public address and issuer, or null when it is off */
@@ -360,6 +365,8 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     pageCard: ctx.pageCard ?? null,
     // the Unix socket the page is served on too (MASON_UI_SOCKET), or null: mason status says it
     pageSocket: ctx.pageSocket ?? null,
+    // the header box's label (MASON_UI_TITLE_FILE, src/cli/ui-title.ts): { label, problem } as last read; absent unset
+    ...(ctx.pageTitle ? { pageTitle: ctx.pageTitle.last() } : {}),
     // mason serve's MCP endpoint (MASON_MCP_URL), or null: mason status and the Users page say it
     mcp: ctx.mcp ?? null,
     // the address ranges hosted agents' companies publish (src/cli/address-presets.ts): the Users page's Connects from
@@ -989,6 +996,8 @@ export function createRunServer(ctx: RunContext): http.Server {
       try {
         const file = method === "GET" ? page.get(url.pathname) : undefined;
         if (file !== undefined) {
+          // the page loads: its header's label is read again (MASON_UI_TITLE_FILE), for the state it asks next
+          if (url.pathname === "/" && ctx.pageTitle) await ctx.pageTitle.read();
           res.writeHead(200, { "Content-Type": file.type, "Content-Length": file.body.length, ...(file.immutable ? { "Cache-Control": IMMUTABLE } : {}) })
             .end(file.body);
         } else if (method === "GET" && url.pathname === "/api/ping") {
@@ -999,7 +1008,10 @@ export function createRunServer(ctx: RunContext): http.Server {
           // ?fresh=1 (mason add, before it checks its tables): the database as it is now, waited for
           const fresh = url.searchParams.get("fresh") === "1";
           if (fresh && !await readNow(ctx, req, res)) return;
-          const body = await state(ctx, url.searchParams.get("columns") === "1", !fresh) as Record<string, unknown>;
+          const columns = url.searchParams.get("columns") === "1";
+          // a command's whole state (mason status) reads the header's label again; the page's lean polls never do
+          if (columns && ctx.pageTitle) await ctx.pageTitle.read();
+          const body = await state(ctx, columns, !fresh) as Record<string, unknown>;
           // ?storage=1 (mason upgrade --check): what the synced data holds of each table, as a start reads it (src/duck/
           // reread.ts). Asked alone, never by the page's poll: it reads the engine's catalog of every synced table
           sendJson(res, 200, url.searchParams.get("storage") === "1" && ctx.duck.storage !== undefined ? { ...body, storage: await ctx.duck.storage() } : body);
