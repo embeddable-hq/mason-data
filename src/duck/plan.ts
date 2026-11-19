@@ -131,7 +131,7 @@ async function numberedLookup(catalog: (bytes: Uint8Array) => Promise<Uint8Array
  *  (src/duck/bucket-column.ts): each such column's hidden bucket column by the catalog's OIDs (Typed.relation), the
  *  listener saying which copies hold one (`BUCKET_KEY` in `userTypes`); null when it reads none */
 async function bucketLookup(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, types: ReadonlyMap<number, ReadonlyArray<{ type: number; relation?: { relid: number; attno: number } }>>,
-  userTypes: ReadonlyMap<string, number>): Promise<BucketLookup | null> {
+  userTypes: ReadonlyMap<string, number>, copies: readonly CopyState[]): Promise<BucketLookup | null> {
   const hidden = new Map<string, string>();
   for (const k of userTypes.keys()) { const b = bucketOf(k); if (b !== null) hidden.set(JSON.stringify([b.schema, b.table, b.column]), b.hidden); }
   if (hidden.size === 0) return null;
@@ -145,7 +145,10 @@ async function bucketLookup(catalog: (bytes: Uint8Array) => Promise<Uint8Array>,
     const name = hidden.get(JSON.stringify([schema, table, column]));
     return name === undefined ? [] : [[`${relid}.${attno}`, name] as const];
   }));
-  return at.size === 0 ? null : { at: (relid, attno) => at.get(`${relid}.${attno}`) ?? null };
+  // each table's rows as the sync counted them (a plan made in UTC reads it: src/duck/rewrite.ts `UTC_BUCKET_ROWS`)
+  const counted = copiedRows(copies, []);
+  const tableRows = new Map(rows.map(([relid, , schema, table]) => [Number(relid), counted(schema!, table!)] as const));
+  return at.size === 0 ? null : { at: (relid, attno) => at.get(`${relid}.${attno}`) ?? null, rows: (relid) => tableRows.get(relid) ?? null };
 }
 
 /** the copies that hold a hidden column of a plain numeric's scale (`SCALED_KEY`) or a timestamptz's bucket
@@ -683,7 +686,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   const numbered = !numbers || outputs || (relations !== undefined && relations.size > 0) ? null : await numberedLookup(catalog, analysis.types, userTypes);
   // the timestamptz columns it reads whose 15-minute buckets their copy holds (src/duck/bucket-column.ts); not a
   // generated table's run, whose stored columns hold none
-  const buckets = outputs ? null : await bucketLookup(catalog, analysis.types, userTypes);
+  const buckets = outputs ? null : await bucketLookup(catalog, analysis.types, userTypes, copies());
   const keyCounts = await distinctKeys(catalog, analysis.tree);
   // WHAT EACH COLLATION OF THE ANALYSIS MEANS (src/duck/collation.ts), resolved before the rewrite reads any: a libc
   // order not read yet is read here, before the plan is made; a collation the source lacks or Mason cannot follow refused

@@ -18,7 +18,8 @@ says why the published run is the cold mode.
 - **Four queries**, sent as written to both (`COLD_STATEMENTS` in `scripts/bench-replica-cold.ts`): a count by status
   over every order, revenue by month and signup year over orders joined to customers, the same revenue in a session
   whose time zone is `Asia/Kathmandu`, and one order by its primary key. None uses `extract(...)`. Kathmandu is 5 hours
-  45 minutes off UTC, so Mason groups its months by a stored 15-minute bucket there, and never in UTC.
+  45 minutes off UTC, so Mason groups its months by a stored 15-minute bucket there. In UTC it does so only over a
+  table of 10 M rows or more.
 - **Three sizes**: 1 M, 10 M and 100 M orders (`--sizes`).
 - **The data** (`COLD_DATA` and `coldDataSql`) is the warm mode's `orders` and `customers` (below), with two changes. The
   primary keys are random UUIDs: `orders.id` is `gen_random_uuid()`, and a customer's id is `md5('customer' || n)::uuid`,

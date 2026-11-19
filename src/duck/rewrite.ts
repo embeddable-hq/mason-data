@@ -6304,12 +6304,15 @@ class Rewriter {
    * SELECT groups by first (src/duck/bucket-group.ts). Null for anything else: its own path, as before.
    */
   private bucketTrunc(unit: string, unitNode: AstNode, x: AstNode, session: () => AstNode): AstNode | null {
-    // planned in UTC, the truncation is already the instant's arithmetic, which costs less than a second GROUP BY (5 M
-    // rows: a month 18 ms against 25). The plan is exact in any zone either way: only its speed reads the zone it is
-    // made in, as the plan cache keeps a plan by its zone
-    if (this.buckets === null || isUtc(this.timeZone) || !BUCKET_UNITS.has(unit) || kindOf(x) !== "ColumnRef") return null;
+    if (this.buckets === null || !BUCKET_UNITS.has(unit) || kindOf(x) !== "ColumnRef") return null;
     const t = this.typed(x);
     if (t === null || t.node !== "VAR" || t.levelsUp !== 0 || t.relation === undefined || t.type !== TIMESTAMPTZ) return null;
+    // PLANNED IN UTC, ONLY OVER A TABLE OF `UTC_BUCKET_ROWS` OR MORE, BY THE SYNC'S COUNT (issue 1174): there the
+    // truncation is already the instant's arithmetic, so the bucket saves less, and the second GROUP BY costs more where
+    // a bucket holds few rows (a month of 1 M rows over two years, 7 ms against 11; of 30 M, 78 against 44). A table not
+    // counted keeps the arithmetic. The plan is exact in any zone either way: only its speed reads the zone and the rows
+    // it is made with, as the plan cache keeps a plan by its zone
+    if (isUtc(this.timeZone) && (this.buckets.rows(t.relation.relid) ?? 0) < UTC_BUCKET_ROWS) return null;
     const hidden = this.buckets.at(t.relation.relid, t.relation.attno);
     const owner = t.column?.owner ?? null;
     if (hidden === null || owner === null) return null;
@@ -8760,8 +8763,15 @@ export interface RewriteOptions {
 }
 
 /** THE HIDDEN BUCKET COLUMN OF A TIMESTAMPTZ (src/duck/bucket-column.ts) a VAR reads, by the catalog's OIDs
- *  (Typed.relation): its name, or null where the copy holds none */
-export interface BucketLookup { at(relid: number, attno: number): string | null }
+ *  (Typed.relation): its name, or null where the copy holds none; and the rows the sync counted in the copy of the table
+ *  (`rows`, by its relid), or null where it counted none */
+export interface BucketLookup { at(relid: number, attno: number): string | null; rows(relid: number): number | null }
+
+/** the rows a table's copy must hold for a plan made in UTC to group a time's unit by its bucket (issue 1174, docs/DESIGN.md
+ *  "A time's 15-minute bucket"). What decides is the rows a bucket holds, which the plan cannot know: the bucket cost
+ *  about as much as the row's arithmetic at 43 rows a bucket (3 M rows over two years) and less from 86 (6 M). 10 M rows
+ *  holds about 45 a bucket over six years of times */
+export const UTC_BUCKET_ROWS = 10_000_000;
 
 /** the units a truncation of a bucketed column is grouped by its bucket for (src/duck/bucket-group.ts): each begins on a
  *  15-minute boundary of UTC in every zone since 1980. A minute or a second does not */

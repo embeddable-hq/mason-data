@@ -110,8 +110,9 @@ paths:
     own transaction (a prepared statement is planned again as it runs), never kept in a plan. It holds because
     every zone has been a multiple of 15 minutes from UTC since 1980, so a bucket never straddles a unit's edge
     (`tests/duck-bucket-zones.test.ts` checks every zone the engine knows). What it is used for is read from speed:
-    - not where the plan is made in UTC (`isUtc` of the session's zone): there the instant's arithmetic costs less than a
-      second GROUP BY. The plan is exact in any zone either way, and the plan cache keeps a plan by its zone;
+    - in UTC (`isUtc` of the zone the plan is made in) only over a table the sync counted at 10 M rows or more
+      (`UTC_BUCKET_ROWS`, issue 1174): below, the instant's arithmetic costs less than a second GROUP BY. The plan is
+      exact in any zone either way, and the plan cache keeps a plan by its zone;
     - one column's bucket a SELECT, the first key's. Grouped by two columns' buckets, the inner groups are pairs, nearly
       a group a row. Every other key, a unit of another column included, is one inner key computed a row, never its
       columns apart.
