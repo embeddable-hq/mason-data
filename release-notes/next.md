@@ -19,8 +19,24 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   - Anything else is worked out after the join, as before. That includes `upper()`, `extract()`, arithmetic on a
     number, and `lower()` under a C or ICU collation. It includes `date_part()` of a year or a longer unit, an epoch,
     a Julian day, a second or a millisecond.
+- **Mason's MCP server now tells a client its icon, a sentence of what it is and its website.** `mason mcp` and
+  `mason serve`'s MCP endpoint send Mason's logo in their `serverInfo`, so a client that shows server icons shows
+  Mason's. A deployment with its own brand sets `MASON_MCP_ICON`, beside `MASON_MCP_URL`: a PNG as a `data:` URL in
+  base64, or an `https://` address on `MASON_MCP_URL`'s own origin. It takes no SVG, which can carry script: give a
+  PNG. Any other value refuses the start. Not every
+  client reads it yet: users report that claude.ai's custom connectors show the favicon of the endpoint's domain
+  instead, which is the site's in front of the endpoint to set.
 
 ## What was wrong and is now right
+
+- **A sync asked by hand showed a full bar at 100% for as long as it ran.** After Sync now or `mason sync`, the Tables
+  page said Syncing beside the table's bar from its last sync, full, with nothing moving, for the minutes a big table
+  takes. Now the page and `mason status` say how far that sync is: the changed rows read so far, counted as they
+  arrive, and the time since it began; then writing them, counting the table's rows on the database, and, when rows
+  were deleted there, how many of the table's keys are read to find them. A bar is shown only against a total Mason
+  knows: the keys, against the row count the sync already reads. The changed rows have no total, so there is no bar
+  while they are read. `mason status --json` and `/api/state` carry it as `tables[].syncProgress`. Nothing more is
+  asked of your database for it.
 
 - **A date or time unit could answer differently under another of its spellings.** Postgres reads a unit by any of
   its spellings. For example, `second`, `seconds`, `sec`, `secs` and `s` are one unit. Mason now reads every spelling

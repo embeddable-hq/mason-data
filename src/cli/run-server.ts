@@ -40,7 +40,7 @@ import { liveColumns, syncChoice, type LiveCheck, type SyncChoice } from "./sync
 import { liveReadinessFailure } from "./replication-mode.ts";
 import { unreplicable } from "./source-check.ts";
 import { errorJson, nextJson, type Failure, type NextStep } from "./command.ts";
-import { phaseCounts, readiness, syncTotals, tableSync, type SyncFacts, type SyncTotals } from "./readiness.ts";
+import { phaseCounts, readiness, syncProgressOf, syncTotals, tableSync, type SyncFacts, type SyncTotals } from "./readiness.ts";
 import { restartsFact, type Restart } from "./supervise.ts";
 import { withRestarts, type SyncEvents } from "../duck/events.ts";
 import { fileStamp, syncedDataBytes, walBytes } from "../duck/file-bytes.ts";
@@ -317,6 +317,9 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
       // its last sync asked by hand in this run (mason sync, the page's Sync now; src/cli/sync-by-hand.ts): syncing,
       // then what it did or why it failed — `POST /api/sync` answers as it starts, and the page follows it here
       ...(byHand !== null ? { syncByHand: byHand } : {}),
+      // HOW FAR THAT SYNC BY HAND IS, while it runs (issue 1173): its rows counted as they arrive, and a share only where a
+      // total is known (src/cli/readiness.ts syncProgressOf) — mason status and the page render it, never the old full bar
+      ...(byHand?.state === "syncing" ? { syncProgress: syncProgressOf(byHand.startedAt, c?.polling, now) } : {}),
       // THE RUN'S OWN SYNC OF IT RUNNING NOW, and since when (issue 1011): `copy` its whole read (a first sync, or read
       // again whole), `catch-up` the one poll after it — the page's Sync events lists it while it runs. A compaction is
       // no sync of the database's rows, and is not said here
