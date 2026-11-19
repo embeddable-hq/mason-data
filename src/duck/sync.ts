@@ -53,6 +53,7 @@
  * Read-only on the source (CLAUDE.md): only SELECTs, through a READ_ONLY attachment.
  */
 import type { DuckStore } from "./store.ts";
+import type { Tally } from "./tally.ts";
 import { syncedDataBytes } from "./file-bytes.ts";
 import { DISK_SHORT, DiskShortError, humanBytes, syncShortWords, type DiskShortage } from "./disk-fit.ts";
 import { DEFAULT_MEMORY_RULE, endedTransaction, freeBytesAt, MASON_SCHEMA, NO_ROLE_SESSION, pgErrorOf, SessionSetup } from "./store.ts";
@@ -316,6 +317,9 @@ export interface CopyState {
   /** while a table's chunks are read: what they have done and are doing at the moment the state is asked
    *  (`copyProgressNow`), so a reader of it moves between two commits; else absent */
   progress?: CopyProgressView;
+  /** its last poll in this run, running or done (`PollProgress`): how far a sync by hand of it is (issue 1173); absent
+   *  before its first poll of the run */
+  polling?: PollProgress;
   /** the copy is in a layout this Mason no longer keeps (`RETIRED_LAYOUT`): it serves as it was until it is copied
    *  again, in heap order */
   retired?: string;
@@ -747,6 +751,53 @@ export interface CopyLive {
  * free space that cannot be read is its error.
  */
 export interface DiskStatus { path: string; freeBytes: number | null; projectedBytes: number | null; error?: string }
+
+/**
+ * A POLL OF A TABLE AT A MOMENT (`CopyState.polling`, issue 1173: a sync by hand of a 17 M-row table showed a full bar
+ * and nothing moving for minutes). A poll is ONE read of the table's CHANGED rows (rows written since its watermark: the
+ * database scans the whole table and sends only those), then their write by key, then the database's count of its rows
+ * beside the synced table's, and — only when the two differ — a read of the database's keys to find the rows it deleted.
+ * Every row is counted on Mason's side as it arrives (src/duck/tally.ts), never by a query of its own on the database:
+ *  - `step`: `starting` (a sync by hand's read begun: the database attached, its columns checked, its snapshot
+ *    taken), `reading` its changed rows, `writing` them by key, `counting` its rows on the database and in the synced
+ *    table, `deleting` (reading the database's keys to find the rows it no longer holds), `done` (its poll committed);
+ *  - `changedRows`: the changed rows read so far (exact once read: the stage's own count); null when uncounted;
+ *  - `keysRead` / `keysTotal`: while `deleting` and after it, the keys read so far, and the database's count of its rows
+ *    the poll already read (the total that read ends at, exact); null before;
+ *  - `pieces`: a large set of changed rows is written a piece at a time after the read commits: how many are written, of
+ *    how many; null otherwise.
+ * There is no total for the changed rows: the database says how many only when it has sent them all.
+ */
+export interface PollProgress {
+  startedAt: string;
+  step: "starting" | "reading" | "writing" | "counting" | "deleting" | "done";
+  changedRows: number | null;
+  keysRead: number | null;
+  keysTotal: number | null;
+  pieces: { written: number; of: number } | null;
+}
+
+/** a poll's progress as it runs (`Sync.polling`): the tallies counting its reads, read at the moment the state is asked */
+interface PollLive {
+  startedAt: string;
+  step: PollProgress["step"];
+  changed: Tally | null;
+  /** the stage's own count once read (exact) */
+  changedRows: number | null;
+  keys: Tally | null;
+  keysTotal: number | null;
+  pieces: { written: number; of: number } | null;
+}
+
+/** a poll's progress at the moment asked (`CopyState.polling`) */
+function pollProgressNow(l: PollLive): PollProgress {
+  return {
+    startedAt: l.startedAt, step: l.step,
+    changedRows: l.changedRows ?? l.changed?.rows() ?? null,
+    keysRead: l.keysTotal === null ? null : l.keys?.rows() ?? null,
+    keysTotal: l.keysTotal, pieces: l.pieces === null ? null : { ...l.pieces },
+  };
+}
 
 /** A COPY'S PROGRESS AT A MOMENT (`CopyState.progress`), for `mason wait` and `mason status` to render */
 export interface CopyProgressView {
@@ -1366,6 +1417,10 @@ export class Sync {
   private readonly removals = new Map<string, number>();
   /** the table the writer's poll reads now (a pass's poll on schedule, a sync by hand): what its removal interrupts */
   private writerPolling: string | null = null;
+  /** each table's last poll in this run, running or done (`PollProgress`, issue 1173): what a sync by hand of it shows */
+  private readonly polling = new Map<string, PollLive>();
+  /** a read went uncounted for want of a free tally slot: said once */
+  private tallyShortSaid = false;
   /** each synced table's space and last compaction (`Compaction`), and the back-off of a compaction that failed */
   private readonly compactions = new Map<string, Compaction>();
   /** THE LOOKUPS BY KEY (src/duck/key-lookup.ts): the tables with a row in its ledger (a side table built or being
@@ -2364,6 +2419,8 @@ export class Sync {
       .map((s) => { const r = this.retired.get(s.source); return r !== undefined ? { ...s, retired: r.layout } : s; })
       // a copy's chunks as they are NOW: the rows the ones in flight have read by now at the measured rate
       .map((s) => { const l = this.copyLive.get(s.source); return s.phase === "copying" && l !== undefined ? { ...s, progress: copyProgressNow(l, Date.now()) } : s; })
+      // its last poll as it is NOW: the rows its reads have passed so far, counted as they arrive (issue 1173)
+      .map((s) => { const p = this.polling.get(s.source); return p === undefined ? s : { ...s, polling: pollProgressNow(p) }; })
       // how it is kept current, and a table the passes leave as copied, from ONE derivation (`keptOf`)
       .map((s) => {
         const t = this.tables.get(s.source);
@@ -2709,12 +2766,19 @@ export class Sync {
     const answered = new Map<string, PolledTable>();
     for (const t of polled) { const p = this.scheduledPolls.get(t.source); if (p !== undefined && p.startedAt >= askedAt) answered.set(t.source, p.found); }
     const toPoll = polled.filter((t) => !answered.has(t.source));
+    // ITS READ BEGINS (issue 1173): what a sync by hand of it says from here until its changed rows arrive — the
+    // database attached, its columns checked, its snapshot taken (`poll`)
+    const starting = (t: AddedTable): void => {
+      this.polling.set(t.source, { startedAt: new Date().toISOString(), step: "starting", changed: null, changedRows: null, keys: null, keysTotal: null, pieces: null });
+    };
     const poll = toPoll.length === 0 ? Promise.resolve([...answered.values()]) : (async (): Promise<PolledTable[]> => {
+      starting(toPoll[0]!);
       await this.onWriter(() => this.attach());
       try {
         // a transaction per table, as the passes poll; a table whose rebuild started since it was asked is refused
         const found: PolledTable[] = [...answered.values()];
         for (const t of toPoll) {
+          if (t !== toPoll[0]) starting(t);
           const f = await this.onWriter(async () => { this.refuseRebuilding(t); return this.writerPoll(t, { strict: true }); });
           for (const x of f) this.polledNow(t, x.ms);
           found.push(...f);
@@ -5171,19 +5235,38 @@ export class Sync {
     // the statement running, for the error of one that fails
     let doing = "reading the source's snapshot";
     const named = (e: unknown): unknown => e instanceof Stopping || e instanceof KeyNotHeld || !(e instanceof Error) ? e : new Error(`${doing}: ${e.message}`, { cause: e });
+    // ITS PROGRESS AS IT RUNS (issue 1173): each table's reads counted as their rows arrive (src/duck/tally.ts), never a
+    // query of their own on the database; a whole sync's side table (`into`) is its whole sync's, said there
+    const lives = new Map<string, PollLive>();
+    const live = (t: AddedTable): PollLive | null => lives.get(t.source) ?? null;
+    const counted = (): Tally | null => {
+      const x = this.store.tally();
+      if (x === null && !this.tallyShortSaid) { this.tallyShortSaid = true; this.log("poll: every slot that counts a read's rows is taken, so a poll's progress goes uncounted (Mason bug: report it)"); }
+      return x;
+    };
+    const step = (t: AddedTable, s: PollLive["step"]): void => { const l = live(t); if (l !== null) l.step = s; };
+    // a poll that failed or stopped leaves no progress behind: its sync by hand says why it failed
+    const unlive = (): void => { for (const [source, l] of lives) if (this.polling.get(source) === l) this.polling.delete(source); };
     // the source's count against DuckDB's, and when they differ the keys DuckDB holds that the source does not deleted
     // (`adds`: the keys a stage still to be written adds to DuckDB's count)
     const reconcile = async (t: AddedTable, target: string, from: string, adds = 0n): Promise<{ rows: number; deleted: number; countMs: number }> => {
       const c0 = Date.now();
       doing = `${t.source}: counting its rows on the source and in the synced table`;
+      step(t, "counting");
       const counts = (await w.runAndReadAll(`SELECT (SELECT count FROM ${pq(`SELECT count(*) AS count FROM ${from}`)}), (SELECT count(*) FROM ${target})`)).getRowsJS()[0] as [bigint, bigint];
       const countMs = Date.now() - c0;
       let deleted = 0;
       if (counts[0] !== counts[1] + adds) {
         doing = `${t.source}: deleting the keys the source no longer holds (its keys anti-joined with the synced table's)`;
         const on = t.key.map((k) => `t.${ident(k)} = k.${ident(k)}`).join(" AND ");
-        const gone = await w.run(`DELETE FROM ${target} WHERE rowid IN (SELECT t.rowid FROM ${target} t ANTI JOIN ${pq(`SELECT ${t.key.map(pgIdent).join(", ")} FROM ${from}`)} k ON ${on})`);
-        deleted = Number(gone.rowsChanged);
+        // the keys counted as they arrive, against the count just read (exact: the same snapshot)
+        const l = live(t), keys = l === null ? null : counted();
+        if (l !== null) { l.step = "deleting"; l.keysTotal = Number(counts[0]); l.keys = keys; }
+        const read = pq(`SELECT ${t.key.map(pgIdent).join(", ")} FROM ${from}`);
+        try {
+          const gone = await w.run(`DELETE FROM ${target} WHERE rowid IN (SELECT t.rowid FROM ${target} t ANTI JOIN ${keys === null ? read : `(SELECT * FROM ${read} WHERE ${keys.filter})`} k ON ${on})`);
+          deleted = Number(gone.rowsChanged);
+        } finally { keys?.release(); }
       }
       return { rows: Number(counts[0]), deleted, countMs };
     };
@@ -5217,9 +5300,20 @@ export class Sync {
           const stage = `temp.main.${ident(`${POLL_STAGE}${pieced.length}`)}`;
           const c0 = Date.now();
           doing = `${t.source}: reading its changed rows from the source into the poll's stage`;
+          // ITS CHANGED ROWS COUNTED AS THEY ARRIVE (issue 1173): a condition every row passes (src/duck/tally.ts)
+          const changed = into === undefined ? counted() : null;
+          if (into === undefined) {
+            const l: PollLive = { startedAt: new Date(c0).toISOString(), step: "reading", changed, changedRows: null, keys: null, keysTotal: null, pieces: null };
+            lives.set(t.source, l);
+            this.polling.set(t.source, l);
+          }
           // its columns named by position: a source column named rowid would hide the stage's own, which a piece reads
-          const staged = Number((await w.run(`CREATE OR REPLACE TEMP TABLE ${ident(`${POLL_STAGE}${pieced.length}`)} AS SELECT * FROM (SELECT ${cols} FROM ` +
-            `${pq(`SELECT ${pgCols} FROM ${from} WHERE ${xmin8Sql(xmax)} >= ${watermark}`)}) AS polled(${t.columns.map((_, i) => `c${i}`).join(", ")})`)).rowsChanged);
+          let staged: number;
+          try {
+            staged = Number((await w.run(`CREATE OR REPLACE TEMP TABLE ${ident(`${POLL_STAGE}${pieced.length}`)} AS SELECT * FROM (SELECT ${cols} FROM ` +
+              `${pq(`SELECT ${pgCols} FROM ${from} WHERE ${xmin8Sql(xmax)} >= ${watermark}`)}${changed === null ? "" : ` WHERE ${changed.filter}`}) AS polled(${t.columns.map((_, i) => `c${i}`).join(", ")})`)).rowsChanged);
+          } finally { changed?.release(); }
+          { const l = live(t); if (l !== null) l.changedRows = staged; }
           // REWRITTEN SINCE THE POLL'S SNAPSHOT (issue 1025): its read, under the lock it still holds, found the new file,
           // whose rows (an ALTER TABLE's, a TRUNCATE's load) the snapshot cannot see, and the count below would then
           // delete every key the synced table holds. Nothing of it is written; its next poll reads every row again
@@ -5242,6 +5336,7 @@ export class Sync {
             continue;
           }
           doing = `${t.source}: writing its ${staged} changed row(s) by key`;
+          step(t, "writing");
           // the rows whose key the table held are UPDATED, the rest ADDED (`PolledTable`), as the delete by key counted them
           const updated = Math.min(staged, await writeStaged(w, t, target, stage, "", into === undefined ? this.kept : null, scaleds.get(t.source), bucketeds.get(t.source),
             into === undefined && this.lookupRows.has(t.source)));
@@ -5267,6 +5362,7 @@ export class Sync {
       catch (r) { this.log(`the poll's ROLLBACK failed too: ${this.errorText(r)}`); }
       // a stage made in the rolled-back transaction went with it
       pieced.length = 0;
+      unlive();
       // a numeric wider than its copy: that table is copied again (wider) at the next pass, the others polled
       // matched against the tables' own names (a name may hold a space)
       const wider = e instanceof Error ? tables.find((t) => widerIn(e, t.source))?.source : undefined;
@@ -5283,6 +5379,8 @@ export class Sync {
     const committed = async (source: string, rows: number, ms: number): Promise<void> => {
       // a side table's: what it was read at, for its swap to carry; the table served is as it was
       if (into !== undefined) { into.done = { snapshot, at: polledAt }; return; }
+      const l = lives.get(source);
+      if (l !== undefined) l.step = "done";
       this.polledAt.set(source, polledAt);
       const st = this.states.get(source)!;
       if (st.rows !== rows || st.error !== null) await this.record({ ...st, rows, error: null }, undefined, w);
@@ -5295,6 +5393,8 @@ export class Sync {
       for (const { t, target, stage, staged, added, deleted, started } of pieced) {
         const p0 = Date.now();
         const n = Math.ceil(staged / POLL_PIECE_ROWS);
+        const l = live(t);
+        if (l !== null) { l.step = "writing"; l.pieces = { written: 0, of: n }; }
         for (let i = 0; i < n; i++) {
           await w.run("BEGIN TRANSACTION");
           try {
@@ -5306,8 +5406,10 @@ export class Sync {
             }
             doing = `${t.source}: committing piece ${i + 1} of ${n}`;
             await w.run("COMMIT");
+            if (l !== null) l.pieces = { written: i + 1, of: n };
           } catch (e) {
             await w.run("ROLLBACK");
+            unlive();
             throw named(e);
           }
         }

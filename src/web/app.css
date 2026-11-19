@@ -664,7 +664,7 @@ td.act > * { vertical-align: middle; }
 table.catalog td.act { background: var(--surface); }
 table.catalog tbody tr:hover > td.act { background: var(--hover); }
 .what-copy.t-unsynced { color: var(--warn); }
-.what-copy.t-copying, .what-copy.t-catching-up, .what-copy.t-waiting { color: var(--muted); }
+.what-copy.t-copying, .what-copy.t-catching-up, .what-copy.t-syncing, .what-copy.t-waiting { color: var(--muted); }
 /* a narrower window (the sidebar beside the page): every table's cells closer, so more fit their card */
 @media (max-width: 1100px) { th, td { padding-left: var(--space-2); padding-right: var(--space-2); } }
 /* a phone, where a list scrolls inside its card: a row's pinned actions on the card's own surface */

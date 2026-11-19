@@ -11,8 +11,14 @@ import { PLAIN } from "../src/cli/style.ts";
 import type { Failure } from "../src/cli/command.ts";
 import * as assert from "node:assert/strict";
 import { generatedReadiness } from "../src/cli/readiness.ts";
+import * as readinessModule from "../src/cli/readiness.ts";
+import type { SyncProgress } from "../src/cli/readiness.ts";
+import type { PollProgress } from "../src/duck/sync.ts";
+// read from the module, not imported by name: the file loads at a commit without it (scripts/fails-without.ts)
+const syncProgressOf = (startedAt: string, p: PollProgress | undefined, now: number): SyncProgress =>
+  (readinessModule as unknown as { syncProgressOf: (a: string, p: PollProgress | undefined, n: number) => SyncProgress }).syncProgressOf(startedAt, p, now);
 import type { GeneratedStatus } from "../src/duck/generated.ts";
-import { addSpecs, addSteps, copyProgress, duration, findTable, paintBar, readiness, SAY_AGAIN_MS, sayAgain, STATUS, tableLines, WAIT, type RunState, type TableState } from "../src/cli/commands.ts";
+import { addSpecs, addSteps, copyProgress, duration, findTable, paintBar, readiness, SAY_AGAIN_MS, sayAgain, STATUS, tableLines, tableRows, WAIT, type RunState, type TableState } from "../src/cli/commands.ts";
 import * as commands from "../src/cli/commands.ts";
 import { jsonText } from "../src/cli/command.ts";
 import type { CopyProgressView, KeptCurrent, StreamStatus } from "../src/duck/sync.ts";
@@ -210,6 +216,41 @@ test("mason wait: every added table on its line — the finished first in the or
   assert.match(paintBar(lines[0]!, st), /<g>█{20}<\/g>/);
   assert.match(paintBar(lines[2]!, st), /<r>█{20}<\/r>/);
   assert.match(paintBar(lines[3]!, st), /<c>█{5}<\/c>/);
+});
+
+// ISSUE 1173: Sync now on a 17 M-row `off` table showed its old full bar, "100%", for the minutes its sync ran. While a
+// sync by hand runs, its line is that sync's: the rows read so far and the time, a bar only where a total is known.
+test("mason status: a table synced by hand says how far that sync is, never the full bar of the sync before it, and draws a bar only against a known total", () => {
+  const done = { phase: "done" as const, rowsCopied: 17_000_000, updatedAt: at(2) };
+  const startedAt = "2026-10-27T09:00:00.000Z", now = Date.parse("2026-10-27T09:02:05.000Z");
+  const poll = (o: Partial<PollProgress>): PollProgress => ({ startedAt: "2026-10-27T09:00:01.000Z", step: "reading", changedRows: 0, keysRead: null, keysTotal: null, pieces: null, ...o });
+  const line = (p: SyncProgress): string => tableLines(state({ tables: [t({ table: "public.events", added: true, copy: done, syncProgress: p })] }))[0]!;
+  const blank = " ".repeat(25);
+  // asked, its poll not begun (the pass ahead of it runs): nothing read yet, no bar
+  assert.equal(line(syncProgressOf(startedAt, undefined, now)), `public.events  ${blank}  syncing by hand: waiting for its turn (2 min)`);
+  // a poll that began before the sync was asked is another's: still its turn to come
+  assert.equal(syncProgressOf(startedAt, poll({ startedAt: "2026-10-27T08:59:59.000Z", changedRows: 40 }), now).step, "waiting");
+  // its read begun: the database attached, its columns checked, its snapshot taken
+  assert.equal(line(syncProgressOf(startedAt, poll({ step: "starting", changedRows: null }), now)), `public.events  ${blank}  syncing by hand: starting to read it from the database (2 min)`);
+  // reading its changed rows: the count so far, and no bar (the database says how many only once it has sent them all)
+  const reading = syncProgressOf(startedAt, poll({ changedRows: 1_234_567 }), now);
+  assert.deepEqual([reading.step, reading.share, reading.seconds], ["reading", null, 125]);
+  assert.equal(line(reading), `public.events  ${blank}  syncing by hand: reading its changed rows from the database, 1,234,567 so far (2 min)`);
+  assert.doesNotMatch(line(reading), /100%|█/, "never the full bar of the sync before it");
+  assert.equal(line(syncProgressOf(startedAt, poll({ step: "counting", changedRows: 1_234_567 }), now)), `public.events  ${blank}  syncing by hand: 1,234,567 changed rows read, counting its rows on the database (2 min)`);
+  // finding the rows deleted: the keys read against the database's count, the poll's own — a bar, held under 100%
+  const keys = syncProgressOf(startedAt, poll({ step: "deleting", changedRows: 1, keysRead: 4_250_000, keysTotal: 17_000_000 }), now);
+  assert.equal(keys.share, 0.25);
+  assert.equal(line(keys), "public.events  █████░░░░░░░░░░░░░░░  25%  syncing by hand: 1 changed row read, finding the rows deleted on the database, 4,250,000 of 17,000,000 keys read (2 min)");
+  assert.equal(syncProgressOf(startedAt, poll({ step: "deleting", keysRead: 17_000_000, keysTotal: 17_000_000 }), now).share, 0.99, "all keys read is not the sync done");
+  assert.equal(line(syncProgressOf(startedAt, poll({ step: "writing", changedRows: 400_000, pieces: { written: 3, of: 8 } }), now)), `public.events  ${blank}  syncing by hand: 400,000 changed rows read, writing them (3 of 8 pieces written) (2 min)`);
+  assert.equal(line(syncProgressOf(startedAt, poll({ step: "done", changedRows: 12 }), now)), `public.events  ${blank}  syncing by hand: 12 changed rows read, finishing the sync (2 min)`);
+  // at work on a terminal: cyan, whatever the table's error from before
+  const st = { ...PLAIN, red: (x: string) => `<r>${x}</r>`, cyan: (x: string) => `<c>${x}</c>` };
+  const rows = tableRows(state({ tables: [t({ table: "public.events", added: true, copy: done, error: "poll: connection reset", syncProgress: keys })] }));
+  assert.deepEqual([rows[0]!.tone, paintBar(rows[0]!.line, st, rows[0]!.tone).includes("<c>█████</c>")], ["cyan", true]);
+  // the sync ended: its line is the table's own again
+  assert.equal(tableLines(state({ tables: [t({ table: "public.events", added: true, copy: done })] }))[0], "public.events  ████████████████████ 100%  17,000,000 rows · synced");
 });
 
 test("mason status and wait: each copied table says how it is kept current and how old its copy is — its sync: off with the command that syncs it, or its poll's interval and last poll", () => {

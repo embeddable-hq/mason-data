@@ -192,6 +192,10 @@ export const SERVE: CommandSpec = {
                             Origin header it does not name, Origin: null included, is refused 403 before its token is
                             read. A hosted agent's server or a desktop app sends none, and is not judged by it
                             (default unset: no browser origin)
+    MASON_MCP_ICON          the icon an MCP client shows for the endpoint (its serverInfo icons): a PNG, as a data: URL
+                            in base64 (data:image/png;base64,…, at most ${ICON_BYTES_MAX} bytes and 1024 pixels a side), or
+                            an https:// address on MASON_MCP_URL's own origin; never an SVG, which can carry script; any
+                            other value is refused (default Mason's logo, a 128x128 PNG)
     MASON_PG_HOST, MASON_PG_PORT  the Postgres API's address (default 127.0.0.1:5433)
     MASON_PG_TLS_CERT, MASON_PG_TLS_KEY   its certificate, required off loopback; or MASON_PG_SELF_SIGNED_TLS=1
                             for one made in .mason/, or MASON_PG_PLAIN=1 behind a TLS proxy of your own
@@ -660,6 +664,7 @@ export async function serve(argv: string[]): Promise<number> {
   if (s.mcp !== null) {
     say(`  mcp       ${s.mcp.url.href} (MASON_MCP_URL), served at http://${s.health.host}:${s.health.port}${MCP_PATH}: tokens of ${s.mcp.issuer}, ` +
       `the user in their ${s.mcp.claim} and ${s.mcp.idClaim} claims, a user's address ranges judged on ${s.mcp.proxyFrom === null ? "each request's peer" : `the X-Forwarded-For entry of ${s.mcp.proxyFrom.entries.join(", ")} (MASON_MCP_PROXY_FROM), else the peer`}`);
+    if ((process.env.MASON_MCP_ICON ?? "") !== "") say(`  mcp       its own icon in a client's connector list, ${s.mcp.icons[0]?.mimeType ?? "an image"} (MASON_MCP_ICON)`);
   }
   for (const l of socketSaid) say(`  ${l}`);
   if (s.ui.runFile !== null) say(`  run file  ${s.ui.runFile}: written once Mason answers (mode 0600; it holds the run's token)`);

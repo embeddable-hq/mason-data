@@ -50,6 +50,7 @@ import type { ExactColumn } from "./rewrite.ts";
 import type { LibcOrder } from "./libc-order.ts";
 import { beats, CANCEL_SLOTS, cancelStatement, cancelTable, resetSlot } from "./cancel.ts";
 import { Admission, LIGHT, type Admitted } from "./admission.ts";
+import { Tallies, tallyTable } from "./tally.ts";
 // a cycle (store.ts opens the executor): read at run time only
 import { failureOf } from "./store.ts";
 
@@ -301,6 +302,8 @@ export class Executor {
   /** the cancel table, shared with the worker (src/duck/cancel.ts), and its free slots */
   readonly cancels = cancelTable();
   private readonly free: number[] = Array.from({ length: CANCEL_SLOTS }, (_, i) => CANCEL_SLOTS - 1 - i);
+  /** the tally table, shared with the worker (src/duck/tally.ts): the rows a read has passed so far, counted as they arrive */
+  readonly tallies = new Tallies(tallyTable());
   /** pings sent since the worker last said anything or beat: the watch's count, of this thread's own ticks */
   private unanswered = 0;
   /** the worker's beat at the watch's last look */
@@ -319,7 +322,7 @@ export class Executor {
   private constructor(o: ExecutorOptions) {
     this.silentMs = o.silentMs ?? SILENT_MS;
     this.log = o.log;
-    this.worker = new Worker(runnable(o.workerFile ?? fileURLToPath(new URL("./executor-worker.ts", import.meta.url))), { workerData: { cancels: this.cancels } });
+    this.worker = new Worker(runnable(o.workerFile ?? fileURLToPath(new URL("./executor-worker.ts", import.meta.url))), { workerData: { cancels: this.cancels, tallies: this.tallies.table } });
     // the process may end while nothing is asked of it (a script, a test that forgot to close): referenced only while
     // a request is in flight (`call`)
     this.worker.unref();
