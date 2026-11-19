@@ -616,6 +616,45 @@ test("no client starts a line of mason serve's log: a cancellation's reason and 
   assert.deepEqual(legacy, []);
 });
 
+test("serverInfo carries the endpoint's icon (issue 1168): Mason's PNG by default in initialize and server/discover, sent once (a tools/call result's _meta names the server without it); MASON_MCP_ICON's data: PNG or same-origin https address in its place", async () => {
+  type Info = { name: string; websiteUrl?: string; description?: string; icons?: Array<{ src: string; mimeType?: string; sizes?: string[] }> };
+  const token = jwt(claims("analyst"));
+  /** what each place says the server is: 2025-11-25's initialize, 2026-07-28's server/discover and a tools/call's _meta */
+  const everywhere = async (m: Mounted): Promise<Info[]> => {
+    const init = await post(m, INIT(), { token });
+    assert.equal(init.status, 200, JSON.stringify(init.body));
+    const d = await postModern(m, token, "server/discover");
+    const q = await postModern(m, token, "tools/call", { name: "query", arguments: { sql: "SELECT 1 AS icon_n" } });
+    assert.equal((q.body!.result as { isError?: boolean }).isError, undefined, JSON.stringify(q.body));
+    const meta = (r: Answer): Info => (r.body!.result as { _meta: Record<string, Info> })._meta["io.modelcontextprotocol/serverInfo"]!;
+    return [(init.body!.result as { serverInfo: Info }).serverInfo, meta(d), meta(q)];
+  };
+  // the default: Mason's logo, a 128x128 PNG as a data: URI, in initialize and server/discover; a tools/call result's
+  // _meta names the server without it (sent once, not in every answer)
+  const [initInfo, discoverInfo, callInfo] = await everywhere(await mount({}));
+  const infos = [initInfo!, discoverInfo!];
+  for (const info of infos) {
+    assert.deepEqual([info.name, info.websiteUrl, typeof info.description], ["mason", "https://github.com/embeddable-hq/mason-data", "string"]);
+    assert.ok(Array.isArray(info.icons) && info.icons.length === 1, JSON.stringify(info).slice(0, 200));
+    const icon = info.icons[0]!;
+    assert.deepEqual([icon.mimeType, icon.sizes, icon.src.slice(0, 22)], ["image/png", ["128x128"], "data:image/png;base64,"]);
+    const png = Buffer.from(icon.src.slice(22), "base64");
+    assert.deepEqual([png.subarray(0, 8).toString("hex"), png.toString("latin1", 12, 16), png.readUInt32BE(16), png.readUInt32BE(20)], ["89504e470d0a1a0a", "IHDR", 128, 128]);
+  }
+  assert.deepEqual(infos[1], infos[0], "server/discover says what initialize says");
+  const { icons: _icons, ...identity } = initInfo!;
+  assert.deepEqual(callInfo, identity, "a result's _meta says who the server is as initialize does, its icons left out");
+  assert.equal("icons" in callInfo!, false);
+  // MASON_MCP_ICON: a data: PNG of the host's (1x1 here), sent as given with its size; and an https address on the
+  // endpoint's own origin
+  const png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+  for (const [value, icons] of [[png, [{ src: png, mimeType: "image/png", sizes: ["1x1"] }]],
+    ["https://mason.example.test/brand/icon.png", [{ src: "https://mason.example.test/brand/icon.png", mimeType: "image/png" }]]] as const) {
+    const [i, d, c] = await everywhere(await mount({ MASON_MCP_ICON: value }));
+    assert.deepEqual([i!.icons, d!.icons, "icons" in c!], [icons, icons, false], value.slice(0, 40));
+  }
+});
+
 test("Origin: a request carrying one is a browser's, answered only from an origin MASON_MCP_ORIGINS names — refused 403 before its token is read, under every revision; Origin: null refused; a request with none (a hosted agent's server, a desktop app) served as before", async () => {
   const m = await mount({ MASON_MCP_ORIGINS: "https://app.example.test,http://localhost:5173" });
   const token = jwt(claims("analyst"));

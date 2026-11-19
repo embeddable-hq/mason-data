@@ -32,6 +32,7 @@ import { isLoopback } from "../api/postgres/plain.ts";
 import { USER_NAME_RE } from "../duck/users.ts";
 import { untrustedText } from "../lib/one-line.ts";
 import { parseProxyFrom, type ProxyFrom } from "../api/postgres/proxy.ts";
+import { DEFAULT_MCP_ICONS, mcpIconSetting, type McpIcon } from "./mcp-icon.ts";
 
 // ------------------------------------------------------------------ the settings
 
@@ -53,10 +54,12 @@ export interface McpSettings {
   proxyFrom: ProxyFrom | null;
   /** MASON_MCP_ORIGINS: the browser origins a request carrying an `Origin` header may come from (none by default) */
   origins: readonly string[];
+  /** MASON_MCP_ICON (src/cli/mcp-icon.ts): the icons serverInfo sends, Mason's own unless it names another */
+  icons: readonly McpIcon[];
 }
 
 /** The endpoint's settings, as `mason serve --help` lists them (one list: the checks read it). */
-export const MCP_SETTINGS = ["MASON_MCP_URL", "MASON_MCP_ISSUER", "MASON_MCP_JWKS_URL", "MASON_MCP_USER_CLAIM", "MASON_MCP_USER_ID_CLAIM", "MASON_MCP_PROXY_FROM", "MASON_MCP_PLAIN", "MASON_MCP_ORIGINS"] as const;
+export const MCP_SETTINGS = ["MASON_MCP_URL", "MASON_MCP_ISSUER", "MASON_MCP_JWKS_URL", "MASON_MCP_USER_CLAIM", "MASON_MCP_USER_ID_CLAIM", "MASON_MCP_PROXY_FROM", "MASON_MCP_PLAIN", "MASON_MCP_ORIGINS", "MASON_MCP_ICON"] as const;
 /** the setting that names the trusted proxies, as its refusals name it */
 export const MCP_PROXY_SETTING = "MASON_MCP_PROXY_FROM";
 /** the setting that names the browser origins /mcp answers, as its refusals name it */
@@ -158,9 +161,11 @@ export function mcpSettings(env: Readonly<Record<string, string | undefined>>, h
   }
   const origins = originsSetting(env[MCP_ORIGINS_SETTING]);
   if (typeof origins === "string") problems.push(origins);
+  const icons = mcpIconSetting(env, url);
+  if (icons !== null && "problem" in icons) problems.push(icons.problem);
   if (problems.length) return { problems };
   return { url: url!, issuer: env.MASON_MCP_ISSUER!, jwks: jwks!.href, claim, idClaim, proxyFrom: proxy === null || "problem" in proxy ? null : proxy,
-    origins: typeof origins === "string" ? [] : origins };
+    origins: typeof origins === "string" ? [] : origins, icons: icons === null || "problem" in icons ? DEFAULT_MCP_ICONS : icons };
 }
 
 /** The resource's metadata (RFC 9728): what a client reads to find where to sign in. */

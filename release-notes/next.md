@@ -19,6 +19,13 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   - Anything else is worked out after the join, as before. That includes `upper()`, `extract()`, arithmetic on a
     number, and `lower()` under a C or ICU collation. It includes `date_part()` of a year or a longer unit, an epoch,
     a Julian day, a second or a millisecond.
+- **Mason's MCP server now tells a client its icon, a sentence of what it is and its website.** `mason mcp` and
+  `mason serve`'s MCP endpoint send Mason's logo in their `serverInfo`, so a client that shows server icons shows
+  Mason's. A deployment with its own brand sets `MASON_MCP_ICON`, beside `MASON_MCP_URL`: a PNG as a `data:` URL in
+  base64, or an `https://` address on `MASON_MCP_URL`'s own origin. It takes no SVG, which can carry script: give a
+  PNG. Any other value refuses the start. Not every
+  client reads it yet: users report that claude.ai's custom connectors show the favicon of the endpoint's domain
+  instead, which is the site's in front of the endpoint to set.
 
 ## What was wrong and is now right
 

@@ -517,7 +517,21 @@ MASON_MCP_USER_ID_CLAIM=mason_user_id                 # the claim that holds its
 MASON_MCP_PROXY_FROM=10.0.0.0/16                      # the relay's own addresses: its X-Forwarded-For is believed
 MASON_MCP_PLAIN=1                                     # TLS is terminated in front (required off loopback)
 MASON_MCP_ORIGINS=https://app.example.test            # browser origins a page may use it from (default: none)
+MASON_MCP_ICON=https://mason.example.com/icon.png     # the icon a client shows (default: Mason's logo)
 ```
+
+- **The server's icon**: `serverInfo` (in `initialize`, `mason mcp` on stdio too, and under 2026-07-28 in
+  `server/discover`) carries `icons`, a `description` and `websiteUrl`, as MCP 2025-11-25's `Implementation` has them.
+  Every other 2026-07-28 result's `_meta` serverInfo names the server without `icons` (optional there): the icon is
+  sent once, not in every answer. The icon is Mason's logo, a 128x128 PNG as a `data:` URI, unless `MASON_MCP_ICON` names
+  another: a PNG as a `data:image/png;base64,…` URL (a whole PNG file, at most 4096 bytes and 1024 pixels a side), or
+  an `https://` address on `MASON_MCP_URL`'s own origin, which the spec asks a client to hold an icon to. **Never an
+  SVG**, in either form: an SVG can carry script and fetch other addresses, and each client decides how it renders one,
+  while every client that renders icons must read a PNG (`MASON_UI_ICON`, the browser tab's icon, still takes one).
+  Any other value, a control character or white space at either end included, refuses the start. A client decides what it shows: users report that claude.ai's custom connectors show the favicon of the
+  endpoint's domain rather than `serverInfo.icons` (anthropics/claude-ai-mcp#152), and ChatGPT's apps take a logo the
+  person sets in its settings. In both, the icon comes from the site in front of the endpoint or the client's own
+  settings, not from Mason.
 
 - **The authorization server** issues signed JWT access tokens (RS256, PS256, ES256, EdDSA, …) whose `iss` is
   `MASON_MCP_ISSUER`, whose `aud` is `MASON_MCP_URL` exactly — the resource a client asks for (RFC 8707) — and that carry

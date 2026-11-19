@@ -32,6 +32,7 @@ import { PgConnection, PgError, pgIdent, pgLiteral, socketErrorText, type Extend
 import { qualifiedName, type TableName } from "../duck/explain.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { withLocalSettings } from "../lib/local-settings.ts";
+import { DEFAULT_MCP_ICONS, type McpIcon } from "./mcp-icon.ts";
 import { untrustedText } from "../lib/one-line.ts";
 
 /** The URL a client is shown in the help: a user's, as mason user add prints it. */
@@ -310,7 +311,13 @@ export const RESOURCES = [
 /** what this server can do and who it is, as initialize says it (and, over HTTP under MCP 2026-07-28, server/discover
  *  and every result's `_meta`: src/cli/mcp-http.ts) */
 export const SERVER_CAPABILITIES = { tools: { listChanged: false }, resources: { listChanged: false } } as const;
-export const serverInfo = (): { name: string; title: string; version: string } => ({ name: "mason", title: "Mason", version: version() });
+/** MCP's `Implementation`: who this server is, with its icons (src/cli/mcp-icon.ts: Mason's logo unless mason serve's
+ *  MASON_MCP_ICON names another), a sentence of what it is and where it is published */
+export interface ServerInfo { name: string; title: string; version: string; description: string; websiteUrl: string; icons: readonly McpIcon[] }
+export const SERVER_DESCRIPTION = "Read-only tables synced from an application's Postgres database, for analytical SQL.";
+export const WEBSITE_URL = "https://github.com/embeddable-hq/mason-data";
+export const serverInfo = (icons: readonly McpIcon[] = DEFAULT_MCP_ICONS): ServerInfo =>
+  ({ name: "mason", title: "Mason", version: version(), description: SERVER_DESCRIPTION, websiteUrl: WEBSITE_URL, icons });
 
 export const INSTRUCTIONS = "Mason serves read-only tables synced from an application's Postgres database, for analytical SQL (scans and aggregates). " +
   "Call tables first, describe a table before querying it, and write Postgres's SQL. Each table says how current it is. " +
@@ -335,10 +342,14 @@ export class McpServer {
   private readonly log: (line: string) => void;
   /** the protocol versions it answers in kind, the first the one a client asking for another is answered with */
   private readonly versions: readonly string[];
+  /** what initialize says this server is (its icons the endpoint's, over HTTP) */
+  private readonly info: ServerInfo;
   /** the requests being answered, by their id (a cancellation names one) */
   private readonly calls = new Map<string, Call>();
 
-  constructor(link: McpLink, logLine: (line: string) => void, versions: readonly string[] = PROTOCOL_VERSIONS) { this.link = link; this.log = logLine; this.versions = versions; }
+  constructor(link: McpLink, logLine: (line: string) => void, versions: readonly string[] = PROTOCOL_VERSIONS, info: ServerInfo = serverInfo()) {
+    this.link = link; this.log = logLine; this.versions = versions; this.info = info;
+  }
 
   /** names the client where no initialize does (a request of MCP's stateless revision over HTTP): application_name's part */
   named(client: string | null): void {
@@ -434,7 +445,7 @@ export class McpServer {
         return {
           protocolVersion: this.versions.includes(asked as never) ? asked : this.versions[0],
           capabilities: SERVER_CAPABILITIES,
-          serverInfo: serverInfo(),
+          serverInfo: this.info,
           instructions: INSTRUCTIONS,
         };
       }
