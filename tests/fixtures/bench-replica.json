@@ -2,7 +2,7 @@
   "mode": "cold",
   "environment": {
     "label": "m7g.xlarge, 4 vCPU, 16 GiB RAM",
-    "date": "2026-11-18T11:00:25.279Z",
+    "date": "2026-11-18T22:05:45.121Z",
     "machine": {
       "cpus": 4,
       "cpuModel": "unknown",
@@ -34,10 +34,10 @@
       }
     },
     "mason": {
-      "image": "mason-data:main-68891954",
-      "imageId": "sha256:d38570f9e197ba212f6af1af87efa1ebf7f0204f05ecc4a0e85787448fcb8de5",
+      "image": "mason-data:main-9828b97d",
+      "imageId": "sha256:7e5356ca9c3c428ca99b51aecbc9afa04b7658fe826f8a4e6c0270fe31891b16",
       "version": "dev",
-      "commit": "688919542504615a990be2bcbcaa9b9c63c1d25f",
+      "commit": "9828b97d6b3bc7c0cc4336ee83e8fa859cc35176",
       "engineMemory": "4096MiB",
       "settings": {
         "sync": "off",
@@ -66,7 +66,7 @@
       "timeZone": "UTC"
     },
     "disk": "EBS gp3, 125 MB/s, 3000 IOPS",
-    "commit": "688919542504",
+    "commit": "a2864c8df7c8",
     "postgresFrom": {
       "date": "2026-11-17T10:52:45.148Z",
       "measuredAt": null,
@@ -95,6 +95,12 @@
       "sql": "SELECT date_trunc('month', o.created_at) AS month, date_trunc('year', c.created_at) AS signup_year, sum(o.amount) AS revenue FROM orders o JOIN customers c ON c.id = o.customer_id GROUP BY 1, 2 ORDER BY 1, 2"
     },
     {
+      "name": "revenue_by_month_kathmandu",
+      "title": "Revenue by month in Asia/Kathmandu, orders joined to customers",
+      "sql": "SELECT date_trunc('month', o.created_at) AS month, date_trunc('year', c.created_at) AS signup_year, sum(o.amount) AS revenue FROM orders o JOIN customers c ON c.id = o.customer_id GROUP BY 1, 2 ORDER BY 1, 2",
+      "timeZone": "Asia/Kathmandu"
+    },
+    {
       "name": "lookup",
       "title": "One order by its primary key",
       "sql": "SELECT * FROM orders WHERE id = '<id>'"
@@ -106,19 +112,20 @@
       "customers": 5000000,
       "generatedSeconds": null,
       "postgresBytes": 37632614400,
-      "masonBytes": 7634185148,
-      "syncSeconds": 555,
+      "masonBytes": 10100465351,
+      "syncSeconds": 568.8,
+      "backgroundSeconds": 28.6,
       "lookupIds": [
-        "3feab41b-e0fb-4929-9306-e05be6519b5b",
-        "f9ad01a4-2de7-4042-8538-1604bb1f2140",
-        "49e1493a-9e20-4a63-b2ca-482fec4f6b87",
-        "fa25e9e0-83be-408e-bb67-3540f84680e9",
-        "aaf4b1d0-5570-4fcb-a263-c2c2d66439d4",
-        "145e3bdd-5fe7-4eb6-b2f3-ef75c393a4fb",
-        "0fff7095-7971-4c7e-b39d-a5081608b1b3",
-        "d945ab48-2e0e-499d-8109-facf960f36a6",
-        "ef1f00fb-4f50-4e44-b317-f3d3b4062476",
-        "80d59c5b-14ac-4e88-b6b9-5fff6f08dda2"
+        "79508cb9-d07f-49ca-a7cc-5eb64ecf8cc2",
+        "c86d5eba-fff4-4487-aa6f-b6c95b7118ca",
+        "aae5caaa-de8d-4b4b-a8d3-9f379c3b16a6",
+        "cde953f3-385c-4b34-ad17-1ce46a71a1b5",
+        "d7941fd2-f104-42c2-b01a-dffe9ce65b1d",
+        "74f8d019-c676-4475-bc02-7addc3bb0687",
+        "4baca8bc-f95e-418b-bd22-b16bd559c38e",
+        "9bddf61c-1625-4ff2-8b7b-939b0a7ea32c",
+        "6bf2c124-4d35-4f3d-b8f0-1bc7e1236c9e",
+        "633512ac-5ee6-43c3-98b3-1cc1c81ad0cf"
       ],
       "answers": {
         "count_by_status": {
@@ -129,45 +136,49 @@
           "postgres": "997bac30180d44429b8171714e22ca0e",
           "mason": "997bac30180d44429b8171714e22ca0e"
         },
-        "lookup 3feab41b-e0fb-4929-9306-e05be6519b5b": {
-          "postgres": "d2b9ef82744f9bd385afead7e05e12ef",
-          "mason": "d2b9ef82744f9bd385afead7e05e12ef"
+        "revenue_by_month_kathmandu": {
+          "postgres": "91ee087e0e0f681afa625d3824b857f6",
+          "mason": "91ee087e0e0f681afa625d3824b857f6"
         },
-        "lookup f9ad01a4-2de7-4042-8538-1604bb1f2140": {
-          "postgres": "6982f9802f0617fcf85b5374d33c2b01",
-          "mason": "6982f9802f0617fcf85b5374d33c2b01"
+        "lookup 79508cb9-d07f-49ca-a7cc-5eb64ecf8cc2": {
+          "postgres": "35f016821394562ac9f69eca36ede782",
+          "mason": "35f016821394562ac9f69eca36ede782"
         },
-        "lookup 49e1493a-9e20-4a63-b2ca-482fec4f6b87": {
-          "postgres": "ffa1b0243735fae605a5f44c04c2f036",
-          "mason": "ffa1b0243735fae605a5f44c04c2f036"
+        "lookup c86d5eba-fff4-4487-aa6f-b6c95b7118ca": {
+          "postgres": "b130ff5d5e1e73c849bc85734b564586",
+          "mason": "b130ff5d5e1e73c849bc85734b564586"
         },
-        "lookup fa25e9e0-83be-408e-bb67-3540f84680e9": {
-          "postgres": "f695d04ef8c5833287db36f397eef787",
-          "mason": "f695d04ef8c5833287db36f397eef787"
+        "lookup aae5caaa-de8d-4b4b-a8d3-9f379c3b16a6": {
+          "postgres": "0df4aa282c5c496857bf1cde2916d594",
+          "mason": "0df4aa282c5c496857bf1cde2916d594"
         },
-        "lookup aaf4b1d0-5570-4fcb-a263-c2c2d66439d4": {
-          "postgres": "2814ec497b542ddea1187c0262170111",
-          "mason": "2814ec497b542ddea1187c0262170111"
+        "lookup cde953f3-385c-4b34-ad17-1ce46a71a1b5": {
+          "postgres": "6c8822a9d771c8af0e916dd75407dc6b",
+          "mason": "6c8822a9d771c8af0e916dd75407dc6b"
         },
-        "lookup 145e3bdd-5fe7-4eb6-b2f3-ef75c393a4fb": {
-          "postgres": "61f75583a8c71986a1c54fd1c5f8efb0",
-          "mason": "61f75583a8c71986a1c54fd1c5f8efb0"
+        "lookup d7941fd2-f104-42c2-b01a-dffe9ce65b1d": {
+          "postgres": "80ffdc2f24bfb3afec1dd6ec62e8f74c",
+          "mason": "80ffdc2f24bfb3afec1dd6ec62e8f74c"
         },
-        "lookup 0fff7095-7971-4c7e-b39d-a5081608b1b3": {
-          "postgres": "1ffcf05229d44e60f7299fc5a756b381",
-          "mason": "1ffcf05229d44e60f7299fc5a756b381"
+        "lookup 74f8d019-c676-4475-bc02-7addc3bb0687": {
+          "postgres": "eedf4fac0c463ca59222457ca5b85f71",
+          "mason": "eedf4fac0c463ca59222457ca5b85f71"
         },
-        "lookup d945ab48-2e0e-499d-8109-facf960f36a6": {
-          "postgres": "6d5f483aa63c8336f7f6c2409f188e0e",
-          "mason": "6d5f483aa63c8336f7f6c2409f188e0e"
+        "lookup 4baca8bc-f95e-418b-bd22-b16bd559c38e": {
+          "postgres": "e6d764f0f5c1df9236b4607ad7fe2a96",
+          "mason": "e6d764f0f5c1df9236b4607ad7fe2a96"
         },
-        "lookup ef1f00fb-4f50-4e44-b317-f3d3b4062476": {
-          "postgres": "cf056ce6a8f662b3d46931b62303c546",
-          "mason": "cf056ce6a8f662b3d46931b62303c546"
+        "lookup 9bddf61c-1625-4ff2-8b7b-939b0a7ea32c": {
+          "postgres": "8d750399aa073027d346c668e6edbf3e",
+          "mason": "8d750399aa073027d346c668e6edbf3e"
         },
-        "lookup 80d59c5b-14ac-4e88-b6b9-5fff6f08dda2": {
-          "postgres": "fcf9f86697381fcceffb0ec7ed4acd39",
-          "mason": "fcf9f86697381fcceffb0ec7ed4acd39"
+        "lookup 6bf2c124-4d35-4f3d-b8f0-1bc7e1236c9e": {
+          "postgres": "0a88fe1353ecbc64e2fb38bfe41250b9",
+          "mason": "0a88fe1353ecbc64e2fb38bfe41250b9"
+        },
+        "lookup 633512ac-5ee6-43c3-98b3-1cc1c81ad0cf": {
+          "postgres": "07a221b0803cc4a3edaea3522511b274",
+          "mason": "07a221b0803cc4a3edaea3522511b274"
         }
       },
       "answersEqual": true,
@@ -178,19 +189,20 @@
       "customers": 50000,
       "generatedSeconds": null,
       "postgresBytes": 376160256,
-      "masonBytes": 80670214,
-      "syncSeconds": 55.8,
+      "masonBytes": 101744252,
+      "syncSeconds": 56.5,
+      "backgroundSeconds": 0,
       "lookupIds": [
-        "695f3b44-113e-4f4e-8d1b-56f79f962eb4",
-        "1f10f334-678d-4450-8803-2fded3afce04",
-        "06feb238-9e5e-41ca-9531-239b954622ad",
-        "c8c288e8-69e8-4a4a-958c-11677eba655c",
-        "b82eed1b-d86e-43b7-b692-f652234ecd84",
-        "c61fc667-6e88-49f0-b206-46980052a3c2",
-        "fe74aa2e-14e5-4137-add6-b89f081c690a",
-        "6767811a-5e18-4233-a8a6-d0540a36c6c7",
-        "c0e5ac87-02ed-476d-96f8-f4b677fdf3b1",
-        "d00c8480-a799-4a01-90c9-60b8ce16dde4"
+        "0d333495-176d-4fb3-9acf-2998a6352422",
+        "cd537c0e-fe0e-4ebe-ad15-83618be0a8d9",
+        "f6feb500-97d2-4d8d-9a29-6f050db63664",
+        "ff78ae7f-94db-4735-a8d9-57dc788ab58b",
+        "11ecbe59-7d00-45a4-9866-e46e2f720495",
+        "3774ca50-dc05-4864-bd4b-b64efc17d891",
+        "98e2e9fd-608f-4b1d-9be5-fff449336c07",
+        "0a40fd7a-d27f-4d36-a86f-1284f416783a",
+        "aa3df269-5fd2-43aa-8351-5fd0ca3d379a",
+        "fe7d4f87-f093-4fb3-8da9-006a7a544894"
       ],
       "answers": {
         "count_by_status": {
@@ -201,45 +213,49 @@
           "postgres": "6030588c0c23d98d4c07ed34d84df68f",
           "mason": "6030588c0c23d98d4c07ed34d84df68f"
         },
-        "lookup 695f3b44-113e-4f4e-8d1b-56f79f962eb4": {
-          "postgres": "ffb5a7d00773decb4e84161ca190b506",
-          "mason": "ffb5a7d00773decb4e84161ca190b506"
+        "revenue_by_month_kathmandu": {
+          "postgres": "0d6bc0120537ed4d484f4f65f6a6bb6a",
+          "mason": "0d6bc0120537ed4d484f4f65f6a6bb6a"
         },
-        "lookup 1f10f334-678d-4450-8803-2fded3afce04": {
-          "postgres": "e81763fb8f86d8420845c191bb727ee5",
-          "mason": "e81763fb8f86d8420845c191bb727ee5"
+        "lookup 0d333495-176d-4fb3-9acf-2998a6352422": {
+          "postgres": "f7a74dd4ab39b93940db929718b0066d",
+          "mason": "f7a74dd4ab39b93940db929718b0066d"
         },
-        "lookup 06feb238-9e5e-41ca-9531-239b954622ad": {
-          "postgres": "a98c8582f32a3a6dfdc7f8ffaa46b6d2",
-          "mason": "a98c8582f32a3a6dfdc7f8ffaa46b6d2"
+        "lookup cd537c0e-fe0e-4ebe-ad15-83618be0a8d9": {
+          "postgres": "dc674505d4f0cdf210a6fbdf83a557b0",
+          "mason": "dc674505d4f0cdf210a6fbdf83a557b0"
         },
-        "lookup c8c288e8-69e8-4a4a-958c-11677eba655c": {
-          "postgres": "efff8a4dbe82ea6630f291a5556979e1",
-          "mason": "efff8a4dbe82ea6630f291a5556979e1"
+        "lookup f6feb500-97d2-4d8d-9a29-6f050db63664": {
+          "postgres": "2521988359f79f1a0b95aa0382096ef3",
+          "mason": "2521988359f79f1a0b95aa0382096ef3"
         },
-        "lookup b82eed1b-d86e-43b7-b692-f652234ecd84": {
-          "postgres": "f0d13dbf58c20f7068115a8f6fa0c19f",
-          "mason": "f0d13dbf58c20f7068115a8f6fa0c19f"
+        "lookup ff78ae7f-94db-4735-a8d9-57dc788ab58b": {
+          "postgres": "b938ca999128d051dba8f92e5c9d637e",
+          "mason": "b938ca999128d051dba8f92e5c9d637e"
         },
-        "lookup c61fc667-6e88-49f0-b206-46980052a3c2": {
-          "postgres": "e8cb3c33de668bbdcc884e93132a46c6",
-          "mason": "e8cb3c33de668bbdcc884e93132a46c6"
+        "lookup 11ecbe59-7d00-45a4-9866-e46e2f720495": {
+          "postgres": "f9f18712c8421a7f00ed54ce11e2f4e1",
+          "mason": "f9f18712c8421a7f00ed54ce11e2f4e1"
         },
-        "lookup fe74aa2e-14e5-4137-add6-b89f081c690a": {
-          "postgres": "db94f119604fb47168f341fea66a1296",
-          "mason": "db94f119604fb47168f341fea66a1296"
+        "lookup 3774ca50-dc05-4864-bd4b-b64efc17d891": {
+          "postgres": "0483d1761cde4ac6543dde1f1e9b1437",
+          "mason": "0483d1761cde4ac6543dde1f1e9b1437"
         },
-        "lookup 6767811a-5e18-4233-a8a6-d0540a36c6c7": {
-          "postgres": "58d6f443b9ce3136a84f94c629269233",
-          "mason": "58d6f443b9ce3136a84f94c629269233"
+        "lookup 98e2e9fd-608f-4b1d-9be5-fff449336c07": {
+          "postgres": "f7ba691a9069165753cad51cf83466b9",
+          "mason": "f7ba691a9069165753cad51cf83466b9"
         },
-        "lookup c0e5ac87-02ed-476d-96f8-f4b677fdf3b1": {
-          "postgres": "9eb04ed0b8f777d6e524b26168236b43",
-          "mason": "9eb04ed0b8f777d6e524b26168236b43"
+        "lookup 0a40fd7a-d27f-4d36-a86f-1284f416783a": {
+          "postgres": "70920abbd28b13996625541f627a0458",
+          "mason": "70920abbd28b13996625541f627a0458"
         },
-        "lookup d00c8480-a799-4a01-90c9-60b8ce16dde4": {
-          "postgres": "96f2019956b84d0e51b4ebba7a6f0518",
-          "mason": "96f2019956b84d0e51b4ebba7a6f0518"
+        "lookup aa3df269-5fd2-43aa-8351-5fd0ca3d379a": {
+          "postgres": "cc283dd7baf0af3a4c6434b4a6eec7e1",
+          "mason": "cc283dd7baf0af3a4c6434b4a6eec7e1"
+        },
+        "lookup fe7d4f87-f093-4fb3-8da9-006a7a544894": {
+          "postgres": "68b7dfee8c5b9c2b3c479de592a8b343",
+          "mason": "68b7dfee8c5b9c2b3c479de592a8b343"
         }
       },
       "answersEqual": true,
@@ -250,19 +266,20 @@
       "customers": 500000,
       "generatedSeconds": null,
       "postgresBytes": 3760111616,
-      "masonBytes": 769569467,
-      "syncSeconds": 84.5,
+      "masonBytes": 989171092,
+      "syncSeconds": 86.6,
+      "backgroundSeconds": 2,
       "lookupIds": [
-        "542676d2-37c8-4530-9d39-e54a8911c180",
-        "4ad635a4-5f38-4e6c-9559-f96ca42cb12f",
-        "2f071dd2-d942-457a-a2eb-7f7790741a33",
-        "1905e238-28a1-49cf-8283-fc194ac77d68",
-        "f1eea906-0502-4b9f-bf9d-2c40b8b3faf8",
-        "43a717a6-8767-4a95-a2ea-fe5588b1d463",
-        "d6fdbae7-7383-46c1-bfb8-b2f2a64a1a7d",
-        "31b83b40-f3b6-4dce-b1fa-31f5b540e8ef",
-        "8d3714e1-38aa-4ced-b394-e4e9af65834a",
-        "f03ea8ce-9991-4f36-9120-9da40a8b0fb9"
+        "45c48139-ac56-4a37-a06e-def5f6c02f01",
+        "9f754246-d61c-4b68-93f5-6832a59f9650",
+        "fe383465-5009-4076-9bd9-ef2edadafbbc",
+        "7ecde44e-c3f7-48ce-b7d8-e62cec1055d6",
+        "2d7b395e-e07a-42b1-a9aa-1807cadb39a8",
+        "2f69e29d-4b5d-417b-a8cd-1181322bc19e",
+        "b53444bd-28bd-40be-ae95-3733555682ee",
+        "9d03d608-b175-4d56-af30-e2b29a6684eb",
+        "602bded0-7b5b-4617-a23d-f62e5b8baed9",
+        "9dacad8d-ffe7-4761-ba0c-f1639d551c7f"
       ],
       "answers": {
         "count_by_status": {
@@ -273,45 +290,49 @@
           "postgres": "73288c5f5ad8ae9b832b85409ccba7d4",
           "mason": "73288c5f5ad8ae9b832b85409ccba7d4"
         },
-        "lookup 542676d2-37c8-4530-9d39-e54a8911c180": {
-          "postgres": "1d89aaf484c87d0cd1dd4109beed3602",
-          "mason": "1d89aaf484c87d0cd1dd4109beed3602"
+        "revenue_by_month_kathmandu": {
+          "postgres": "3f7e7aba9e51152f982b7356ba98bd9d",
+          "mason": "3f7e7aba9e51152f982b7356ba98bd9d"
         },
-        "lookup 4ad635a4-5f38-4e6c-9559-f96ca42cb12f": {
-          "postgres": "81ebc675459677b1ad41a88a41e8c142",
-          "mason": "81ebc675459677b1ad41a88a41e8c142"
+        "lookup 45c48139-ac56-4a37-a06e-def5f6c02f01": {
+          "postgres": "f64d79f1ec91518f6a1d4cb8c3ba2d5d",
+          "mason": "f64d79f1ec91518f6a1d4cb8c3ba2d5d"
         },
-        "lookup 2f071dd2-d942-457a-a2eb-7f7790741a33": {
-          "postgres": "9bcbb09b76e8a2f7d79c30ecb18a7d69",
-          "mason": "9bcbb09b76e8a2f7d79c30ecb18a7d69"
+        "lookup 9f754246-d61c-4b68-93f5-6832a59f9650": {
+          "postgres": "70284198fa4b5c563ce540fb3cd70fca",
+          "mason": "70284198fa4b5c563ce540fb3cd70fca"
         },
-        "lookup 1905e238-28a1-49cf-8283-fc194ac77d68": {
-          "postgres": "18fd22b790f3279b9d3184578f9e309b",
-          "mason": "18fd22b790f3279b9d3184578f9e309b"
+        "lookup fe383465-5009-4076-9bd9-ef2edadafbbc": {
+          "postgres": "753d335622c0f7bab9d05b424efb69ef",
+          "mason": "753d335622c0f7bab9d05b424efb69ef"
         },
-        "lookup f1eea906-0502-4b9f-bf9d-2c40b8b3faf8": {
-          "postgres": "2dd179138b3aa8e73121a3f9d4796579",
-          "mason": "2dd179138b3aa8e73121a3f9d4796579"
+        "lookup 7ecde44e-c3f7-48ce-b7d8-e62cec1055d6": {
+          "postgres": "754182750440e6a49fc47ff86aa56f5e",
+          "mason": "754182750440e6a49fc47ff86aa56f5e"
         },
-        "lookup 43a717a6-8767-4a95-a2ea-fe5588b1d463": {
-          "postgres": "5a89b876faf4a3d5eaf81d087bbf6e1f",
-          "mason": "5a89b876faf4a3d5eaf81d087bbf6e1f"
+        "lookup 2d7b395e-e07a-42b1-a9aa-1807cadb39a8": {
+          "postgres": "cfadd69287c0ce9d0050a758cee15152",
+          "mason": "cfadd69287c0ce9d0050a758cee15152"
         },
-        "lookup d6fdbae7-7383-46c1-bfb8-b2f2a64a1a7d": {
-          "postgres": "379005a6094b868ad724f8e38c818229",
-          "mason": "379005a6094b868ad724f8e38c818229"
+        "lookup 2f69e29d-4b5d-417b-a8cd-1181322bc19e": {
+          "postgres": "d5e7f1596b6dfe5c13f8c4803690e017",
+          "mason": "d5e7f1596b6dfe5c13f8c4803690e017"
         },
-        "lookup 31b83b40-f3b6-4dce-b1fa-31f5b540e8ef": {
-          "postgres": "7b2168025909e7982eb72d9ad7b8d008",
-          "mason": "7b2168025909e7982eb72d9ad7b8d008"
+        "lookup b53444bd-28bd-40be-ae95-3733555682ee": {
+          "postgres": "61f5a3bc81397d7a12f08006186c3bfa",
+          "mason": "61f5a3bc81397d7a12f08006186c3bfa"
         },
-        "lookup 8d3714e1-38aa-4ced-b394-e4e9af65834a": {
-          "postgres": "3c5465e1da177458ecf0f43a79a05993",
-          "mason": "3c5465e1da177458ecf0f43a79a05993"
+        "lookup 9d03d608-b175-4d56-af30-e2b29a6684eb": {
+          "postgres": "e6e8a8ae57bdac65a27746c465feb9bd",
+          "mason": "e6e8a8ae57bdac65a27746c465feb9bd"
         },
-        "lookup f03ea8ce-9991-4f36-9120-9da40a8b0fb9": {
-          "postgres": "d8b4df3866a3044b2f2a5d5935a74569",
-          "mason": "d8b4df3866a3044b2f2a5d5935a74569"
+        "lookup 602bded0-7b5b-4617-a23d-f62e5b8baed9": {
+          "postgres": "9c7a501f31b7d41888cfff1f2681711b",
+          "mason": "9c7a501f31b7d41888cfff1f2681711b"
+        },
+        "lookup 9dacad8d-ffe7-4761-ba0c-f1639d551c7f": {
+          "postgres": "22fe168731ea6465d6abb404b5def34e",
+          "mason": "22fe168731ea6465d6abb404b5def34e"
         }
       },
       "answersEqual": true,
@@ -372,44 +393,44 @@
       "clients": 1,
       "engine": "mason",
       "statement": "count_by_status",
-      "slowestMs": 451.997,
-      "meanMs": 451.997,
+      "slowestMs": 462.431,
+      "meanMs": 462.431,
       "runs": [
         {
-          "slowestMs": 403.882,
-          "meanMs": 403.882,
-          "spanMs": 403.882,
+          "slowestMs": 462.445,
+          "meanMs": 462.445,
+          "spanMs": 462.445,
           "clientsMs": [
-            403.882
+            462.445
           ],
-          "readyMs": 4400,
-          "readBytes": 139538432,
+          "readyMs": 6693,
+          "readBytes": 150589440,
           "idleReadBytes": 0,
-          "at": "2026-11-18T11:19:43.127Z"
+          "at": "2026-11-18T22:31:20.331Z"
         },
         {
-          "slowestMs": 455.481,
-          "meanMs": 455.481,
-          "spanMs": 455.481,
+          "slowestMs": 462.431,
+          "meanMs": 462.431,
+          "spanMs": 462.431,
           "clientsMs": [
-            455.481
+            462.431
           ],
-          "readyMs": 4595,
-          "readBytes": 138788864,
-          "idleReadBytes": 131072,
-          "at": "2026-11-18T11:19:59.972Z"
+          "readyMs": 4723,
+          "readBytes": 150339584,
+          "idleReadBytes": 0,
+          "at": "2026-11-18T22:31:37.643Z"
         },
         {
-          "slowestMs": 451.997,
-          "meanMs": 451.997,
-          "spanMs": 451.997,
+          "slowestMs": 460.828,
+          "meanMs": 460.828,
+          "spanMs": 460.828,
           "clientsMs": [
-            451.997
+            460.828
           ],
-          "readyMs": 4732,
-          "readBytes": 140038144,
+          "readyMs": 4743,
+          "readBytes": 150839296,
           "idleReadBytes": 0,
-          "at": "2026-11-18T11:20:17.232Z"
+          "at": "2026-11-18T22:31:54.930Z"
         }
       ]
     },
@@ -492,71 +513,71 @@
       "clients": 10,
       "engine": "mason",
       "statement": "count_by_status",
-      "slowestMs": 1217.39,
-      "meanMs": 1160.609,
+      "slowestMs": 1240.87,
+      "meanMs": 1212.422,
       "runs": [
         {
-          "slowestMs": 1217.39,
-          "meanMs": 1160.609,
-          "spanMs": 1217.47,
+          "slowestMs": 1233.01,
+          "meanMs": 1128.747,
+          "spanMs": 1233.019,
           "clientsMs": [
-            1184.781,
-            1138.924,
-            1139.585,
-            1202.408,
-            1139.169,
-            1151.348,
-            1139.125,
-            1139.919,
-            1217.39,
-            1153.438
+            1233.01,
+            1229.515,
+            1225.872,
+            912.362,
+            1158.27,
+            1216.608,
+            1043.617,
+            1196.638,
+            962.615,
+            1108.966
           ],
-          "readyMs": 4622,
-          "readBytes": 140800000,
-          "idleReadBytes": 131072,
-          "at": "2026-11-18T11:20:34.398Z"
-        },
-        {
-          "slowestMs": 1212.352,
-          "meanMs": 1108.177,
-          "spanMs": 1212.423,
-          "clientsMs": [
-            1035.388,
-            1091.626,
-            1212.352,
-            1136.8,
-            1208.272,
-            1185.602,
-            1163.976,
-            1189.722,
-            887.496,
-            970.54
-          ],
-          "readyMs": 4735,
-          "readBytes": 138526720,
+          "readyMs": 4719,
+          "readBytes": 150589440,
           "idleReadBytes": 0,
-          "at": "2026-11-18T11:20:52.504Z"
+          "at": "2026-11-18T22:32:12.230Z"
         },
         {
-          "slowestMs": 1335.958,
-          "meanMs": 1334.37,
-          "spanMs": 1336.029,
+          "slowestMs": 1346.274,
+          "meanMs": 1344.094,
+          "spanMs": 1346.37,
           "clientsMs": [
-            1334.298,
-            1334.045,
-            1334.435,
-            1333.791,
-            1335.958,
-            1334.37,
-            1334.586,
-            1333.669,
-            1333.989,
-            1334.563
+            1346.274,
+            1343.648,
+            1343.956,
+            1343.24,
+            1343.276,
+            1343.92,
+            1343.759,
+            1345.198,
+            1343.268,
+            1344.403
           ],
-          "readyMs": 4554,
-          "readBytes": 150548480,
-          "idleReadBytes": 131072,
-          "at": "2026-11-18T11:21:10.395Z"
+          "readyMs": 4726,
+          "readBytes": 162603008,
+          "idleReadBytes": 0,
+          "at": "2026-11-18T22:32:30.316Z"
+        },
+        {
+          "slowestMs": 1240.87,
+          "meanMs": 1212.422,
+          "spanMs": 1240.917,
+          "clientsMs": [
+            1232.546,
+            1159.563,
+            1158.799,
+            1237.701,
+            1240.87,
+            1213.164,
+            1240.345,
+            1199.287,
+            1238.088,
+            1203.857
+          ],
+          "readyMs": 4724,
+          "readBytes": 153088000,
+          "idleReadBytes": 0,
+          "at": "2026-11-18T22:32:48.477Z"
         }
       ]
     },
@@ -612,44 +633,44 @@
       "clients": 1,
       "engine": "mason",
       "statement": "revenue_by_month",
-      "slowestMs": 17927.664,
-      "meanMs": 17927.664,
+      "slowestMs": 6685.216,
+      "meanMs": 6685.216,
       "runs": [
         {
-          "slowestMs": 17927.664,
-          "meanMs": 17927.664,
-          "spanMs": 17927.664,
+          "slowestMs": 6685.216,
+          "meanMs": 6685.216,
+          "spanMs": 6685.216,
           "clientsMs": [
-            17927.664
+            6685.216
           ],
-          "readyMs": 4734,
-          "readBytes": 2454671360,
-          "idleReadBytes": 2854912,
-          "at": "2026-11-18T11:21:28.604Z"
+          "readyMs": 4731,
+          "readBytes": 993263616,
+          "idleReadBytes": 0,
+          "at": "2026-11-18T22:33:06.590Z"
         },
         {
-          "slowestMs": 18072.799,
-          "meanMs": 18072.799,
-          "spanMs": 18072.799,
+          "slowestMs": 6682.173,
+          "meanMs": 6682.173,
+          "spanMs": 6682.173,
           "clientsMs": [
-            18072.799
+            6682.173
           ],
           "readyMs": 4423,
-          "readBytes": 2456657920,
-          "idleReadBytes": 2973696,
-          "at": "2026-11-18T11:22:03.457Z"
+          "readBytes": 993153024,
+          "idleReadBytes": 278528,
+          "at": "2026-11-18T22:33:29.854Z"
         },
         {
-          "slowestMs": 17880.898,
-          "meanMs": 17880.898,
-          "spanMs": 17880.898,
+          "slowestMs": 6689.321,
+          "meanMs": 6689.321,
+          "spanMs": 6689.321,
           "clientsMs": [
-            17880.898
+            6689.321
           ],
-          "readyMs": 4415,
-          "readBytes": 2453086208,
-          "idleReadBytes": 2977792,
-          "at": "2026-11-18T11:22:38.218Z"
+          "readyMs": 4488,
+          "readBytes": 993415168,
+          "idleReadBytes": 270336,
+          "at": "2026-11-18T22:33:53.072Z"
         }
       ]
     },
@@ -732,71 +753,303 @@
       "clients": 10,
       "engine": "mason",
       "statement": "revenue_by_month",
-      "slowestMs": 39191.243,
-      "meanMs": 27576.612,
+      "slowestMs": 34049.439,
+      "meanMs": 22783.822,
       "runs": [
         {
-          "slowestMs": 39065.208,
-          "meanMs": 27481.09,
-          "spanMs": 39065.269,
+          "slowestMs": 34049.439,
+          "meanMs": 23264.902,
+          "spanMs": 34049.519,
           "clientsMs": [
-            18410.397,
-            38221.655,
-            18416.054,
-            31754.584,
-            18410.557,
-            18415.82,
-            30835.45,
-            39065.208,
-            26376.62,
-            34904.555
+            29410.46,
+            34049.439,
+            25982.694,
+            33741.411,
+            14353.428,
+            14344.683,
+            14353.306,
+            26302.208,
+            14356.768,
+            25754.622
           ],
-          "readyMs": 4445,
-          "readBytes": 2484305920,
+          "readyMs": 4447,
+          "readBytes": 993624064,
+          "idleReadBytes": 4395008,
+          "at": "2026-11-18T22:34:16.350Z"
+        },
+        {
+          "slowestMs": 33429.232,
+          "meanMs": 21497.27,
+          "spanMs": 33429.453,
+          "clientsMs": [
+            31337.35,
+            13492.904,
+            19699.951,
+            26996.479,
+            11026.204,
+            23435.867,
+            29217.782,
+            11056.984,
+            33429.232,
+            15279.949
+          ],
+          "readyMs": 4718,
+          "readBytes": 993701888,
+          "idleReadBytes": 4120576,
+          "at": "2026-11-18T22:35:07.280Z"
+        },
+        {
+          "slowestMs": 34193.211,
+          "meanMs": 22783.822,
+          "spanMs": 34193.317,
+          "clientsMs": [
+            14378.13,
+            14379.536,
+            14378.935,
+            27876.695,
+            34193.211,
+            32448.945,
+            14377.769,
+            22068.953,
+            29852.054,
+            23883.993
+          ],
+          "readyMs": 4710,
+          "readBytes": 994185216,
           "idleReadBytes": 4116480,
-          "at": "2026-11-18T11:23:12.850Z"
+          "at": "2026-11-18T22:35:57.777Z"
+        }
+      ]
+    },
+    {
+      "rows": 100000000,
+      "clients": 1,
+      "engine": "postgres",
+      "statement": "revenue_by_month_kathmandu",
+      "slowestMs": 335053.851,
+      "meanMs": 335053.851,
+      "runs": [
+        {
+          "slowestMs": 336054.836,
+          "meanMs": 336054.836,
+          "spanMs": 336054.836,
+          "clientsMs": [
+            336054.836
+          ],
+          "readyMs": 661,
+          "readBytes": 33758126080,
+          "at": "2026-11-18T22:36:44.283Z"
         },
         {
-          "slowestMs": 39191.243,
-          "meanMs": 27576.612,
-          "spanMs": 39191.25,
+          "slowestMs": 335053.851,
+          "meanMs": 335053.851,
+          "spanMs": 335053.851,
           "clientsMs": [
-            30662.468,
-            18537.178,
-            30218.536,
-            18536.422,
-            18536.431,
-            18537.357,
-            33448.722,
-            31129.701,
-            36968.059,
-            39191.243
+            335053.851
           ],
-          "readyMs": 4444,
-          "readBytes": 2498957312,
-          "idleReadBytes": 4112384,
-          "at": "2026-11-18T11:24:08.723Z"
+          "readyMs": 664,
+          "readBytes": 33757085696,
+          "at": "2026-11-18T22:43:22.391Z"
         },
         {
-          "slowestMs": 39568.723,
-          "meanMs": 27648.685,
-          "spanMs": 39568.891,
+          "slowestMs": 334823.73,
+          "meanMs": 334823.73,
+          "spanMs": 334823.73,
           "clientsMs": [
-            30253.181,
-            18451.834,
-            18451.117,
-            38753.189,
-            35128.413,
-            32211.754,
-            18451.204,
-            39568.723,
-            18451.456,
-            26765.974
+            334823.73
           ],
-          "readyMs": 4412,
-          "readBytes": 2498797568,
-          "idleReadBytes": 4100096,
-          "at": "2026-11-18T11:25:04.642Z"
+          "readyMs": 629,
+          "readBytes": 33757880320,
+          "at": "2026-11-18T22:49:09.366Z"
+        }
+      ]
+    },
+    {
+      "rows": 100000000,
+      "clients": 1,
+      "engine": "mason",
+      "statement": "revenue_by_month_kathmandu",
+      "slowestMs": 6930.739,
+      "meanMs": 6930.739,
+      "runs": [
+        {
+          "slowestMs": 6930.739,
+          "meanMs": 6930.739,
+          "spanMs": 6930.739,
+          "clientsMs": [
+            6930.739
+          ],
+          "readyMs": 4974,
+          "readBytes": 646750208,
+          "idleReadBytes": 0,
+          "at": "2026-11-18T22:42:37.255Z"
+        },
+        {
+          "slowestMs": 6941.194,
+          "meanMs": 6941.194,
+          "spanMs": 6941.194,
+          "clientsMs": [
+            6941.194
+          ],
+          "readyMs": 6865,
+          "readBytes": 647323648,
+          "idleReadBytes": 2990080,
+          "at": "2026-11-18T22:43:03.275Z"
+        },
+        {
+          "slowestMs": 6910.594,
+          "meanMs": 6910.594,
+          "spanMs": 6910.594,
+          "clientsMs": [
+            6910.594
+          ],
+          "readyMs": 4973,
+          "readBytes": 646660096,
+          "idleReadBytes": 0,
+          "at": "2026-11-18T22:55:00.842Z"
+        }
+      ]
+    },
+    {
+      "rows": 100000000,
+      "clients": 10,
+      "engine": "postgres",
+      "statement": "revenue_by_month_kathmandu",
+      "slowestMs": 2362172.312,
+      "meanMs": 1975224.128,
+      "runs": [
+        {
+          "slowestMs": 2098434.707,
+          "meanMs": 1849939.252,
+          "spanMs": 2098434.707,
+          "clientsMs": [
+            2075622.154,
+            2098434.707,
+            2085207.546,
+            2097857.237,
+            902434.231,
+            2062436.501,
+            907661.681,
+            2097373.501,
+            2097601.042,
+            2074763.923
+          ],
+          "readyMs": 675,
+          "readBytes": 162494324736,
+          "at": "2026-11-18T22:55:19.941Z"
+        },
+        {
+          "slowestMs": 2362172.312,
+          "meanMs": 1975224.128,
+          "spanMs": 2362172.378,
+          "clientsMs": [
+            2361837.296,
+            2220036.292,
+            2361603.858,
+            2356093.124,
+            2181333.039,
+            1278818.705,
+            2362172.312,
+            1282413.004,
+            2357493.04,
+            990440.608
+          ],
+          "readyMs": 677,
+          "readBytes": 200690253824,
+          "at": "2026-11-18T23:33:01.564Z"
+        },
+        {
+          "slowestMs": 2379649.652,
+          "meanMs": 2020811.622,
+          "spanMs": 2379649.753,
+          "clientsMs": [
+            1039032.129,
+            2379649.652,
+            2253912.319,
+            2379452.804,
+            2369332.059,
+            1333615.725,
+            2370123.589,
+            2379587.134,
+            2372830.867,
+            1330579.938
+          ],
+          "readyMs": 988,
+          "readBytes": 203063050240,
+          "at": "2026-11-19T00:12:36.131Z"
+        }
+      ]
+    },
+    {
+      "rows": 100000000,
+      "clients": 10,
+      "engine": "mason",
+      "statement": "revenue_by_month_kathmandu",
+      "slowestMs": 58421.195,
+      "meanMs": 38100.442,
+      "runs": [
+        {
+          "slowestMs": 58614.737,
+          "meanMs": 38937.817,
+          "spanMs": 58614.851,
+          "clientsMs": [
+            58560.88,
+            41754.783,
+            49320.964,
+            34499.897,
+            22854.363,
+            24456.834,
+            58614.737,
+            53596.836,
+            22863.842,
+            22855.032
+          ],
+          "readyMs": 4942,
+          "readBytes": 647344128,
+          "idleReadBytes": 5238784,
+          "at": "2026-11-18T23:30:35.374Z"
+        },
+        {
+          "slowestMs": 58421.195,
+          "meanMs": 38100.442,
+          "spanMs": 58421.273,
+          "clientsMs": [
+            47072.72,
+            17059.68,
+            52727.817,
+            36010.948,
+            29328.252,
+            42716.593,
+            19067.78,
+            24019.777,
+            54579.655,
+            58421.195
+          ],
+          "readyMs": 4688,
+          "readBytes": 646717440,
+          "idleReadBytes": 5373952,
+          "at": "2026-11-18T23:31:50.905Z"
+        },
+        {
+          "slowestMs": 58013.438,
+          "meanMs": 36771.256,
+          "spanMs": 58013.601,
+          "clientsMs": [
+            23040.381,
+            34175.295,
+            45403.266,
+            26888.687,
+            54899.405,
+            17826.512,
+            39810.317,
+            16824.447,
+            58013.438,
+            50830.814
+          ],
+          "readyMs": 4964,
+          "readBytes": 647589888,
+          "idleReadBytes": 5238784,
+          "at": "2026-11-19T00:52:32.728Z"
         }
       ]
     },
@@ -805,41 +1058,41 @@
       "clients": 1,
       "engine": "postgres",
       "statement": "lookup",
-      "slowestMs": 21.816,
-      "meanMs": 21.816,
+      "slowestMs": 36.616,
+      "meanMs": 36.616,
       "runs": [
         {
-          "slowestMs": 21.068,
-          "meanMs": 21.068,
-          "spanMs": 21.068,
+          "slowestMs": 36.616,
+          "meanMs": 36.616,
+          "spanMs": 36.616,
           "clientsMs": [
-            21.068
+            36.616
           ],
-          "readyMs": 643,
+          "readyMs": 678,
           "readBytes": 5156864,
-          "at": "2026-11-18T11:25:56.553Z"
+          "at": "2026-11-19T00:53:42.955Z"
         },
         {
-          "slowestMs": 21.816,
-          "meanMs": 21.816,
-          "spanMs": 21.816,
+          "slowestMs": 36.437,
+          "meanMs": 36.437,
+          "spanMs": 36.437,
           "clientsMs": [
-            21.816
+            36.437
           ],
-          "readyMs": 648,
-          "readBytes": 5156864,
-          "at": "2026-11-18T11:27:08.112Z"
+          "readyMs": 666,
+          "readBytes": 5165056,
+          "at": "2026-11-19T00:54:29.131Z"
         },
         {
-          "slowestMs": 22.01,
-          "meanMs": 22.01,
-          "spanMs": 22.01,
+          "slowestMs": 36.904,
+          "meanMs": 36.904,
+          "spanMs": 36.904,
           "clientsMs": [
-            22.01
+            36.904
           ],
-          "readyMs": 648,
-          "readBytes": 5156864,
-          "at": "2026-11-18T11:27:19.537Z"
+          "readyMs": 651,
+          "readBytes": 5165056,
+          "at": "2026-11-19T00:54:40.788Z"
         }
       ]
     },
@@ -848,44 +1101,44 @@
       "clients": 1,
       "engine": "mason",
       "statement": "lookup",
-      "slowestMs": 13041.57,
-      "meanMs": 13041.57,
+      "slowestMs": 101.268,
+      "meanMs": 101.268,
       "runs": [
         {
-          "slowestMs": 13200.604,
-          "meanMs": 13200.604,
-          "spanMs": 13200.604,
+          "slowestMs": 101.268,
+          "meanMs": 101.268,
+          "spanMs": 101.268,
           "clientsMs": [
-            13200.604
+            101.268
           ],
-          "readyMs": 5239,
-          "readBytes": 1821347840,
-          "idleReadBytes": 2850816,
-          "at": "2026-11-18T11:26:13.198Z"
+          "readyMs": 5494,
+          "readBytes": 5779456,
+          "idleReadBytes": 0,
+          "at": "2026-11-19T00:54:00.135Z"
         },
         {
-          "slowestMs": 13038.725,
-          "meanMs": 13038.725,
-          "spanMs": 13038.725,
+          "slowestMs": 102.912,
+          "meanMs": 102.912,
+          "spanMs": 102.912,
           "clientsMs": [
-            13038.725
+            102.912
           ],
-          "readyMs": 4443,
-          "readBytes": 1821270016,
-          "idleReadBytes": 3133440,
-          "at": "2026-11-18T11:26:43.055Z"
+          "readyMs": 4720,
+          "readBytes": 5718016,
+          "idleReadBytes": 0,
+          "at": "2026-11-19T00:54:16.999Z"
         },
         {
-          "slowestMs": 13041.57,
-          "meanMs": 13041.57,
-          "spanMs": 13041.57,
+          "slowestMs": 100.1,
+          "meanMs": 100.1,
+          "spanMs": 100.1,
           "clientsMs": [
-            13041.57
+            100.1
           ],
-          "readyMs": 5509,
-          "readBytes": 1821347840,
-          "idleReadBytes": 2854912,
-          "at": "2026-11-18T11:27:36.484Z"
+          "readyMs": 5464,
+          "readBytes": 5783552,
+          "idleReadBytes": 0,
+          "at": "2026-11-19T00:54:57.927Z"
         }
       ]
     },
@@ -894,68 +1147,68 @@
       "clients": 10,
       "engine": "postgres",
       "statement": "lookup",
-      "slowestMs": 24.958,
-      "meanMs": 23.598,
+      "slowestMs": 38.977,
+      "meanMs": 38.248,
       "runs": [
         {
-          "slowestMs": 24.615,
-          "meanMs": 23.8,
-          "spanMs": 24.67,
+          "slowestMs": 40.793,
+          "meanMs": 38.99,
+          "spanMs": 40.793,
           "clientsMs": [
-            23.692,
-            23.375,
-            24.373,
-            24.436,
-            23.391,
-            23.439,
-            23.395,
-            23.684,
-            24.615,
-            23.604
+            38.47,
+            38.293,
+            39.255,
+            39.141,
+            38.29,
+            40.793,
+            38.474,
+            40.617,
+            38.321,
+            38.245
           ],
-          "readyMs": 631,
-          "readBytes": 5455872,
-          "at": "2026-11-18T11:28:01.693Z"
+          "readyMs": 678,
+          "readBytes": 5443584,
+          "at": "2026-11-19T00:55:10.029Z"
         },
         {
-          "slowestMs": 25.503,
-          "meanMs": 23.598,
-          "spanMs": 25.561,
+          "slowestMs": 38.977,
+          "meanMs": 38.248,
+          "spanMs": 39.027,
           "clientsMs": [
-            23.12,
-            25.503,
-            23.542,
-            23.189,
-            23.088,
-            23.312,
-            24.343,
-            23.422,
-            23.113,
-            23.345
+            38.045,
+            38.977,
+            38.842,
+            37.922,
+            37.86,
+            37.673,
+            38.719,
+            37.885,
+            38.806,
+            37.751
           ],
-          "readyMs": 635,
-          "readBytes": 5455872,
-          "at": "2026-11-18T11:29:13.799Z"
+          "readyMs": 678,
+          "readBytes": 5447680,
+          "at": "2026-11-19T00:55:56.553Z"
         },
         {
-          "slowestMs": 24.958,
-          "meanMs": 23.481,
-          "spanMs": 24.979,
+          "slowestMs": 38.653,
+          "meanMs": 38.196,
+          "spanMs": 38.704,
           "clientsMs": [
-            22.682,
-            23.986,
-            22.65,
-            23.798,
-            24.958,
-            22.6,
-            22.732,
-            23.682,
-            23.893,
-            23.831
+            38.079,
+            37.892,
+            38.254,
+            37.974,
+            37.892,
+            38.381,
+            37.888,
+            38.391,
+            38.556,
+            38.653
           ],
-          "readyMs": 639,
-          "readBytes": 5455872,
-          "at": "2026-11-18T11:29:25.230Z"
+          "readyMs": 667,
+          "readBytes": 5439488,
+          "at": "2026-11-19T00:56:08.260Z"
         }
       ]
     },
@@ -964,71 +1217,71 @@
       "clients": 10,
       "engine": "mason",
       "statement": "lookup",
-      "slowestMs": 13260.519,
-      "meanMs": 13259.379,
+      "slowestMs": 240.241,
+      "meanMs": 239.995,
       "runs": [
         {
-          "slowestMs": 13429.427,
-          "meanMs": 13428.641,
-          "spanMs": 13429.439,
+          "slowestMs": 240.241,
+          "meanMs": 239.995,
+          "spanMs": 240.31,
           "clientsMs": [
-            13429.427,
-            13428.245,
-            13428.013,
-            13428.395,
-            13429.04,
-            13428.866,
-            13428.477,
-            13428.761,
-            13428.635,
-            13428.553
+            240.098,
+            239.432,
+            240.1,
+            240.226,
+            240.038,
+            239.87,
+            239.856,
+            240.241,
+            240.07,
+            240.019
           ],
-          "readyMs": 5249,
-          "readBytes": 1838772224,
-          "idleReadBytes": 2850816,
-          "at": "2026-11-18T11:28:18.363Z"
+          "readyMs": 5494,
+          "readBytes": 35401728,
+          "idleReadBytes": 0,
+          "at": "2026-11-19T00:55:27.229Z"
         },
         {
-          "slowestMs": 13260.519,
-          "meanMs": 13259.379,
-          "spanMs": 13260.58,
+          "slowestMs": 249.141,
+          "meanMs": 244.609,
+          "spanMs": 249.379,
           "clientsMs": [
-            13259.3,
-            13260.519,
-            13259.938,
-            13259.867,
-            13260.228,
-            13259.933,
-            13259.531,
-            13254.561,
-            13260.087,
-            13259.827
+            244.378,
+            243.927,
+            244.128,
+            243.814,
+            244.578,
+            244.169,
+            249.141,
+            243.991,
+            243.257,
+            244.705
           ],
-          "readyMs": 4436,
-          "readBytes": 1838690304,
-          "idleReadBytes": 3133440,
-          "at": "2026-11-18T11:28:48.498Z"
+          "readyMs": 4715,
+          "readBytes": 35590144,
+          "idleReadBytes": 0,
+          "at": "2026-11-19T00:55:44.262Z"
         },
         {
-          "slowestMs": 13257.793,
-          "meanMs": 13256.736,
-          "spanMs": 13257.862,
+          "slowestMs": 238.236,
+          "meanMs": 234.89,
+          "spanMs": 238.309,
           "clientsMs": [
-            13255.82,
-            13257.793,
-            13256.667,
-            13256.648,
-            13257.614,
-            13256.002,
-            13256.529,
-            13256.013,
-            13257.288,
-            13256.983
+            234.681,
+            233.188,
+            238.236,
+            238.178,
+            234.428,
+            234.641,
+            234.191,
+            233.574,
+            233.788,
+            233.998
           ],
-          "readyMs": 5528,
-          "readBytes": 1838772224,
-          "idleReadBytes": 2854912,
-          "at": "2026-11-18T11:29:42.240Z"
+          "readyMs": 7743,
+          "readBytes": 35258368,
+          "idleReadBytes": 0,
+          "at": "2026-11-19T00:56:27.694Z"
         }
       ]
     },
@@ -1084,44 +1337,44 @@
       "clients": 1,
       "engine": "mason",
       "statement": "count_by_status",
-      "slowestMs": 57.594,
-      "meanMs": 57.594,
+      "slowestMs": 61.623,
+      "meanMs": 61.623,
       "runs": [
         {
-          "slowestMs": 57.594,
-          "meanMs": 57.594,
-          "spanMs": 57.594,
+          "slowestMs": 59.911,
+          "meanMs": 59.911,
+          "spanMs": 59.911,
           "clientsMs": [
-            57.594
+            59.911
           ],
-          "readyMs": 4142,
+          "readyMs": 4098,
           "readBytes": 2916352,
-          "idleReadBytes": 278528,
-          "at": "2026-11-18T11:31:13.450Z"
+          "idleReadBytes": 274432,
+          "at": "2026-11-19T00:57:49.880Z"
         },
         {
-          "slowestMs": 56.048,
-          "meanMs": 56.048,
-          "spanMs": 56.048,
+          "slowestMs": 62.333,
+          "meanMs": 62.333,
+          "spanMs": 62.333,
           "clientsMs": [
-            56.048
+            62.333
           ],
-          "readyMs": 4561,
+          "readyMs": 4717,
           "readBytes": 2916352,
-          "idleReadBytes": 131072,
-          "at": "2026-11-18T11:31:30.124Z"
-        },
-        {
-          "slowestMs": 58.575,
-          "meanMs": 58.575,
-          "spanMs": 58.575,
-          "clientsMs": [
-            58.575
-          ],
-          "readyMs": 4784,
-          "readBytes": 2920448,
           "idleReadBytes": 0,
-          "at": "2026-11-18T11:31:46.966Z"
+          "at": "2026-11-19T00:58:06.677Z"
+        },
+        {
+          "slowestMs": 61.623,
+          "meanMs": 61.623,
+          "spanMs": 61.623,
+          "clientsMs": [
+            61.623
+          ],
+          "readyMs": 4704,
+          "readBytes": 2916352,
+          "idleReadBytes": 0,
+          "at": "2026-11-19T00:58:23.463Z"
         }
       ]
     },
@@ -1204,71 +1457,71 @@
       "clients": 10,
       "engine": "mason",
       "statement": "count_by_status",
-      "slowestMs": 152.597,
-      "meanMs": 143.613,
+      "slowestMs": 170.94,
+      "meanMs": 165.01,
       "runs": [
         {
-          "slowestMs": 152.597,
-          "meanMs": 143.613,
-          "spanMs": 152.659,
+          "slowestMs": 174.184,
+          "meanMs": 165.01,
+          "spanMs": 174.291,
           "clientsMs": [
-            146.819,
-            140.484,
-            146.73,
-            135.779,
-            140.839,
-            144.936,
-            144.966,
-            147.123,
-            152.597,
-            135.854
+            162.139,
+            166.039,
+            172.448,
+            151.132,
+            163.062,
+            166.048,
+            172.22,
+            157.262,
+            174.184,
+            165.571
           ],
-          "readyMs": 4726,
-          "readBytes": 2916352,
+          "readyMs": 4717,
+          "readBytes": 3166208,
           "idleReadBytes": 0,
-          "at": "2026-11-18T11:32:03.827Z"
+          "at": "2026-11-19T00:58:40.291Z"
         },
         {
-          "slowestMs": 141.126,
-          "meanMs": 137.248,
-          "spanMs": 141.126,
+          "slowestMs": 170.94,
+          "meanMs": 166.253,
+          "spanMs": 171.15,
           "clientsMs": [
-            140.658,
-            140.956,
-            132.739,
-            133.137,
-            140.892,
-            133.133,
-            132.812,
-            138.52,
-            138.503,
-            141.126
+            166.805,
+            159.072,
+            166.373,
+            161.697,
+            170.94,
+            167.044,
+            166.85,
+            166.498,
+            170.811,
+            166.439
           ],
-          "readyMs": 4555,
-          "readBytes": 2916352,
-          "idleReadBytes": 131072,
-          "at": "2026-11-18T11:32:20.630Z"
+          "readyMs": 4719,
+          "readBytes": 3166208,
+          "idleReadBytes": 0,
+          "at": "2026-11-19T00:58:57.275Z"
         },
         {
-          "slowestMs": 241.922,
-          "meanMs": 223.837,
-          "spanMs": 241.971,
+          "slowestMs": 169.529,
+          "meanMs": 160.742,
+          "spanMs": 169.569,
           "clientsMs": [
-            229.077,
-            229.489,
-            218.214,
-            202.691,
-            211.74,
-            228.736,
-            239.017,
-            241.922,
-            211.716,
-            225.763
+            167.008,
+            148.09,
+            154.677,
+            154.977,
+            163.842,
+            154.688,
+            167.03,
+            163.713,
+            169.529,
+            163.869
           ],
-          "readyMs": 4732,
-          "readBytes": 2916352,
+          "readyMs": 4721,
+          "readBytes": 2920448,
           "idleReadBytes": 0,
-          "at": "2026-11-18T11:32:37.518Z"
+          "at": "2026-11-19T00:59:14.264Z"
         }
       ]
     },
@@ -1324,44 +1577,44 @@
       "clients": 1,
       "engine": "mason",
       "statement": "revenue_by_month",
-      "slowestMs": 159.884,
-      "meanMs": 159.884,
+      "slowestMs": 156.101,
+      "meanMs": 156.101,
       "runs": [
         {
-          "slowestMs": 159.884,
-          "meanMs": 159.884,
-          "spanMs": 159.884,
+          "slowestMs": 157.685,
+          "meanMs": 157.685,
+          "spanMs": 157.685,
           "clientsMs": [
-            159.884
+            157.685
           ],
-          "readyMs": 4578,
-          "readBytes": 26750976,
-          "idleReadBytes": 131072,
-          "at": "2026-11-18T11:32:54.429Z"
-        },
-        {
-          "slowestMs": 159.458,
-          "meanMs": 159.458,
-          "spanMs": 159.458,
-          "clientsMs": [
-            159.458
-          ],
-          "readyMs": 4578,
-          "readBytes": 27000832,
-          "idleReadBytes": 131072,
-          "at": "2026-11-18T11:33:11.208Z"
-        },
-        {
-          "slowestMs": 161.506,
-          "meanMs": 161.506,
-          "spanMs": 161.506,
-          "clientsMs": [
-            161.506
-          ],
-          "readyMs": 4737,
-          "readBytes": 26603520,
+          "readyMs": 4718,
+          "readBytes": 12460032,
           "idleReadBytes": 0,
-          "at": "2026-11-18T11:33:28.141Z"
+          "at": "2026-11-19T00:59:31.206Z"
+        },
+        {
+          "slowestMs": 156.101,
+          "meanMs": 156.101,
+          "spanMs": 156.101,
+          "clientsMs": [
+            156.101
+          ],
+          "readyMs": 4720,
+          "readBytes": 12460032,
+          "idleReadBytes": 0,
+          "at": "2026-11-19T00:59:48.140Z"
+        },
+        {
+          "slowestMs": 155.181,
+          "meanMs": 155.181,
+          "spanMs": 155.181,
+          "clientsMs": [
+            155.181
+          ],
+          "readyMs": 4732,
+          "readBytes": 12464128,
+          "idleReadBytes": 0,
+          "at": "2026-11-19T01:00:05.072Z"
         }
       ]
     },
@@ -1444,71 +1697,71 @@
       "clients": 10,
       "engine": "mason",
       "statement": "revenue_by_month",
-      "slowestMs": 573.62,
-      "meanMs": 545.18,
+      "slowestMs": 574.989,
+      "meanMs": 541.885,
       "runs": [
         {
-          "slowestMs": 577.756,
-          "meanMs": 545.18,
-          "spanMs": 577.85,
+          "slowestMs": 574.989,
+          "meanMs": 541.885,
+          "spanMs": 574.989,
           "clientsMs": [
-            565.169,
-            568.05,
-            510.191,
-            577.756,
-            537.286,
-            564.17,
-            525.482,
-            575.195,
-            515.315,
-            513.188
+            574.4,
+            505.563,
+            570.048,
+            532.04,
+            567.309,
+            572.941,
+            489.173,
+            574.989,
+            550.98,
+            481.41
           ],
-          "readyMs": 4750,
-          "readBytes": 27250688,
+          "readyMs": 4715,
+          "readBytes": 12910592,
           "idleReadBytes": 0,
-          "at": "2026-11-18T11:33:45.112Z"
+          "at": "2026-11-19T01:00:21.940Z"
         },
         {
-          "slowestMs": 573.62,
-          "meanMs": 545.947,
-          "spanMs": 573.638,
+          "slowestMs": 596.263,
+          "meanMs": 582.572,
+          "spanMs": 596.33,
           "clientsMs": [
-            564.053,
-            503.704,
-            535.831,
-            496.102,
-            568.906,
-            573.065,
-            568.715,
-            573.62,
-            502.355,
-            573.12
+            591.15,
+            596.263,
+            591.961,
+            574.91,
+            591.772,
+            585.262,
+            572.115,
+            592.276,
+            558.902,
+            571.108
           ],
-          "readyMs": 4729,
-          "readBytes": 26234880,
+          "readyMs": 4694,
+          "readBytes": 13279232,
           "idleReadBytes": 0,
-          "at": "2026-11-18T11:34:02.483Z"
+          "at": "2026-11-19T01:00:39.296Z"
         },
         {
-          "slowestMs": 549.596,
-          "meanMs": 513.833,
-          "spanMs": 549.746,
+          "slowestMs": 565.754,
+          "meanMs": 530.628,
+          "spanMs": 565.826,
           "clientsMs": [
-            543.232,
-            522.354,
-            546.9,
-            549.596,
-            500.129,
-            532.406,
-            478.392,
-            478.207,
-            515.275,
-            471.844
+            480.778,
+            485.316,
+            565.754,
+            525.261,
+            546.939,
+            563.299,
+            502.681,
+            538.98,
+            539.716,
+            557.555
           ],
-          "readyMs": 4553,
-          "readBytes": 26484736,
-          "idleReadBytes": 131072,
-          "at": "2026-11-18T11:34:19.695Z"
+          "readyMs": 4708,
+          "readBytes": 12525568,
+          "idleReadBytes": 0,
+          "at": "2026-11-19T01:00:56.682Z"
         }
       ]
     },
@@ -1516,42 +1769,42 @@
       "rows": 1000000,
       "clients": 1,
       "engine": "postgres",
-      "statement": "lookup",
-      "slowestMs": 34.489,
-      "meanMs": 34.489,
+      "statement": "revenue_by_month_kathmandu",
+      "slowestMs": 1998.941,
+      "meanMs": 1998.941,
       "runs": [
         {
-          "slowestMs": 34.142,
-          "meanMs": 34.142,
-          "spanMs": 34.142,
+          "slowestMs": 1991.553,
+          "meanMs": 1991.553,
+          "spanMs": 1991.553,
           "clientsMs": [
-            34.142
+            1991.553
           ],
-          "readyMs": 681,
-          "readBytes": 5029888,
-          "at": "2026-11-18T11:34:32.320Z"
+          "readyMs": 668,
+          "readBytes": 357814272,
+          "at": "2026-11-19T01:01:09.314Z"
         },
         {
-          "slowestMs": 34.625,
-          "meanMs": 34.625,
-          "spanMs": 34.625,
+          "slowestMs": 1998.941,
+          "meanMs": 1998.941,
+          "spanMs": 1998.941,
           "clientsMs": [
-            34.625
+            1998.941
           ],
-          "readyMs": 690,
-          "readBytes": 5029888,
-          "at": "2026-11-18T11:35:18.476Z"
+          "readyMs": 691,
+          "readBytes": 357814272,
+          "at": "2026-11-19T01:01:59.767Z"
         },
         {
-          "slowestMs": 34.489,
-          "meanMs": 34.489,
-          "spanMs": 34.489,
+          "slowestMs": 1999.307,
+          "meanMs": 1999.307,
+          "spanMs": 1999.307,
           "clientsMs": [
-            34.489
+            1999.307
           ],
-          "readyMs": 686,
-          "readBytes": 5033984,
-          "at": "2026-11-18T11:35:30.167Z"
+          "readyMs": 677,
+          "readBytes": 357683200,
+          "at": "2026-11-19T01:02:13.474Z"
         }
       ]
     },
@@ -1559,45 +1812,45 @@
       "rows": 1000000,
       "clients": 1,
       "engine": "mason",
-      "statement": "lookup",
-      "slowestMs": 131.007,
-      "meanMs": 131.007,
+      "statement": "revenue_by_month_kathmandu",
+      "slowestMs": 241.59,
+      "meanMs": 241.59,
       "runs": [
         {
-          "slowestMs": 131.268,
-          "meanMs": 131.268,
-          "spanMs": 131.268,
+          "slowestMs": 240.418,
+          "meanMs": 240.418,
+          "spanMs": 240.418,
           "clientsMs": [
-            131.268
+            240.418
           ],
-          "readyMs": 5522,
-          "readBytes": 20127744,
+          "readyMs": 7499,
+          "readBytes": 8327168,
           "idleReadBytes": 0,
-          "at": "2026-11-18T11:34:49.544Z"
+          "at": "2026-11-19T01:01:30.495Z"
         },
         {
-          "slowestMs": 130.194,
-          "meanMs": 130.194,
-          "spanMs": 130.194,
+          "slowestMs": 243.015,
+          "meanMs": 243.015,
+          "spanMs": 243.015,
           "clientsMs": [
-            130.194
+            243.015
           ],
-          "readyMs": 4578,
-          "readBytes": 20066304,
+          "readyMs": 4693,
+          "readBytes": 8409088,
           "idleReadBytes": 131072,
-          "at": "2026-11-18T11:35:06.282Z"
+          "at": "2026-11-19T01:01:47.464Z"
         },
         {
-          "slowestMs": 131.007,
-          "meanMs": 131.007,
-          "spanMs": 131.007,
+          "slowestMs": 241.59,
+          "meanMs": 241.59,
+          "spanMs": 241.59,
           "clientsMs": [
-            131.007
+            241.59
           ],
-          "readyMs": 5509,
-          "readBytes": 20127744,
+          "readyMs": 7536,
+          "readBytes": 8327168,
           "idleReadBytes": 0,
-          "at": "2026-11-18T11:35:47.380Z"
+          "at": "2026-11-19T01:02:34.545Z"
         }
       ]
     },
@@ -1605,69 +1858,301 @@
       "rows": 1000000,
       "clients": 10,
       "engine": "postgres",
-      "statement": "lookup",
-      "slowestMs": 37.519,
-      "meanMs": 37.186,
+      "statement": "revenue_by_month_kathmandu",
+      "slowestMs": 3594.789,
+      "meanMs": 3415.471,
       "runs": [
         {
-          "slowestMs": 36.356,
-          "meanMs": 35.921,
-          "spanMs": 36.356,
+          "slowestMs": 3594.789,
+          "meanMs": 3454.055,
+          "spanMs": 3594.789,
           "clientsMs": [
-            35.87,
-            35.97,
-            36.356,
-            35.986,
-            35.704,
-            36.148,
-            35.802,
-            35.732,
-            35.817,
-            35.824
-          ],
-          "readyMs": 681,
-          "readBytes": 5210112,
-          "at": "2026-11-18T11:35:59.511Z"
-        },
-        {
-          "slowestMs": 37.519,
-          "meanMs": 37.186,
-          "spanMs": 37.628,
-          "clientsMs": [
-            37.519,
-            37.222,
-            37.141,
-            36.912,
-            36.769,
-            37.385,
-            36.95,
-            37.426,
-            37.288,
-            37.245
-          ],
-          "readyMs": 675,
-          "readBytes": 5218304,
-          "at": "2026-11-18T11:36:45.843Z"
-        },
-        {
-          "slowestMs": 39.329,
-          "meanMs": 37.292,
-          "spanMs": 39.329,
-          "clientsMs": [
-            36.828,
-            36.838,
-            36.947,
-            36.844,
-            37.419,
-            36.832,
-            37.101,
-            37.053,
-            39.329,
-            37.732
+            3326.111,
+            3302.289,
+            3594.789,
+            3415.713,
+            3482.818,
+            3410.748,
+            3437.034,
+            3488.795,
+            3548.598,
+            3533.659
           ],
           "readyMs": 682,
-          "readBytes": 5218304,
-          "at": "2026-11-18T11:36:57.584Z"
+          "readBytes": 357789696,
+          "at": "2026-11-19T01:02:46.824Z"
+        },
+        {
+          "slowestMs": 3632.671,
+          "meanMs": 3415.471,
+          "spanMs": 3632.733,
+          "clientsMs": [
+            3336.993,
+            3272.635,
+            3632.671,
+            3134.201,
+            3577.529,
+            3418.654,
+            3584.074,
+            3438.377,
+            3321.683,
+            3437.891
+          ],
+          "readyMs": 673,
+          "readBytes": 357797888,
+          "at": "2026-11-19T01:03:39.047Z"
+        },
+        {
+          "slowestMs": 3580.028,
+          "meanMs": 3354.781,
+          "spanMs": 3580.1,
+          "clientsMs": [
+            3522.324,
+            3580.028,
+            3269.965,
+            3492.353,
+            3451.417,
+            3206.332,
+            3044.831,
+            3349.952,
+            3160.198,
+            3470.406
+          ],
+          "readyMs": 720,
+          "readBytes": 357785600,
+          "at": "2026-11-19T01:03:54.433Z"
+        }
+      ]
+    },
+    {
+      "rows": 1000000,
+      "clients": 10,
+      "engine": "mason",
+      "statement": "revenue_by_month_kathmandu",
+      "slowestMs": 1235.301,
+      "meanMs": 1169.123,
+      "runs": [
+        {
+          "slowestMs": 1235.301,
+          "meanMs": 1169.123,
+          "spanMs": 1235.546,
+          "clientsMs": [
+            926.885,
+            1181.911,
+            1229.863,
+            1222.415,
+            1043.007,
+            1230.018,
+            1235.301,
+            1230.042,
+            1201.065,
+            1190.722
+          ],
+          "readyMs": 5483,
+          "readBytes": 8806400,
+          "idleReadBytes": 0,
+          "at": "2026-11-19T01:03:07.644Z"
+        },
+        {
+          "slowestMs": 1265.298,
+          "meanMs": 1187.675,
+          "spanMs": 1265.362,
+          "clientsMs": [
+            1265.298,
+            1053.78,
+            1260.452,
+            1121.774,
+            1265.01,
+            1195.704,
+            929.941,
+            1254.674,
+            1264.901,
+            1265.218
+          ],
+          "readyMs": 4721,
+          "readBytes": 9121792,
+          "idleReadBytes": 0,
+          "at": "2026-11-19T01:03:25.710Z"
+        },
+        {
+          "slowestMs": 1218.671,
+          "meanMs": 1114.259,
+          "spanMs": 1218.724,
+          "clientsMs": [
+            832.364,
+            947.384,
+            1090.245,
+            1213.28,
+            1133.844,
+            1160.611,
+            1218.671,
+            1187.992,
+            1185.767,
+            1172.432
+          ],
+          "readyMs": 5488,
+          "readBytes": 8806400,
+          "idleReadBytes": 0,
+          "at": "2026-11-19T01:04:15.250Z"
+        }
+      ]
+    },
+    {
+      "rows": 1000000,
+      "clients": 1,
+      "engine": "postgres",
+      "statement": "lookup",
+      "slowestMs": 34.495,
+      "meanMs": 34.495,
+      "runs": [
+        {
+          "slowestMs": 34.328,
+          "meanMs": 34.328,
+          "spanMs": 34.328,
+          "clientsMs": [
+            34.328
+          ],
+          "readyMs": 689,
+          "readBytes": 5033984,
+          "at": "2026-11-19T01:04:28.556Z"
+        },
+        {
+          "slowestMs": 34.554,
+          "meanMs": 34.554,
+          "spanMs": 34.554,
+          "clientsMs": [
+            34.554
+          ],
+          "readyMs": 675,
+          "readBytes": 5033984,
+          "at": "2026-11-19T01:05:16.790Z"
+        },
+        {
+          "slowestMs": 34.495,
+          "meanMs": 34.495,
+          "spanMs": 34.495,
+          "clientsMs": [
+            34.495
+          ],
+          "readyMs": 674,
+          "readBytes": 5033984,
+          "at": "2026-11-19T01:05:28.462Z"
+        }
+      ]
+    },
+    {
+      "rows": 1000000,
+      "clients": 1,
+      "engine": "mason",
+      "statement": "lookup",
+      "slowestMs": 93.42,
+      "meanMs": 93.42,
+      "runs": [
+        {
+          "slowestMs": 96.544,
+          "meanMs": 96.544,
+          "spanMs": 96.544,
+          "clientsMs": [
+            96.544
+          ],
+          "readyMs": 5481,
+          "readBytes": 5079040,
+          "idleReadBytes": 0,
+          "at": "2026-11-19T01:04:45.711Z"
+        },
+        {
+          "slowestMs": 93.42,
+          "meanMs": 93.42,
+          "spanMs": 93.42,
+          "clientsMs": [
+            93.42
+          ],
+          "readyMs": 6846,
+          "readBytes": 4866048,
+          "idleReadBytes": 0,
+          "at": "2026-11-19T01:05:04.646Z"
+        },
+        {
+          "slowestMs": 92.6,
+          "meanMs": 92.6,
+          "spanMs": 92.6,
+          "clientsMs": [
+            92.6
+          ],
+          "readyMs": 5489,
+          "readBytes": 5083136,
+          "idleReadBytes": 0,
+          "at": "2026-11-19T01:05:45.630Z"
+        }
+      ]
+    },
+    {
+      "rows": 1000000,
+      "clients": 10,
+      "engine": "postgres",
+      "statement": "lookup",
+      "slowestMs": 37.901,
+      "meanMs": 36.253,
+      "runs": [
+        {
+          "slowestMs": 38.291,
+          "meanMs": 36.492,
+          "spanMs": 38.302,
+          "clientsMs": [
+            38.254,
+            36.109,
+            35.962,
+            38.291,
+            36.121,
+            36.194,
+            36.256,
+            35.802,
+            35.911,
+            36.016
+          ],
+          "readyMs": 677,
+          "readBytes": 5206016,
+          "at": "2026-11-19T01:05:57.761Z"
+        },
+        {
+          "slowestMs": 37.901,
+          "meanMs": 36.251,
+          "spanMs": 37.955,
+          "clientsMs": [
+            35.813,
+            35.786,
+            37.765,
+            35.715,
+            37.901,
+            36.046,
+            36.117,
+            35.635,
+            36.076,
+            35.66
+          ],
+          "readyMs": 670,
+          "readBytes": 5206016,
+          "at": "2026-11-19T01:06:44.302Z"
+        },
+        {
+          "slowestMs": 37.27,
+          "meanMs": 36.253,
+          "spanMs": 37.271,
+          "clientsMs": [
+            35.987,
+            36.008,
+            37.004,
+            35.856,
+            37.27,
+            35.83,
+            36.05,
+            36.307,
+            35.998,
+            36.216
+          ],
+          "readyMs": 674,
+          "readBytes": 5206016,
+          "at": "2026-11-19T01:06:56.005Z"
         }
       ]
     },
@@ -1676,71 +2161,71 @@
       "clients": 10,
       "engine": "mason",
       "statement": "lookup",
-      "slowestMs": 202.499,
-      "meanMs": 202.149,
+      "slowestMs": 232.831,
+      "meanMs": 226.659,
       "runs": [
         {
-          "slowestMs": 201.819,
-          "meanMs": 200.957,
-          "spanMs": 201.885,
+          "slowestMs": 229.743,
+          "meanMs": 226.302,
+          "spanMs": 229.952,
           "clientsMs": [
-            200.784,
-            200.725,
-            200.706,
-            201.551,
-            200.307,
-            201.819,
-            200.337,
-            201.064,
-            200.779,
-            201.495
+            225.965,
+            225.656,
+            226.307,
+            225.817,
+            229.743,
+            226.421,
+            225.58,
+            225.256,
+            226.359,
+            225.916
           ],
-          "readyMs": 5518,
-          "readBytes": 31772672,
+          "readyMs": 5503,
+          "readBytes": 21307392,
           "idleReadBytes": 0,
-          "at": "2026-11-18T11:36:16.756Z"
+          "at": "2026-11-19T01:06:14.975Z"
         },
         {
-          "slowestMs": 208.4,
-          "meanMs": 207.853,
-          "spanMs": 208.491,
+          "slowestMs": 232.831,
+          "meanMs": 226.659,
+          "spanMs": 232.948,
           "clientsMs": [
-            208.4,
-            207.624,
-            207.901,
-            207.543,
-            207.891,
-            207.726,
-            208.036,
-            208.097,
-            208.106,
-            207.203
+            221.964,
+            231.015,
+            232.831,
+            222.734,
+            228.023,
+            230.489,
+            230.666,
+            223.227,
+            222.373,
+            223.27
           ],
-          "readyMs": 4574,
-          "readBytes": 31956992,
-          "idleReadBytes": 131072,
-          "at": "2026-11-18T11:36:33.577Z"
+          "readyMs": 4703,
+          "readBytes": 21995520,
+          "idleReadBytes": 0,
+          "at": "2026-11-19T01:06:31.995Z"
         },
         {
-          "slowestMs": 202.499,
-          "meanMs": 202.149,
-          "spanMs": 202.548,
+          "slowestMs": 233.405,
+          "meanMs": 226.737,
+          "spanMs": 233.64,
           "clientsMs": [
-            202.085,
-            202.231,
-            201.849,
-            201.955,
-            202.458,
-            202.377,
-            202.205,
-            202.499,
-            202.354,
-            201.481
+            226.852,
+            226.477,
+            225.799,
+            225.689,
+            225.899,
+            225.996,
+            225.368,
+            233.405,
+            226.24,
+            225.648
           ],
-          "readyMs": 5533,
-          "readBytes": 31780864,
+          "readyMs": 5473,
+          "readBytes": 21307392,
           "idleReadBytes": 0,
-          "at": "2026-11-18T11:37:14.843Z"
+          "at": "2026-11-19T01:07:13.180Z"
         }
       ]
     },
@@ -1796,44 +2281,44 @@
       "clients": 1,
       "engine": "mason",
       "statement": "count_by_status",
-      "slowestMs": 93.183,
-      "meanMs": 93.183,
+      "slowestMs": 98.946,
+      "meanMs": 98.946,
       "runs": [
         {
-          "slowestMs": 92.746,
-          "meanMs": 92.746,
-          "spanMs": 92.746,
+          "slowestMs": 98.946,
+          "meanMs": 98.946,
+          "spanMs": 98.946,
           "clientsMs": [
-            92.746
+            98.946
           ],
-          "readyMs": 4127,
-          "readBytes": 15486976,
-          "idleReadBytes": 405504,
-          "at": "2026-11-18T11:39:12.907Z"
+          "readyMs": 4104,
+          "readBytes": 16248832,
+          "idleReadBytes": 274432,
+          "at": "2026-11-19T01:09:28.945Z"
         },
         {
-          "slowestMs": 93.183,
-          "meanMs": 93.183,
-          "spanMs": 93.183,
+          "slowestMs": 100.388,
+          "meanMs": 100.388,
+          "spanMs": 100.388,
           "clientsMs": [
-            93.183
+            100.388
           ],
-          "readyMs": 4583,
-          "readBytes": 15986688,
-          "idleReadBytes": 131072,
-          "at": "2026-11-18T11:39:29.663Z"
-        },
-        {
-          "slowestMs": 94.001,
-          "meanMs": 94.001,
-          "spanMs": 94.001,
-          "clientsMs": [
-            94.001
-          ],
-          "readyMs": 4742,
-          "readBytes": 15736832,
+          "readyMs": 4703,
+          "readBytes": 15998976,
           "idleReadBytes": 0,
-          "at": "2026-11-18T11:39:46.542Z"
+          "at": "2026-11-19T01:09:45.810Z"
+        },
+        {
+          "slowestMs": 97.455,
+          "meanMs": 97.455,
+          "spanMs": 97.455,
+          "clientsMs": [
+            97.455
+          ],
+          "readyMs": 4712,
+          "readBytes": 15998976,
+          "idleReadBytes": 0,
+          "at": "2026-11-19T01:10:02.672Z"
         }
       ]
     },
@@ -1916,71 +2401,71 @@
       "clients": 10,
       "engine": "mason",
       "statement": "count_by_status",
-      "slowestMs": 240.768,
-      "meanMs": 227.539,
+      "slowestMs": 259.526,
+      "meanMs": 247.279,
       "runs": [
         {
-          "slowestMs": 240.768,
-          "meanMs": 224.582,
-          "spanMs": 240.92,
+          "slowestMs": 259.526,
+          "meanMs": 247.279,
+          "spanMs": 259.598,
           "clientsMs": [
-            240.517,
-            237.373,
-            236.935,
-            240.768,
-            194.674,
-            205.191,
-            221.822,
-            240.367,
-            227.432,
-            200.742
+            241.243,
+            258.98,
+            241.484,
+            242.038,
+            251.346,
+            258.861,
+            227.359,
+            259.526,
+            259.051,
+            232.9
           ],
-          "readyMs": 4564,
-          "readBytes": 15486976,
-          "idleReadBytes": 131072,
-          "at": "2026-11-18T11:40:03.240Z"
-        },
-        {
-          "slowestMs": 237.082,
-          "meanMs": 227.539,
-          "spanMs": 237.183,
-          "clientsMs": [
-            224.677,
-            233.423,
-            235.3,
-            225.662,
-            225.757,
-            224.938,
-            225.007,
-            209.618,
-            233.924,
-            237.082
-          ],
-          "readyMs": 4752,
-          "readBytes": 15740928,
+          "readyMs": 4712,
+          "readBytes": 15749120,
           "idleReadBytes": 0,
-          "at": "2026-11-18T11:40:20.319Z"
+          "at": "2026-11-19T01:10:19.494Z"
         },
         {
-          "slowestMs": 246.578,
-          "meanMs": 240.467,
-          "spanMs": 246.69,
+          "slowestMs": 257.472,
+          "meanMs": 245.216,
+          "spanMs": 257.671,
           "clientsMs": [
-            246.099,
-            246.578,
-            237.87,
-            236.506,
-            237.84,
-            237.48,
-            237.075,
-            246.365,
-            241.767,
-            237.088
+            252.507,
+            246.108,
+            242.152,
+            249.727,
+            231.572,
+            255.639,
+            255.869,
+            234.565,
+            226.551,
+            257.472
           ],
-          "readyMs": 4601,
-          "readBytes": 15990784,
-          "idleReadBytes": 131072,
-          "at": "2026-11-18T11:40:37.257Z"
+          "readyMs": 4730,
+          "readBytes": 15749120,
+          "idleReadBytes": 0,
+          "at": "2026-11-19T01:10:36.574Z"
+        },
+        {
+          "slowestMs": 260.124,
+          "meanMs": 257.761,
+          "spanMs": 260.238,
+          "clientsMs": [
+            252.088,
+            246.45,
+            260.004,
+            259.514,
+            259.71,
+            259.955,
+            260.107,
+            259.763,
+            260.124,
+            259.894
+          ],
+          "readyMs": 4730,
+          "readBytes": 15503360,
+          "idleReadBytes": 0,
+          "at": "2026-11-19T01:10:53.614Z"
         }
       ]
     },
@@ -2036,44 +2521,44 @@
       "clients": 1,
       "engine": "mason",
       "statement": "revenue_by_month",
-      "slowestMs": 965.183,
-      "meanMs": 965.183,
+      "slowestMs": 498.753,
+      "meanMs": 498.753,
       "runs": [
         {
-          "slowestMs": 966.951,
-          "meanMs": 966.951,
-          "spanMs": 966.951,
+          "slowestMs": 500.108,
+          "meanMs": 500.108,
+          "spanMs": 500.108,
           "clientsMs": [
-            966.951
+            500.108
           ],
-          "readyMs": 4731,
-          "readBytes": 248934400,
+          "readyMs": 4722,
+          "readBytes": 95756288,
           "idleReadBytes": 0,
-          "at": "2026-11-18T11:40:54.280Z"
+          "at": "2026-11-19T01:11:10.721Z"
         },
         {
-          "slowestMs": 965.183,
-          "meanMs": 965.183,
-          "spanMs": 965.183,
+          "slowestMs": 496.145,
+          "meanMs": 496.145,
+          "spanMs": 496.145,
           "clientsMs": [
-            965.183
+            496.145
           ],
-          "readyMs": 4567,
-          "readBytes": 247930880,
-          "idleReadBytes": 131072,
-          "at": "2026-11-18T11:41:11.856Z"
+          "readyMs": 4708,
+          "readBytes": 95756288,
+          "idleReadBytes": 0,
+          "at": "2026-11-19T01:11:28.009Z"
         },
         {
-          "slowestMs": 964.598,
-          "meanMs": 964.598,
-          "spanMs": 964.598,
+          "slowestMs": 498.753,
+          "meanMs": 498.753,
+          "spanMs": 498.753,
           "clientsMs": [
-            964.598
+            498.753
           ],
-          "readyMs": 4741,
-          "readBytes": 248545280,
+          "readyMs": 4738,
+          "readBytes": 96272384,
           "idleReadBytes": 0,
-          "at": "2026-11-18T11:41:29.620Z"
+          "at": "2026-11-19T01:11:45.328Z"
         }
       ]
     },
@@ -2156,71 +2641,303 @@
       "clients": 10,
       "engine": "mason",
       "statement": "revenue_by_month",
-      "slowestMs": 3871.78,
-      "meanMs": 2708.487,
+      "slowestMs": 2758.131,
+      "meanMs": 1888.811,
       "runs": [
         {
-          "slowestMs": 3871.78,
-          "meanMs": 2708.487,
-          "spanMs": 3871.872,
+          "slowestMs": 2758.131,
+          "meanMs": 1888.811,
+          "spanMs": 2758.308,
           "clientsMs": [
-            1853.895,
-            2661.504,
-            3112.266,
-            3871.78,
-            3062.31,
-            1850.927,
-            1853.805,
-            3614.192,
-            3350.532,
-            1853.663
+            1115.437,
+            1695.498,
+            1372.368,
+            1372.586,
+            2256.016,
+            2449.231,
+            2758.131,
+            1238.415,
+            2631.019,
+            1999.408
           ],
-          "readyMs": 4602,
-          "readBytes": 254029824,
-          "idleReadBytes": 131072,
-          "at": "2026-11-18T11:41:47.210Z"
-        },
-        {
-          "slowestMs": 3960.481,
-          "meanMs": 2813.28,
-          "spanMs": 3960.481,
-          "clientsMs": [
-            3202.89,
-            3960.481,
-            1872.668,
-            3816.804,
-            1874.721,
-            1872.531,
-            3057.909,
-            1872.183,
-            2969.707,
-            3632.904
-          ],
-          "readyMs": 4736,
-          "readBytes": 253145088,
+          "readyMs": 4700,
+          "readBytes": 96342016,
           "idleReadBytes": 0,
-          "at": "2026-11-18T11:42:07.985Z"
+          "at": "2026-11-19T01:12:02.585Z"
         },
         {
-          "slowestMs": 3615.56,
-          "meanMs": 2463.382,
-          "spanMs": 3615.571,
+          "slowestMs": 2660.517,
+          "meanMs": 1820.806,
+          "spanMs": 2660.527,
           "clientsMs": [
-            2729.148,
-            3615.56,
-            3163.205,
-            1610.924,
-            3434.103,
-            2239.822,
-            2935.204,
-            1598.139,
-            1639.472,
-            1668.239
+            2660.517,
+            2180.755,
+            2356.682,
+            1927.645,
+            1340.653,
+            1661.743,
+            1143.851,
+            1179.754,
+            1205.764,
+            2550.696
           ],
-          "readyMs": 4559,
-          "readBytes": 251043840,
-          "idleReadBytes": 131072,
-          "at": "2026-11-18T11:42:28.671Z"
+          "readyMs": 4718,
+          "readBytes": 96849920,
+          "idleReadBytes": 0,
+          "at": "2026-11-19T01:12:22.158Z"
+        },
+        {
+          "slowestMs": 2763.683,
+          "meanMs": 1903.565,
+          "spanMs": 2763.889,
+          "clientsMs": [
+            1223.565,
+            1323.563,
+            2454.318,
+            2605.457,
+            1226.682,
+            1365.635,
+            2763.683,
+            2040.233,
+            1710.889,
+            2321.622
+          ],
+          "readyMs": 4699,
+          "readBytes": 96604160,
+          "idleReadBytes": 0,
+          "at": "2026-11-19T01:12:41.609Z"
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 1,
+      "engine": "postgres",
+      "statement": "revenue_by_month_kathmandu",
+      "slowestMs": 24310.305,
+      "meanMs": 24310.305,
+      "runs": [
+        {
+          "slowestMs": 24302.761,
+          "meanMs": 24302.761,
+          "spanMs": 24302.761,
+          "clientsMs": [
+            24302.761
+          ],
+          "readyMs": 688,
+          "readBytes": 2963537920,
+          "at": "2026-11-19T01:12:56.451Z"
+        },
+        {
+          "slowestMs": 24310.305,
+          "meanMs": 24310.305,
+          "spanMs": 24310.305,
+          "clientsMs": [
+            24310.305
+          ],
+          "readyMs": 661,
+          "readBytes": 2963533824,
+          "at": "2026-11-19T01:14:08.131Z"
+        },
+        {
+          "slowestMs": 24311.249,
+          "meanMs": 24311.249,
+          "spanMs": 24311.249,
+          "clientsMs": [
+            24311.249
+          ],
+          "readyMs": 647,
+          "readBytes": 2963230720,
+          "at": "2026-11-19T01:14:44.391Z"
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 1,
+      "engine": "mason",
+      "statement": "revenue_by_month_kathmandu",
+      "slowestMs": 829.08,
+      "meanMs": 829.08,
+      "runs": [
+        {
+          "slowestMs": 818.304,
+          "meanMs": 818.304,
+          "spanMs": 818.304,
+          "clientsMs": [
+            818.304
+          ],
+          "readyMs": 4946,
+          "readBytes": 58732544,
+          "idleReadBytes": 0,
+          "at": "2026-11-19T01:13:37.663Z"
+        },
+        {
+          "slowestMs": 852.404,
+          "meanMs": 852.404,
+          "spanMs": 852.404,
+          "clientsMs": [
+            852.404
+          ],
+          "readyMs": 4696,
+          "readBytes": 58400768,
+          "idleReadBytes": 0,
+          "at": "2026-11-19T01:13:55.212Z"
+        },
+        {
+          "slowestMs": 829.08,
+          "meanMs": 829.08,
+          "spanMs": 829.08,
+          "clientsMs": [
+            829.08
+          ],
+          "readyMs": 4962,
+          "readBytes": 58232832,
+          "idleReadBytes": 0,
+          "at": "2026-11-19T01:15:25.410Z"
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 10,
+      "engine": "postgres",
+      "statement": "revenue_by_month_kathmandu",
+      "slowestMs": 44591.832,
+      "meanMs": 43597.879,
+      "runs": [
+        {
+          "slowestMs": 44591.832,
+          "meanMs": 43597.879,
+          "spanMs": 44591.99,
+          "clientsMs": [
+            42325.752,
+            44332.535,
+            44361.767,
+            43895.77,
+            43692.639,
+            40831.566,
+            43394.493,
+            44438.317,
+            44114.119,
+            44591.832
+          ],
+          "readyMs": 697,
+          "readBytes": 3422138368,
+          "at": "2026-11-19T01:15:38.300Z"
+        },
+        {
+          "slowestMs": 45509.592,
+          "meanMs": 44652.732,
+          "spanMs": 45509.658,
+          "clientsMs": [
+            45013.589,
+            43566.079,
+            45429.673,
+            44632.622,
+            43909.436,
+            44486.071,
+            43822.568,
+            44834.655,
+            45323.03,
+            45509.592
+          ],
+          "readyMs": 671,
+          "readBytes": 3349635072,
+          "at": "2026-11-19T01:17:23.863Z"
+        },
+        {
+          "slowestMs": 42819.948,
+          "meanMs": 41786.941,
+          "spanMs": 42819.984,
+          "clientsMs": [
+            42479.056,
+            40683.609,
+            41173.51,
+            42706.21,
+            41866.196,
+            42819.948,
+            39255.478,
+            42726.594,
+            42485.527,
+            41673.278
+          ],
+          "readyMs": 863,
+          "readBytes": 3188371456,
+          "at": "2026-11-19T01:18:21.490Z"
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 10,
+      "engine": "mason",
+      "statement": "revenue_by_month_kathmandu",
+      "slowestMs": 7483.614,
+      "meanMs": 6560.689,
+      "runs": [
+        {
+          "slowestMs": 7471.529,
+          "meanMs": 6560.689,
+          "spanMs": 7471.572,
+          "clientsMs": [
+            7292.056,
+            5263.785,
+            6669.801,
+            7463.647,
+            6852.123,
+            5268.054,
+            7316.584,
+            7471.529,
+            6742.052,
+            5267.263
+          ],
+          "readyMs": 4967,
+          "readBytes": 59813888,
+          "idleReadBytes": 0,
+          "at": "2026-11-19T01:16:39.988Z"
+        },
+        {
+          "slowestMs": 7483.614,
+          "meanMs": 6525.011,
+          "spanMs": 7483.799,
+          "clientsMs": [
+            7173.321,
+            5159.52,
+            6770.592,
+            5294.551,
+            6665.793,
+            6741.357,
+            7372.482,
+            7483.614,
+            5158.456,
+            7430.424
+          ],
+          "readyMs": 4689,
+          "readBytes": 59994112,
+          "idleReadBytes": 0,
+          "at": "2026-11-19T01:17:04.261Z"
+        },
+        {
+          "slowestMs": 7562.869,
+          "meanMs": 6581.402,
+          "spanMs": 7562.967,
+          "clientsMs": [
+            7220.489,
+            6954.631,
+            5284.538,
+            7562.869,
+            5284.968,
+            5285.064,
+            7543.595,
+            7416.533,
+            6258.716,
+            7002.618
+          ],
+          "readyMs": 4958,
+          "readBytes": 59568128,
+          "idleReadBytes": 0,
+          "at": "2026-11-19T01:19:21.193Z"
         }
       ]
     },
@@ -2229,41 +2946,41 @@
       "clients": 1,
       "engine": "postgres",
       "statement": "lookup",
-      "slowestMs": 35.242,
-      "meanMs": 35.242,
+      "slowestMs": 35.07,
+      "meanMs": 35.07,
       "runs": [
         {
-          "slowestMs": 35.639,
-          "meanMs": 35.639,
-          "spanMs": 35.639,
+          "slowestMs": 35.556,
+          "meanMs": 35.556,
+          "spanMs": 35.556,
           "clientsMs": [
-            35.639
+            35.556
           ],
-          "readyMs": 681,
-          "readBytes": 5165056,
-          "at": "2026-11-18T11:42:44.438Z"
+          "readyMs": 673,
+          "readBytes": 5160960,
+          "at": "2026-11-19T01:19:40.858Z"
         },
         {
-          "slowestMs": 35.102,
-          "meanMs": 35.102,
-          "spanMs": 35.102,
+          "slowestMs": 35.07,
+          "meanMs": 35.07,
+          "spanMs": 35.07,
           "clientsMs": [
-            35.102
+            35.07
           ],
           "readyMs": 678,
           "readBytes": 5165056,
-          "at": "2026-11-18T11:43:32.017Z"
+          "at": "2026-11-19T01:20:26.994Z"
         },
         {
-          "slowestMs": 35.242,
-          "meanMs": 35.242,
-          "spanMs": 35.242,
+          "slowestMs": 35.063,
+          "meanMs": 35.063,
+          "spanMs": 35.063,
           "clientsMs": [
-            35.242
+            35.063
           ],
-          "readyMs": 682,
+          "readyMs": 656,
           "readBytes": 5165056,
-          "at": "2026-11-18T11:43:43.683Z"
+          "at": "2026-11-19T01:20:38.661Z"
         }
       ]
     },
@@ -2272,44 +2989,44 @@
       "clients": 1,
       "engine": "mason",
       "statement": "lookup",
-      "slowestMs": 743.074,
-      "meanMs": 743.074,
+      "slowestMs": 95.3,
+      "meanMs": 95.3,
       "runs": [
         {
-          "slowestMs": 747.581,
-          "meanMs": 747.581,
-          "spanMs": 747.581,
+          "slowestMs": 95.3,
+          "meanMs": 95.3,
+          "spanMs": 95.3,
           "clientsMs": [
-            747.581
+            95.3
           ],
-          "readyMs": 5516,
-          "readBytes": 185647104,
+          "readyMs": 5490,
+          "readBytes": 5017600,
           "idleReadBytes": 0,
-          "at": "2026-11-18T11:43:01.663Z"
+          "at": "2026-11-19T01:19:58.019Z"
         },
         {
-          "slowestMs": 742.315,
-          "meanMs": 742.315,
-          "spanMs": 742.315,
+          "slowestMs": 93.408,
+          "meanMs": 93.408,
+          "spanMs": 93.408,
           "clientsMs": [
-            742.315
+            93.408
           ],
-          "readyMs": 4744,
-          "readBytes": 185577472,
+          "readyMs": 4707,
+          "readBytes": 4947968,
           "idleReadBytes": 0,
-          "at": "2026-11-18T11:43:19.222Z"
+          "at": "2026-11-19T01:20:14.868Z"
         },
         {
-          "slowestMs": 743.074,
-          "meanMs": 743.074,
-          "spanMs": 743.074,
+          "slowestMs": 96.106,
+          "meanMs": 96.106,
+          "spanMs": 96.106,
           "clientsMs": [
-            743.074
+            96.106
           ],
-          "readyMs": 5526,
-          "readBytes": 185647104,
+          "readyMs": 5489,
+          "readBytes": 5017600,
           "idleReadBytes": 0,
-          "at": "2026-11-18T11:44:00.887Z"
+          "at": "2026-11-19T01:20:55.825Z"
         }
       ]
     },
@@ -2318,68 +3035,68 @@
       "clients": 10,
       "engine": "postgres",
       "statement": "lookup",
-      "slowestMs": 39.214,
-      "meanMs": 37.655,
+      "slowestMs": 38.77,
+      "meanMs": 37.829,
       "runs": [
         {
-          "slowestMs": 39.214,
-          "meanMs": 37.655,
-          "spanMs": 39.359,
+          "slowestMs": 37.231,
+          "meanMs": 36.959,
+          "spanMs": 37.335,
           "clientsMs": [
-            37.83,
-            36.892,
-            36.959,
-            39.205,
-            36.934,
-            36.985,
-            37.825,
-            37.782,
-            39.214,
-            36.927
+            36.708,
+            37.136,
+            36.879,
+            36.974,
+            37.017,
+            36.733,
+            36.582,
+            37.099,
+            37.231,
+            37.231
           ],
-          "readyMs": 683,
+          "readyMs": 684,
           "readBytes": 5369856,
-          "at": "2026-11-18T11:44:13.654Z"
+          "at": "2026-11-19T01:21:07.916Z"
         },
         {
-          "slowestMs": 39.737,
-          "meanMs": 37.812,
-          "spanMs": 39.806,
+          "slowestMs": 38.77,
+          "meanMs": 38.016,
+          "spanMs": 38.821,
           "clientsMs": [
-            39.201,
-            36.887,
-            36.937,
-            39.671,
-            36.961,
-            39.737,
-            37.823,
-            37.081,
-            36.928,
-            36.889
+            37.667,
+            38.689,
+            37.898,
+            37.952,
+            37.675,
+            37.658,
+            37.616,
+            38.441,
+            38.77,
+            37.794
           ],
-          "readyMs": 678,
+          "readyMs": 664,
           "readBytes": 5369856,
-          "at": "2026-11-18T11:45:01.379Z"
+          "at": "2026-11-19T01:21:54.461Z"
         },
         {
-          "slowestMs": 38.04,
-          "meanMs": 37.41,
-          "spanMs": 38.076,
+          "slowestMs": 40.067,
+          "meanMs": 37.829,
+          "spanMs": 40.111,
           "clientsMs": [
-            37.914,
-            37.006,
-            37.01,
-            37.114,
-            38.018,
-            37.159,
-            36.996,
-            38.04,
-            36.956,
-            37.89
+            37.718,
+            38.444,
+            37.449,
+            37.53,
+            37.402,
+            37.367,
+            40.067,
+            37.335,
+            37.491,
+            37.483
           ],
-          "readyMs": 687,
+          "readyMs": 673,
           "readBytes": 5369856,
-          "at": "2026-11-18T11:45:13.104Z"
+          "at": "2026-11-19T01:22:06.169Z"
         }
       ]
     },
@@ -2388,71 +3105,71 @@
       "clients": 10,
       "engine": "mason",
       "statement": "lookup",
-      "slowestMs": 826.221,
-      "meanMs": 825.6,
+      "slowestMs": 234.051,
+      "meanMs": 226.044,
       "runs": [
         {
-          "slowestMs": 837.392,
-          "meanMs": 836.728,
-          "spanMs": 837.392,
+          "slowestMs": 242.36,
+          "meanMs": 236.071,
+          "spanMs": 242.522,
           "clientsMs": [
-            836.54,
-            837.033,
-            836.63,
-            837.392,
-            836.26,
-            836.301,
-            836.588,
-            837.055,
-            836.222,
-            837.255
+            230.52,
+            242.36,
+            235.82,
+            236.003,
+            242.126,
+            235.861,
+            235.859,
+            229.766,
+            236.2,
+            236.192
           ],
-          "readyMs": 5524,
-          "readBytes": 201584640,
+          "readyMs": 5475,
+          "readBytes": 29642752,
           "idleReadBytes": 0,
-          "at": "2026-11-18T11:44:30.893Z"
+          "at": "2026-11-19T01:21:25.100Z"
         },
         {
-          "slowestMs": 826.221,
-          "meanMs": 825.6,
-          "spanMs": 826.39,
+          "slowestMs": 234.051,
+          "meanMs": 226.044,
+          "spanMs": 234.186,
           "clientsMs": [
-            826.221,
-            825.091,
-            824.942,
-            825.773,
-            825.576,
-            825.121,
-            825.417,
-            826.01,
-            826.219,
-            825.632
+            226.075,
+            225.396,
+            225.849,
+            224.6,
+            234.051,
+            233.421,
+            226.091,
+            213.952,
+            225.784,
+            225.224
           ],
-          "readyMs": 4587,
-          "readBytes": 201519104,
-          "idleReadBytes": 131072,
-          "at": "2026-11-18T11:44:48.430Z"
+          "readyMs": 4720,
+          "readBytes": 29581312,
+          "idleReadBytes": 0,
+          "at": "2026-11-19T01:21:42.137Z"
         },
         {
-          "slowestMs": 815.428,
-          "meanMs": 814.637,
-          "spanMs": 815.492,
+          "slowestMs": 233.273,
+          "meanMs": 225.503,
+          "spanMs": 233.514,
           "clientsMs": [
-            814.237,
-            814.856,
-            814.531,
-            814.916,
-            814.569,
-            813.829,
-            815.428,
-            814.798,
-            814.725,
-            814.485
+            224.553,
+            224.231,
+            224.822,
+            225.042,
+            224.699,
+            233.273,
+            224.903,
+            224.23,
+            224.69,
+            224.592
           ],
-          "readyMs": 5483,
-          "readBytes": 201588736,
+          "readyMs": 5488,
+          "readBytes": 29642752,
           "idleReadBytes": 0,
-          "at": "2026-11-18T11:45:30.309Z"
+          "at": "2026-11-19T01:22:23.363Z"
         }
       ]
     }
