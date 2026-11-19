@@ -59,9 +59,6 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   - `date_trunc('weeks', i)` of an interval answered, where Postgres refuses it.
   - Spellings such as `qtr`, `mm`, `timezone_h` and `extract('dec' FROM t)` were refused, where Postgres
     answers. Each spelling Postgres does not take is refused with Postgres's own error.
-  - A unit a type does not have, in a query over no rows or over NULLs, now answers where Postgres answers, instead
-    of being refused. `SELECT extract('foo' FROM ts) FROM t WHERE false` answers no rows, as on Postgres. Over a
-    constant, such as `extract('foo' FROM timestamp '2020-01-01')`, it is still refused, as Postgres refuses it.
   - `extract(julian FROM d)` of a date was refused. Its spelling `jd` answered, but a filter on it dropped an
     infinite date that Postgres keeps. Now it answers Postgres's whole Julian day under every spelling. Of an
     infinite date it is refused, as `extract(year FROM d)` is. Of a timestamp, it is now answered with Postgres's

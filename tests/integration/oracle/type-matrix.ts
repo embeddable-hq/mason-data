@@ -2349,26 +2349,6 @@ function* unitSpellings(): Generator<Matrixed> {
     `format('%s', extract('julian' from ts)), to_json(extract('jd' from tz)), json_build_object('j', extract('julian' from ts)), extract('julian' from ts) || '' FROM typed WHERE ${ORDINARY} ORDER BY id`);
   yield q("unit spellings: a timestamp's Julian day summed", `SELECT avg(extract('jd' from ts)), sum(extract('julian' from tz)), min(extract('j' from ts)), max(extract('julian' from tz)) FROM typed WHERE ${ORDINARY}`);
   yield q("unit spellings: a quotient's text in concat, format and json", `SELECT id, concat(n / 7), format('%s', n2 / 3), to_json(n / 7), json_build_object('q', n2 / 3), (n / 7) || '', concat(avg(n2) OVER ()) FROM typed WHERE ${ORDINARY} ORDER BY id`);
-  // A UNIT REFUSED WHERE POSTGRES REFUSES IT: at a row that holds a value. A NULL is answered, and so is no row; a
-  // timestamp's zone unit is NULL of an infinity (it was refused before a row was read)
-  const none = (c: string): string => `CASE WHEN id < 0 THEN ${c} END`;
-  yield q("unit spellings: a unit refused, of NULLs", `SELECT id, extract('foo' FROM ${none("ts")}), date_part('timezone', ${none("ts")}), extract('day' FROM ${none("tm")}), date_part('now', ${none("iv")}), ` +
-    `extract('hour' FROM ${none("d")}), date_trunc('foo', ${none("tz")}), date_trunc('week', ${none("iv")}), date_part('dow', ${none("tz")}) FROM typed ORDER BY id`);
-  yield q("unit spellings: a unit refused, over no rows", "SELECT count(extract('foo' FROM ts)), count(date_part('day', tm)), count(date_trunc('dow', tz)) FROM typed WHERE id < 0");
-  // (the review of PR 1177) WHERE POSTGRES'S PLANNER FOLDS THE CALL, an immutable one of constants, it refuses before a
-  // row is read; a timestamptz's (stable), a NULL's, an infinity's zone unit and a cast through text are left for each row
-  for (const [name, call] of [["a timestamp", "extract('foo' FROM timestamp '2020-01-01')"], ["a timestamp's sum", "date_part('timezone', timestamp '2020-01-01' + interval '1 day')"],
-    ["a date", "extract(hour FROM date '2020-01-01')"], ["a time", "extract(day FROM time '12:00')"], ["a timetz", "extract(day FROM '12:00+05'::timetz)"],
-    ["an interval", "date_trunc('foo', interval '1 day')"], ["a timestamptz in a zone", "date_trunc('foo', timestamptz '2020-01-01', 'UTC')"],
-    ["a CASE's arm", "CASE WHEN id > 0 THEN extract('foo' FROM timestamp '2020-01-01') END"], ["a COALESCE", "extract('foo' FROM coalesce(timestamp '2020-01-01', ts))"],
-    ["a timestamptz", "extract('foo' FROM timestamptz '2020-01-01')"], ["a timestamptz's date_trunc", "date_trunc('foo', timestamptz '2020-01-01')"],
-    ["a NULL", "extract('foo' FROM NULL::timestamp)"], ["an infinity's zone", "date_part('timezone', timestamp 'infinity')"],
-    ["a cast through text", "extract('foo' FROM '2020-01-01'::text::timestamp)"], ["a subquery", "extract('foo' FROM (SELECT timestamp '2020-01-01'))"]] as const) {
-    yield q(`unit spellings: a unit refused of ${name}, over no rows`, `SELECT id, ${call} FROM typed WHERE id < 0`);
-    yield q(`unit spellings: a unit refused of ${name}, filtered by it`, `SELECT count(*) FROM typed WHERE id < 0 AND ${call} IS NULL`);
-  }
-  yield q("unit spellings: a timestamp's zone unit of an infinity", "SELECT id, date_part('timezone', CASE WHEN NOT isfinite(ts) THEN ts END), extract('timezone_h' FROM CASE WHEN NOT isfinite(ts) THEN ts END), " +
-    "date_part('timezone_m', CASE WHEN NOT isfinite(d) THEN d END) FROM typed ORDER BY id");
 }
 
 export const TYPE_MATRIX: Matrixed[] = [...matrix(), ...mappedTypes(), ...binCases(), ...wholeCases(), ...unitSpellings(), ...FROM_ITEMS_SORTED.map((f) => q(f.name, f.sql, f.zone)),

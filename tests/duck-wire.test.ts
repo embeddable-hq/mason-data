@@ -1069,21 +1069,12 @@ test("issue 1006: every name Postgres takes for a field of extract and date_part
       const others = (answered: string[]): string[] => Object.keys(SPELLINGS).filter((f) => !answered.includes(f)).map((f) => SPELLINGS[f]!.at(-1)!);
       const unknown = ["foo", "now", "allballs", "jan", "monday", "ago", "minutes ", "", "é".repeat(40)];
       for (const name of [...others(fields), ...unknown]) await refused(`SELECT id, extract(${q(name)} FROM ${column}) FROM parts ORDER BY id`);
-      for (const name of [...others(partFields), ...unknown]) {
-        await refused(`SELECT id, date_part(${q(name)}, ${column}) FROM parts ORDER BY id`);
-        // raised at a row that holds a value, as Postgres raises it: none of a NULL
-        await alike(`SELECT id, extract(${q(name)} FROM ${column}), date_part(${q(name)}, ${column}) FROM parts WHERE ${column} IS NULL`);
-      }
+      for (const name of [...others(partFields), ...unknown]) await refused(`SELECT id, date_part(${q(name)}, ${column}) FROM parts ORDER BY id`);
     }
     // the issue's statement, a seconds' sum, and the fields of an interval it refused
     await alike("SELECT sum(extract(sec FROM ts)), sum(extract(seconds FROM tz)), sum(extract(secs FROM t)), sum(extract(sec FROM iv)), sum(extract(ms FROM iv)) FROM parts");
     await alike("SELECT extract(sec FROM ts) AS s, count(*) FROM parts GROUP BY 1 ORDER BY 1 NULLS FIRST");
-    // a timestamp's zone fields are NULL of an infinity, its error only of a finite value
-    await alike("SELECT id, date_part('timezone', CASE WHEN id = 1 THEN 'infinity'::timestamp END), extract(timezone_h FROM CASE WHEN id = 2 THEN '-infinity'::timestamp END) FROM parts ORDER BY id");
     await refused("SELECT id, date_part('timezone', ts) FROM parts ORDER BY id");
-    // date_trunc's refusal at a row too, and none over no rows
-    await alike("SELECT id, date_trunc('foo', tz), date_trunc('dow', ts), date_trunc('week', iv) FROM parts WHERE id = 5");
-    await alike("SELECT count(date_trunc('foo', tz)), count(extract('foo' FROM ts)), count(date_part('day', t)) FROM parts WHERE id < 0");
     // a timestamp's Julian day at its row's scale (numeric_div's: 28, 24 or 20 decimals), as its text, a difference and a sum
     await alike("SELECT id, extract(jd FROM ts)::text, extract(julian FROM tz) - extract(julian FROM d), (extract(j FROM ts) * 2)::text FROM parts ORDER BY id");
     await alike("SELECT sum(extract(julian FROM ts)), sum(extract(jd FROM tz)) FROM parts");
@@ -1159,32 +1150,10 @@ test("PR 1106: a numeric division or average is Postgres's text in concat, forma
   } finally { await c.end(); }
 });
 
-test("PR 1106: a unit a type has not is refused at a row that holds a value, never over no rows or NULLs", async () => {
-  const c = await client();
-  try {
-    const alike = async (sql: string): Promise<void> => assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
-    // (each was refused before a row was read)
-    await alike("SELECT id, extract('foo' FROM ts), date_part('timezone', ts), extract('day' FROM t), date_part('now', iv), extract('hour' FROM d), " +
-      "date_trunc('foo', tz), date_trunc('week', iv), date_trunc('dow', ts) FROM parts WHERE id = 5");
-    await alike("SELECT count(extract('foo' FROM ts)), count(date_part('day', ttz)), count(date_trunc('foo', tz)) FROM parts WHERE id < 0");
-    // a timestamp's zone unit is NULL of an infinity, a date_part of a date's too
-    await alike("SELECT id, date_part('timezone', CASE WHEN id = 1 THEN 'infinity'::timestamp END), extract(timezone_h FROM CASE WHEN id = 2 THEN '-infinity'::timestamp END), " +
-      "date_part('timezone_m', CASE WHEN id = 3 THEN 'infinity'::date END) FROM parts ORDER BY id");
-    // and of a value, Postgres's error, under a wrapper too
-    const said = async (run: Promise<unknown>): Promise<unknown> => run.then(() => null, (e: { code?: string; message: string }) => [e.code, e.message]);
-    for (const sql of ["SELECT id, extract('foo' FROM ts) * 2 FROM parts ORDER BY id", "SELECT sum(date_part('day', t)) FROM parts",
-      "SELECT id, date_trunc('w', iv) + interval '1 day' FROM parts ORDER BY id", "SELECT id FROM parts WHERE coalesce(date_part('timezone', d), 0) = 0 ORDER BY id"]) {
-      const [m, p] = [await said(c.query(sql)), await said(truth.query(sql))];
-      assert.notEqual(p, null, `${sql}: Postgres answered`);
-      assert.deepEqual(m, p, sql);
-    }
-  } finally { await c.end(); }
-});
-
-// the review of PR 1177: Postgres's planner folds an immutable call whose arguments are constants (or bound parameters)
-// once, before a row is read, so a unit refused there is refused over no rows too; a stable one (of a timestamptz, which
-// reads the session's zone) is left for each row. Each refusal arrives as Postgres sends it: no DETAIL, no HINT
-test("PR 1177: a unit refused where Postgres's planner folds the call, before a row is read, and per row elsewhere", async () => {
+// the re-check of PR 1177: where Postgres's planner folds a call whose unit its type has not, it refuses before a row is
+// read. A refusal only at a row answered these over no rows (or wrote 42601), where main refused them, as Postgres does.
+// Mason refuses a unit its type has not as it plans the query, wherever the call is
+test("PR 1177: a unit a type has not is refused as Postgres's planner refuses it, over no rows too", async () => {
   const c = await client();
   try {
     const said = async (run: Promise<unknown>): Promise<unknown> =>
@@ -1194,45 +1163,27 @@ test("PR 1177: a unit refused where Postgres's planner folds the call, before a 
       assert.notEqual(p, "answered", `${sql}: Postgres answered`);
       assert.deepEqual(m, p, `${sql} ${JSON.stringify(values ?? [])}`);
     };
-    const alike = async (sql: string, values?: unknown[]): Promise<void> => assert.deepEqual(await answer(c, sql, values), await postgres(sql, values), `${sql} ${JSON.stringify(values ?? [])}`);
-    // folded: a constant, a bound parameter, a constant expression, of each type whose call is immutable
-    for (const sql of ["SELECT extract('foo' FROM timestamp '2020-01-01') FROM parts WHERE id < 0", "SELECT id, extract('foo' FROM timestamp '2020-01-01') FROM parts WHERE false",
-      "SELECT count(*) FROM parts WHERE id < 0 AND extract('foo' FROM timestamp '2020-01-01') > 0",
-      "SELECT date_part('timezone', timestamp '2020-01-01' + interval '1 day') FROM parts WHERE id < 0",
-      "SELECT extract('foo' FROM '2020-01-01'::date) FROM parts WHERE id < 0", "SELECT extract(hour FROM date '2020-01-01') FROM parts WHERE id < 0",
-      "SELECT extract(day FROM time '12:00') FROM parts WHERE id < 0", "SELECT extract(day FROM '12:00+05'::timetz) FROM parts WHERE id < 0",
-      "SELECT date_trunc('foo', interval '1 day') FROM parts WHERE id < 0", "SELECT date_trunc('foo', timestamptz '2020-01-01', 'UTC') FROM parts WHERE id < 0",
-      "SELECT CASE WHEN id > 0 THEN extract('foo' FROM timestamp '2020-01-01') END FROM parts WHERE id < 0",
-      "SELECT extract('foo' FROM coalesce(timestamp '2020-01-01', ts)) FROM parts WHERE id < 0"]) await refusedAlike(sql);
-    await refusedAlike("SELECT extract('foo' FROM $1::timestamp) FROM parts WHERE id < 0", ["2020-01-01"]);
-    await refusedAlike("SELECT date_part('timezone', $1::timestamp) FROM parts WHERE id < 0", ["2020-01-01 12:00"]);
-    // left for each row: a timestamptz's call (stable), a NULL, ±infinity's zone unit (NULL), a cast through text, a subquery
-    for (const sql of ["SELECT extract('foo' FROM timestamptz '2020-01-01') FROM parts WHERE id < 0", "SELECT date_trunc('foo', timestamptz '2020-01-01') FROM parts WHERE id < 0",
-      "SELECT date_part('foo', timestamptz '2020-01-01') FROM parts WHERE id < 0", "SELECT extract('foo' FROM NULL::timestamp) FROM parts",
-      "SELECT date_part('timezone', timestamp 'infinity') FROM parts WHERE id < 0", "SELECT date_part('timezone', timestamp '-infinity') FROM parts",
-      "SELECT extract('foo' FROM '2020-01-01'::text::timestamp) FROM parts WHERE id < 0", "SELECT extract('foo' FROM (SELECT timestamp '2020-01-01')) FROM parts WHERE id < 0"]) await alike(sql);
-    await alike("SELECT extract('foo' FROM $1::timestamp) FROM parts WHERE id < 0", [null]);
-    await alike("SELECT date_part('timezone', $1::timestamp) FROM parts WHERE id < 0", ["infinity"]);
-    // a condition that reads no column is run once, before a row is read, stable or not: a WHERE, an inner join's ON, a
-    // HAVING, a subquery's WHERE
-    for (const sql of ["SELECT count(*) FROM parts WHERE id < 0 AND extract('foo' FROM timestamptz '2020-01-01') IS NULL",
-      "SELECT count(*) FROM parts WHERE id < 0 AND date_trunc('foo', timestamptz '2020-01-01') IS NULL",
-      "SELECT count(*) FROM parts WHERE id < 0 AND extract('foo' FROM '2020-01-01'::text::timestamp) IS NULL",
-      "SELECT count(*) FROM parts WHERE id < 0 AND extract('foo' FROM now()) IS NULL",
-      "SELECT count(*) FROM parts p JOIN parts q ON extract('foo' FROM timestamptz '2020-01-01') IS NULL WHERE p.id < 0 AND q.id < 0",
-      "SELECT id FROM parts WHERE id < 0 GROUP BY id HAVING extract('foo' FROM timestamptz '2020-01-01') IS NULL",
-      "SELECT count(*) FROM parts WHERE id < 0 AND EXISTS (SELECT 1 FROM parts q WHERE extract('foo' FROM timestamptz '2020-01-01') IS NULL)"]) await refusedAlike(sql);
-    await refusedAlike("SELECT count(*) FROM parts WHERE id < 0 AND extract('foo' FROM $1::timestamptz) IS NULL", ["2020-01-01"]);
-    // run for each row: a condition that reads a column, an outer join's ON, a NULL, ±infinity's zone unit
-    for (const sql of ["SELECT count(*) FROM parts WHERE id < 0 AND extract('foo' FROM ts) IS NULL",
-      "SELECT count(*) FROM parts p LEFT JOIN parts q ON extract('foo' FROM timestamptz '2020-01-01') IS NULL WHERE p.id < 0",
-      "SELECT count(*) FROM parts WHERE id < 0 AND extract('foo' FROM NULL::timestamptz) IS NULL",
-      "SELECT count(*) FROM parts WHERE id < 0 AND extract('timezone' FROM timestamp 'infinity') IS NULL"]) await alike(sql);
-    await alike("SELECT count(*) FROM parts WHERE id < 0 AND extract('foo' FROM $1::timestamptz) IS NULL", [null]);
+    // a CASE, greatest or nullif over constants
+    await refusedAlike("SELECT extract('foo' FROM CASE WHEN true THEN timestamp '2020-01-01' END) FROM parts WHERE id < 0");
+    await refusedAlike("SELECT extract('foo' FROM greatest(timestamp '2020-01-01', timestamp '2021-01-01')) FROM parts WHERE id < 0");
+    await refusedAlike("SELECT extract('foo' FROM nullif(timestamp '2020-01-01', timestamp '2021-01-01')) FROM parts WHERE id < 0");
+    // a constant column from a subquery, a WITH query, VALUES or LATERAL, joined to no rows
+    await refusedAlike("SELECT extract('foo' FROM s.c) FROM parts p, (SELECT timestamp '2020-01-01' AS c) s WHERE p.id < 0");
+    await refusedAlike("WITH w AS (SELECT timestamp '2020-01-01' AS c) SELECT extract('foo' FROM w.c) FROM parts p, w WHERE p.id < 0");
+    await refusedAlike("SELECT extract('foo' FROM v.c) FROM parts p, (VALUES (timestamp '2020-01-01')) AS v(c) WHERE p.id < 0");
+    await refusedAlike("SELECT extract('foo' FROM l.c) FROM parts p CROSS JOIN LATERAL (SELECT timestamp '2020-01-01' AS c) l WHERE p.id < 0");
+    // a bound parameter in a COALESCE or a CASE's condition
+    await refusedAlike("SELECT extract('foo' FROM coalesce($1::timestamp, ts)) FROM parts WHERE id < 0", ["2020-01-01"]);
+    await refusedAlike("SELECT extract('foo' FROM CASE WHEN $1::bool THEN timestamp '2020-01-01' END) FROM parts WHERE id < 0", [true]);
+    // a condition run once, under a NOT
+    await refusedAlike("SELECT count(*) FROM parts WHERE id < 0 AND NOT (id <= 0 OR extract('foo' FROM now()) IS NULL)");
+    // a call of an array's element, over rows that hold values (it wrote 42601)
+    await refusedAlike("SELECT id, extract('foo' FROM (ARRAY[ts])[1]) FROM parts ORDER BY id");
+    await refusedAlike("SELECT id, date_part('foo', (ARRAY[tz])[1]) FROM parts ORDER BY id");
   } finally { await c.end(); }
 });
 
-test("PR 1177: a unit refused at a row arrives as Postgres sends it, with no DETAIL of the engine's", async () => {
+test("PR 1177: an error the engine raises in Postgres's words arrives as Postgres sends it, with no DETAIL of the engine's", async () => {
   const c = await client();
   try {
     const said = async (run: Promise<unknown>): Promise<unknown> =>
@@ -1242,10 +1193,13 @@ test("PR 1177: a unit refused at a row arrives as Postgres sends it, with no DET
       assert.notEqual(p, "answered", `${sql}: Postgres answered`);
       assert.deepEqual(m, p, sql);
     };
-    // (each arrived with `DETAIL: the engine: mason[22023]: …`, which Postgres does not send)
-    await refusedAlike("SELECT id, extract('foo' FROM ts) FROM parts ORDER BY id");
-    await refusedAlike("SELECT id, extract('foo' FROM timestamptz '2020-01-01') FROM parts ORDER BY id");
-    await refusedAlike("SELECT id, date_part('day', t) FROM parts ORDER BY id");
+    // (each arrived with `DETAIL: the engine: mason[…]: …`, which Postgres does not send)
+    await refusedAlike("SELECT id, current_setting(CASE WHEN id > 0 THEN 'mason_no_such_setting' END) FROM parts ORDER BY id");
+    await refusedAlike("SELECT id FROM parts ORDER BY id OFFSET (SELECT -1) ROWS FETCH FIRST 2 ROWS WITH TIES");
+    // the engine's own error keeps it
+    const [code, , detail] = await said(c.query("SELECT id, 1 / (id - id) FROM parts ORDER BY id")) as [string, string, string | null];
+    assert.equal(code, "22012");
+    assert.match(detail ?? "", /^the engine: /);
   } finally { await c.end(); }
 });
 

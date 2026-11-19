@@ -19,7 +19,6 @@
  * not supported for type …`, and a spelling no table holds is 22023 `unit "…" not recognized for type …`. The unit is
  * quoted as Postgres quotes it: lowercased, never its one name.
  */
-import { callsTo, constTextOf, exprType, type TreeNode, type TreeValue } from "./pgtree.ts";
 
 /** Postgres's units (its DTK_* codes), each by the one name the rewrite and the engine take */
 export type Unit = "microseconds" | "milliseconds" | "second" | "minute" | "hour" | "day" | "week" | "month" | "quarter"
@@ -114,16 +113,8 @@ const TRUNCS: Record<number, ReadonlySet<Unit>> = {
 };
 
 export type UnitCall = "extract" | "date_part" | "date_trunc";
-/**
- * a unit as a call reads it: its one name, or Postgres's refusal (its SQLSTATE and words). Postgres refuses at a row
- * that holds a value, never in its analysis: none of a NULL, and none over no rows. `finiteOnly` is a refusal an
- * infinite value does not raise: a timestamp's zone units, which Postgres answers NULL of an infinity
- * (`NonFiniteTimestampTzPart`)
- */
-export type CallUnit = { unit: Unit } | { code: "22023" | "0A000"; message: string; finiteOnly: boolean };
-/** a refusal Postgres's planner raises once these parameters are bound, each to a value (a zone unit of a timestamp: a
- *  finite one) */
-export type UnitParam = { params: readonly number[]; code: "22023" | "0A000"; message: string; finiteOnly: boolean };
+/** a unit as a call reads it: its one name, or Postgres's refusal (its SQLSTATE and words) */
+export type CallUnit = { unit: Unit } | { code: "22023" | "0A000"; message: string };
 
 /**
  * THE UNIT `call` READS `text` AS, OF AN ARGUMENT OF `type` (the OID Postgres's analysis chose for the function's
@@ -138,8 +129,8 @@ export function callUnit(call: UnitCall, text: string, type: number | null): Cal
   const read = readUnit(text);
   const name = TYPE_NAME[of];
   if (name === undefined) return null;
-  const unrecognized = (): CallUnit => ({ code: "22023", message: `unit "${read.low}" not recognized for type ${name}`, finiteOnly: false });
-  const unsupported = (finiteOnly = false): CallUnit => ({ code: "0A000", message: `unit "${read.low}" not supported for type ${name}`, finiteOnly });
+  const unrecognized = (): CallUnit => ({ code: "22023", message: `unit "${read.low}" not recognized for type ${name}` });
+  const unsupported = (): CallUnit => ({ code: "0A000", message: `unit "${read.low}" not supported for type ${name}` });
   if (call === "date_trunc") {
     const takes = TRUNCS[of];
     if (takes === undefined) return null;
@@ -149,28 +140,5 @@ export function callUnit(call: UnitCall, text: string, type: number | null): Cal
   const takes = EXTRACTS[of];
   if (takes === undefined) return null;
   if (read.unit === null) return read.table === "reserved" && takes.reserved === "0A000" ? unsupported() : unrecognized();
-  // (a timestamp's zone unit is NULL of an infinity, its refusal only of a finite value)
-  return takes.units.has(read.unit) ? { unit: read.unit } : unsupported(of === TIMESTAMP && ZONE.includes(read.unit));
-}
-
-/** each of the three functions by its OID in Postgres 18's catalog (pg_proc.dat): extract's six, date_part's six (a
- *  date's is a SQL function over the date as a timestamp) and date_trunc's four */
-export const UNIT_CALL_OIDS: ReadonlyMap<number, UnitCall> = new Map<number, UnitCall>([
-  [6199, "extract"], [6200, "extract"], [6201, "extract"], [6202, "extract"], [6203, "extract"], [6204, "extract"],
-  [1171, "date_part"], [1172, "date_part"], [1273, "date_part"], [1384, "date_part"], [1385, "date_part"], [2021, "date_part"],
-  [1217, "date_trunc"], [1218, "date_trunc"], [1284, "date_trunc"], [2020, "date_trunc"],
-]);
-
-/**
- * THE CALLS OF A STATEMENT'S ANALYSIS THAT REFUSE THEIR UNIT (`callUnit`), each with its refusal: what src/duck/plan.ts
- * asks the planner's folding of (`foldedUnits`), since Postgres refuses there, before a row is read, where it folds one.
- */
-export function refusedUnitCalls(tree: TreeValue): Array<{ call: TreeNode; value: TreeValue | undefined; refusal: Extract<CallUnit, { code: string }> }> {
-  return callsTo(tree, new Set(UNIT_CALL_OIDS.keys())).flatMap(({ call, args }) => {
-    const text = constTextOf(args[0]);
-    const value = args[1];
-    const type = value !== undefined && value !== null && typeof value === "object" && !Array.isArray(value) ? exprType(value)?.type ?? null : null;
-    const read = typeof text === "string" ? callUnit(UNIT_CALL_OIDS.get(Number(call.funcid))!, text, type) : null;
-    return read !== null && "code" in read ? [{ call, value, refusal: read }] : [];
-  });
+  return takes.units.has(read.unit) ? { unit: read.unit } : unsupported();
 }
