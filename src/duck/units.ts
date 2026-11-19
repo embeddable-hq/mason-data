@@ -113,8 +113,13 @@ const TRUNCS: Record<number, ReadonlySet<Unit>> = {
 };
 
 export type UnitCall = "extract" | "date_part" | "date_trunc";
-/** a unit as a call reads it: its one name, or Postgres's refusal (its SQLSTATE and words) */
-export type CallUnit = { unit: Unit } | { code: "22023" | "0A000"; message: string };
+/**
+ * a unit as a call reads it: its one name, or Postgres's refusal (its SQLSTATE and words). Postgres refuses at a row
+ * that holds a value, never in its analysis: none of a NULL, and none over no rows. `finiteOnly` is a refusal an
+ * infinite value does not raise: a timestamp's zone units, which Postgres answers NULL of an infinity
+ * (`NonFiniteTimestampTzPart`)
+ */
+export type CallUnit = { unit: Unit } | { code: "22023" | "0A000"; message: string; finiteOnly: boolean };
 
 /**
  * THE UNIT `call` READS `text` AS, OF AN ARGUMENT OF `type` (the OID Postgres's analysis chose for the function's
@@ -129,8 +134,8 @@ export function callUnit(call: UnitCall, text: string, type: number | null): Cal
   const read = readUnit(text);
   const name = TYPE_NAME[of];
   if (name === undefined) return null;
-  const unrecognized = (): CallUnit => ({ code: "22023", message: `unit "${read.low}" not recognized for type ${name}` });
-  const unsupported = (): CallUnit => ({ code: "0A000", message: `unit "${read.low}" not supported for type ${name}` });
+  const unrecognized = (): CallUnit => ({ code: "22023", message: `unit "${read.low}" not recognized for type ${name}`, finiteOnly: false });
+  const unsupported = (finiteOnly = false): CallUnit => ({ code: "0A000", message: `unit "${read.low}" not supported for type ${name}`, finiteOnly });
   if (call === "date_trunc") {
     const takes = TRUNCS[of];
     if (takes === undefined) return null;
@@ -140,5 +145,6 @@ export function callUnit(call: UnitCall, text: string, type: number | null): Cal
   const takes = EXTRACTS[of];
   if (takes === undefined) return null;
   if (read.unit === null) return read.table === "reserved" && takes.reserved === "0A000" ? unsupported() : unrecognized();
-  return takes.units.has(read.unit) ? { unit: read.unit } : unsupported();
+  // (a timestamp's zone unit is NULL of an infinity, its refusal only of a finite value)
+  return takes.units.has(read.unit) ? { unit: read.unit } : unsupported(of === TIMESTAMP && ZONE.includes(read.unit));
 }

@@ -332,6 +332,7 @@ export const VERIFIED: ReadonlyMap<string, string> = new Map([
   ["function:1199", "the function age(timestamp with time zone,timestamp with time zone)"],
   ["function:1217", "the function date_trunc(text,timestamp with time zone)"],
   ["function:1218", "the function date_trunc(text,interval)"],
+  ["function:1273", "the function date_part(text,time with time zone)"],
   ["function:1283", "the function quote_literal(text)"],
   ["function:1284", "the function date_trunc(text,timestamp with time zone,text)"],
   ["function:1288", "the function int8(oid)"],

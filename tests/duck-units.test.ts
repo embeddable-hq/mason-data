@@ -75,6 +75,19 @@ test("each call refuses a unit its type has not, and a spelling no table holds, 
   assert.equal(refusal("date_trunc", "timezone_m", TIMESTAMPTZ), `0A000 unit "timezone_m" not supported for type timestamp with time zone`);
   assert.equal(refusal("date_trunc", "weeks", INTERVAL), `0A000 unit "weeks" not supported for type interval`);
   assert.equal(refusal("date_trunc", "w", TIMESTAMP), "week");
+  // PR 1106: a timestamp's zone unit is refused of a finite value alone (NULL of an infinity), date_part of a date's
+  // too; no other refusal is
+  const finiteOnly = (call: "extract" | "date_part" | "date_trunc", text: string, type: number): boolean | null => {
+    const r = callUnit(call, text, type);
+    return r !== null && "code" in r ? r.finiteOnly : null;
+  };
+  assert.equal(finiteOnly("date_part", "timezone", TIMESTAMP), true);
+  assert.equal(finiteOnly("extract", "timezone_h", TIMESTAMP), true);
+  assert.equal(finiteOnly("date_part", "timezone_m", DATE), true);
+  assert.equal(finiteOnly("extract", "timezone", DATE), false);
+  assert.equal(finiteOnly("date_part", "now", TIMESTAMP), false);
+  assert.equal(finiteOnly("date_trunc", "timezone", TIMESTAMP), false);
+  assert.equal(finiteOnly("extract", "day", TIME), false);
   // a type none of them takes is left to the call's own rules
   assert.equal(refusal("date_part", "second", 25), "null");
   assert.equal(refusal("date_trunc", "second", DATE), "null");

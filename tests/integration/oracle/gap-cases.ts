@@ -31,7 +31,6 @@ export const GAP_CASES: Array<{ gap: GapId; sql: string }> = [
   { gap: "regexp-functions", sql: "SELECT id, regexp_count(t, 'a') FROM typed ORDER BY id" },
   { gap: "regexp-matches-forms", sql: "SELECT id, m FROM typed, regexp_matches(t, '(a)(b)') AS m ORDER BY id" },
   { gap: "json-of-type", sql: "SELECT id, to_json(ARRAY[iv]) FROM typed ORDER BY id" },
-  { gap: "extract-julian", sql: "SELECT id, extract(julian FROM ts) FROM typed WHERE id < 100 ORDER BY id" },
   { gap: "with-ordinality", sql: "SELECT id, e, k FROM typed, jsonb_array_elements(jb) WITH ORDINALITY AS x(e, k) WHERE jsonb_typeof(jb) = 'array' ORDER BY id, k" },
   // (issue 982: SYSTEM (100) reads every page, so Postgres's count is every row; the engine read it as 100 rows)
   { gap: "tablesample", sql: "SELECT count(*) FROM typed TABLESAMPLE SYSTEM (100)" },

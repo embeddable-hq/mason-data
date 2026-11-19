@@ -38,4 +38,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
     answers. Each spelling Postgres does not take is refused with Postgres's own error.
   - `extract(julian FROM d)` of a date was refused. Its spelling `jd` answered, but a filter on it dropped an
     infinite date that Postgres keeps. Now it answers Postgres's whole Julian day under every spelling. Of an
-    infinite date it is refused, as `extract(year FROM d)` is. Of a timestamp it is still refused.
+    infinite date it is refused, as `extract(year FROM d)` is. Of a timestamp, it is now answered with Postgres's
+    digits too, at the scale Postgres gives each row.
+- **`extract(epoch FROM t)` of a `time with time zone` now counts its offset, as Postgres does.** Before, it gave the
+  time of day alone, so `12:00:00-05` answered 43200 where Postgres answers 61200. `date_part('epoch', t)` was wrong
+  the same way.
+- **A numeric division or average written as text by `concat`, `format`, `||`, `to_json` or `json_build_object` now
+  has Postgres's digits.** Before, `concat(amount / 3)` wrote the nearest double, such as `333.3333333333333` where
+  Postgres writes `333.3333333333333333`. A cast to text, such as `(amount / 3)::text`, was already right.
