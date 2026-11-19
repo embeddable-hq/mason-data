@@ -694,7 +694,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   // its columns read by a `*` included, whichever module writes it (the rewrite, the late select list, the libc bounds)
   const own = ownPrefix([stmt, analysis.tree], walls?.written ?? []);
   const analysed = performance.now();
-  const rewritten = (l = lookup, sc = scales, bu = buckets, nb = numbered): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, typeNames, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts, boundPaths, scales: sc, buckets: bu, numbered: nb, own });
+  const rewritten = (l = lookup, sc = scales, bu = buckets, nb = numbered): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, typeNames, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts, boundPaths, scales: sc, buckets: bu, numbered: nb, own, rows: copiedRows(copies(), searchSchemas(searchPath)) });
   try {
     ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams, wholeNumericArrays, numbers: numberedReads } = rewritten());
     // the oracle's (`eager`): every read stored before the plan is made, and the plan made again over them

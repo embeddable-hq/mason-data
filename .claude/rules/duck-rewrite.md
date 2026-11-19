@@ -23,6 +23,8 @@ paths:
   - "src/duck/reference-keys.ts"
   - "tests/duck-reference-keys.test.ts"
   - "src/duck/row-filter.ts"
+  - "src/duck/side-first.ts"
+  - "tests/duck-side-first.test.ts"
   - "src/duck/to-char.ts"
   - "src/duck/types.ts"
   - "src/duck/verified.ts"
@@ -126,6 +128,23 @@ paths:
       Bay to 2011, Moncton to 2006, Gaza and Hebron in 2010–11, Casey in 2020–22) are read from the session at run
       time, and there every row is truncated as before. Mason refuses a fixed-offset session zone (22023), so none
       needs a guard;
+  - **a key over one side of a grouped join is computed on that side, before the join** (`sideFirst`,
+    src/duck/side-first.ts, issue 1160): a GROUP BY key that reads one table of the FROM alone becomes a column of a
+    derived table of that table, under its FROM name, listing each column the SELECT reads of it by name (never a `*`:
+    `exposes`). Before the bucket's grouping, which then groups by the column. Each guard keeps the answer Postgres's:
+    - the key computes on rows the join drops, so it cannot fail and is not volatile (`safe`, a short list; a truncation's
+      integer arithmetic only where its every value is proven to fit 64 bits). A Mason function, error(), a cast that can
+      fail, a zone's conversion and arithmetic on a number's column stay where they are;
+    - on the side an outer join extends with NULLs, the key is NULL where its columns are (`nullIn`): a COALESCE stays;
+    - a column is bound as Postgres bound it: by its qualifier, or a bare name by the analysed FROM item. A name that
+      cannot be told, a whole row, a `*`, `rowid`, a subquery anywhere in the SELECT's clauses, a LATERAL item, USING,
+      NATURAL, a join's alias, a grouping set, a set operation, and a key spelled otherwise in the list than in the
+      GROUP BY keep the SELECT as it was;
+    - it is applied only where it saves work (`smallEnough`): every FROM item a synced table with a count, the side at
+      most half the rows of the biggest other, and no WHERE or ON conjunct that reads another item, other than an
+      equality of two columns, which could leave the join fewer rows than the side. At equal sizes it saves nothing
+      (55 against 54 ms); under a filter that keeps a month of 50 M orders it costs (35 to 42 ms in UTC). DETECTOR:
+      tests/duck-side-first.test.ts, tests/duck-plans.test.ts, the oracle's "issue 1160: …" statements;
   - **a LEFT JOIN of a list's rows ON TRUE is an INNER lateral of a list never empty only where its rows' order
     decides the answer** (`leftLateral`, `markBounds`, `limitBounds`, the functions' `orNull`): DuckDB's LEFT lateral is
     a delimiter join over the whole base, whose LIMIT read every row (37.9 s for a 100-row preview) and whose order

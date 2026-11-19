@@ -4899,3 +4899,53 @@ volume's baseline) that is 4 to 10 s a query. Warm, a UUID and a sparse integer 
 text key joins faster on its number (1.42 s → 0.83 s). The cost is the hidden columns: about 312 MiB a reference on the
 orders (about 26 bits for each of 100 M rows), 13 MB on each customers table, and the dictionaries. The first
 sync took 13 s more for three references.
+
+### A key of one side, computed on that side (issue 1160, 2026-11-18)
+
+**Decision.** In a grouped join, a GROUP BY key that reads one table alone is computed in a derived table of that
+table, before the join, and the statement groups by its column (src/duck/side-first.ts). The cold benchmark's revenue
+query groups by the orders' month and the customers' signup year. The year was computed once a joined row, 20 times a
+customer. Now it is computed once a customer. The derived table keeps the table's FROM name and lists each column the
+SELECT reads of it, hidden ones included, so the join on a reference's numbers (issue 1144) and a time's bucket (issue
+1146) read as before.
+
+**Why only a key that cannot fail.** Computed before the join, the key is computed on every row of its table, also on
+the rows the join drops. A key that can raise an error would raise it for a row Postgres never computes it on. So only a
+short list of nodes moves, each one the engine computes from any value of its type. The edges were measured on the
+engine, not assumed. A time zone's conversion (`timezone(zone, ts)`) raises "Unable to convert TIMESTAMPTZ to local
+TIMESTAMP" at the engine's last instant in a +14 zone, so it stays. ICU's date_trunc, date_part and a cast to a date do
+not raise there. A date's truncation raises past the last timestamp, so it stays. The integer arithmetic the rewrite
+writes a truncation in moves only where interval arithmetic over the times a copy can hold proves every value fits 64
+bits. A Mason function stays, since it may refuse a row.
+
+**Why the null-extended side needs a strict key.** On the side an outer join extends with NULLs, the derived table's
+column is NULL on an extended row. Postgres computes the key there over NULL columns. A truncation of NULL is NULL, so
+it moves. `coalesce(c.region, 'none')` is 'none', so it stays.
+
+**Why the key is applied only where it saves work.** It saves work only where the join has more rows than the side.
+The plan knows no join's size, only each table's count from the sync. So it moves a key only where its table holds at
+most half the rows of the biggest other table, and no WHERE or ON conjunct filters the other tables. Measured on 50 M
+orders and 2.5 M customers (below), a filter that kept one month of orders made the move cost: 35 to 42 ms in UTC, 50 to
+56 ms in Asia/Kathmandu. A filter that kept six months made it save, 202 to 113 ms in Asia/Kathmandu. That gain is
+left, since the plan cannot tell the two apart. At equal sizes it saves nothing.
+
+**Why a bucket's truncation moves too.** Issue 1146 groups a time's unit by its 15-minute bucket. Left to that rewrite,
+the customers' month is a bucket per joined row, then a truncation per bucket. Moved, it is a truncation per customer.
+A month of the customers' signups over 50 M orders in Asia/Kathmandu took 383 ms by the bucket and 233 ms computed first.
+A key of the larger side keeps its bucket.
+
+**Measured.** 50 M orders and 2.5 M customers, synthetic, with the customers' reference declared (issue 1144) and the
+times' buckets (issue 1146). Laptop: Apple, 10 cores, 32 GiB. The SQL Mason sent, run warm on the synced data, the
+median of 5 to 7 runs, every answer the same by a digest of its rows.
+
+| query | zone | before | after |
+|---|---|---|---|
+| revenue by order month and signup year | Asia/Kathmandu | 660 ms | 283 ms |
+| revenue by order month and signup year | UTC | 383 ms | 331 ms |
+| customers joined to customers (2.5 M each), forced | Asia/Kathmandu | 54 ms | 55 ms |
+| customers joined to customers (2.5 M each), forced | UTC | 37 ms | 39 ms |
+| orders joined to orders (50 M each), forced | Asia/Kathmandu | 827 ms | 835 ms |
+| orders joined to orders (50 M each), forced | UTC | 598 ms | 561 ms |
+
+The joins of two equal sides were written by hand with the key moved ("forced"), since the size rule keeps them. They
+show it saves nothing there, so the rule costs nothing.

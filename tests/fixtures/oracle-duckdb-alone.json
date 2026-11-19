@@ -1,19 +1,19 @@
 {
-  "statements": 7625,
+  "statements": 7675,
   "mason": {
-    "exact": 7109,
+    "exact": 7159,
     "decided": 46,
     "refused": 470,
     "differs": 0
   },
   "duckdb": {
-    "exact": 1941,
-    "name": 1412,
-    "refused": 1752,
-    "value": 1139,
+    "exact": 1951,
+    "name": 1420,
+    "refused": 1766,
+    "value": 1155,
     "rows": 636,
     "text": 84,
-    "other": 661
+    "other": 663
   },
   "gaps": {
     "copyPhase": {
@@ -94,7 +94,7 @@
       }
     },
     "everyAsk": {
-      "asked": 106836,
+      "asked": 107730,
       "refused": {
         "array-lower-bound": { "planted": 0, "natural": 2 },
         "array-remove-type": { "planted": 3, "natural": 0 },
