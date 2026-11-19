@@ -1411,6 +1411,55 @@ test("a mixed project: an `off` table unchanged until mason sync, a `poll 2s` on
   } finally { await repl.stop(); await other.close(); }
 });
 
+// A SYNC BY HAND SAYS HOW FAR IT IS (issue 1173: Sync now on a 17 M-row `off` table showed its old full bar and nothing
+// moving for minutes). Its poll reads the changed rows in ONE statement; each row is counted on Mason's side as it
+// arrives (src/duck/tally.ts), so the state asked WHILE the read runs says a count that grows and ends at the rows the
+// poll read; then, as the database deleted rows, its keys are read against the count the poll already took, which is
+// that read's exact total. Nothing is asked of the database for it: the poll's statements on it are its own.
+test("a sync by hand's progress: its changed rows counted as they arrive, ending at what it read, and its keys read against the database's count", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {
+  const N = 400_000;
+  const source = ownDatabase("progress", `CREATE TABLE t (id int PRIMARY KEY, v text); INSERT INTO t SELECT g, repeat('v', 40) || g FROM generate_series(1, ${N}) g`);
+  const url = `postgres://${source.user}${source.password ? `:${encodeURIComponent(source.password)}` : ""}@${source.host}:${source.port}/${source.database}`;
+  const logged: string[] = [];
+  const store = await DuckStore.open(path.join(dir, "progress.db"), (l) => logged.push(l));
+  const sync = new Sync(store, source, source.database, (l) => logged.push(l), 3_600_000, "poll");
+  await sync.open();
+  try {
+    await sync.setTables([tableOf("t", OFF)]);
+    sync.start();
+    await until("t copied and caught up", settled(sync, ["public.t"]), 120_000);
+    // every row changed, and a thousand deleted: the poll reads N - 1,000 changed rows, then the keys to find the deleted
+    psql(url, "UPDATE t SET v = v || 'x'; DELETE FROM t WHERE id <= 1000");
+    type Seen = NonNullable<ReturnType<Sync["state"]>[number]["polling"]>;
+    const seen: Seen[] = [];
+    const asked = new Date().toISOString();
+    const sample = setInterval(() => { const p = sync.state().find((s) => s.source === "public.t")?.polling; if (p !== undefined && p.startedAt >= asked) seen.push(p); }, 2);
+    let answer: Awaited<ReturnType<Sync["pollNow"]>>;
+    try { answer = await sync.pollNow(["public.t"]); } finally { clearInterval(sample); }
+    const [found] = answer.tables;
+    assert.deepEqual([found?.deleted, found?.rows], [1000, N - 1000], JSON.stringify(answer.tables));
+    const read = found!.added + found!.updated;
+    assert.ok(read >= N - 1000, `every row changed: ${read}`);
+    const last = sync.state().find((s) => s.source === "public.t")!.polling!;
+    assert.deepEqual([last.step, last.changedRows, last.keysRead, last.keysTotal], ["done", read, N - 1000, N - 1000], JSON.stringify(last));
+    // while the changed rows were read: a count that grew, from below what the read ended at, and never past it
+    const reading = seen.filter((p) => p.step === "reading").map((p) => p.changedRows ?? -1);
+    assert.ok(reading.length > 0, `sampled while reading: ${JSON.stringify(seen.slice(0, 5))}`);
+    assert.ok(reading.every((x, i) => x >= 0 && x <= read && (i === 0 || x >= reading[i - 1]!)), `a count that only grows: ${reading.join(", ")}`);
+    assert.ok(reading.some((x) => x > 0 && x < read), `a count between none and the whole read: ${reading.join(", ")}`);
+    // the keys: read against the database's count, the poll's own, never past it
+    const deleting = seen.filter((p) => p.step === "deleting");
+    assert.ok(deleting.length > 0 && deleting.every((p) => p.keysTotal === N - 1000 && p.keysRead !== null && p.keysRead <= N - 1000 && p.changedRows === read), JSON.stringify(deleting.slice(0, 3)));
+    // the steps in their order, never back: so many changed rows are written a piece at a time once the read commits
+    // (after its count and its keys), each piece said as it is written
+    const order = ["starting", "reading", "counting", "deleting", "writing", "done"];
+    const steps = seen.map((p) => order.indexOf(p.step));
+    assert.ok(steps.every((x, i) => x >= 0 && (i === 0 || x >= steps[i - 1]!)), `steps in order: ${[...new Set(seen.map((p) => p.step))].join(" → ")}`);
+    const pieces = seen.filter((p) => p.step === "writing").map((p) => p.pieces);
+    assert.ok(pieces.length > 0 && pieces.every((x, i) => x !== null && x.of === Math.ceil(read / 50_000) && x.written <= x.of && (i === 0 || x.written >= pieces[i - 1]!.written)), JSON.stringify(pieces));
+  } finally { await sync.stop(); await store.close(); }
+});
+
 // A SYNC'S TIME IS ONE VALUE, THE LEDGER'S: `poll_state.polled_at` was now() (the transaction's start) where the run
 // remembered a `new Date()` of after the commit, until `readPolledAt` replaced the one with the other, so a `syncedAt`
 // read in between moved BACKWARDS at that read (CI: 8 ms, "its syncedAt moves only with its own poll"). Held at the

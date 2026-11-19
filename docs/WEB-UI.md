@@ -864,6 +864,13 @@ reads:
   read again whole, being caught up), or null when it would run. Once the sync holds it there are
   also `kept` (how it is kept current now: `by` is `poll`, with its `sync`, or `replication` or `recopy`) and `duck`.
   A table synced by hand since the run started also has `syncByHand`, its last such sync (`POST /api/sync`, below).
+  While that sync runs the table also has `syncProgress`: `step` (`waiting` for its turn, `starting` its read, `reading` its changed rows,
+  `writing` them, `counting` its rows on the database, `deleting` while it reads the database's keys to find the rows
+  deleted there, `read` once its part is done), `startedAt` and `seconds` (since the sync began), `changedRows` (the
+  changed rows read so far, counted as they arrive), `keysRead` and `keysTotal` (the database's count of its rows, which
+  the sync reads anyway), `pieces` (`{ written, of }` for a large set of changes written a piece at a time), and `share`.
+  Each is null where it has none. `share` is how much is done where a total is known, the keys read, and null
+  otherwise: the page then draws no bar, and never the table's full bar from the sync before.
   While the run's own sync of a table runs, the table has `rebuilding`: `kind` is `copy` (its first sync, or the table
   read again whole) or `catch-up` (the one sync of what changed meanwhile that follows it), and `startedAt` is when it
   began.

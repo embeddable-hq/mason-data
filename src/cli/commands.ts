@@ -33,7 +33,7 @@ import { diskFitNote, type DiskFit, type DiskRoom, type DiskShortage } from "../
 import { connectSource, maskedUrl, parseSource, readSourceFacts, type SourceFacts, type SourceTable } from "./preflight.ts";
 import type { GeneratedStatus } from "../duck/generated.ts";
 import { reach } from "./state.ts";
-import { CATCHING_UP, copyingText, copyProgress, duration, generatedReadiness, msText, statementMsText, readiness, readinessWord, READY_TEXT, type Readiness, type SyncFacts, type SyncTotals } from "./readiness.ts";
+import { CATCHING_UP, copyingText, copyProgress, duration, generatedReadiness, msText, statementMsText, readiness, readinessWord, READY_TEXT, syncProgressText, type Readiness, type SyncFacts, type SyncProgress, type SyncTotals } from "./readiness.ts";
 import type { SyncEvent } from "../duck/events.ts";
 import type { Compaction, CopyProgressView, KeptCurrent, StreamStatus } from "../duck/sync.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
@@ -100,6 +100,9 @@ export interface TableState extends Omit<CatalogTable, "columns"> {
   /** the run's own sync of it running now, and since when (issue 1011): `copy` its whole read (its first sync, or read
    *  again whole), `catch-up` the one poll after it; absent otherwise (a compaction is not said) */
   rebuilding?: { kind: "copy" | "catch-up"; startedAt: string };
+  /** while a sync asked by hand of it runs (`mason sync`, the page's Sync now), how far it is (issue 1173,
+   *  src/cli/readiness.ts `SyncProgress`); absent otherwise, and from a run before it was said */
+  syncProgress?: SyncProgress;
 }
 /** which reason the run cannot write its sources file (`RunState.sourcesReadOnlyKind`) */
 export type SourcesReadOnlyKind = "deployed" | "unwritable" | "unknown";
@@ -309,6 +312,7 @@ export function paintBar(line: string, s: Style, tone?: BarTone): string {
  *  failed, copying / catching-up, unsynced, done). */
 export type BarTone = "red" | "yellow" | "green" | "cyan";
 export function barTone(t: TableState): BarTone {
+  if (byHandNow(t)) return "cyan";
   if (t.error) return "red";
   if (!t.copy || t.copy.phase === "copying" || t.sync?.state === "catching-up") return "cyan";
   const k = t.kept;
@@ -336,10 +340,17 @@ export function tableLines(s: RunState, now: number = Date.now()): string[] {
 /** `tableLines` with each line's bar colour (`barTone`): what mason status and mason wait paint by */
 export function tableRows(s: RunState, now: number = Date.now()): Array<{ line: string; tone: BarTone }> {
   const picked = s.tables.filter((t) => t.added);
-  // 0 done, 1 failed, 2 copying or in its one catch-up poll (at work: issue 834), 3 waiting for its copy
-  const rank = (t: TableState): number => t.error ? 1 : t.copy?.phase === "copying" ? 2 : !t.copy ? 3 : t.sync?.state === "catching-up" ? 2 : 0;
+  // 0 done, 1 failed, 2 copying, in its one catch-up poll (at work: issue 834) or synced by hand now (issue 1173), 3 waiting for its copy
+  const rank = (t: TableState): number => byHandNow(t) ? 2 : t.error ? 1 : t.copy?.phase === "copying" ? 2 : !t.copy ? 3 : t.sync?.state === "catching-up" ? 2 : 0;
   const rows = picked.map((t) => {
     const r = rank(t);
+    // A SYNC BY HAND OF IT RUNNING (issue 1173): its progress, never the full bar of the sync before it. A bar only where
+    // a total is known; without one its place is blank, and its words say the rows read and the time so far
+    if (byHandNow(t)) {
+      const p = t.syncProgress!;
+      const shown = p.share === null ? `${" ".repeat(BAR)}     ` : `${bar(p.share)} ${`${Math.floor(p.share * 100)}%`.padStart(4)}`;
+      return { t, r, at: t.copy?.updatedAt ?? "", line: `${shown}  ${syncProgressText(p)}` };
+    }
     let fraction: number, what: string;
     // served: its line says how it is kept (a catch-up's too, ranked at work)
     if (r === 0 || r === 2 && t.copy?.phase === "done") {
@@ -361,6 +372,9 @@ export function tableRows(s: RunState, now: number = Date.now()): Array<{ line: 
   const w = Math.max(0, ...rows.map((x) => x.t.table.length));
   return rows.map((x) => ({ line: `${x.t.table.padEnd(w)}  ${x.line}`, tone: barTone(x.t) }));
 }
+
+/** a sync asked by hand of the table runs now, its progress said (`syncProgress`): its line is that sync's */
+const byHandNow = (t: TableState): boolean => t.copy?.phase === "done" && t.syncProgress !== undefined;
 
 /** a share of a synced table's stored rows that are deleted at or past which its line says it (under it, its last
  *  compaction, if any) */
@@ -610,7 +624,13 @@ const STATUS_USAGE = `usage: mason status [--json]
     notRunning (why the stream is not running, null when it is) }; each with promisedSeconds (the age of
     its synced data past which it is behind: poll, its interval plus the larger of 60 s and twice its last poll;
     replication, 120 s; off, null) and lateWhy (what would make it late now: the pass's or its own poll's
-    time, which Mason waits four times, the stream not running); with Mason stopped: { running: false, project, source: { name,
+    time, which Mason waits four times, the stream not running). A table being synced by hand now (mason sync, the
+    page's Sync now) has syncProgress: { step (waiting: its turn not come yet; starting its read; reading: its changed rows; writing them;
+    counting its rows on the database; deleting: reading the database's keys to find the rows it deleted; read: its
+    part done), startedAt, seconds (since the sync began), changedRows (the changed rows read so far, counted as they
+    arrive), keysRead, keysTotal (the database's count of its rows, read by the sync itself), pieces: { written, of },
+    share (how much is done where a total is known: the keys read; null otherwise, and its line draws no bar) }, each
+    null where it has none; with Mason stopped: { running: false, project, source: { name,
     file, url, error (the sources file's problem, or null) }, engine, tables: [{ table }], lastRun, lastStop:
     { at, how } or null, next }; hung: the same with hung: { pid, problem, why },
     exit 1. In replication mode stream: { slot, slotWal: { walHeldBytes (the WAL the slot holds on the

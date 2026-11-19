@@ -667,7 +667,9 @@ export function renderTables(s, ui = {}) {
     // it copies, the indeterminate shimmer while it waits — the Overview's renderer (`copyBar`), its words the line's;
     // a table with none keeps its line, empty, so the row is as tall either way
     const l = t.added && !adding_ ? tableLine(t, now) : null;
-    const bar = l ? `<span class="copyline t-${l.state}">${copyBar(t.table, l, shares.get(t.table) ?? l.fraction, before.get(t.table))}</span>` : `<span class="copyline none" aria-hidden="true"></span>`;
+    // a sync by hand with no total known yet (`syncProgress.share` null) has no bar: its note says the rows and the time
+    // (issue 1173), never the full bar of the sync before it
+    const bar = l && l.fraction !== null ? `<span class="copyline t-${l.state}">${copyBar(t.table, l, shares.get(t.table) ?? l.fraction, before.get(t.table))}</span>` : `<span class="copyline none" aria-hidden="true"></span>`;
     // while a sync by hand of it runs (`syncingNow`), its State says so
     const state = adding_ ? status("warn", "Adding…") : syncingNow ? status("warn", SYNC_WORDS.syncing)
       : t.added ? (y ? status(undefined, SYNC_WORDS[y.state]) : "") : status("unknown", "Not added");
@@ -703,7 +705,7 @@ export function renderTables(s, ui = {}) {
     // an error (its first line; the whole in a details), why it cannot be added as it is, its stream state (replication mode)
     const said_ = adding_ ? `<span class="dim">adding it…</span>`
       : t.added ? [
-        l && l.state !== "done" && !t.error ? `<span class="what-copy t-${l.state}">${esc(l.what)}</span>` : "",
+        l && l.state !== "done" && (!t.error || l.state === "syncing") ? `<span class="what-copy t-${l.state}">${esc(l.what)}</span>` : "",
         t.error ? `<span class="err">${esc(firstLine(t.error))}</span>${t.error.includes("\n") ? details(`error:${t.table}`, "the whole error", `<pre>${esc(t.error)}</pre>`, open(`error:${t.table}`)) : ""}` : "",
         stream && stream.get(t.table) ? `<span class="stream dim">Stream: ${esc(stream.get(t.table))}</span>` : "",
       ].filter(Boolean).join("")

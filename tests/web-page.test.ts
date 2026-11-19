@@ -7834,3 +7834,48 @@ test("the page says a poll's updated count as an estimate (~N updated) by the co
   assert.deepEqual(r.details, [["public.orders", "60,000 added, ~64,383 updated, 0 deleted, 60,000 rows now · 900 ms"]]);
   assert.equal(fn<[unknown], string>("countsText")({ inserts: 1, updates: 64_383, deletes: 0, truncates: 0 }), "1 added, 64,383 updated, 0 deleted");
 });
+
+// ISSUE 1173: Sync now on a 17 M-row `off` table showed "Syncing" beside its old full bar, "100%", nothing moving for the
+// minutes the sync ran. While a sync by hand runs, the row says how far it is — mason status's words (`syncProgressText`,
+// held equal) — and draws a bar only against a known total: never the full bar of the sync before it.
+test("Tables: a sync by hand shows how far it is, the rows read so far and the time, a bar only against a known total, never the old 100% (issue 1173)", async () => {
+  const pageText = fn<[unknown], string>("syncProgressText");
+  const readinessOf = await import("../src/cli/readiness.ts") as unknown as Record<string, (...a: never[]) => unknown>;
+  assert.equal(typeof readinessOf.syncProgressOf, "function", "the server computes a sync by hand's progress once");
+  const progressOf = readinessOf.syncProgressOf as unknown as (startedAt: string, p: unknown, now: number) => Record<string, unknown> & { share: number | null };
+  const cliText = readinessOf.syncProgressText as unknown as (p: unknown) => string;
+  const startedAt = "2026-10-27T09:05:22.000Z", now = Date.parse("2026-10-27T09:07:30.000Z");
+  const poll = (o: Record<string, unknown>) => ({ startedAt: "2026-10-27T09:05:23.000Z", step: "reading", changedRows: 0, keysRead: null, keysTotal: null, pieces: null, ...o });
+  const cases = [progressOf(startedAt, undefined, now), progressOf(startedAt, poll({ changedRows: 1_234_567 }), now), progressOf(startedAt, poll({ step: "starting", changedRows: null }), now), progressOf(startedAt, poll({ changedRows: null }), now),
+    progressOf(startedAt, poll({ step: "writing", changedRows: 1, pieces: { written: 2, of: 9 } }), now), progressOf(startedAt, poll({ step: "writing", changedRows: 40 }), now),
+    progressOf(startedAt, poll({ step: "counting", changedRows: 40 }), now), progressOf(startedAt, poll({ step: "deleting", changedRows: 40, keysRead: 7_500_000, keysTotal: 30_000_000 }), now),
+    progressOf(startedAt, poll({ step: "done", changedRows: 40 }), now)];
+  for (const p of cases) assert.equal(pageText(p), cliText(p), JSON.stringify(p));
+
+  const running = { id: 9, tables: ["public.events"], state: "syncing", startedAt, endedAt: null };
+  const withProgress = (p: unknown) => ({ ...SYNCED, tables: SYNCED.tables.map((t) => t.table === "public.events" ? { ...t, syncByHand: running, syncProgress: p } : t) });
+  const run = fakeRun();
+  run.answers.set("GET api/state", answer(withProgress(cases[1])));
+  const app = fn<[unknown], App>("createApp")(run.fetch);
+  app.show("tables");
+  await app.poll();
+  const rowOf = (h: string) => new RegExp(`<tr class="[^"]*"><th scope="row" class="name"><code class="name" title="public\\.events">.*?</tr><tr class="under note">.*?</tr>`).exec(withoutPops(h))?.[0] ?? assert.fail("no row for public.events");
+  // reading its changed rows: Syncing, the count so far and the time in its note, and NO bar (no total is known)
+  let row = rowOf(app.view().tables!);
+  assert.match(textOf(row), /public\.events Syncing /);
+  assert.ok(textOf(row).includes("syncing by hand: reading its changed rows from the database, 1,234,567 so far (2 min)"), textOf(row));
+  assert.doesNotMatch(row, /role="progressbar"|100%/, "never the full bar of the sync before it");
+  assert.match(row, /<span class="copyline none" aria-hidden="true"><\/span>/, "its bar's line kept, empty, so the row is as tall");
+  // finding the rows deleted: the keys read against the database's count, a bar at that share
+  run.answers.set("GET api/state", answer(withProgress(cases[7])));
+  await app.poll();
+  row = rowOf(app.view().tables!);
+  assert.match(row, /<span class="copyline t-syncing"><span class="copybar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="25" aria-label="public\.events: its sync by hand"/);
+  assert.match(textOf(row), / 25% .*syncing by hand: 40 changed rows read, finding the rows deleted on the database, 7,500,000 of 30,000,000 keys read \(2 min\)/);
+  // ended: its own line again, synced, its full bar
+  run.answers.set("GET api/state", answer({ ...SYNCED, tables: SYNCED.tables.map((t) => t.table === "public.events" ? { ...t, syncByHand: { ...running, state: "synced", endedAt: "2026-10-27T09:07:31.000Z", answer: { at: startedAt, tables: [] } } } : t) }));
+  await app.poll();
+  row = rowOf(app.view().tables!);
+  assert.doesNotMatch(textOf(row), /syncing by hand/);
+  assert.match(row, /aria-valuenow="100"/, "served: its full bar again");
+});
