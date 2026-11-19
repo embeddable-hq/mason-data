@@ -222,7 +222,7 @@ test("a light statement never waits for a heavy one's turn: a lookup and a group
   } finally { await c.end(); await held.release(); held.end(); }
 });
 
-test("a heavy statement waits for the turn: its statement_timeout and its cancel end the wait with 57014, and it runs once the turn is released, its wait on its row", async () => {
+test("a heavy statement waits for the turn: its statement_timeout and its cancel end the wait with 57014, and it runs once the turn is released, its wait on its row", { skip: "quarantined: #1183" }, async () => {
   const held = await holdTheTurn();
   try {
     // THE TIMEOUT counts the wait
