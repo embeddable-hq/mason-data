@@ -1532,6 +1532,46 @@ function fakeRun(): { fetch: (p: string, init?: { method?: string; body?: string
   };
 }
 
+/** The header box's text (what it shows) and its title (what a hover shows), from `renderWhere`'s one span. */
+const whereParts = (html: string): { text: string; title: string } => {
+  const m = /^<span title="([^"]*)">([^<]*)<\/span>$/.exec(html);
+  assert.ok(m, `one span, its title an attribute and its text text: ${html}`);
+  return { title: m[1]!, text: m[2]! };
+};
+
+test("the header box (renderWhere): MASON_UI_TITLE_FILE's label, escaped as text; without one the database's name alone, never its source's (issue 1181)", () => {
+  const where = (s: unknown): string => whereParts(fn<[unknown], string>("renderWhere")(s)).text;
+  const source = { database: "shop", name: "billing" };
+  assert.equal(where({ source }), "shop", "no label: the database alone, the sources file's name not said");
+  assert.equal(where({ source: { database: "shop", name: "shop" } }), "shop");
+  assert.equal(where({ source, pageTitle: { label: null, problem: { code: "missing", message: "the file does not exist" } } }), "shop", "a file that gave no label: as without it");
+  assert.equal(where({ source, pageTitle: { label: "", problem: null } }), "shop");
+  assert.equal(where({ source, pageTitle: { label: "Production analytics (EU)", problem: null } }), "Production analytics (EU)");
+  assert.equal(where({ source, pageTitle: { label: `<img src=x onerror="alert('x')"> & co`, problem: null } }),
+    "&lt;img src=x onerror=&quot;alert(&#39;x&#39;)&quot;&gt; &amp; co", "markup and quotes are text, never HTML");
+  assert.equal(where({ source: { database: "<b>db</b>", name: null } }), "&lt;b&gt;db&lt;/b&gt;");
+});
+
+test("the header box's whole text is its title, for a hover where the box cuts it: the same text, escaped for the attribute, nothing more", () => {
+  const render = fn<[unknown], string>("renderWhere");
+  const source = { database: "analytics_warehouse_eu", name: "billing" };
+  const states = [
+    { source },
+    { source, pageTitle: { label: null, problem: { code: "missing", message: "the file does not exist" } } },
+    { source, pageTitle: { label: "Production analytics (EU)", problem: null } },
+    { source, pageTitle: { label: `A "quoted" <b>label</b> & 'more'`, problem: null } },
+  ];
+  for (const s of states) {
+    const { text, title } = whereParts(render(s));
+    assert.equal(title, text, "the title says what the box says, cleaned as the run cleaned it, with no path or reason added");
+  }
+  assert.deepEqual(whereParts(render(states[0])), { text: "analytics_warehouse_eu", title: "analytics_warehouse_eu" }, "no label: the database's name");
+  assert.equal(whereParts(render(states[2])).title, "Production analytics (EU)");
+  // quotes, < and & are entities in the attribute: the title cannot be closed, nor markup opened
+  assert.equal(whereParts(render(states[3])).title, "A &quot;quoted&quot; &lt;b&gt;label&lt;/b&gt; &amp; &#39;more&#39;");
+  assert.deepEqual(whereParts(render(states[1])), { text: "analytics_warehouse_eu", title: "analytics_warehouse_eu" }, "a problem never reaches the box or its title");
+});
+
 test("the app: a poll writes the shown page and when, reading only its endpoints; a poll that fails keeps what it knew and says what to do", async () => {
   const run = fakeRun();
   let clock = new Date(2026, 9, 27, 14, 3, 5).getTime();
@@ -1540,7 +1580,7 @@ test("the app: a poll writes the shown page and when, reading only its endpoints
   assert.match(app.view().status!, /<span class="skeleton/, "being asked: the words over grey bars");
   await app.poll();
   let v = app.view();
-  assert.equal(v.where, "shop", "the database; its source's name only when it is another");
+  assert.equal(v.where, `<span title="shop">shop</span>`, "the database alone, its whole the title");
   assert.equal(v.badge, "", "a database of the person's own: no badge");
   assert.equal(v.updated, "Updated 1 s ago");
   clock += 4000;

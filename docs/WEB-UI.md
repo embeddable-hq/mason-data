@@ -414,7 +414,7 @@ while it waits (still under `prefers-reduced-motion`); a state's marker is a sma
 Getting-started steps are courses of a wall, an empty state is one quiet line of muted text (`empty`: no box, no
 icon, one short sentence, the same on every page), and the mark is an
 arch of bricks with its keystone, drawn inline. All of it is borders and boxes: no gradient, no image. A left sidebar
-as Vercel's and Supabase's are (Mason, the database's name, a **demo** badge when it is the demo database; the nav,
+as Vercel's and Supabase's are (Mason, the database's name alone or a server's `MASON_UI_TITLE_FILE` label, a **demo** badge when it is the demo database; the nav,
 each link an icon and its label, the one shown a pale stone row with the patina at its edge; at its foot how long ago Mason last
 answered — `Updated 3 s ago`, which keeps counting when it stops answering — and the version), the time range as a
 segmented control at the top of the Observability views, and on the Overview the run's word beside a big brick, a
@@ -641,6 +641,27 @@ listens, and every browser connection crosses that one ssh connection as frames 
   0-9, `+`, `/` and its `=` padding: no space and no %-encoding. A PNG must start as a PNG file does. An SVG must be
   UTF-8 text with an `<svg>` element. The message never repeats the value. The icon is not in `/api/state` or `mason
   status --json`: the page has it in its HTML. `mason start` refuses it, as the other `MASON_UI_*` server settings.
+- **The label in the header box: `MASON_UI_TITLE_FILE`.** The box at the top of the sidebar shows the database's name.
+  An operator who runs several deployments can name each one in their own words instead. Set the setting to a file's
+  path, and the file's first line is shown in the box. Every viewer of the page sees it.
+  - **It is read again as the page loads.** The run reads the file at its start, each time the page's document is loaded
+    (`GET /`), and each time a command asks for the whole state (`/api/state?columns=1`, which `mason status` asks).
+    The page's polls of `/api/state` answer what was read last and never touch the file. So an edit shows at the next
+    load of the page, with no restart.
+  - **It is bounded, and plain text.** The run reads at most the first 1024 bytes, and only from a regular file. A
+    folder, a pipe or a device is refused, and a pipe is opened without blocking, so it cannot hang the run. It takes
+    the first line (up to `\n`, `\r\n` or `\r`) as strict UTF-8. A control character becomes a space. An invisible
+    format character is dropped: a bidi control, a zero-width space, a BOM. The two joiners that emoji and some
+    scripts need (U+200C, U+200D) are kept. Runs of white space become one space, and the line is trimmed. A line over
+    80 characters is cut on a whole character and ends with "…". The page escapes it: it is text, never HTML.
+  - **A failure never breaks the page.** A file that is missing, a folder, a file Mason may not read, bad UTF-8 or an
+    empty first line leaves the box showing the database. `mason status` says why on its Web UI label row.
+    `mason status --json` says `pageTitle: { label, problem }`, with `problem.code` one of `missing`, `not_a_file`,
+    `no_permission`, `not_utf8`, `empty` or `unreadable`. The run's log says each reason once. Neither the state nor
+    the log names the file's path, since the page shows both.
+  - A file that does not exist yet never refuses the start. A name that is not the setting (`MASON_UI_TITLE`) does, with
+    a `did you mean`. `mason start` refuses the setting, as the other `MASON_UI_*` server settings. Unset,
+    `/api/state` and `mason status` say nothing of it (`src/cli/ui-title.ts`).
 - **In the image, Mason's user is uid 1000, gid 1000 (`node`), and stays so**: an image that changes it names it under
   "Before you upgrade" in its release notes (deploy/mason-data/README.md). A supervisor that creates the folder of the
   socket or the run file makes it owned by `1000:1000`, mode 0700, where the container mounts it (the one folder rule of

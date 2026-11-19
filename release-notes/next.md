@@ -33,6 +33,16 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   PNG. Any other value refuses the start. Not every
   client reads it yet: users report that claude.ai's custom connectors show the favicon of the endpoint's domain
   instead, which is the site's in front of the endpoint to set.
+- **The box at the top of the web page shows the database's name alone, or a label you choose.** It used to add
+  `· source <name>` after the database. The box was too narrow to show that part, so it is gone. The sources file is
+  still named by `mason status`.
+  - On a server, `MASON_UI_TITLE_FILE` names a file whose first line is shown in the box instead. Use it to tell your
+    deployments apart, such as "Production analytics (EU)". Every viewer of the page sees it.
+  - Mason reads the file again each time the page loads, so an edit shows with no restart.
+  - It is shown as plain text. Mason reads at most the first 1024 bytes, takes the first line, makes each control
+    character a space, drops invisible ones, and cuts it to 80 characters.
+  - If the file is missing or can't be read, the box shows the database, and `mason status` says why.
+  - `mason start` refuses the setting, as it does the other web page settings of `mason serve`.
 
 ## What was wrong and is now right
 
