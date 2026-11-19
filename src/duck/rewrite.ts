@@ -6608,7 +6608,12 @@ class Rewriter {
       case "second": return micros(fn("microsecond", [x]), "0.000001");
       case "milliseconds": return micros(fn("microsecond", [x]), "0.001");
       case "microseconds": return wholeNumeric(fn("microsecond", [x]));
-      case "julian": throw new Unrewritable("extract(julian …) is not supported by Mason", "compute it from extract(epoch …) / 86400 + 2440587.5", "extract-julian");
+      // a date's Julian day is a whole number, its day count from 4714-11-24 BC (extract_date: date +
+      // POSTGRES_EPOCH_JDATE), 2440588 on 1970-01-01. A timestamp's adds the fraction of its day, a numeric quotient
+      // Postgres writes to its division's scale, which is not matched here: refused by name
+      case "julian":
+        if (type === DATE) return wholeNumeric(op("+", op("-", x, cast(strConst("1970-01-01"), ["date"])), intConst(2440588)));
+        throw new Unrewritable("extract(julian …) of a timestamp is not supported by Mason", "compute it from extract(epoch …) / 86400 + 2440587.5", "extract-julian");
       default: return null;
     }
   }

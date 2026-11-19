@@ -34,5 +34,8 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
     and a microsecond.
   - `extract(h FROM d)` of a date answered 0, where Postgres refuses it.
   - `date_trunc('weeks', i)` of an interval answered, where Postgres refuses it.
-  - Spellings such as `qtr`, `mm`, `timezone_h` and `EXTRACT(dec FROM t)` were refused, where Postgres
+  - Spellings such as `qtr`, `mm`, `timezone_h` and `extract('dec' FROM t)` were refused, where Postgres
     answers. Each spelling Postgres does not take is refused with Postgres's own error.
+  - `extract(julian FROM d)` of a date was refused. Its spelling `jd` answered, but a filter on it dropped an
+    infinite date that Postgres keeps. Now it answers Postgres's whole Julian day under every spelling. Of an
+    infinite date it is refused, as `extract(year FROM d)` is. Of a timestamp it is still refused.

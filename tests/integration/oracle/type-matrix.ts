@@ -2309,10 +2309,20 @@ function* unitSpellings(): Generator<Matrixed> {
       if (c !== "tm") yield q(`unit spellings: date_trunc('${s}', ${c})`, `SELECT id, date_trunc('${s}', ${c}) FROM typed ORDER BY id`);
     }
   }
-  // EXTRACT's own syntax: a keyword, a name Postgres lowercases, one it quotes (and lowercases as a unit), a keyword of
-  // another meaning (`dec`)
+  // EXTRACT's own syntax: a keyword, a name Postgres lowercases, one it quotes (and lowercases as a unit); `dec`, a
+  // keyword of another meaning, which only the quoted form takes (bare, it is Postgres's syntax error, 42601)
   yield q("unit spellings: EXTRACT(… FROM) by a name", "SELECT id, EXTRACT(SECOND FROM ts), extract(seconds FROM ts), EXTRACT(SECS FROM tz), extract(\"Msec\" FROM tm), EXTRACT(mon FROM iv), EXTRACT(Hours FROM ts) FROM typed ORDER BY id");
-  yield q("unit spellings: EXTRACT(dec FROM)", `SELECT id, EXTRACT(dec FROM ts), EXTRACT(qtr FROM tz), EXTRACT(us FROM tm) FROM typed WHERE ${ORDINARY} ORDER BY id`);
+  yield q("unit spellings: extract('dec' FROM)", `SELECT id, extract('dec' FROM ts), EXTRACT(qtr FROM tz), EXTRACT(us FROM tm) FROM typed WHERE ${ORDINARY} ORDER BY id`);
+  yield q("unit spellings: EXTRACT(dec FROM), a syntax error", `SELECT id, EXTRACT(dec FROM ts) FROM typed WHERE ${ORDINARY} ORDER BY id`);
+  // A DATE'S JULIAN DAY (the review of PR 1170): a whole numeric, under each spelling, of a date before year 1 and of
+  // ±infinity (refused by name, `infinite-extract`: the engine's DECIMAL has no Infinity), and filtered by it, where
+  // an infinite row must be refused, never dropped. date_part reads the date as a timestamp: ±Infinity
+  yield q("unit spellings: extract of a date's Julian day, every row", "SELECT id, extract(julian FROM d), extract('jd' FROM d), extract('J' FROM d) FROM typed ORDER BY id");
+  yield q("unit spellings: extract of a date's Julian day, finite", "SELECT id, extract(julian FROM d), extract('jd' FROM d), extract('j' FROM d), extract(julian FROM d) - 2440588 AS since_1970 FROM typed WHERE isfinite(d) OR d IS NULL ORDER BY id");
+  yield q("unit spellings: filtered by a date's Julian day", "SELECT id FROM typed WHERE extract('jd' FROM d) > 2451545 ORDER BY id");
+  yield q("unit spellings: date_part of a date's Julian day", "SELECT id, date_part('julian', d), date_part('jd', d), date_part('j', d) FROM typed ORDER BY id");
+  // issue 1006: a short spelling's fraction of a second inside a sum, and of an interval
+  yield q("unit spellings: summed (issue 1006)", `SELECT sum(extract(sec FROM ts)), sum(extract(seconds FROM ts)), sum(extract(msec FROM tz)), sum(extract(usecs FROM tm)), sum(extract(sec FROM iv)), sum(extract(ms FROM iv)) FROM typed WHERE ${ORDINARY}`);
   // a unit's spelling as a key: grouped, filtered and sorted by it
   yield q("unit spellings: grouped by date_part('secs')", "SELECT date_part('secs', ts) AS s, count(*) FROM typed GROUP BY 1 ORDER BY 1 NULLS FIRST");
   yield q("unit spellings: filtered by date_part('ms')", "SELECT id FROM typed WHERE date_part('ms', ts) > 500 ORDER BY id");
