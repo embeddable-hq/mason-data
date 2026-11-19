@@ -42,7 +42,7 @@ import { proxyHeaderFor, proxyNames, type ProxyFrom } from "../api/postgres/prox
 import { ADDRESS_NOT_ALLOWED, ApiError, USER_DISABLED } from "../api/error.ts";
 import type { PgApiServer, ShareSocket } from "../api/postgres/server.ts";
 import { USER_REMOVED, type LiveUsers } from "../duck/users.ts";
-import { INSTRUCTIONS, McpServer, SERVER_CAPABILITIES, serverInfo } from "./mcp.ts";
+import { INSTRUCTIONS, McpServer, SERVER_CAPABILITIES, serverInfo, type ServerInfo } from "./mcp.ts";
 import { Issuer, MCP_ORIGINS_SETTING, MCP_PATH, MCP_PROXY_SETTING, RESOURCE_METADATA_PATH, resourceMetadata, resourceMetadataUrl, type Fetcher, type McpSettings } from "./mcp-oauth.ts";
 
 /** the most MCP sessions open at once, every user's together: past it a new session is refused (503), never made by
@@ -218,17 +218,17 @@ export function modernRefusal(msg: unknown, headers: http.IncomingHttpHeaders): 
 
 /** A 2026-07-28 result: `resultType` (every result, "Base protocol": "ResultType"), the server's identity in `_meta`, and a
  *  cached result's `ttlMs` and `cacheScope` ("Caching"). */
-function modernResult(method: string, result: Record<string, unknown>): Record<string, unknown> {
+function modernResult(method: string, result: Record<string, unknown>, info: ServerInfo): Record<string, unknown> {
   const meta = typeof result._meta === "object" && result._meta !== null ? result._meta as Record<string, unknown> : {};
-  return { resultType: "complete", ...result, _meta: { ...meta, [META.server]: serverInfo() }, ...(CACHED.has(method) ? { ttlMs: CACHE_TTL_MS, cacheScope: "public" } : {}) };
+  return { resultType: "complete", ...result, _meta: { ...meta, [META.server]: info }, ...(CACHED.has(method) ? { ttlMs: CACHE_TTL_MS, cacheScope: "public" } : {}) };
 }
 
 /** McpServer's answer as 2026-07-28 says it: a result made `modernResult`; a resource not found -32602, not 2025-11-25's
  *  -32002 ("Resources": "Error handling"). */
-function modernAnswer(method: string, answer: unknown): unknown {
+function modernAnswer(method: string, answer: unknown, info: ServerInfo): unknown {
   if (typeof answer !== "object" || answer === null) return answer;
   const a = answer as { result?: unknown; error?: { code?: unknown } };
-  if (typeof a.result === "object" && a.result !== null) return { ...a, result: modernResult(method, a.result as Record<string, unknown>) };
+  if (typeof a.result === "object" && a.result !== null) return { ...a, result: modernResult(method, a.result as Record<string, unknown>, info) };
   if (a.error?.code === -32002) return { ...a, error: { ...a.error, code: -32602 } };
   return answer;
 }
@@ -243,6 +243,9 @@ export function mcpEndpoint(settings: McpSettings, o: { log: (line: string) => v
   const now = o.now ?? Date.now;
   const issuer = new Issuer(settings, { log, ...(o.fetch !== undefined ? { fetch: o.fetch } : {}), now });
   const metadataUrl = resourceMetadataUrl(settings);
+  // who this server is, with the endpoint's icons (MASON_MCP_ICON, else Mason's): initialize, server/discover and every
+  // 2026-07-28 result's _meta say the same
+  const info = serverInfo(settings.icons);
   // the metadata at RFC 9728's path for the public address's own path, at the well-known root, and for /mcp: a relay
   // forwards the one its address makes
   const publicPath = settings.url.pathname === "/" ? "" : settings.url.pathname.replace(/\/$/, "");
@@ -372,7 +375,7 @@ export function mcpEndpoint(settings: McpSettings, o: { log: (line: string) => v
       log(`[mcp] ${idle.user}: a session unused ${Math.round(EVICTABLE_IDLE_MS / 60_000)} minutes or more ended: it made way for a new session (at most ${maxSessions} in all)`);
     }
     const s: Session = { id: crypto.randomBytes(24).toString("base64url"), user: who.user, userId: who.id, server: null as unknown as McpServer, usedAt: now(), address: who.address, running: 0, version: null };
-    s.server = new McpServer({ connect: connectAs(() => ({ user: s.user, id: s.userId, address: s.address })), where: "this Mason" }, (l) => log(`[mcp] ${who.user}: ${l}`), LEGACY_VERSIONS);
+    s.server = new McpServer({ connect: connectAs(() => ({ user: s.user, id: s.userId, address: s.address })), where: "this Mason" }, (l) => log(`[mcp] ${who.user}: ${l}`), LEGACY_VERSIONS, info);
     sessions.set(s.id, s);
     return s;
   }
@@ -398,7 +401,7 @@ export function mcpEndpoint(settings: McpSettings, o: { log: (line: string) => v
       for (const server of others ?? []) await server.handle(text);
       return null;
     }
-    const server = new McpServer({ connect: connectAs(() => who), where: "this Mason" }, (l) => log(`[mcp] ${who.user}: ${l}`), [STATELESS_VERSION]);
+    const server = new McpServer({ connect: connectAs(() => who), where: "this Mason" }, (l) => log(`[mcp] ${who.user}: ${l}`), [STATELESS_VERSION], info);
     const client = metaOf(messages[0])?.[META.client] as { name?: unknown } | undefined;
     server.named(typeof client?.name === "string" ? client.name : String(req.headers["user-agent"] ?? "").split(/[\s/]/)[0] ?? null);
     const closed = (): void => { if (!res.writableFinished) server.cancelAll("cancelled: the client closed its request"); };
@@ -489,9 +492,9 @@ export function mcpEndpoint(settings: McpSettings, o: { log: (line: string) => v
     }
     if (modern) {
       const method = methodOf(msg);
-      if (requests && method === "server/discover") { reply({ jsonrpc: "2.0", id: rpcId, result: modernResult(method, { supportedVersions: HTTP_VERSIONS, capabilities: SERVER_CAPABILITIES, instructions: INSTRUCTIONS }) }); return; }
+      if (requests && method === "server/discover") { reply({ jsonrpc: "2.0", id: rpcId, result: modernResult(method, { supportedVersions: HTTP_VERSIONS, capabilities: SERVER_CAPABILITIES, instructions: INSTRUCTIONS }, info) }); return; }
       const answer = await standalone(who, text, messages, req, res);
-      reply(requests && method !== null ? modernAnswer(method, answer) : answer);
+      reply(requests && method !== null ? modernAnswer(method, answer, info) : answer);
       return;
     }
     let s: Session;
