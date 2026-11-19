@@ -206,6 +206,8 @@ const MOVED = [
   `WITH t AS (SELECT date_trunc('year', c.created_at) AS y, sum(o.amount) AS s ${JOIN} GROUP BY 1) SELECT * FROM t ORDER BY y NULLS FIRST`,
   `SELECT date_trunc('year', c.created_at), count(*) ${JOIN} GROUP BY 1 UNION ALL SELECT date_trunc('month', c.created_at), count(*) ${JOIN} GROUP BY 1 ORDER BY 1 NULLS FIRST, 2`,
   `SELECT y, n FROM (SELECT date_trunc('year', c.created_at) AS y, count(*) AS n ${JOIN} GROUP BY 1) s ORDER BY 1 NULLS FIRST`,
+  // a unit by another of its spellings (issue 1167): its one name's plan
+  `SELECT date_part('mons', c.created_at) AS m, date_part('hrs', c.created_at) AS h, count(*) ${JOIN} GROUP BY 1, 2 ORDER BY 1 NULLS FIRST, 2 NULLS FIRST`,
 ];
 /** the shapes that keep their plan, each for its reason */
 const KEPT = [
@@ -223,6 +225,12 @@ const KEPT = [
   "SELECT lower(n.body) AS b, count(*) FROM orders c JOIN notes n ON n.customer_id = c.customer_id GROUP BY 1 ORDER BY 1",
   // a subquery in the list
   `SELECT date_trunc('year', c.created_at) AS y, count(*), (SELECT count(*) FROM notes) ${JOIN} GROUP BY 1 ORDER BY 1 NULLS FIRST`,
+  // date_part of a second, a millisecond or a year, under each of its spellings (issue 1167): the plan of its one name,
+  // which the engine computes in a form not proven safe (a second's fraction, an infinite time's ±Infinity)
+  `SELECT date_part('second', c.created_at) AS s, count(*) ${JOIN} GROUP BY 1 ORDER BY 1 NULLS FIRST`,
+  `SELECT date_part('seconds', c.created_at) AS s, count(*) ${JOIN} GROUP BY 1 ORDER BY 1 NULLS FIRST`,
+  `SELECT date_part('ms', c.created_at) AS s, count(*) ${JOIN} GROUP BY 1 ORDER BY 1 NULLS FIRST`,
+  "SELECT date_part('y', c.created_at) AS y, count(*) FROM customers c LEFT JOIN orders o ON o.customer_id = c.id WHERE c.cid <> 23 GROUP BY 1 ORDER BY 1 NULLS FIRST",
 ];
 
 test("a key of one side of a grouped join answers as Postgres does, computed on its side first or not, in every zone", async () => {

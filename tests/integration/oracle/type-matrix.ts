@@ -12,6 +12,7 @@
  * else reads every row. A statement Postgres refuses (min(json), a % of floats) is asked too: it must be refused alike.
  */
 import { FROM_ITEM_VIEWS, FROM_ITEMS_SORTED } from "./unordered-limit.ts";
+import { spellings } from "./unit-spellings.ts";
 
 
 /** the columns, by family, with the type each is declared with */
@@ -2273,6 +2274,61 @@ function* wholeCases(): Generator<Matrixed> {
   yield q("whole: div()'s own arithmetic", "SELECT id, div(b, 2) * div(b, 2) AS sq, div(i, 2) * a AS m, div(i, 2) + m AS p, div(i, 2) / 3 AS q, round(div(i, 2), 2) AS r, div(i, 2)::text AS t FROM public.bins ORDER BY id");
 }
 
-export const TYPE_MATRIX: Matrixed[] = [...matrix(), ...mappedTypes(), ...binCases(), ...wholeCases(),...FROM_ITEMS_SORTED.map((f) => q(f.name, f.sql, f.zone)),
+/**
+ * EACH UNIT UNDER EVERY SPELLING POSTGRES TAKES (issue 1167; oracle/unit-spellings.ts, from Postgres's own tables):
+ * `date_part('seconds', ts)` once lost the fraction of a second `date_part('second', ts)` kept, and `date_part('hour',
+ * d)` was refused where `date_part('h', d)` answered. A unit's spellings are asked side by side, of a date, a timestamp,
+ * a timestamptz (in UTC and in Asia/Kathmandu, +5:45), a time and an interval, over `typed`'s rows (a fraction of a
+ * second, ±infinity, 24:00, a negative interval, NULL). extract of a unit that grows with time reads the ordinary rows:
+ * an infinite one is refused by name (`infinite-extract`), its spellings alike. Each spelling Postgres refuses is asked
+ * too, and must be refused alike.
+ */
+function* unitSpellings(): Generator<Matrixed> {
+  const growing = new Set(["year", "decade", "century", "millennium", "isoyear", "epoch", "julian"]);
+  const BC_YEARS = new Set(["year", "decade", "isoyear"]);
+  const list = (spelled: string[], call: (s: string) => string): string => spelled.map(call).join(", ");
+  for (const [unit, { all, trunc }] of spellings()) {
+    for (const c of ["d", "ts", "tz", "tm", "iv"] as const) {
+      for (const zone of c === "tz" || c === "d" ? ["UTC", "Asia/Kathmandu"] : ["UTC"]) {
+        const at = zone === "UTC" ? "" : ` in ${zone}`;
+        const z = zone === "UTC" ? undefined : zone;
+        // (row 103's year 4713 BC is issue 1108's, open: a year, a decade and an ISO year of a date before year 1)
+        yield q(`unit spellings: date_part of ${c}'s ${unit}${at}`, `SELECT id, ${list(all, (s) => `date_part('${s}', ${c})`)} FROM typed ${BC_YEARS.has(unit) ? "WHERE id <> 103 " : ""}ORDER BY id`, z);
+        yield q(`unit spellings: extract of ${c}'s ${unit}${at}`, `SELECT id, ${list(all, (s) => `extract('${s}' FROM ${c})`)} FROM typed ${growing.has(unit) && c !== "tm" && c !== "iv" ? `WHERE ${ORDINARY} ` : ""}ORDER BY id`, z);
+        // (a time's date_trunc is the interval's, refused by name: time-date-trunc)
+        if (trunc.length > 0 && c !== "tm") yield q(`unit spellings: date_trunc of ${c}'s ${unit}${at}`, `SELECT id, ${list(trunc, (s) => `date_trunc('${s}', ${c})`)} FROM typed ORDER BY id`, z);
+        if (trunc.length > 0 && c === "tz") yield q(`unit spellings: date_trunc of ${c}'s ${unit} in a zone of its own${at}`, `SELECT id, ${list(trunc, (s) => `date_trunc('${s}', ${c}, 'Asia/Kathmandu')`)} FROM typed ORDER BY id`, z);
+      }
+    }
+  }
+  // spellings datetktbl holds, which date_trunc does not read; a reserved word; one no table holds; a space; a month
+  for (const s of ["epoch", "dow", "mm", "jd", "infinity", "now", "foo", " second", "second ", "jan", "isoyears"]) {
+    for (const c of ["d", "ts", "tz", "tm", "iv"]) {
+      yield q(`unit spellings: date_part('${s}', ${c})`, `SELECT id, date_part('${s}', ${c}) FROM typed ORDER BY id`);
+      yield q(`unit spellings: extract('${s}' FROM ${c})`, `SELECT id, extract('${s}' FROM ${c}) FROM typed WHERE ${ORDINARY} ORDER BY id`);
+      if (c !== "tm") yield q(`unit spellings: date_trunc('${s}', ${c})`, `SELECT id, date_trunc('${s}', ${c}) FROM typed ORDER BY id`);
+    }
+  }
+  // EXTRACT's own syntax: a keyword, a name Postgres lowercases, one it quotes (and lowercases as a unit); `dec`, a
+  // keyword of another meaning, which only the quoted form takes (bare, it is Postgres's syntax error, 42601)
+  yield q("unit spellings: EXTRACT(… FROM) by a name", "SELECT id, EXTRACT(SECOND FROM ts), extract(seconds FROM ts), EXTRACT(SECS FROM tz), extract(\"Msec\" FROM tm), EXTRACT(mon FROM iv), EXTRACT(Hours FROM ts) FROM typed ORDER BY id");
+  yield q("unit spellings: extract('dec' FROM)", `SELECT id, extract('dec' FROM ts), EXTRACT(qtr FROM tz), EXTRACT(us FROM tm) FROM typed WHERE ${ORDINARY} ORDER BY id`);
+  yield q("unit spellings: EXTRACT(dec FROM), a syntax error", `SELECT id, EXTRACT(dec FROM ts) FROM typed WHERE ${ORDINARY} ORDER BY id`);
+  // A DATE'S JULIAN DAY (the review of PR 1170): a whole numeric, under each spelling, of a date before year 1 and of
+  // ±infinity (refused by name, `infinite-extract`: the engine's DECIMAL has no Infinity), and filtered by it, where
+  // an infinite row must be refused, never dropped. date_part reads the date as a timestamp: ±Infinity
+  yield q("unit spellings: extract of a date's Julian day, every row", "SELECT id, extract(julian FROM d), extract('jd' FROM d), extract('J' FROM d) FROM typed ORDER BY id");
+  yield q("unit spellings: extract of a date's Julian day, finite", "SELECT id, extract(julian FROM d), extract('jd' FROM d), extract('j' FROM d), extract(julian FROM d) - 2440588 AS since_1970 FROM typed WHERE isfinite(d) OR d IS NULL ORDER BY id");
+  yield q("unit spellings: filtered by a date's Julian day", "SELECT id FROM typed WHERE extract('jd' FROM d) > 2451545 ORDER BY id");
+  yield q("unit spellings: date_part of a date's Julian day", "SELECT id, date_part('julian', d), date_part('jd', d), date_part('j', d) FROM typed ORDER BY id");
+  // issue 1006: a short spelling's fraction of a second inside a sum, and of an interval
+  yield q("unit spellings: summed (issue 1006)", `SELECT sum(extract(sec FROM ts)), sum(extract(seconds FROM ts)), sum(extract(msec FROM tz)), sum(extract(usecs FROM tm)), sum(extract(sec FROM iv)), sum(extract(ms FROM iv)) FROM typed WHERE ${ORDINARY}`);
+  // a unit's spelling as a key: grouped, filtered and sorted by it
+  yield q("unit spellings: grouped by date_part('secs')", "SELECT date_part('secs', ts) AS s, count(*) FROM typed GROUP BY 1 ORDER BY 1 NULLS FIRST");
+  yield q("unit spellings: filtered by date_part('ms')", "SELECT id FROM typed WHERE date_part('ms', ts) > 500 ORDER BY id");
+  yield q("unit spellings: grouped by date_trunc('hrs') in Asia/Kathmandu", "SELECT date_trunc('hrs', tz) AS h, count(*) FROM typed GROUP BY 1 ORDER BY 1 NULLS FIRST", "Asia/Kathmandu");
+}
+
+export const TYPE_MATRIX: Matrixed[] = [...matrix(), ...mappedTypes(), ...binCases(), ...wholeCases(), ...unitSpellings(), ...FROM_ITEMS_SORTED.map((f) => q(f.name, f.sql, f.zone)),
   // issue 665: a quotient grouped by its exact key alone, its day of the year read in the session's zone
   q("issue 665: the week of year grouped in a session zone of daylight saving", "SELECT ceil(cast(extract(doy from o.created_at) as integer) / 7.0) AS w, count(*) FROM orders o GROUP BY 1 ORDER BY 1", "America/New_York")];

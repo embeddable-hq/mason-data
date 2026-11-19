@@ -25,6 +25,8 @@ paths:
   - "src/duck/row-filter.ts"
   - "src/duck/side-first.ts"
   - "tests/duck-side-first.test.ts"
+  - "src/duck/units.ts"
+  - "tests/duck-units.test.ts"
   - "src/duck/to-char.ts"
   - "src/duck/types.ts"
   - "src/duck/verified.ts"
@@ -67,6 +69,11 @@ paths:
   each reader resolved names by rules of its own. Each read a WITH query's own body `FROM t` as the WITH query, where
   Postgres reads the table (a count of 0, and XX000 from a pass-through followed into itself), and `hideKept` read a
   name a set operation's arm's own WITH binds as the table of that name.
+- **A date and time unit is read once, by Postgres's own tables, in `src/duck/units.ts`** (issue 1167): `funcCall`
+  writes the unit of `extract`, `date_part` and `date_trunc` as its one name (`seconds`, `secs` and `s` as `second`)
+  before any rule reads it, and refuses a unit the type has not in Postgres's SQLSTATE and words. A rule after it
+  matches one name per unit, never a list of spellings. Why: each rule matched the spellings it listed, so
+  `date_part('seconds', t)` took the engine's whole second and lost the fraction `date_part('second', t)` kept.
 - **Every name Mason invents for a statement begins with ONE prefix, chosen for that statement** (`ownPrefix`,
   src/duck/own-names.ts, issue 1024): `__mason_`, else `__mason<n>_` for the first n that no string of the statement's
   parse tree or of Postgres's analysis holds, in any case. The analysis names every column of every table read, so a
