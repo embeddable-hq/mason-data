@@ -25,3 +25,23 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   SVG in base64, or an `https://` address on `MASON_MCP_URL`'s own origin. Any other value refuses the start. Not every
   client reads it yet: users report that claude.ai's custom connectors show the favicon of the endpoint's domain
   instead, which is the site's in front of the endpoint to set.
+
+## What was wrong and is now right
+
+- **A date or time unit could answer differently under another of its spellings.** Postgres reads a unit by any of
+  its spellings. For example, `second`, `seconds`, `sec`, `secs` and `s` are one unit. Mason now reads every spelling
+  Postgres reads, in `date_part()`, `extract()` and `date_trunc()`, and answers as for the unit's usual name. These
+  answered wrong before:
+  - `date_part('seconds', t)`, `'sec'` and `'s'` dropped the fraction of a second: 59 where Postgres answers
+    59.999999. `date_part('ms', t)` and the other spellings of a millisecond dropped it too. So did `extract()`.
+  - `date_part('y', t)` of an infinite time was NULL where Postgres answers Infinity. The same held for other
+    spellings of a year, a decade, a century and a millennium.
+  - `date_part('hour', d)` of a date was refused, where Postgres answers 0. So were a minute, a second, a millisecond
+    and a microsecond.
+  - `extract(h FROM d)` of a date answered 0, where Postgres refuses it.
+  - `date_trunc('weeks', i)` of an interval answered, where Postgres refuses it.
+  - Spellings such as `qtr`, `mm`, `timezone_h` and `extract('dec' FROM t)` were refused, where Postgres
+    answers. Each spelling Postgres does not take is refused with Postgres's own error.
+  - `extract(julian FROM d)` of a date was refused. Its spelling `jd` answered, but a filter on it dropped an
+    infinite date that Postgres keeps. Now it answers Postgres's whole Julian day under every spelling. Of an
+    infinite date it is refused, as `extract(year FROM d)` is. Of a timestamp it is still refused.

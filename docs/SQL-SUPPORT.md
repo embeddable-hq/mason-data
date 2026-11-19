@@ -24,12 +24,12 @@ each). The synced data is read-only.
 
 ## Why not DuckDB by itself
 
-DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 7,675 statements,
+DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 8,270 statements,
 each sent as written to Mason and to a plain DuckDB connection over the same synced tables (tests/integration/duck-oracle.itest.ts):
 
-| Of 7,675 statements | Mason | DuckDB alone |
+| Of 8,270 statements | Mason | DuckDB alone |
 |---|---|---|
-| answered exactly as Postgres: the rows, their text, the column names | 93% | 25% |
+| answered exactly as Postgres: the rows, their text, the column names | 94% | 24% |
 | answered differently by a decision the registry lists ("Answered differently" below) | 1% | — |
 | refused, naming what to write instead (SQLSTATE 0A000, `Mason gap <id>`) | 6% | — |
 | the right rows under DuckDB's own column names (`count_star()` for `count`, the expression's text for an unnamed column) | — | 19% |
@@ -37,7 +37,7 @@ each sent as written to Mason and to a plain DuckDB connection over the same syn
 | a wrong value (`7 / 2` is 3.5, LIKE's backslash escape, a float4 beside a literal, a numeric's rounding) | 0% | 15% |
 | wrong rows, or the rows in another order | — | 8% |
 | the same value in other text (`1.0` for `1`, a numeric's scale, a timestamptz without its offset) | — | 1% |
-| another error than Postgres's, or answered where Postgres refuses | — | 9% |
+| another error than Postgres's, or answered where Postgres refuses | — | 11% |
 
 A tool that reads Postgres reads the first row's answers; the rest it would have to work around, statement by
 statement. The oracle's statements are adversarial by design (NULL beside '', ties, every type's edge values), so
@@ -79,7 +79,7 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `regexp-functions` | regexp_split_to_table / regexp_split_to_array / regexp_count / regexp_instr / regexp_substr / regexp_like | answers | refused | ~ to test, substring(text from pattern) to take a part, regexp_replace to replace |
 | `regexp-matches-forms` | regexp_matches in FROM | answers | refused | regexp_matches in the SELECT list |
 | `json-of-type` | to_json / array_to_json / json_build_object of a value (or an array of elements) of a type Mason does not write as json | answers | refused | cast the value to text, a number, a boolean, a timestamp or json first |
-| `extract-julian` | extract(julian FROM …) | answers | refused | extract(epoch FROM …) / 86400 + 2440587.5 |
+| `extract-julian` | extract(julian FROM …) of a timestamp or timestamptz (a date's is answered) | answers | refused | extract(epoch FROM …) / 86400 + 2440587.5 |
 | `with-ordinality` | a function in FROM … WITH ORDINALITY | numbers the rows | refused | row_number() OVER () instead |
 | `tablesample` | TABLESAMPLE SYSTEM or BERNOULLI on a table, at any percent, with or without REPEATABLE, wherever the table is read (a subquery, a CTE, a join, a view) | a sample of the table: about that percent of its pages (SYSTEM) or of its rows (BERNOULLI) | refused: the synced table has none of the source's pages, so its sample would not be Postgres's. A literal percent or seed Postgres rejects (past 100, NaN, NULL) gets Postgres's own error | read the whole table, or a part of it by a filter (WHERE id % 10 = 0) |
 | `array-subquery-element` | ARRAY(SELECT x …) whose x is a numeric, an array or a row; array_agg(x) of a numeric quotient or average not rounded to a fixed scale (round, trunc or a cast to numeric(p,s)); x = ANY or ALL (ARRAY(SELECT …)) | a numeric[] computed exactly, a multi-dimensional array (2202E on an empty element, 22004 on a NULL one), a record[] | refused (DuckDB makes a list of doubles, of lists, of structs; it binds ANY (ARRAY(SELECT …)) as a comparison of its own) | ARRAY(SELECT x::text …) or array_agg(x::text), array_agg(x ORDER BY …) of a column in a subquery, or x = ANY (SELECT …) without the ARRAY |
@@ -93,7 +93,7 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `libc-uncovered` | ORDER BY, <, >, min / max of text (or of a jsonb, by its strings) holding a character whose order under a libc collation Mason could not read: under a locale other than English's (`en_*`, where it never is, nor is anything refused), a symbol with a first-level weight of its own (`㏩`, `㊿`) or any rare character the read was held to and differed on | answers, in the collation's order | refused when a value holding one is ordered (the order is read from the database, every character held to it, and glibc's every other character is followed); a top N or a min / max orders only the values that may be among its answers (src/duck/libc-bound.ts), so one outside them is not refused | ORDER BY x COLLATE "C" for byte order, or normalize(x, NFKC) where it spells the character out |
 | `libc-locale-unread` | ORDER BY, <, >, min / max of text (or of a jsonb, by its strings) under a database whose libc collation Mason's read does not follow: a locale that tailors ASCII or Latin (tr_TR, sv_SE, cs_CZ) or another C library's. An `en_*` locale never is; the read says which at the start and mason status repeats it | answers, in the collation's order | refused whenever text is ordered; everything else is answered, equality, GROUP BY and DISTINCT of text included | add COLLATE "C" or an ICU collation (COLLATE "und-x-icu") to the comparison or the sort |
 | `hypothetical-set` | a hypothetical-set aggregate: rank, dense_rank, percent_rank or cume_dist(…) WITHIN GROUP (ORDER BY …) | the rank the value would have among the rows | refused | count the rows below the value in a subquery |
-| `infinite-extract` | extract(year, decade, century, millennium, isoyear or epoch FROM) an infinite date or timestamp | Infinity (a numeric) | refused when a row holds one (DuckDB's DECIMAL has no Infinity) | filter the infinite values out (isfinite(x)), or date_part(…), which is a double |
+| `infinite-extract` | extract(year, decade, century, millennium, isoyear, julian or epoch FROM) an infinite date or timestamp | Infinity (a numeric) | refused when a row holds one (DuckDB's DECIMAL has no Infinity) | filter the infinite values out (isfinite(x)), or date_part(…), which is a double |
 | `time-timetz-coerced` | a time Postgres casts to a timetz where Mason cannot write the cast: an arm of a UNION, INTERSECT or EXCEPT written as a * or as a set operation of its own with an ORDER BY or a LIMIT; a time BETWEEN a time bound and a timetz one; a CASE of a time WHEN a time and WHEN a timetz | casts the time to a timetz at the session zone's offset on the transaction's date | refused (a time beside a timetz in a comparison, IN, BETWEEN, CASE, COALESCE, GREATEST, LEAST, NULLIF, an ARRAY, a VALUES list, a function's argument and a set operation's named columns is answered) | cast the time: tm::timetz |
 | `time-date-trunc` | date_trunc of a time (Postgres truncates it as an interval) | an interval | refused | date_trunc of a timestamp, or extract the parts |
 | `quote-ident` | quote_ident() | quotes an identifier when it must be | refused (it needs Postgres's keyword list) | quote it in the statement, or format('%s', …) |
