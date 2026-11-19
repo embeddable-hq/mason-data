@@ -192,10 +192,11 @@ export const SERVE: CommandSpec = {
                             Origin header it does not name, Origin: null included, is refused 403 before its token is
                             read. A hosted agent's server or a desktop app sends none, and is not judged by it
                             (default unset: no browser origin)
-    MASON_MCP_ICON          the icon an MCP client shows for the endpoint (its serverInfo icons): a data: URL of a PNG
-                            or SVG image in base64, read as MASON_UI_ICON is, or an https:// address on MASON_MCP_URL's
-                            own origin; any other value is refused (default Mason's logo, a 128x128 PNG)
-    MASON_PG_HOST,MASON_PG_PORT  the Postgres API's address (default 127.0.0.1:5433)
+    MASON_MCP_ICON          the icon an MCP client shows for the endpoint (its serverInfo icons): a PNG, as a data: URL
+                            in base64 (data:image/png;base64,…, at most ${ICON_BYTES_MAX} bytes and 1024 pixels a side), or
+                            an https:// address on MASON_MCP_URL's own origin; never an SVG, which can carry script; any
+                            other value is refused (default Mason's logo, a 128x128 PNG)
+    MASON_PG_HOST, MASON_PG_PORT  the Postgres API's address (default 127.0.0.1:5433)
     MASON_PG_TLS_CERT, MASON_PG_TLS_KEY   its certificate, required off loopback; or MASON_PG_SELF_SIGNED_TLS=1
                             for one made in .mason/, or MASON_PG_PLAIN=1 behind a TLS proxy of your own
     MASON_PG_PUBLIC_URL     the Postgres API's address as a client reaches it, behind a load balancer, a proxy or a DNS

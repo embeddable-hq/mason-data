@@ -524,9 +524,11 @@ MASON_MCP_ICON=https://mason.example.com/icon.png     # the icon a client shows 
   `server/discover`) carries `icons`, a `description` and `websiteUrl`, as MCP 2025-11-25's `Implementation` has them.
   Every other 2026-07-28 result's `_meta` serverInfo names the server without `icons` (optional there): the icon is
   sent once, not in every answer. The icon is Mason's logo, a 128x128 PNG as a `data:` URI, unless `MASON_MCP_ICON` names
-  another: a `data:` URL of a PNG or SVG in base64 (at most 4096 bytes, read as `MASON_UI_ICON` is), or an `https://`
-  address on `MASON_MCP_URL`'s own origin, which the spec asks a client to hold an icon to. Any other value refuses the
-  start. A client decides what it shows: users report that claude.ai's custom connectors show the favicon of the
+  another: a PNG as a `data:image/png;base64,…` URL (a whole PNG file, at most 4096 bytes and 1024 pixels a side), or
+  an `https://` address on `MASON_MCP_URL`'s own origin, which the spec asks a client to hold an icon to. **Never an
+  SVG**, in either form: an SVG can carry script and fetch other addresses, and each client decides how it renders one,
+  while every client that renders icons must read a PNG (`MASON_UI_ICON`, the browser tab's icon, still takes one).
+  Any other value, a control character or white space at either end included, refuses the start. A client decides what it shows: users report that claude.ai's custom connectors show the favicon of the
   endpoint's domain rather than `serverInfo.icons` (anthropics/claude-ai-mcp#152), and ChatGPT's apps take a logo the
   person sets in its settings. In both, the icon comes from the site in front of the endpoint or the client's own
   settings, not from Mason.

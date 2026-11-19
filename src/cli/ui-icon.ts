@@ -37,13 +37,7 @@ const WAY = "data:image/png;base64,… or data:image/svg+xml;base64,…, the fil
 export function uiIconSetting(env: Readonly<Record<string, string | undefined>>): string | null | { problem: string } {
   const v = env[UI_ICON_SETTING] ?? "";
   if (v === "") return null;
-  return iconDataUrl(UI_ICON_SETTING, v);
-}
-
-/** A `data:` URL of an icon as the setting named says it, held to the one form above (`MASON_UI_ICON`'s, and
- *  `MASON_MCP_ICON`'s data: form, src/cli/mcp-icon.ts): the URL given back, or what is wrong, never quoting the value. */
-export function iconDataUrl(setting: string, v: string): string | { problem: string } {
-  const at = `${setting} is set`;
+  const at = `${UI_ICON_SETTING} is set`;
   if (!/^data:/i.test(v)) return { problem: `${at} to something other than a data: URL, and the icon is inline: ${WAY}` };
   const comma = v.indexOf(",");
   if (comma < 0) return { problem: `${at} to a data: URL with no comma before its data: ${WAY}` };
