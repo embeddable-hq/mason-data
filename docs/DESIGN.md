@@ -4573,7 +4573,8 @@ with ZSTD everywhere, so it now over-estimates a table of short text, which only
 
 **Decision.** Beside each `timestamptz` column, a synced table holds an INTEGER: the value's 15 minutes of UTC
 (src/duck/bucket-column.ts). A GROUP BY of a timestamptz column's hour, day, week, month, quarter or year, planned in a
-zone other than UTC, groups by that bucket first (src/duck/bucket-group.ts). It then works out the unit once a bucket,
+zone other than UTC, or in UTC over a table of 10 M rows or more (issue 1174), groups by that bucket first
+(src/duck/bucket-group.ts). It then works out the unit once a bucket,
 instead of once a row. The rules are in duck-copy.md and duck-rewrite.md ("a time's unit grouped by its bucket").
 
 **Why it is exact.** Every zone the engine knows has been a multiple of 15 minutes from UTC since 1980. So a local
@@ -4613,9 +4614,12 @@ a cold read saved no bytes. Now:
   plan: a volatile call, a LIMIT or OFFSET, a sample, a LATERAL item or a function in the FROM, a WITH query with one.
 
 **When it is used, by measurement:**
-- **Not when the plan is made in UTC.** There the truncation is already the instant's arithmetic, and the second
-  GROUP BY cost more: a month took 25 ms against 18 at 5 M rows. The plan is exact in any zone either way. The plan
-  cache keeps a plan by its zone, so only a prepared statement can run a plan made in another zone.
+- **In UTC, only over a table of 10 M rows or more** (issue 1174, below). There the truncation is already the
+  instant's arithmetic, so the bucket saves less, and the second GROUP BY costs more where a bucket holds few rows. The
+  plan reads the rows the sync counted in the copy of the column's table (`UTC_BUCKET_ROWS`, src/duck/rewrite.ts). A
+  table the sync has not counted keeps the arithmetic. The plan is exact in any zone either way. The plan cache keeps a
+  plan by its zone, so only a prepared statement can run a plan made in another zone, and it answers right with
+  either plan (`tests/duck-time-bucket.test.ts`).
 - **One column's bucket a statement**, the first key's. Grouped by two columns' buckets, the inner groups are pairs of
   buckets, nearly one a row. Every other key, a unit of another column included, is one inner key, computed a row.
   At 5 M rows (24 rows a bucket) a month and a week of two columns took 139 ms against main's 125. At 50 M rows (240 a
@@ -4650,6 +4654,42 @@ last column is the statement's SQL run in a fresh engine instance over the file,
 - **The synced data** took 584.9 MB against 557.1 MB (+5%). At 5 M rows with rows in random time order, the worst case
   for the bucket's compression, it took 94.6 MB against 70.0 MB (+35%).
 - A query that also filters on the time (`WHERE created_at >= …`) reads the time for its own filter.
+
+**In UTC too, over a big table (issue 1174, 2026-11-19).** Profiling the cold benchmark at 100 M orders found ten
+clients in UTC limited by CPU, and revenue by month cheaper grouped by the bucket by hand (10.3 against 6.9
+CPU-seconds a query). So a plan made in UTC takes the bucket too, where the table is big enough. Measured on a laptop
+(Apple, 10 cores, 32 GiB, Node 26) over the cold benchmark's data (`coldDataSql`): 30 M orders and 1.5 M customers
+over two years, synced from a local Postgres 18. Beside them, tables of 5,000 and 1 M rows and samples of 3 M, 6 M and
+10 M orders, all over the same two years (70,080 buckets). Warm, one client over the Postgres API, the median of 7
+runs. Main (db568e92) and the head were each started over the same file in turn. CPU is the Mason process's own time
+over the query (`ps`). The "by the bucket" column below 10 M is the head before it was limited to 10 M, which took the
+bucket over every table.
+
+| Query, in UTC | Table's rows | main: wall, CPU | by the bucket: wall, CPU |
+|---|---:|---:|---:|
+| Revenue by month, joined to customers (the cold benchmark's) | 30 M | 226 ms, 1.78 s | 166 ms, 1.44 s |
+| Orders by month | 30 M | 78 ms, 0.71 s | 44 ms, 0.32 s |
+| Orders by day | 30 M | 63 ms, 0.54 s | 44 ms, 0.32 s |
+| Orders by hour | 30 M | 101 ms, 0.62 s | 78 ms, 0.36 s |
+| Orders by day and status | 30 M | 104 ms, 0.70 s | 81 ms, 0.54 s |
+| By month / day / hour | 10 M | 30 / 26 / 70 ms, 0.24 / 0.18 / 0.24 s | 20 / 20 / 56 ms, 0.12 / 0.12 / 0.16 s |
+| By month / day / hour | 6 M | 19 / 17 / 49 ms, 0.14 / 0.11 / 0.16 s | 15 / 17 / 52 ms, 0.08 / 0.08 / 0.13 s |
+| By month / day / hour | 3 M | 12 / 12 / 42 ms, 0.07 / 0.06 / 0.10 s | 13 / 16 / 53 ms, 0.05 / 0.06 / 0.10 s |
+| Customers by month / day | 1.5 M | 7 / 7 ms, 0.04 / 0.03 s | 10 / 10 ms, 0.03 / 0.03 s |
+| By month / hour | 1 M | 7 / 39 ms, 0.03 / 0.07 s | 11 / 54 ms, 0.03 / 0.08 s |
+| By month / day / hour | 5,000 | 3 / 5 / 13 ms | 8 / 9 / 19 ms |
+
+- Ten clients at once, each sending the query once, the slowest of the ten, the median of 5 rounds: revenue by month
+  joined to customers took 2,276 ms at main and 1,796 ms at the head (19.8 against 15.9 CPU-seconds). Orders by month
+  took 799 ms against 391 (7.4 against 3.4 CPU-seconds).
+- Revenue by month in Asia/Kathmandu, which took the bucket before, measured the same at both (201 and 187 ms).
+- Every answer was the same at both (an md5 of the rows).
+- **Why 10 M.** What decides is the rows a bucket holds, which the plan cannot know: it knows the table's rows, not the
+  span of its times. At 43 rows a bucket (3 M rows over two years) the bucket cost the same CPU and up to 11 ms more. At
+  86 (6 M) it cost less CPU and about the same time, and from 143 (10 M) less of both. 10 M rows over six years of times
+  is still about 45 a bucket. A smaller table loses at most a few milliseconds by the arithmetic, so it keeps it.
+- The oracle's tables are small, so its statements in UTC take the arithmetic. The bucket's plan in UTC is held to
+  Postgres by `tests/duck-time-bucket.test.ts`, whose tables the sync is told are big.
 
 **The benchmark's joined query, and its customer's year.** It groups by `date_trunc('year', c.created_at)` too, which
 the plan works out once a joined row, after the join. Measured by hand on the head's file at 50 M, in Kathmandu, warm:

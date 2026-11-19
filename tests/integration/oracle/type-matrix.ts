@@ -1917,7 +1917,8 @@ function* matrix(): Generator<Matrixed> {
         `min(x), min(f), max(f), min(at), max(at), count(*) FILTER (WHERE v > 50), sum(v) FILTER (WHERE s <> 's1') FROM bucket_edges GROUP BY 1 ORDER BY 1`, zone);
     }
   }
-  for (const zone of ["Asia/Kathmandu", "America/New_York"]) {
+  // (and in UTC, issue 1174: a table this small keeps the row's arithmetic there, its answer held as the bucket's is elsewhere)
+  for (const zone of ["UTC", "Asia/Kathmandu", "America/New_York"]) {
     yield q(`issue 1146: a time's unit grouped beside another key, a HAVING, a WHERE and a LIMIT, in ${zone}`, "SELECT date_trunc('month', at) AS m, s, count(*), sum(v) FROM bucket_edges WHERE id % 3 <> 0 " +
       "GROUP BY date_trunc('month', at), s HAVING count(*) > 2 ORDER BY m DESC NULLS FIRST, s LIMIT 25", zone);
     yield q(`issue 1146: a time's unit inside an expression of the list, sorted by the expression, in ${zone}`, "SELECT to_char(date_trunc('day', at), 'YYYY-MM-DD') AS d, max(v) - min(v), count(*) FROM bucket_edges " +
@@ -1941,6 +1942,13 @@ function* matrix(): Generator<Matrixed> {
     yield q(`issue 1146: a time's unit beside a constant key, sorted by number, in ${zone}`,
       "SELECT date_trunc('month', at) w, 1 AS one, count(*) FROM bucket_edges GROUP BY 1, 2 ORDER BY 2, 1 NULLS FIRST", zone);
     yield q(`issue 1146: a time's unit grouped by its number and sorted by its count, in ${zone}`, "SELECT date_trunc('hour', at) AS h, count(*) FROM bucket_edges GROUP BY 1 ORDER BY 2 DESC, 1 NULLS FIRST LIMIT 12", zone);
+    // issue 1174: two units of one column, a truncation in a zone of its own, and a DISTINCT over the grouping
+    yield q(`issue 1174: two units of one time grouped, in ${zone}`, "SELECT date_trunc('month', at) AS m, date_trunc('hour', at) AS h, count(*), sum(x) FROM bucket_edges " +
+      "GROUP BY 1, 2 HAVING count(*) > 0 ORDER BY m NULLS FIRST, 2 DESC NULLS LAST", zone);
+    yield q(`issue 1174: a time's unit in a zone of its own grouped beside the session's, in ${zone}`, "SELECT date_trunc('day', at) AS d, date_trunc('day', at, 'UTC') AS u, " +
+      "date_trunc('month', at, 'Asia/Kathmandu') AS k, count(*) FROM bucket_edges GROUP BY 1, 2, 3 ORDER BY 1 NULLS FIRST, 2 NULLS FIRST, 3 NULLS FIRST", zone);
+    yield q(`issue 1174: a DISTINCT over a time's unit grouped, in ${zone}`, "SELECT DISTINCT date_trunc('year', at) AS y, count(*) > 100 AS many FROM bucket_edges GROUP BY date_trunc('week', at), 1 " +
+      "ORDER BY 1 NULLS FIRST, 2", zone);
   }
   // ---- issue 1160: a key over the smaller side of a grouped join computed on that side, before the join
   // (src/duck/side-first.ts): the shop's 31 customers against its 400 orders, an inner, LEFT, RIGHT and FULL join (the
