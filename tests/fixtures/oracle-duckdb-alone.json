@@ -1,17 +1,17 @@
 {
-  "statements": 8270,
+  "statements": 8296,
   "mason": {
-    "exact": 7736,
+    "exact": 7763,
     "decided": 46,
-    "refused": 488,
+    "refused": 487,
     "differs": 0
   },
   "duckdb": {
     "exact": 1952,
     "name": 1558,
-    "refused": 1929,
-    "value": 1212,
-    "rows": 636,
+    "refused": 1953,
+    "value": 1213,
+    "rows": 637,
     "text": 86,
     "other": 897
   },
@@ -27,12 +27,12 @@
         "div-numeric": { "planted": 1, "natural": 0 },
         "enum-forms": { "planted": 1, "natural": 0 },
         "explain-option": { "planted": 1, "natural": 0 },
-        "extract-julian": { "planted": 1, "natural": 8 },
+        "extract-julian": { "planted": 1, "natural": 5 },
         "format-specifiers": { "planted": 1, "natural": 0 },
         "held-type-compare": { "planted": 1, "natural": 297 },
         "hypothetical-set": { "planted": 1, "natural": 0 },
         "inet-order": { "planted": 0, "natural": 20 },
-        "infinite-extract": { "planted": 0, "natural": 18 },
+        "infinite-extract": { "planted": 0, "natural": 20 },
         "infinite-interval": { "planted": 1, "natural": 0 },
         "interval-aggregates": { "planted": 0, "natural": 1 },
         "interval-style": { "planted": 1, "natural": 0 },
@@ -95,7 +95,7 @@
       }
     },
     "everyAsk": {
-      "asked": 113277,
+      "asked": 113740,
       "refused": {
         "array-lower-bound": { "planted": 0, "natural": 2 },
         "array-remove-type": { "planted": 3, "natural": 0 },
@@ -107,12 +107,12 @@
         "div-numeric": { "planted": 3, "natural": 0 },
         "enum-forms": { "planted": 3, "natural": 0 },
         "explain-option": { "planted": 3, "natural": 0 },
-        "extract-julian": { "planted": 3, "natural": 24 },
+        "extract-julian": { "planted": 3, "natural": 15 },
         "format-specifiers": { "planted": 3, "natural": 0 },
         "held-type-compare": { "planted": 3, "natural": 1017 },
         "hypothetical-set": { "planted": 3, "natural": 0 },
         "inet-order": { "planted": 0, "natural": 60 },
-        "infinite-extract": { "planted": 0, "natural": 54 },
+        "infinite-extract": { "planted": 0, "natural": 60 },
         "infinite-interval": { "planted": 3, "natural": 0 },
         "interval-aggregates": { "planted": 0, "natural": 3 },
         "interval-style": { "planted": 3, "natural": 0 },
