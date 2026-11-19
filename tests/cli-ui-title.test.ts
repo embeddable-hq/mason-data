@@ -181,6 +181,7 @@ test("the setting: a path, relative to the folder mason serve runs in; never rea
 test("mason serve's: in its --help with the other MASON_UI_* settings, its bounds and that every viewer sees it; mason start refuses it", () => {
   const usage = SERVE.usage.replace(/\s+/g, " ");
   assert.match(SERVE.usage, /\n {4}MASON_UI_TITLE_FILE {5}a file whose first line is the label in the web page's header box, in place of the\n/);
+  assert.match(SERVE.usage, /\n {4}MASON_MCP_URL {11}an MCP endpoint/, "the setting after it keeps its column");
   assert.match(usage, /Mason reads it again each time the page loads, so an edit shows with no restart\. Every viewer of the page sees it\./);
   assert.match(usage, /at most the first 1024 bytes, takes the first line, makes each control character a space, drops invisible ones, and cuts it to 80 characters\./);
   assert.match(usage, /has an empty first line leaves the box showing the database's name, and mason status says why \(default unset: the database's name\)/);

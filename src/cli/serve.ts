@@ -170,7 +170,7 @@ export const SERVE: CommandSpec = {
                             drops invisible ones, and cuts it to ${TITLE_CHARS_MAX} characters. A file that is missing, cannot
                             be read, is not UTF-8 or has an empty first line leaves the box showing the database's
                             name, and mason status says why (default unset: the database's name)
-    MASON_MCP_URL          an MCP endpoint for a hosted agent (claude.ai, ChatGPT, a team's agent platform): mason
+    MASON_MCP_URL           an MCP endpoint for a hosted agent (claude.ai, ChatGPT, a team's agent platform): mason
                             mcp's tools over MCP's Streamable HTTP (revisions 2025-11-25 and 2026-07-28), at
                             ${MCP_PATH} on MASON_HEALTH_PORT. This is its PUBLIC address, as a client reaches it
                             through the relay in front (https://mason.example.com/mcp): the resource its metadata
