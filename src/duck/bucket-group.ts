@@ -35,8 +35,9 @@
  * SELECT a subquery or a LATERAL item may correlate. Nothing is refused.
  *
  * One column's bucket a SELECT, the first key's: grouped by two, the inner groups are pairs, nearly one a row. Every
- * other key is one inner key, computed a row as the statement computes it. The rewrite marks nothing it plans in UTC,
- * where the instant's arithmetic costs less than a second GROUP BY.
+ * other key is one inner key, computed a row as the statement computes it. The rewrite marks nothing it plans in UTC
+ * over a table of fewer than 10 M rows (src/duck/rewrite.ts `UTC_BUCKET_ROWS`, issue 1174), where the instant's
+ * arithmetic costs less than a second GROUP BY.
  *
  * On the finished tree, after the walk (src/duck/rewrite.ts `rewrite`), so no rule of the rewrite meets the inner query.
  * A truncation is recognised by its form without offsets (`shape`): the rewrite writes the list's and the GROUP BY's

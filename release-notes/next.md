@@ -2,6 +2,13 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **In UTC, a group by a time's hour, day, week, month, quarter or year is faster on a large table.** Mason already
+  grouped such a query by a stored 15-minute number in other time zones. Now it does so in UTC too, for a table of
+  10 M rows or more. The answers are the same. On 30 M orders over two years:
+  - Revenue by month, joined to customers, went from 226 ms to 166 ms, and from 1.8 to 1.4 CPU-seconds.
+  - Orders by month went from 78 ms to 44 ms, and by day from 63 ms to 44 ms.
+  - With ten clients at once, revenue by month went from 2.3 s to 1.8 s, and orders by month from 0.80 s to 0.39 s.
+  - A table of fewer rows keeps the plan it had, which is faster there. Mason counts a table's rows when it syncs it.
 - **A group by over a join can work out a smaller table's value once for each of its rows.** In revenue by order month
   and customer signup year, the signup year was worked out once for each order. Now it is worked out once for each
   customer, before the join. On 50 M orders and 2.5 M customers, that query went from 660 ms to 283 ms in

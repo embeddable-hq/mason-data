@@ -185,7 +185,7 @@ export const COLD_STATEMENTS: readonly ColdStatement[] = [
     sql: "SELECT status, count(*) FROM orders GROUP BY status ORDER BY status" },
   { name: "revenue_by_month", title: "Revenue by month, orders joined to customers", sql: REVENUE_SQL },
   // the same SQL in a session whose zone is off the hour by 45 minutes: Mason groups a time's unit by a stored
-  // 15-minute bucket outside UTC (src/duck/bucket-column.ts, issue 1146), never in UTC
+  // 15-minute bucket outside UTC (src/duck/bucket-column.ts, issue 1146), and in UTC from 10 M rows (issue 1174)
   { name: "revenue_by_month_kathmandu", title: "Revenue by month in Asia/Kathmandu, orders joined to customers", sql: REVENUE_SQL, timeZone: "Asia/Kathmandu" },
   { name: "lookup", title: "One order by its primary key", sql: `SELECT * FROM orders WHERE id = '${LOOKUP_ID}'`, lookup: true },
 ];
