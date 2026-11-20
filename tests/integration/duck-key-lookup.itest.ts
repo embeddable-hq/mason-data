@@ -20,6 +20,7 @@ import { DuckStore } from "../../src/duck/store.ts";
 import { Sync, type AddedTable, type CompactOptions, type LookupOptions } from "../../src/duck/sync.ts";
 import { startPostgresApi } from "../../src/api/postgres/server.ts";
 import { connectSource, parseSource, readSourceFacts, type Source } from "../../src/cli/preflight.ts";
+import { snapshotXmin } from "../../src/cdc/poll.ts";
 import { checkpoint } from "./checkpoint.ts";
 
 const adminUrl = process.env.IT_POSTGRES_URL;
@@ -128,12 +129,36 @@ const KEYS = [1, 5, 7, 12345, 299_999];
 const settled = async (sync: Sync): Promise<void> => { await (sync as unknown as { rebuilding: Promise<void> | null }).rebuilding; };
 
 /**
+ * THE POLL'S WATERMARK PAST EVERY CHANGE THE TEST MADE (issue 1192). A poll reads every row written at or past its
+ * watermark: the oldest transaction running anywhere on the server at the last poll (src/cdc/poll.ts). It writes each
+ * such row again by key, deleted where it was and appended at the table's end. So a transaction of another database
+ * (another test file's, when two run at once) that ran during the last poll makes the next poll write again every row
+ * the test changed since. `givenAgain` deletes the table's end and polls. Rows written again land in the last row
+ * group, which is then not wholly deleted, and no checkpoint drops it. So the table is polled until its last poll's
+ * watermark is past a transaction id taken after every change, before the side table is built again over the table.
+ * Measured: a transaction held open on another database from round 1 to the deletes failed the test 3 times in 3 as
+ * #1192 says, with 4,469 rows written again at the end.
+ */
+async function pollPastChanges(sync: Sync, store: DuckStore, url: string): Promise<void> {
+  const after = BigInt(psql(url, "SELECT pg_current_xact_id()"));
+  for (const until = Date.now() + 120_000; ;) {
+    await sync.pollNow(["public.orders"]);
+    const snapshot = (await store.writer.runAndReadAll("SELECT snapshot FROM _mason.poll_state WHERE source = 'public.orders'")).getRowsJS()[0]![0] as string;
+    if (snapshotXmin(snapshot) > after) return;
+    if (Date.now() > until) throw new Error(`the poll's watermark stayed at or before transaction ${after} for 120 s (its snapshot ${snapshot}): a transaction on the test's server stayed open`);
+    await new Promise((r) => setTimeout(r, 200));
+  }
+}
+
+/**
  * ROW IDS GIVEN AGAIN: the side table built again, then every row of the synced table's last row group deleted on the
  * source and synced (`synced`: the poll, or the stream caught up), a checkpoint dropping those row groups, and new rows
  * synced: they take the dropped rows' row ids, below what the side table covered, and are found all the same, as what
- * it covers was lowered in their write's transaction.
+ * it covers was lowered in their write's transaction. `quiet` first brings the sync to where syncing the deletes writes
+ * nothing else (`pollPastChanges`).
  */
-async function givenAgain(sync: Sync, store: DuckStore, db: string, url: string, synced: () => Promise<void>): Promise<void> {
+async function givenAgain(sync: Sync, store: DuckStore, db: string, url: string, quiet: () => Promise<void>, synced: () => Promise<void>): Promise<void> {
+  await quiet();
   await sync.checkCompaction();
   await settled(sync);
   const one = async (sql: string): Promise<bigint> => (await store.writer.runAndReadAll(sql)).getRowsJS()[0]![0] as bigint;
@@ -147,14 +172,15 @@ async function givenAgain(sync: Sync, store: DuckStore, db: string, url: string,
   await writer.connect();
   try { await writer.query("DELETE FROM orders WHERE id = ANY($1::uuid[])", [end]); } finally { await writer.end(); }
   await synced();
-  // the checkpoint that drops the deleted row groups, on the writer's turn (between two of the stream's batches), taken
-  // again while another transaction holds those rows back
-  for (const until = Date.now() + 30_000; ;) {
-    await checkpoint(sync, store);
-    if (await one("SELECT max(row_group_id) FROM pragma_storage_info('public.orders')") < groups) break;
-    if (Date.now() > until) throw new Error("the checkpoint dropped none of the table's end in 30 s");
-    await new Promise((r) => setTimeout(r, 100));
-  }
+  // the table's end is all deleted, and the sync wrote nothing there again, or no checkpoint could drop it
+  const live = await one(`SELECT count(*) FROM public.orders WHERE rowid >= ${last}`);
+  assert.equal(live, 0n, `${live} row(s) live at or past ${last} once the deletes were synced: the sync wrote other rows there again`);
+  // the checkpoint that drops the deleted row groups, on the writer's turn (between two of the stream's batches). The
+  // sync's write committed an INSERT OR REPLACE (the poll's watermark, the stream's position). So a FORCE CHECKPOINT
+  // waits for every transaction older than it, which could still see the deleted rows (measured on DuckDB 2.0.0 alone)
+  await checkpoint(sync, store);
+  const now = await one("SELECT max(row_group_id) FROM pragma_storage_info('public.orders')");
+  assert.ok(now < groups, `the checkpoint dropped the table's deleted end: its last row group is ${now}, was ${groups}`);
   psql(url, `INSERT INTO orders SELECT md5(g::text)::uuid, g, 'given again', ARRAY['r'] FROM generate_series(${ROWS * 40}, ${ROWS * 40 + 9}) g`);
   await synced();
   const taken = await one(`SELECT rowid FROM public.orders WHERE id = ${key(ROWS * 40)}`);
@@ -162,7 +188,7 @@ async function givenAgain(sync: Sync, store: DuckStore, db: string, url: string,
   await lookups(sync, store, db, url, [...KEYS, ROWS * 40, ROWS * 40 + 9], "row ids given again");
 }
 
-test("a polled table's lookups by key go through its side table, equal to the source, through the poll's writes, a rebuild and a compaction", { skip: "quarantined: #1192" }, async () => {
+test("a polled table's lookups by key go through its side table, equal to the source, through the poll's writes, a rebuild and a compaction", async () => {
   const { db, url, source } = aSource("poll");
   const tables = (await tablesOf(source, ["public.orders", "public.events"])).map((t) => ({ ...t, sync: { mode: "poll", every: "1h", seconds: 3600 } as const }));
   const logged: string[] = [];
@@ -196,7 +222,7 @@ test("a polled table's lookups by key go through its side table, equal to the so
     changes(url, 3);
     await sync.pollNow(["public.orders"]);
     await lookups(sync, store, db, url, [...KEYS, ROWS * 30 + 1], "a poll after the compaction");
-    await givenAgain(sync, store, db, url, () => sync.pollNow(["public.orders"]).then(() => undefined));
+    await givenAgain(sync, store, db, url, () => pollPastChanges(sync, store, url), () => sync.pollNow(["public.orders"]).then(() => undefined));
   } finally { await sync.stop(); await store.close(); }
 });
 
@@ -219,6 +245,6 @@ test("a streamed table's lookups by key go through its side table, equal to the 
       await sync.caughtUp(60_000);
       await lookups(sync, store, db, url, [...KEYS, ROWS * 10 * round + 1], `stream round ${round}`);
     }
-    await givenAgain(sync, store, db, url, () => sync.caughtUp(60_000));
+    await givenAgain(sync, store, db, url, async () => undefined, () => sync.caughtUp(60_000));
   } finally { await sync.stop(); await store.close(); }
 });
