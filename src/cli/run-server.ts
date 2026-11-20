@@ -196,6 +196,9 @@ export interface RunContext {
     /** why a poll of these tables is refused now, or null when it would start (src/duck/sync.ts pollRefusal, the check
      *  `poll` refuses with): `POST /api/sync` answers it at once, before any sync starts */
     refused: (sources: string[]) => PollRefused | null;
+    /** the tables among these held by their entry, looked at again on the database first (src/duck/sync.ts
+     *  `lookAtHeld`): a hold the database fixed is let go before `refused` is asked (absent: a run that holds none) */
+    lookAtHeld?: (sources: string[]) => Promise<void>;
     /** where the replication stream is (src/duck/sync.ts streamStatus): null outside replication mode; `refresh: false`
      *  never reaches the database (the position and the slot as last read) */
     stream: (o?: { refresh?: boolean }) => Promise<StreamStatus | null>;
@@ -1252,6 +1255,9 @@ export function createRunServer(ctx: RunContext): http.Server {
           // issue 1007: a second Sync now is never queued for another read of the table), with that sync beside it
           const running = syncs.running(tables);
           if (running !== null) { sendFailure(res, 409, busyFailure(tables, running), { code: "busy", sync: running }); return; }
+          // A TABLE HELD BY ITS ENTRY (issue 1074) is looked at again first: `mason sync` of a `sync: off` table is how it is
+          // read again, so a hold the database fixed since (a rename put back) is let go and the sync runs, as main's did
+          if (ctx.duck.lookAtHeld !== undefined) await ctx.duck.lookAtHeld(tables);
           // the sync's one check, as it is asked: a refusal now is the answer (`busy` while the run itself syncs it), and no sync starts
           const refused = ctx.duck.refused(tables);
           if (refused !== null) { sendFailure(res, refused.code === "not_found" ? 404 : 409, { message: refused.message, code: refused.code, ...(refused.code === "busy" ? { fix: BUSY_FIX } : {}) }, { code: refused.code, ...(refused.follow !== null ? { follow: refused.follow } : {}) }); return; }

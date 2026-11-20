@@ -757,14 +757,16 @@ hold gives (`renamedColumns`) is checked against `entryProblems`, but only the p
 run takes it at once, and a hand edit at the next time the run reads the file (a restart, an add or a remove, or a
 table's columns changing). The run has no watch on the file: the README says a hand edit applies at the next start.
 
-**A held table's columns are still looked at** (the review of PR 1091). A held table is not polled or caught up, so at
-first nothing looked at it again. A rename put back on the database left it held for good, serving stale rows, where
-main had kept polling its old columns and recovered. Now the sync holds each held table's columns to the shape the run
-last read, not the shape it was synced with, which a rename put back equals. A polled one is looked at at its poll's
-interval, and a replicated one at a stream's relation message. A change reads the file again, and the table is let go
-and caught up by one poll. One under `sync: off` is looked at by nothing, as it is polled by nothing. A hold whose
-cause is not a column (a `key:` whose unique index comes back) is not seen this way: it waits for the next read of the
-file.
+**A held table is still looked at on the database** (the reviews of PR 1091). A held table is not polled or caught up,
+so at first nothing looked at it again. A rename put back on the database, or a unique index a `key:` needs restored,
+left it held for good, serving stale rows. Main had kept polling the table and recovered. Now the run reads a held
+table's catalog row again on the schedule its `sync:` would read it, and reads the sources file against it when the row
+changed in what an entry is checked by. Its size and statistics are left out of that comparison, so a look that finds
+nothing new costs one catalog row and no more. A polled table is looked at at its poll interval, and a replicated one
+every minute and at a stream's relation message. A table under `sync: off` is looked at when `mason sync` asks for it,
+before the sync is refused, since that is the only time such a table is read. Once its entry passes, the table is let
+go and caught up by one poll. A first version compared only the column shape of a polled or replicated table, so it
+missed a key's restored index and every `sync: off` table.
 
 **An entry the run never takes is no added table** (the same review). `mason status` and the web page counted a table
 as added by its entry in the file alone, so `mason wait` waited for a first sync that never starts. The run's state now

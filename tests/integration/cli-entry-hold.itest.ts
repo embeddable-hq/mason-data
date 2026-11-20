@@ -180,19 +180,24 @@ test("a hold the database fixes is let go with no restart, polled and streamed, 
   psql(adminUrl!, `CREATE DATABASE ${tag}`);
   psql(dbUrl, "CREATE TABLE t3 (id int PRIMARY KEY, amount_total int, note text); INSERT INTO t3 SELECT g, g * 10, 'n' || g FROM generate_series(1, 5) g; " +
     "CREATE TABLE s3 (id int PRIMARY KEY, amount int, note text); INSERT INTO s3 SELECT g, g * 7, 'n' || g FROM generate_series(1, 5) g; " +
-    "CREATE TABLE x2 (id int PRIMARY KEY, value text); INSERT INTO x2 SELECT g, 'v' || g FROM generate_series(1, 3) g");
+    "CREATE TABLE x2 (id int PRIMARY KEY, value text); INSERT INTO x2 SELECT g, 'v' || g FROM generate_series(1, 3) g; " +
+    // a table with no primary key, synced by a key: over its unique index; and one whose sync: is off
+    "CREATE TABLE k (id int NOT NULL, v int); CREATE UNIQUE INDEX k_id ON k (id); INSERT INTO k SELECT g, g * 10 FROM generate_series(1, 5) g; " +
+    "CREATE TABLE o3 (id int PRIMARY KEY, amount_total int, note text); INSERT INTO o3 SELECT g, g * 10, 'n' || g FROM generate_series(1, 5) g");
   ok(mason("init", dbUrl, "--json"), "mason init");
   const file = path.join(root, "mason", "sources", `${tag}.yml`);
   fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace(/^sync: off {3}#.*$/m, "sync: poll 1s"));
   ok(mason("add", "t3", "--columns", "id,amount_total", "--json"), "mason add t3 --columns id,amount_total");
   ok(mason("add", "s3", "--columns", "id,amount", "--sync", "replication", "--json"), "mason add s3 --sync replication");
+  ok(mason("add", "k", "--key", "id", "--json"), "mason add k --key id");
+  ok(mason("add", "o3", "--columns", "id,amount_total", "--sync", "off", "--json"), "mason add o3 --sync off");
   ok(mason("start", "--json"), "mason start");
   ok(mason("wait", "--timeout", "120", "--json"), "mason wait");
   const api = ok(mason("user", "add", "it", "--json"), "mason user add").json.url as string;
   type Row = Line & { added?: boolean };
   const line = (table: string): Row | undefined => ((mason("status", "--json").json.tables as Row[] | undefined) ?? []).find((x) => x.table === table);
-  const serves = (tbl: string, col: string): boolean =>
-    JSON.stringify(psqlWithHeader(api, `SELECT * FROM public.${tbl} ORDER BY id`)) === JSON.stringify({ columns: `id\t${col}`, rows: psql(dbUrl, `SELECT id, ${col} FROM ${tbl} ORDER BY id`) });
+  const serves = (tbl: string, ...cols: string[]): boolean =>
+    JSON.stringify(psqlWithHeader(api, `SELECT * FROM public.${tbl} ORDER BY id`)) === JSON.stringify({ columns: ["id", ...cols].join("\t"), rows: psql(dbUrl, `SELECT id, ${cols.join(", ")} FROM ${tbl} ORDER BY id`) });
 
   // BY HAND, a new entry with a typo, which the run never takes, read when a column t3's entry leaves out is added
   fs.writeFileSync(file, `${fs.readFileSync(file, "utf8")}  x2:\n    columns: [id, valu]\n`);
@@ -212,4 +217,20 @@ test("a hold the database fixes is let go with no restart, polled and streamed, 
     "ALTER TABLE s3 RENAME COLUMN amount2 TO amount; UPDATE s3 SET amount = 3333 WHERE id = 3");
   await until("t3 (polled) and s3 (streamed) to be let go and serve the database's rows", () => serves("t3", "amount_total") && serves("s3", "amount"), 180_000);
   await until("both lines to say synced", () => [line("public.t3"), line("public.s3")].every((l) => l !== undefined && l.error === null && l.sync?.state === "synced"));
+
+  // A KEY: WHOSE UNIQUE INDEX IS DROPPED holds its table; restored, the table is let go by itself (the second review of
+  // PR 1091: main recovered in about 9 s, and the head held it until another read of the file)
+  // (a column added beside it: the run reads k's catalog again, and finds its key no longer held there)
+  psql(dbUrl, "DROP INDEX k_id; ALTER TABLE k ADD COLUMN w int DEFAULT 1");
+  await until("k to be held for its key", () => /tables\.k\.key: no unique index/.test(line("public.k")?.error ?? ""));
+  psql(dbUrl, "CREATE UNIQUE INDEX k_id ON k (id); UPDATE k SET v = 999 WHERE id = 2");
+  await until("k to be let go and serve the database's rows", () => serves("k", "v", "w"), 90_000);
+
+  // A SYNC: OFF TABLE held by a rename, the rename put back: mason sync of it looks at it again, lets it go and syncs it
+  psql(dbUrl, "ALTER TABLE o3 RENAME COLUMN amount_total TO amount_total2; UPDATE o3 SET amount_total2 = 7777 WHERE id = 1");
+  assert.equal(mason("sync", "o3", "--json").status, 1, "mason sync o3 while its column is renamed");
+  await until("o3 to be held", () => /tables\.o3\.columns: public\.o3 has no column amount_total/.test(line("public.o3")?.error ?? ""));
+  psql(dbUrl, "ALTER TABLE o3 RENAME COLUMN amount_total2 TO amount_total; UPDATE o3 SET amount_total = 4444 WHERE id = 2");
+  ok(mason("sync", "o3", "--json"), "mason sync o3 once the rename is put back");
+  assert.ok(serves("o3", "amount_total"), "o3 serves the database's rows");
 });

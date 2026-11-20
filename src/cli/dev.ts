@@ -251,6 +251,14 @@ function recordReplication(cfg: ProjectConfig, repl: ReturnType<typeof projectRe
   writeConfig(home, cfg);
 }
 
+/** A table's catalog row as its entry is checked by (src/cli/sources.ts `entryProblems`): its size and statistics left
+ *  out, which move with its rows. "" when the catalog has no such table. A held table's look compares two (`onHeldLook`) */
+function entryFacts(table: SourceTable | undefined): string {
+  if (table === undefined) return "";
+  const { rows: _rows, bytes: _bytes, tableBytes: _tableBytes, toastBytes: _toastBytes, estimateBytes: _estimateBytes, ...rest } = table;
+  return JSON.stringify({ ...rest, columns: rest.columns.map(({ width: _width, ...c }) => c) });
+}
+
 async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // when this run began: the uptime /api/state says (engine.startedAt, a supervisor's restart is a new run)
   const startedAt = Date.now();
@@ -552,6 +560,17 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
         if ("failed" in r) throw new Error(r.failed);
         await added();
       },
+      // A TABLE HELD BY ITS ENTRY, LOOKED AT AGAIN (issue 1074): its catalog row read again alone, and the sources file
+      // read against it only when the row changed in what an entry is checked by (its size and statistics left out), so
+      // a hold the database fixed (a rename put back, a unique index restored) is let go with no restart
+      onHeldLook: async (held) => {
+        const heldRowsBefore = held.map((s) => entryFacts(catalog.facts().tables.find((x) => x.source === s)));
+        const heldRead = await catalog.refreshTables(held);
+        if ("failed" in heldRead) throw new Error(heldRead.failed);
+        if (held.every((s, i) => entryFacts(catalog.facts().tables.find((x) => x.source === s)) === heldRowsBefore[i])) return false;
+        await added();
+        return true;
+      },
       // what the run made on the database, recorded as it is made and dropped: mason destroy drops it by that name
       onReplication: (made) => {
         if (made) recordReplication(cfg, repl, home);
@@ -643,10 +662,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     // the run cannot take holds its table alone (issue 1074): never confirmed, held as the run took it before
     const held = new Map(untaken.filter((x) => x.held).map((x) => [x.table, x.text]));
     const notTaken = new Set(untaken.map((x) => x.table));
-    // each held table's columns as this read saw them: the hold looks at the database's against them, so a change there
-    // (a rename put back) reads the file again without a restart
-    const seen = new Map([...held.keys()].flatMap((s) => { const sh = now.tables.find((t) => t.source === s)?.shape; return sh === undefined ? [] : [[s, sh] as [string, string]]; }));
-    return sync.setTables(sources.tables, { confirmed: r.problem === null ? (edit.confirmed ?? []).filter((c) => !notTaken.has(c.table)) : [], readOnly, held, seen });
+    return sync.setTables(sources.tables, { confirmed: r.problem === null ? (edit.confirmed ?? []).filter((c) => !notTaken.has(c.table)) : [], readOnly, held });
   };
 
   if (pg.said) say(`  ${pg.said}`);
@@ -891,7 +907,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     uiErrors: new UiErrors((e) => events.record(e), (m) => say(`  ${m}`)),
     // the statements running now, and a cancel of one: the listener's own (a CancelRequest's path)
     listener: api,
-    duck: { copies: () => sync.state(), file: duckFile, poll: (sources) => sync.pollNow(sources), refused: (sources) => sync.pollRefusal(sources), stream: (o) => sync.streamStatus(o), measured: (table) => sync.measured(table), disk: () => sync.diskStatus(),
+    duck: { copies: () => sync.state(), file: duckFile, poll: (sources) => sync.pollNow(sources), refused: (sources) => sync.pollRefusal(sources), lookAtHeld: (sources) => sync.lookAtHeld(sources), stream: (o) => sync.streamStatus(o), measured: (table) => sync.measured(table), disk: () => sync.diskStatus(),
       // what queries may spill into now, and whether MASON_SPILL_LIMIT sets it: the room an add keeps beside a table
       spill: () => ({ limitBytes: store.spillLimitBytes, set: spillLimit !== undefined }), requests, events, usage,
       restarts: () => readRestarts(home), jsonPaths: () => sync.kept.status(), generated: () => sync.generated.status(), storage: () => sync.storedFacts() },

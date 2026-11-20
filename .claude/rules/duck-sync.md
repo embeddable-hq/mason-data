@@ -88,12 +88,14 @@ paths:
   its line says why with the line to write. Only `mason add` confirms it (through the run, or recorded in `.mason/` while
   Mason is stopped, src/cli/confirmed.ts), and only for the table's shape as the add read it, or its entry removed. A
   table whose ENTRY the run's re-read cannot take is held the same way (`setTables`' `held`, issue 1074), as the run
-  took it before, its record left as it was: one entry's problem never stops the others being kept current. Its
-  columns are still looked at as its `sync:` says, against the shape the run last READ, never the one it was synced with
-  (`heldSeen`): a polled one at its interval (`heldLooks`), a replicated one at a relation message (`relationSeen`). A
-  change there (a rename put back) reads the file again and lets it go with no restart (the review of PR 1091: never
-  looked at, a hold the database fixed stayed for good, where main's kept table was polled again). One under `sync: off`
-  is looked at by nothing, as it is polled by nothing. A
+  took it before, its record left as it was: one entry's problem never stops the others being kept current. Such a
+  table is still LOOKED AT on the database as its `sync:` would read it (`lookAtHeld`): its catalog row read again
+  alone, and the sources file read against it when the row changed in what an entry is checked by (src/cli/dev.ts
+  `onHeldLook`; never a shape compared with the one it was synced with, which a rename put back equals). A polled one
+  at its interval (`heldLooks`), a replicated one every `HELD_LOOK_REPLICATED_MS` and at a relation message
+  (`relationSeen`), one under `sync: off` at `mason sync` of it (`/api/sync` looks before it refuses). So a hold the
+  database fixes (a rename put back, a `key:`'s unique index restored) is let go with no restart (the reviews of PR
+  1091: never looked at, such a hold stayed for good, where main's kept table was polled again and recovered). A
   table is placed against EVERY record of its oid, every entry's and the ones kept by oid
   (`_mason.column_identity_former`), all read before any is written (issue 1080: two tables or schemas swapped names and
   the entry syncing every column served the other's left-out column). In a project deployed read-only the committed file is
