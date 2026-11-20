@@ -9,8 +9,8 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   whose every column may be NULL in a matched row is now refused by name, since Mason cannot tell its unmatched rows.
   Select its primary key too, or name its columns. Such a subquery is still answered where no row can be left
   unmatched, as Postgres decides it. That is a WHERE or an inner join above that is never true for an unmatched row,
-  such as `WHERE d.v = 'x' OR d.v = 'y'` or `JOIN o ON o.id = d.a_id`. It is also a subquery that gives one row and is
-  joined `ON true`.
+  such as `WHERE d.v = 'x' OR d.v = 'y'`, `JOIN o ON o.id = d.a_id` or `WHERE EXISTS (…)`. A subquery that gives one
+  row is answered too, joined on any condition that reads none of its columns, such as `ON true` or `ON a.id = 1`.
 - **The whole row of a subquery that names two columns alike now reads each column.** In
   `(SELECT v AS id, a_id, id FROM d) x`, `x::text` and `row_to_json(x)` read the first `id` twice. Now each column
   reads its own value, as in Postgres.

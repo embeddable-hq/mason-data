@@ -9717,12 +9717,13 @@ test("issue 1008, the review of PR 1100: a whole row's names are Postgres's, its
       ["SELECT a.id, x::text FROM nx_a a LEFT JOIN (SELECT a_id, note FROM nx_b) x ON x.a_id = a.id WHERE x.note = 'b1' ORDER BY a.id", "ordered"],
       ["SELECT a.id, x::text FROM nx_a a LEFT JOIN (SELECT a_id, note FROM nx_b) x ON x.a_id = a.id WHERE x.a_id > 0 ORDER BY a.id", "ordered"],
       ["WITH w AS (SELECT a_id, note FROM nx_b) SELECT a.id, w::text FROM nx_a a LEFT JOIN w ON w.a_id = a.id WHERE w.a_id IS NOT NULL AND a.id > 0 ORDER BY a.id", "ordered"],
+      // a one-row item ON a condition never true: unmatched on every row, told by that condition (the third review)
+      ["SELECT a.id, x::text FROM nx_a a LEFT JOIN (SELECT max(b.note) AS mv FROM nx_b b) x ON 1 = 2 ORDER BY a.id", "ordered"],
     ]), []);
-    // a WHERE that is not strict in it, an ON that may be false, and a NOT NULL column that is no key, still leave
-    // unmatched rows nothing tells: refused
+    // a WHERE that is not strict in it and a NOT NULL column that is no key still leave unmatched rows nothing tells:
+    // refused
     for (const sql of ["SELECT a.id, x::text FROM nx_a a LEFT JOIN (SELECT n, v FROM nx_c) x ON x.v = a.label ORDER BY a.id",
-"SELECT a.id, x::text FROM nx_a a LEFT JOIN (SELECT a_id, note FROM nx_b) x ON x.a_id = a.id WHERE x.note IS NULL OR a.id > 0 ORDER BY a.id",
-      "SELECT a.id, x::text FROM nx_a a LEFT JOIN (SELECT max(b.note) AS mv FROM nx_b b) x ON 1 = 2 ORDER BY a.id"]) {
+"SELECT a.id, x::text FROM nx_a a LEFT JOIN (SELECT a_id, note FROM nx_b) x ON x.a_id = a.id WHERE x.note IS NULL OR a.id > 0 ORDER BY a.id"]) {
       await assert.rejects(answer(c, sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap null-extended-row/.test(e.detail ?? ""), sql);
     }
   } finally { await c.end(); }
@@ -9760,8 +9761,72 @@ test("issue 1008, the second review of PR 1100: a join the planner finds inner, 
       ["SELECT x.\"T\", x.t FROM (SELECT b.note AS \"T\", a.label AS t FROM nx_b b JOIN nx_a a ON a.id = b.a_id) x UNION ALL SELECT x.t, x.u FROM (SELECT note AS t, note AS u FROM nx_b) x ORDER BY 1, 2", "ordered"],
     ]), []);
     // an OR whose arm is not strict in d, and a condition that may be false: unmatched rows nothing tells, refused
-    for (const sql of [`SELECT a.id, d::text ${left} WHERE d.note = 'b1' OR a.id = 3 ORDER BY 1, 2`, `SELECT a.id, x::text ${one} ON false OR a.id = 1 ORDER BY 1`]) {
+    for (const sql of [`SELECT a.id, d::text ${left} WHERE d.note = 'b1' OR a.id = 3 ORDER BY 1, 2`]) {
       await assert.rejects(answer(c, sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap null-extended-row/.test(e.detail ?? ""), sql);
     }
+  } finally { await c.end(); }
+});
+
+// THE THIRD REVIEW OF PR 1100. "Never true where the row is unmatched" was decided by a condition's shape: a nested
+// IS NOT NULL or IS TRUE counted as strict and a whole row read in the WHERE as a proof, so an unmatched row read as a
+// row of NULLs; EXISTS, IN, LATERAL and a scalar subquery counted as nothing, and a one-row item's ON had to be a
+// constant the catalog evaluated, so what main answered was refused. A condition is evaluated in three-valued logic now,
+// the unmatched side's columns NULL (src/duck/pgtree.ts `outerJoinsOf`), and a one-row item is told by its ON, evaluated
+// again. One test a finding
+const NX_TABLE = "FROM nx_a a LEFT JOIN nx_b b ON b.a_id = a.id";
+const NX_LEFT = "FROM nx_a a LEFT JOIN (SELECT a_id, note FROM nx_b) d ON d.a_id = a.id";
+const NX_ONE = "FROM nx_a a LEFT JOIN (SELECT max(b.note) AS mv FROM nx_b b WHERE b.id < 0) x";
+const refusedNullExtended = async (c: pg.Client, statements: readonly string[]): Promise<void> => {
+  for (const sql of statements) await assert.rejects(answer(c, sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap null-extended-row/.test(e.detail ?? ""), sql);
+};
+
+test("issue 1008, the third review of PR 1100: a null or truth test inside NOT, a comparison or another test is true for an unmatched row, which stays NULL", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      [`SELECT a.id, b::text ${NX_TABLE} WHERE (b.note IS NOT NULL) = false ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, row_to_json(b) ${NX_TABLE} WHERE NOT (b.id IS NOT NULL) ORDER BY 1`, "ordered"],
+      [`SELECT a.id, row_to_json(b) ${NX_TABLE} WHERE NOT (b.id = 1 IS TRUE) ORDER BY 1`, "ordered"],
+      [`SELECT a.id, row_to_json(b) ${NX_TABLE} WHERE (b.id IS NOT NULL) IS FALSE ORDER BY 1`, "ordered"],
+      [`SELECT a.id, json_agg(b) ${NX_TABLE} WHERE NOT (b.a_id IS NOT NULL) GROUP BY a.id ORDER BY 1`, "ordered"],
+      // (a test that is never true for an unmatched row still proves the join inner)
+      [`SELECT a.id, d::text ${NX_LEFT} WHERE (d.note IS NOT NULL) IS NOT FALSE AND a.id > 0 ORDER BY 1, 2`, "ordered"],
+    ]), []);
+    // a subquery's unmatched row such a test lets through: nothing tells it, refused
+    await refusedNullExtended(c, [`SELECT a.id, d::text ${NX_LEFT} WHERE NOT (d.note IS NOT NULL) ORDER BY 1, 2`]);
+  } finally { await c.end(); }
+});
+
+test("issue 1008, the third review of PR 1100: a whole row read in the WHERE is the row Postgres reads, NULL where nothing matched", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      [`SELECT a.id, b::text ${NX_TABLE} WHERE length(b::text) > 0 ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, b::text ${NX_TABLE} WHERE row_to_json(b) IS NOT NULL ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, row_to_json(b) ${NX_TABLE} WHERE to_jsonb(b) ? 'id' ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, b::text ${NX_TABLE} WHERE b::text <> '' ORDER BY 1, 2`, "ordered"],
+    ]), []);
+    await refusedNullExtended(c, [`SELECT a.id, d::text ${NX_LEFT} WHERE length(d::text) > 0 ORDER BY 1, 2`]);
+  } finally { await c.end(); }
+});
+
+test("issue 1008, the third review of PR 1100: EXISTS, IN, LATERAL and a scalar subquery prove a join inner; a one-row item is told by its ON", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      [`SELECT a.id, d::text ${NX_LEFT} WHERE EXISTS (SELECT 1 FROM nx_a o WHERE o.id = d.a_id) ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, d::text ${NX_LEFT} WHERE d.a_id IN (SELECT id FROM nx_a) ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, d::text ${NX_LEFT}, LATERAL (SELECT d.note AS lt) l WHERE l.lt = 'b1' ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, d::text ${NX_LEFT} JOIN LATERAL (SELECT d.note AS lt) l ON l.lt = 'b1' ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, d::text ${NX_LEFT} WHERE (SELECT d.note) = 'b1' ORDER BY 1, 2`, "ordered"],
+      ...["now() IS NOT NULL", "(SELECT true)", "current_setting('DateStyle') LIKE 'ISO%'", "true AND a.id = 1", "1 = 2", "NULL::boolean", "false OR a.id = 1"]
+        .map((on): [string, "ordered"] => [`SELECT a.id, x::text ${NX_ONE} ON ${on} ORDER BY 1`, "ordered"]),
+      // a LIMIT that keeps its one row
+      ["SELECT a.id, x::text FROM nx_a a LEFT JOIN (SELECT max(b.note) AS mv FROM nx_b b WHERE b.id < 0 LIMIT 1) x ON true ORDER BY 1", "ordered"],
+    ]), []);
+    // Postgres's own error where it raises one, as main
+    await assert.rejects(answer(c, `SELECT a.id, x::text ${NX_ONE} ON 1 / 0 = 1 ORDER BY 1`), (e: pg.DatabaseError) => e.code === "22012");
+    // an ON that reads the item's own column: its row of NULLs where it matched is not told from no match, refused
+    await refusedNullExtended(c, [`SELECT a.id, x::text FROM nx_a a LEFT JOIN (SELECT max(b.note) AS mv FROM nx_b b) x ON x.mv IS NULL ORDER BY 1`]);
   } finally { await c.end(); }
 });

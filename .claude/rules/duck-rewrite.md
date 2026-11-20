@@ -397,12 +397,16 @@ paths:
   while that column cannot be NULL. The primary key is the key Mason syncs by, which the sync holds to the source
   before each read, so it holds; a NOT NULL that is no key may be dropped on the source after the catalog read it, so it
   is never asked. Every reader of the row (its text, its json, json_agg's element) is NULL where that column is. No
-  presence is asked where no unmatched row reaches a reader, as the planner decides it (`extendedReads`,
-  src/duck/pgtree.ts): its reduction of outer joins (a WHERE, or an inner join's ON above, never true where the row is
-  unmatched: a strict function, operator or `= ANY` of its column, pg_proc's `proisstrict`, through AND, OR, NOT and
-  casts), and a one-row item alone on a side, joined on a condition the catalog evaluates to true. Never a list of
-  conditions the code knows: one refused `d.t = 'x' OR d.t = 'y'` and an inner join above, which main answered right
-  (the second review of PR 1100). A row nothing tells is refused, `null-extended-row`. A whole row's column names have
+  presence is asked where no unmatched row reaches a reader, as the planner's reduction of outer joins decides it
+  (`extendedReads`, src/duck/pgtree.ts): a WHERE, or an inner join's ON above, never true where the row is unmatched.
+  That is decided by EVALUATING the condition in three-valued logic with the unmatched side's columns NULL and the rest
+  unknown (`outerJoinsOf`): strict functions by pg_proc's `proisstrict`, AND, OR, NOT, the null and truth tests, CASE,
+  COALESCE, EXISTS and IN of a subquery, a scalar subquery and a LATERAL column each by its own rule. A whole row read in
+  a condition is unknown, since Mason writes it with the very presence this decides. Never a shape list: one refused
+  `d.t = 'x' OR d.t = 'y'` and an inner join above (the second review of PR 1100), and the next took a nested `IS NOT
+  NULL` for strict and `length(d::text) > 0` for a proof, so unmatched rows read as rows of NULLs (the third). A one-row
+  item alone on a join's nullable side is told by that join's ON, evaluated again in the reader, where the ON reads none
+  of its columns and calls nothing volatile. A row nothing tells is refused, `null-extended-row`. A whole row's column names have
   one reader, Postgres's (`Typed.rowColumns`: a WITH query's column list, a name held twice renamed in each place by
   `itemTwins`). An item's renamed columns are its own query's (`QueryOutputs.twins`), never its name's across the
   statement: by name, another query's item of the same name took its alias list. Why: the row was written from its

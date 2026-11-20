@@ -33,7 +33,7 @@ import type { PgAnalysis } from "./analyze.ts";
 import type { CellConv } from "./types.ts";
 import { pathIndex, PG_SESSION_SEPARATOR, SESSION_VARIABLE, SETTINGS_VARIABLE, TURN_FUNCTION, type JsonKind, type PgKind } from "./functions.ts";
 import { cellsOf, evaluateText, mapCells, numericLiteral, programJson, type NumericProgram } from "../lib/pg-numeric.ts";
-import { analysedQueries, FIRST_USER_OID, uniqueTwins, implicitTimetzCasts, joinsUsing, setOperationOutputs, type Grouping, type Keys, type QueryOutputs, type TreeValue, type Typed } from "./pgtree.ts";
+import { analysedQueries, FIRST_USER_OID, uniqueTwins, implicitTimetzCasts, type Unmatched, joinsUsing, setOperationOutputs, type Grouping, type Keys, type QueryOutputs, type TreeValue, type Typed } from "./pgtree.ts";
 import { evaluated, keysBound, type Unbound } from "./constant-key.ts";
 import { cteNamesApart } from "./cte-names.ts";
 import { OWN_PREFIX, ownPrefix } from "./own-names.ts";
@@ -311,7 +311,7 @@ class Rewriter {
   /** the offsets of the VARs an outer join may still leave unmatched where they are read, once the planner's reduction
    *  of outer joins is applied (src/duck/plan.ts `extendedRows`, src/duck/pgtree.ts `extendedReads`); null: every VAR
    *  Postgres's analysis marks (`Typed.nulled`) */
-  extended: ReadonlySet<number> | null = null;
+  extended: ReadonlyMap<number, Unmatched> | null = null;
   /** the timestamptz columns whose copy holds each value's 15-minute bucket (src/duck/bucket-column.ts); null for none */
   buckets: BucketLookup | null = null;
   /** each truncation written of such a column, by its form (src/duck/bucket-group.ts `shape`): what `bucketGroups` reads */
@@ -1231,6 +1231,13 @@ class Rewriter {
       throw new Unrewritable(`the whole row of ${alias}, which an outer join may leave unmatched, is not supported by Mason: ${why}`,
         `name its columns (json_build_object('id', ${alias}.id, …), or CASE WHEN ${alias}.id IS NULL THEN NULL ELSE … END over them)`, "null-extended-row");
     };
+    // a one-row item is unmatched exactly where its join's condition is not true: that condition, evaluated again
+    const on = this.unmatchedBy(n);
+    if (on?.by === "on") {
+      const quals = this.joinCondition(select, on.at);
+      if (quals === null) return refuse("Mason cannot find its join's condition");
+      return caseWhen([[this.clone(quals), boolConst(true)]], null);
+    }
     const inKey = (relid: number | undefined, attno: number | undefined): boolean => relid !== undefined && attno !== undefined && this.rowKeys.get(relid)?.has(attno) === true;
     const table = this.rowTypes.get(t.type);
     if (table !== undefined) {
@@ -1261,8 +1268,31 @@ class Rewriter {
   /** whether a VAR an outer join may NULL-extend may still be unmatched where it is read: Postgres's analysis marks it
    *  (`Typed.nulled`), and the planner's reduction of outer joins does not clear it (`extended`) */
   private unmatched(n: AstNode, t: Typed): boolean {
+    return t.nulled === true && (this.extended === null || this.unmatchedBy(n) !== undefined);
+  }
+  /** how a VAR an outer join may leave unmatched is told (`Unmatched`); undefined where nothing leaves it so, or where no
+   *  reduction was decided (every VAR Postgres marks is then told by a column) */
+  private unmatchedBy(n: AstNode): Unmatched | undefined {
     const at = bodyOf(n).location;
-    return t.nulled === true && (this.extended === null || (typeof at === "number" && this.extended.has(at - this.base)));
+    return this.extended === null || typeof at !== "number" ? undefined : this.extended.get(at - this.base);
+  }
+  /** the condition of the JOIN of this SELECT's FROM whose condition holds an expression at `at` (the analysis's offset:
+   *  a cast's constant is at its literal, the raw cast at its `::`), or null. Two joins' conditions share no offset */
+  private joinCondition(select: Body, at: number): AstNode | null {
+    let found: AstNode | null = null;
+    const holds = (v: unknown): boolean => {
+      if (Array.isArray(v)) return v.some(holds);
+      if (v === null || typeof v !== "object") return false;
+      return (v as Body).location === at + this.base || Object.values(v as Body).some(holds);
+    };
+    const visit = (x: unknown): void => {
+      if (found !== null || !isNode(x) || kindOf(x) !== "JoinExpr") return;
+      const quals = bodyOf(x).quals as AstNode | undefined;
+      if (isNode(quals) && holds(quals)) { found = quals; return; }
+      visit(bodyOf(x).larg); visit(bodyOf(x).rarg);
+    };
+    for (const x of (select.fromClause ?? []) as unknown[]) visit(x);
+    return found;
   }
 
   /** a reader of a whole row (`rowValues`) as Postgres reads a NULL-extended one: `ifNull` (NULL, json_agg's `null`)
@@ -8938,7 +8968,7 @@ export interface RewriteOptions {
    *  (src/duck/plan.ts `rowKeys`) */
   rowKeys?: PrimaryKeys;
   /** the VARs an outer join may still leave unmatched where they are read (src/duck/plan.ts `extendedRows`) */
-  extended?: ReadonlySet<number> | null;
+  extended?: ReadonlyMap<number, Unmatched> | null;
   /** the references whose keys the synced data numbers (src/duck/reference-keys.ts, src/duck/plan.ts `numberedLookup`) */
   numbered?: NumberedLookup | null;
   /** the timestamptz columns whose copy holds each value's 15-minute bucket (src/duck/bucket-column.ts, src/duck/plan.ts
