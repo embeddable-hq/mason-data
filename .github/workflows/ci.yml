@@ -327,7 +327,7 @@ jobs:
     # needs wal_level=logical (set below: a service takes no command line). psql is on the runner image.
     services: &postgres-service
       postgres:
-        image: postgres:18
+        image: postgres:19
         env:
           POSTGRES_PASSWORD: it
         ports:
