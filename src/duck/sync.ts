@@ -1342,6 +1342,12 @@ export class Sync {
   /** the shape each table's columns were last read again for (`columnsChanged`): a shape read again once, never at
    *  every poll — the sources file may not take it (an entry naming a column gone), and the poll then says so */
   private readonly reshapedTo = new Map<string, string>();
+  /** EACH TABLE HELD BY ITS ENTRY (issue 1074), with its columns' shape as the run last read them: what the database's
+   *  columns are held to while it is held (`heldLooks`, `relationSeen`), never the shape it was synced with — a rename
+   *  put back on the database is the synced shape again, and a change from what the run read last */
+  private heldSeen = new Map<string, string>();
+  /** when each polled table held by its entry has its columns looked at next (`heldLooks`): at its poll's interval */
+  private readonly heldLookAt = new Map<string, number>();
   /** the replicated tables a stream's relation message asks to check (`relationSeen`), at the next pass */
   private readonly shapeChecks = new Set<string>();
   /** when a replicated table's shape was last checked for a relation message that carried its copy's columns */
@@ -2215,13 +2221,16 @@ export class Sync {
    *  afresh by name (src/duck/column-identity.ts). `readOnly`: the project's files are deployed read-only, so the
    *  sources file is the owner's committed word, which confirms a column left out that did not move. `held`: the tables
    *  whose entry the run cannot take as it is (issue 1074, src/cli/sources.ts `rereadSources`), each as the run took it
-   *  before, and why: held as a table held for its columns is (`placeColumns`).
+   *  before, and why: held as a table held for its columns is (`placeColumns`). `seen`: each held table's columns as the
+   *  run last read them on the database, which its hold looks at (`heldSeen`).
    *  What it returns is the catalog rebuilt over them (never rejected: a failure is said in the log) */
-  setTables(tables: readonly AddedTable[], o: { confirmed?: ReadonlyArray<{ table: string; shape: string | undefined }>; readOnly?: boolean; held?: ReadonlyMap<string, string> } = {}): Promise<void> {
+  setTables(tables: readonly AddedTable[], o: { confirmed?: ReadonlyArray<{ table: string; shape: string | undefined }>; readOnly?: boolean; held?: ReadonlyMap<string, string>; seen?: ReadonlyMap<string, string> } = {}): Promise<void> {
     // (called at mason start and at mason add / remove only: the catalog's keys and constraints are the source's as of
     // then — docs/DESIGN.md "A count of distinct keys")
     const before = this.tables;
     this.tables = new Map(tables.map((t) => [t.source, t]));
+    this.heldSeen = new Map([...(o.held ?? new Map()).keys()].flatMap((s) => { const sh = o.seen?.get(s); return sh === undefined ? [] : [[s, sh] as [string, string]]; }));
+    for (const s of [...this.heldLookAt.keys()]) if (!this.heldSeen.has(s)) this.heldLookAt.delete(s);
     this.placeColumns(tables, new Map((o.confirmed ?? []).map((c) => [c.table, c.shape])), o.readOnly === true, o.held ?? new Map());
     // the references the sources file names: their hidden keys made, dropped and numbered on the writer's turn
     this.numbers.set(tables);
@@ -2385,7 +2394,23 @@ export class Sync {
     // a table copying, queued, or owed its catch-up is not polled by a pass (its catch-up polls it, then `rearm`): counted
     // as due it would run a pass every few ms that polls nothing and attaches the source each time
     const dues = [...this.tables.values()].filter((t) => this.pollable(t)).flatMap((t) => this.dueAt(t) ?? []);
+    dues.push(...this.heldLooks().map((t) => this.heldLookAt.get(t.source) ?? 0));
     return dues.length ? passDelayMs(Math.min(...dues), Date.now(), this.lastPassMs) : null;
+  }
+
+  /** THE POLLED TABLES HELD BY THEIR ENTRY (issue 1074) whose columns a pass looks at, at their poll's interval
+   *  (`heldLookAt`): one not read again now. A table held by its entry under `sync: off` is looked at by nothing, as it
+   *  is polled by nothing; one under replication is looked at for a stream's relation message (`relationSeen`) */
+  private heldLooks(): AddedTable[] {
+    if (this.mode === "recopy" || this.onColumnsChanged === undefined || this.stopped) return [];
+    return [...this.heldSeen.keys()].flatMap((s) => this.tables.get(s) ?? [])
+      .filter((t) => !this.replicated(t) && this.syncOf(t).mode === "poll" && t.shape !== undefined && !this.reshaping.has(t.source));
+  }
+
+  /** how long until a held table's columns are looked at again: its poll's interval */
+  private heldLookMs(t: AddedTable): number {
+    const s = this.syncOf(t);
+    return s.mode === "poll" ? s.seconds * 1000 : this.intervalMs;
   }
 
   /** a copy or a catch-up of the table is queued (a compaction queued is not one: the table is polled until it runs) */
@@ -3015,18 +3040,23 @@ export class Sync {
     if (this.reshaping.has(t.source)) return true;
     if (this.reshapedTo.get(t.source) === shape || this.onColumnsChanged === undefined) return false;
     this.reshapedTo.set(t.source, shape);
-    // against the columns the catalog read last: a column the entry leaves out is no change of the copy's
-    const was = t.shape !== undefined ? shapeColumns(t.shape) : this.asCopied(t).columns.map((c) => c.name), now = shapeColumns(shape);
+    // against the columns the catalog read last: a column the entry leaves out is no change of the copy's. A table held
+    // by its entry (issue 1074), against its columns as the run last read them
+    const seen = this.heldSeen.get(t.source);
+    const base = seen ?? t.shape;
+    const was = base !== undefined ? shapeColumns(base) : this.asCopied(t).columns.map((c) => c.name), now = shapeColumns(shape);
     const gone = was.filter((c) => !now.includes(c)), added = now.filter((c) => !was.includes(c));
     // the same names on other columns (a swap, issue 1073), or a column dropped and added again under its name
     const placed = (s: string): string => JSON.stringify(shapeTuples(s).map((c) => [c.name, c.attnum]));
-    const moved = t.shape !== undefined && placed(t.shape) !== placed(shape);
+    const moved = base !== undefined && placed(base) !== placed(shape);
     // another table at its name (dropped and made again, or renamed into its place): another oid
-    const other = t.shape !== undefined && shapeOid(t.shape) !== null && shapeOid(t.shape) !== shapeOid(shape);
+    const other = base !== undefined && shapeOid(base) !== null && shapeOid(base) !== shapeOid(shape);
     const what = other ? `it is another table of that name now (dropped and made again, or renamed into its place)${added.length || gone.length ? `, ${[added.length ? `${added.join(", ")} added` : "", gone.length ? `${gone.join(", ")} gone` : ""].filter(Boolean).join("; ")}` : ""}`
       : [added.length ? `${added.join(", ")} added` : "", gone.length ? `${gone.join(", ")} gone` : "",
         !added.length && !gone.length ? (moved ? "its names are on other columns now" : "a column's type changed") : ""].filter(Boolean).join("; ");
-    const m = `its columns changed on the database (${what}): they are read again, and its synced data serves as it was until it is synced again whole with them`;
+    const m = seen !== undefined
+      ? `its columns changed on the database while it is held (${what}): they are read again with the sources file, and it is synced again if its entry is right for them now`
+      : `its columns changed on the database (${what}): they are read again, and its synced data serves as it was until it is synced again whole with them`;
     this.log(`${t.source}: ${m}`);
     this.event({ kind: "columns_changed", table: t.source, message: m });
     const done = this.onColumnsChanged([t.source]).catch((e: unknown) => {
@@ -3071,7 +3101,8 @@ export class Sync {
     const t = this.tables.get(source);
     if (t === undefined || !this.replicated(t) || t.shape === undefined || this.onColumnsChanged === undefined || this.stopped) return;
     const generated = new Set(t.columns.filter((c) => c.generated).map((c) => c.name));
-    const shape = shapeTuples(t.shape).filter((c) => !generated.has(c.name));
+    // a table held by its entry: against its columns as the run last read them (`heldSeen`)
+    const shape = shapeTuples(this.heldSeen.get(source) ?? t.shape).filter((c) => !generated.has(c.name));
     const differs = shape.length !== columns.length || shape.some((c, i) => c.name !== columns[i]!.name || c.typeOid !== columns[i]!.typeOid || c.typmod !== columns[i]!.typmod);
     if (!differs && Date.now() - (this.relationCheckedAt.get(source) ?? 0) < 60_000) return;
     this.relationCheckedAt.set(source, Date.now());
@@ -4694,10 +4725,16 @@ export class Sync {
     // table whose columns changed read again (`columnsChanged`)
     const asked = [...this.shapeChecks].flatMap((s) => this.tables.get(s) ?? []);
     this.shapeChecks.clear();
+    // A POLLED TABLE HELD BY ITS ENTRY (issue 1074) at its poll's time: never polled, but its columns are looked at, so a
+    // hold the database fixes (a rename put back) is let go without a restart
+    const looks = this.heldLooks().filter((t) => (this.heldLookAt.get(t.source) ?? 0) <= Date.now());
+    for (const t of looks) this.heldLookAt.set(t.source, Date.now() + this.heldLookMs(t));
+    asked.push(...looks.filter((t) => !asked.includes(t)));
     if (asked.length) {
       try {
         const now = await this.onWriter(() => this.shapesNow(this.store.writer, asked));
-        for (const t of asked) { const shape = now.get(t.source); if (shape !== undefined && shape !== null && shape !== t.shape) this.columnsChanged(t, shape); }
+        // a table held by its entry, against its columns as the run last read them (`heldSeen`)
+        for (const t of asked) { const shape = now.get(t.source); if (shape !== undefined && shape !== null && shape !== (this.heldSeen.get(t.source) ?? t.shape)) this.columnsChanged(t, shape); }
       } catch (e) {
         // asked again at a pass after the sync's interval (in replication mode nothing else runs one); the stream goes on
         for (const t of asked) this.shapeChecks.add(t.source);

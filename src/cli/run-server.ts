@@ -275,8 +275,11 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
   const repl = ctx.replication();
   const bytes = fileBytes(ctx.duck.file);
   const disk = ctx.duck.disk();
+  // an entry the run neither takes nor holds (a new one it cannot take, issue 1074) is no added table: it is said among
+  // the run's warnings, and never waited for as a first sync
+  const taken = sources.tables === undefined ? null : new Set(sources.tables.map((x) => x.source));
   const tables = facts.tables.map((t) => {
-    const c = by.get(t.source), entry = sources.file?.tables.find((e) => e.table === t.source);
+    const c = by.get(t.source), entry = taken === null || taken.has(t.source) ? sources.file?.tables.find((e) => e.table === t.source) : undefined;
     const byHand = syncsOf(ctx).of(t.source);
     const { columns: cols, ...catalog } = catalogTable(t, entry);
     // WHAT IS SYNCED NOW (issue 977): the synced data's own columns, while its columns changed on the database and it is

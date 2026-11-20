@@ -643,7 +643,10 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     // the run cannot take holds its table alone (issue 1074): never confirmed, held as the run took it before
     const held = new Map(untaken.filter((x) => x.held).map((x) => [x.table, x.text]));
     const notTaken = new Set(untaken.map((x) => x.table));
-    return sync.setTables(sources.tables, { confirmed: r.problem === null ? (edit.confirmed ?? []).filter((c) => !notTaken.has(c.table)) : [], readOnly, held });
+    // each held table's columns as this read saw them: the hold looks at the database's against them, so a change there
+    // (a rename put back) reads the file again without a restart
+    const seen = new Map([...held.keys()].flatMap((s) => { const sh = now.tables.find((t) => t.source === s)?.shape; return sh === undefined ? [] : [[s, sh] as [string, string]]; }));
+    return sync.setTables(sources.tables, { confirmed: r.problem === null ? (edit.confirmed ?? []).filter((c) => !notTaken.has(c.table)) : [], readOnly, held, seen });
   };
 
   if (pg.said) say(`  ${pg.said}`);

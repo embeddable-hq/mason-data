@@ -757,6 +757,19 @@ hold gives (`renamedColumns`) is checked against `entryProblems`, but only the p
 run takes it at once, and a hand edit at the next time the run reads the file (a restart, an add or a remove, or a
 table's columns changing). The run has no watch on the file: the README says a hand edit applies at the next start.
 
+**A held table's columns are still looked at** (the review of PR 1091). A held table is not polled or caught up, so at
+first nothing looked at it again. A rename put back on the database left it held for good, serving stale rows, where
+main had kept polling its old columns and recovered. Now the sync holds each held table's columns to the shape the run
+last read, not the shape it was synced with, which a rename put back equals. A polled one is looked at at its poll's
+interval, and a replicated one at a stream's relation message. A change reads the file again, and the table is let go
+and caught up by one poll. One under `sync: off` is looked at by nothing, as it is polled by nothing. A hold whose
+cause is not a column (a `key:` whose unique index comes back) is not seen this way: it waits for the next read of the
+file.
+
+**An entry the run never takes is no added table** (the same review). `mason status` and the web page counted a table
+as added by its entry in the file alone, so `mason wait` waited for a first sync that never starts. The run's state now
+reads an entry only for a table the run takes or holds.
+
 **What is left.** A start still refuses the whole file on any entry's problem: the file is the person's to fix before
 anything runs. `mason add` and `mason remove` still refuse while another entry fails against the database
 (`othersHold`), so a held entry is fixed by its own `mason add`, or removed.

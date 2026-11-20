@@ -88,7 +88,12 @@ paths:
   its line says why with the line to write. Only `mason add` confirms it (through the run, or recorded in `.mason/` while
   Mason is stopped, src/cli/confirmed.ts), and only for the table's shape as the add read it, or its entry removed. A
   table whose ENTRY the run's re-read cannot take is held the same way (`setTables`' `held`, issue 1074), as the run
-  took it before, its record left as it was: one entry's problem never stops the others being kept current. A
+  took it before, its record left as it was: one entry's problem never stops the others being kept current. Its
+  columns are still looked at as its `sync:` says, against the shape the run last READ, never the one it was synced with
+  (`heldSeen`): a polled one at its interval (`heldLooks`), a replicated one at a relation message (`relationSeen`). A
+  change there (a rename put back) reads the file again and lets it go with no restart (the review of PR 1091: never
+  looked at, a hold the database fixed stayed for good, where main's kept table was polled again). One under `sync: off`
+  is looked at by nothing, as it is polled by nothing. A
   table is placed against EVERY record of its oid, every entry's and the ones kept by oid
   (`_mason.column_identity_former`), all read before any is written (issue 1080: two tables or schemas swapped names and
   the entry syncing every column served the other's left-out column). In a project deployed read-only the committed file is

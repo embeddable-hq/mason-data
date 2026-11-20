@@ -200,7 +200,10 @@ CLI lacks).
   PR 1091: a new entry written first was taken beside the synced one, and the two shared one synced table). **A
   `references:` problem is the entry's that names it**, but a reference into an entry the run does not take (a problem
   of its own, or a clash) is passed over for that verdict, neither checked nor carried, so one entry's problem never
-  holds the tables that reference it (`entryTables`, `OwnEntry.passedOver`). A start still refuses the file on any entry.
+  holds the tables that reference it (`entryTables`, `OwnEntry.passedOver`). **An entry the run neither takes nor holds
+  is no added table** (`runState` reads the file's entry only for a table among the run's `tables`): said among the
+  warnings, never a first sync `mason wait` waits for (the review of PR 1091: it waited to its timeout). A start still
+  refuses the file on any entry.
 - **`mason add` and `mason remove` work before `mason start` as after it** (`needs: "project"`): the sources file is
   the list, and `mason init demo` already writes entries before any run, so `mason init && mason add orders && mason
   start` is a natural order. With Mason up they ask the run (`/api/pick`, `/api/remove`: the copy starts or is dropped

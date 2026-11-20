@@ -9,7 +9,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   renamed column under its new name until your file says so. Its line in `mason status` and on the web page says why,
   and gives the line to write. `mason add <table> --columns …` while Mason runs takes the fixed entry at once. A fix
   made by hand is taken the next time Mason reads the file: at `mason stop && mason start`, at a `mason add` or
-  `mason remove`, or when a table's columns change on your database. Every other table is kept current as before.
+  `mason remove`, or when a table's columns change on your database. If the change on your database is undone, such as
+  a column renamed back, the held table is synced again by itself, unless its `sync:` is `off`. Every other table is
+  kept current as before.
   - A new entry whose table's name differs only in case from a synced table's, such as `Accents` beside `accents`, is
     never synced while Mason runs, wherever you write it in the file. The synced table keeps syncing. The new entry's
     warning says to remove one of the two entries.
