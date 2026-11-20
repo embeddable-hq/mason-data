@@ -406,8 +406,8 @@ test("verify unit warns of a test near its bound: a file not ALONE is told to be
 
 test("the rest shards are weighed by their files' measured seconds, and a file not listed by REST_UNLISTED", () => {
   const rest = weightOf("rest", ROOT);
-  const hand: Array<[string, number]> = [["duck-generated", 316], ["duck-pool", 219], ["duck-poll", 160], ["duck-secret", 141], ["duck-stream", 136], ["duck-libc-read", 129],
-    ["cli-upgrade", 123], ["cli-sources", 82], ["duck-serve", 74], ["duck-json-paths", 14], ["cli-source-role", 14], ["not-listed", 3]];
+  const hand: Array<[string, number]> = [["cli-columns-change", 395], ["duck-generated", 335], ["duck-poll", 280], ["duck-pool", 219], ["cli-entry-hold", 183],
+    ["duck-secret", 160], ["cli-sources", 82], ["duck-serve", 74], ["duck-json-paths", 16], ["cli-source-role", 17], ["not-listed", 3]];
   assert.deepEqual(hand.map(([f]) => rest(T(`integration/${f}.itest.ts`)) / 1000), hand.map(([, s]) => s));
 });
 
