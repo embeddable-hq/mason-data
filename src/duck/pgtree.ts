@@ -140,7 +140,7 @@ export interface Typed {
   qualifier: string | null;
   /** a VAR's column renamed (`t__mason_3`) where its FROM item — a subquery, a CTE — has another column of the same
    *  name but another case (`"T"` beside `t`), which DuckDB cannot tell apart: the item's columns are renamed alike
-   *  (caseTwins) */
+   *  (`QueryOutputs.twins`) */
   renamed: string | null;
   /** a Const of the analysis (under a COLLATE): a sort key that orders nothing, by ONE reader (src/duck/constant-key.ts) */
   constant?: true;
@@ -164,7 +164,7 @@ export interface Typed {
   rowOf?: number;
   /** a whole-row VAR of a subquery or a WITH query: its columns' names, in order. `shown` are Postgres's own (a WITH
    *  query's column list, an output's name or the name Postgres made up for it), what its json writes; `read` are the
-   *  names the engine reads them by, a name held twice in any case renamed in each place (`wholeRowTwins`). The ONE
+   *  names the engine reads them by, a name held twice in any case renamed in each place (`QueryOutputs.twins`). The ONE
    *  reader of a whole row's column names (src/duck/rewrite.ts `rowFields`, `rowPresence`). Absent for anything else */
   rowColumns?: { shown: string[]; read: string[] };
   /** a FUNCEXPR of a set-returning function (`funcretset`): in a SELECT list, any number of rows a row, none included */
@@ -681,6 +681,9 @@ export interface QueryOutputs {
   joins: string[][];
   /** its ORDER BY and DISTINCT ON keys as Postgres bound them */
   keys: Keys;
+  /** its own FROM items whose columns are renamed (`itemTwins`), by the name it calls each: what src/duck/rewrite.ts
+   *  names their columns by */
+  twins: Map<string, string[]>;
 }
 
 /**
@@ -703,6 +706,7 @@ export function outputsByLocation(tree: TreeValue): Map<number, QueryOutputs> {
 export function analysedQueries(tree: TreeValue): { byOffset: Map<number, QueryOutputs>; unplaced: Array<{ from: string[]; limits: number[]; outputs: QueryOutputs }> } {
   const found = new Map<number, QueryOutputs>();
   const unplaced: Array<{ from: string[]; limits: number[]; outputs: QueryOutputs }> = [];
+  const twins = itemTwins(tree);
   const visit = (v: TreeValue): void => {
     if (Array.isArray(v)) { for (const x of v) visit(x); return; }
     if (!isNode(v)) return;
@@ -724,6 +728,7 @@ export function analysedQueries(tree: TreeValue): { byOffset: Map<number, QueryO
         widths,
         joins,
         keys: keysOf(v.targetList, v.sortClause, v.distinctClause, rtable, v.windowClause),
+        twins: twinsOf(rtable, twins),
       };
       let placed = false;
       const offsets = (x: TreeValue): void => {
@@ -869,6 +874,245 @@ export function nulledRowTables(tree: TreeValue): number[] {
   visit(tree);
   return nulled ? [...relids].sort((a, b) => a - b) : [];
 }
+/**
+ * WHICH WHOLE ROWS AN OUTER JOIN MAY LEAVE UNMATCHED WHERE THEY ARE READ (issue 1008, the review of PR 1100). Postgres's
+ * analysis marks every VAR an outer join may NULL-extend (`varnullingrels`, `Typed.nulled`) before its planner finds
+ * that some cannot be: a WHERE, or an inner join's ON above the join, that is never true where the row is unmatched
+ * makes the join inner on that side (`reduce_outer_joins`). A syntactic list of such conditions refused what main
+ * answered right (`d.t = 'x' OR d.t = 'y'`, `lower(d.t) = 'x'`, `JOIN o ON o.id = d.a_id`), so this is the planner's own
+ * rule, over the analysed join tree: `find_nonnullable_rels` (a strict function's, operator's or `= ANY`'s arguments, AND
+ * and OR, NOT, a cast, IS NOT NULL, IS TRUE), passed down as `reduce_outer_joins_pass2` passes it. Strict is pg_proc's
+ * `proisstrict` (`OuterJoinFacts.strict`).
+ *
+ * One more way no row is unmatched is not the planner's: an item that always gives one row (an aggregate with no GROUP
+ * BY but `()` and no HAVING, or no FROM and no WHERE; no LIMIT, OFFSET, set operation or set-returning function), alone
+ * on the nullable side, joined on a condition always true. A condition is always true where it reads nothing (no
+ * column, parameter or subquery), calls only immutable functions, and the catalog evaluates it to true
+ * (`OuterJoinFacts.alwaysTrue`, by its offset; `ON NOT false`, `ON 1.0 = 1.0`, `ON 't'`): the planner folds it so too.
+ */
+export interface OuterJoinFacts {
+  /** the functions pg_proc says are strict (`proisstrict`): NULL wherever an argument is NULL */
+  strict: ReadonlySet<number>;
+  /** the offsets of the join conditions the catalog evaluated to true (`outerJoinQuestions`' `constant`) */
+  alwaysTrue: ReadonlySet<number>;
+}
+
+const JOIN_LEFT = 1, JOIN_FULL = 2, JOIN_RIGHT = 3;
+/** the nodes that read something, so a condition holding one is no constant */
+const READS = new Set(["VAR", "PARAM", "SUBLINK", "AGGREF", "WINDOWFUNC", "GROUPINGFUNC", "NEXTVALUEEXPR", "CURRENTOFEXPR", "SQLVALUEFUNCTION"]);
+const treeList = (v: TreeValue | undefined): TreeValue[] => Array.isArray(v) ? v : [];
+const union = (sets: Iterable<ReadonlySet<number>>): Set<number> => { const out = new Set<number>(); for (const s of sets) for (const x of s) out.add(x); return out; };
+const overlaps = (a: ReadonlySet<number>, b: ReadonlySet<number>): boolean => [...a].some((x) => b.has(x));
+/** an expression's offset, an implicit cast's being its argument's */
+const placedAt = (x: TreeValue): number | null => {
+  if (!isNode(x)) return null;
+  const at = num(x.location ?? null);
+  return (at === null || at < 0) && isNode(x.arg ?? null) ? placedAt(x.arg as TreeNode) : at;
+};
+
+/** a query that always gives exactly one row */
+function alwaysOneRow(q: TreeNode): boolean {
+  if (num(q.commandType ?? null) !== 1 || isNode(q.setOperations ?? null) || q.hasTargetSRFs === "true") return false;
+  if (isNode(q.limitCount ?? null) || isNode(q.limitOffset ?? null) || isNode(q.havingQual ?? null)) return false;
+  const sets = treeList(q.groupingSets), groups = treeList(q.groupClause);
+  // `GROUP BY ()` is one group, as no GROUP BY is
+  if (sets.length > 0) return sets.length === 1 && isNode(sets[0] ?? null) && num((sets[0] as TreeNode).kind ?? null) === 0 && groups.length === 0;
+  if (groups.length > 0) return false;
+  if (q.hasAggs === "true") return true;
+  const jt = q.jointree ?? null;
+  return isNode(jt) && treeList(jt.fromlist).length === 0 && !isNode(jt.quals ?? null);
+}
+
+/** the functions a condition calls, or null where it reads something (a column, a parameter, a subquery) */
+function constantCalls(e: TreeValue | undefined): number[] | null {
+  const calls: number[] = [];
+  let reads = false;
+  const visit = (v: TreeValue | undefined): void => {
+    if (Array.isArray(v)) { for (const x of v) visit(x); return; }
+    if (v === undefined || !isNode(v)) return;
+    if (READS.has(String(v._node))) { reads = true; return; }
+    for (const k of ["funcid", "opfuncid"]) { const f = num(v[k] ?? null); if (f !== null && f > 0) calls.push(f); }
+    for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x);
+  };
+  visit(e);
+  return reads ? null : calls;
+}
+
+/**
+ * One query's outer joins: each join's range-table index to the items it may still NULL-extend (`nulls`), each join's
+ * items (`relids`), and the conditions to ask the catalog about (`constant`, when `facts` is null).
+ */
+function outerJoinsOf(q: TreeNode, queries: readonly TreeNode[], facts: OuterJoinFacts | null): {
+  nulls: Map<number, Set<number>>; relids: Map<number, Set<number>>; constant: Array<{ location: number; functions: number[] }>;
+} {
+  const rtable = treeList(q.rtable).filter(isNode);
+  const relids = new Map<number, Set<number>>();
+  const items = (n: TreeValue | undefined): Set<number> => {
+    if (n === undefined || !isNode(n)) return new Set();
+    if (n._node === "RANGETBLREF") { const i = num(n.rtindex ?? null); return new Set(i === null ? [] : [i]); }
+    if (n._node === "FROMEXPR") return union(treeList(n.fromlist).map(items));
+    if (n._node !== "JOINEXPR") return new Set();
+    const s = union([items(n.larg), items(n.rarg)]);
+    const i = num(n.rtindex ?? null);
+    if (i !== null) relids.set(i, s);
+    return s;
+  };
+  items(q.jointree);
+  const strict = (id: TreeValue | undefined): boolean => facts !== null && facts.strict.has(num(id ?? null) ?? 0);
+  // find_nonnullable_rels (src/backend/optimizer/util/clauses.c): the items a condition is never true without
+  const nonnull = (e: TreeValue | undefined, top: boolean): Set<number> => {
+    if (Array.isArray(e)) return union(e.map((x) => nonnull(x, top)));
+    if (e === undefined || !isNode(e)) return new Set();
+    switch (e._node) {
+      case "VAR": {
+        if ((num(e.varlevelsup ?? null) ?? 0) !== 0) return new Set();
+        const varno = num(e.varno ?? null) ?? 0, attno = num(e.varattno ?? null) ?? 0;
+        const rte = rtable[varno - 1];
+        if (rte === undefined) return new Set();
+        const kind = num(rte.rtekind ?? null);
+        // a join's column is the column it aliases (the planner flattens it first); a FULL JOIN's merged one is a
+        // COALESCE, which is not strict
+        if (kind === RTE_JOIN) return attno > 0 ? nonnull(treeList(rte.joinaliasvars)[attno - 1], top) : new Set();
+        return kind === RTE_GROUP ? new Set() : new Set([varno]);
+      }
+      case "FUNCEXPR": return strict(e.funcid) ? nonnull(e.args, false) : new Set();
+      case "OPEXPR": return strict(e.opfuncid) ? nonnull(e.args, false) : new Set();
+      // (is_strict_saop with falseOK: = ANY of a strict operator is never true where an argument is NULL, nor is <> ALL
+      // of an array written with an element, which is never empty)
+      case "SCALARARRAYOPEXPR": {
+        const array = treeList(e.args)[1];
+        const nonEmpty = isNode(array ?? null) && (array as TreeNode)._node === "ARRAYEXPR" && treeList((array as TreeNode).elements).length > 0;
+        return strict(e.opfuncid) && (e.useOr === "true" || nonEmpty) ? nonnull(e.args, false) : new Set();
+      }
+      case "BOOLEXPR": {
+        const args = treeList(e.args);
+        if (e.boolop === "and" && top) return nonnull(args, true);
+        if (e.boolop === "and" || e.boolop === "or") {
+          const each = args.map((a) => nonnull(a, top));
+          return each.length === 0 ? new Set() : new Set([...each[0]!].filter((x) => each.every((s) => s.has(x))));
+        }
+        return e.boolop === "not" ? nonnull(args, false) : new Set();
+      }
+      case "RELABELTYPE": case "COERCEVIAIO": case "ARRAYCOERCEEXPR": case "CONVERTROWTYPEEXPR": case "COLLATEEXPR": return nonnull(e.arg, top);
+      // IS NOT NULL of a value that is no row; IS TRUE, IS FALSE, IS NOT UNKNOWN
+      case "NULLTEST": return num(e.nulltesttype ?? null) === 1 && e.argisrow !== "true" ? nonnull(e.arg, false) : new Set();
+      case "BOOLEANTEST": return [0, 2, 5].includes(num(e.booltesttype ?? null) ?? -1) ? nonnull(e.arg, false) : new Set();
+      default: return new Set();
+    }
+  };
+  // an item that always gives one row: a subquery's, or a WITH query's that is not recursive
+  const oneRowItem = (n: TreeValue | undefined): boolean => {
+    if (n === undefined || !isNode(n) || n._node !== "RANGETBLREF") return false;
+    const rte = rtable[(num(n.rtindex ?? null) ?? 0) - 1];
+    if (rte === undefined) return false;
+    const kind = num(rte.rtekind ?? null);
+    if (kind === RTE_SUBQUERY) return isNode(rte.subquery ?? null) && alwaysOneRow(rte.subquery as TreeNode);
+    if (kind !== RTE_CTE) return false;
+    const owner = queries[queries.length - 1 - (num(rte.ctelevelsup ?? null) ?? 0)];
+    const cte = treeList(owner?.cteList).find((c) => isNode(c) && c.ctename === rte.ctename);
+    return isNode(cte ?? null) && (cte as TreeNode).cterecursive !== "true" && isNode((cte as TreeNode).ctequery ?? null) && alwaysOneRow((cte as TreeNode).ctequery as TreeNode);
+  };
+  const nulls = new Map<number, Set<number>>();
+  const constant: Array<{ location: number; functions: number[] }> = [];
+  // reduce_outer_joins_pass2 (src/backend/optimizer/prep/prepjointree.c): the constraints from above, passed down
+  const pass = (n: TreeValue | undefined, upper: ReadonlySet<number>): void => {
+    if (n === undefined || !isNode(n)) return;
+    if (n._node === "FROMEXPR") {
+      const below = union([nonnull(n.quals, true), upper]);
+      for (const x of treeList(n.fromlist)) pass(x, below);
+      return;
+    }
+    if (n._node !== "JOINEXPR") return;
+    const jt = num(n.jointype ?? null) ?? -1, left = items(n.larg), right = items(n.rarg);
+    let nullsLeft = (jt === JOIN_RIGHT || jt === JOIN_FULL) && !overlaps(upper, left);
+    let nullsRight = (jt === JOIN_LEFT || jt === JOIN_FULL) && !overlaps(upper, right);
+    // the join as the planner leaves it decides what passes down (an outer join passes nothing from above to its
+    // nullable side, nor its own condition to its preserved side; a FULL one passes nothing)
+    if (nullsLeft && nullsRight) { pass(n.larg, new Set()); pass(n.rarg, new Set()); }
+    else if (!nullsLeft && !nullsRight) { const local = union([nonnull(n.quals, true), upper]); pass(n.larg, local); pass(n.rarg, local); }
+    else { const local = nonnull(n.quals, true); pass(nullsLeft ? n.rarg : n.larg, upper); pass(nullsLeft ? n.larg : n.rarg, local); }
+    // a one-row item alone on a side, joined on a condition always true, is never left unmatched
+    if ((nullsLeft && oneRowItem(n.larg)) || (nullsRight && oneRowItem(n.rarg))) {
+      // as the planner folds it: a constant the catalog evaluates to true, an OR holding one, an AND of them (`ON true OR
+      // a.id = 1`); no condition at all is a NATURAL JOIN of no common column
+      const alwaysTrue = (e: TreeValue): boolean => {
+        if (!isNode(e)) return false;
+        const calls = constantCalls(e), at = placedAt(e);
+        if (calls !== null) {
+          if (at === null || at < 0) return false;
+          if (facts === null) constant.push({ location: at, functions: calls });
+          return facts !== null && facts.alwaysTrue.has(at);
+        }
+        if (e._node !== "BOOLEXPR" || (e.boolop !== "and" && e.boolop !== "or")) return false;
+        const each = treeList(e.args).map(alwaysTrue);
+        return e.boolop === "and" ? each.length > 0 && each.every(Boolean) : each.some(Boolean);
+      };
+      const quals = n.quals ?? null;
+      const always = !isNode(quals) || alwaysTrue(quals);
+      if (always && nullsLeft && oneRowItem(n.larg)) nullsLeft = false;
+      if (always && nullsRight && oneRowItem(n.rarg)) nullsRight = false;
+    }
+    const i = num(n.rtindex ?? null);
+    if (i !== null) nulls.set(i, union([nullsLeft ? left : new Set(), nullsRight ? right : new Set()]));
+  };
+  pass(q.jointree, new Set());
+  return { nulls, relids, constant };
+}
+
+/** visits each VAR Postgres marks as an outer join's, with its query's outer joins as `outerJoinsOf` decides them */
+function visitNulledVars(tree: TreeValue, facts: OuterJoinFacts | null, seen: (v: TreeNode, extended: boolean) => void, joined?: (j: ReturnType<typeof outerJoinsOf>) => void): void {
+  const queries: TreeNode[] = [];
+  const joins: Array<ReturnType<typeof outerJoinsOf>> = [];
+  const visit = (v: TreeValue): void => {
+    if (Array.isArray(v)) { for (const x of v) visit(x); return; }
+    if (!isNode(v)) return;
+    if (v._node === "QUERY") {
+      queries.push(v);
+      const j = outerJoinsOf(v, queries, facts);
+      joined?.(j);
+      joins.push(j);
+      try { for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x); } finally { queries.pop(); joins.pop(); }
+      return;
+    }
+    if (v._node === "VAR" && nulledVar(v)) {
+      const up = num(v.varlevelsup ?? null) ?? 0;
+      const level = joins[joins.length - 1 - up], q = queries[queries.length - 1 - up];
+      const rtable = treeList(q?.rtable).filter(isNode);
+      // a grouped column is the expression it groups (Postgres 18's RTE_GROUP)
+      const inner = ungrouped(v, rtable);
+      const read = isNode(inner) && inner._node === "VAR" ? inner : null;
+      const varno = read === null ? null : num(read.varno ?? null);
+      const rels = strings(read?.varnullingrels).slice(1).map(Number);
+      const rte = varno === null ? undefined : rtable[varno - 1];
+      const own = varno === null || rte === undefined ? null : num(rte.rtekind ?? null) === RTE_JOIN ? level?.relids.get(varno) ?? null : new Set([varno]);
+      // what cannot be told is extended: an expression grouped, a join this query does not hold
+      seen(v, read === null || own === null || level === undefined || rels.some((j) => { const n = level.nulls.get(j); return n === undefined || overlaps(n, own); }));
+    }
+    for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x);
+  };
+  visit(tree);
+}
+
+/** what src/duck/plan.ts asks the catalog before `extendedReads`: the functions the statement calls (for pg_proc's
+ *  `proisstrict` and `provolatile`) and the join conditions that may be always true. Null where the statement holds no
+ *  whole row an outer join may NULL-extend, so it asks nothing */
+export function outerJoinQuestions(tree: TreeValue): { functions: number[]; constant: Array<{ location: number; functions: number[] }> } | null {
+  let held = false;
+  const constant: Array<{ location: number; functions: number[] }> = [];
+  visitNulledVars(tree, null, (v) => { held ||= num(v.varattno ?? null) === 0; }, (j) => constant.push(...j.constant));
+  if (!held) return null;
+  return { functions: [...functionsCalled(tree).oids].filter((f) => f > 0).sort((a, b) => a - b), constant };
+}
+
+/** THE OFFSETS OF THE VARS AN OUTER JOIN MAY STILL LEAVE UNMATCHED WHERE THEY ARE READ (`OuterJoinFacts`): a VAR
+ *  Postgres marks (`Typed.nulled`) and no reduction clears. src/duck/rewrite.ts `rowPresence` asks a presence only of
+ *  these. An offset two VARs share is held if either is (a `*`'s columns) */
+export function extendedReads(tree: TreeValue, facts: OuterJoinFacts): Set<number> {
+  const out = new Set<number>();
+  visitNulledVars(tree, facts, (v, extended) => { const at = num(v.location ?? null); if (extended && at !== null && at >= 0) out.add(at); });
+  return out;
+}
+
 /** Typed.column */
 function columnOf(v: TreeNode, rtables: TreeNode[][]): NonNullable<Typed["column"]> | null {
   const up = num(v.varlevelsup ?? null) ?? 0, varno = num(v.varnosyn ?? null), attno = num(v.varattnosyn ?? null);
@@ -921,7 +1165,7 @@ function qualifierOf(v: TreeNode, rtables: TreeNode[][]): string | null {
 /** a FROM item's columns with each one that has a twin in another case renamed `<name>__mason_<n>`; null when none has.
  *  The infix is the analysed tree's own prefix (src/duck/own-names.ts `analysedPrefix`), which no column it names holds
  *  in any case, so a renamed column is none of theirs (issue 1024). `same` renames a name held twice in the same case
- *  too (wholeRowTwins) */
+ *  too (`itemTwins`) */
 function twinNames(rte: TreeNode, infix: string, same = false): string[] | null {
   if (num(rte.rtekind ?? null) === RTE_JOIN || num(rte.rtekind ?? null) === 0 || !isNode(rte.eref ?? null)) return null;
   const cols = strings((rte.eref as TreeNode).colnames);
@@ -931,15 +1175,19 @@ function twinNames(rte: TreeNode, infix: string, same = false): string[] | null 
 }
 
 /**
- * THE SUBQUERIES AND WITH QUERIES WHOSE WHOLE ROW IS READ AND WHO HOLD A NAME TWICE (`SELECT d.id, c.id FROM d JOIN c
- * …`), by the name the query calls them: every column of such a name renamed `<name>__mason_<n>`, as `caseTwins` renames
- * a twin in another case. The row reads each column by its name (`Typed.rowColumns`), and a name held twice reads the
- * first column twice. No other read can name such a column (Postgres refuses it as ambiguous), so the renaming reaches
- * only the row's reads; src/duck/rewrite.ts names the item's columns by an alias list of these.
+ * EACH FROM ITEM'S COLUMNS AS DUCKDB IS TO NAME THEM, by the item's own range-table entry: a column with a twin in
+ * another case (`"T"` beside `t`) renamed `<name><prefix><n>` (`twinNames`), every reference renamed alike
+ * (`Typed.renamed`); and where the item's whole row is read, a name it holds twice in the same case too (`SELECT d.id,
+ * c.id FROM d JOIN c …`), since the row reads each column by its name (`Typed.rowColumns`) and a name held twice read
+ * the first column twice. No other read can name such a column (Postgres refuses it as ambiguous). src/duck/rewrite.ts
+ * names the item's columns by an alias list of these, for the query that holds the item alone (`QueryOutputs.twins`):
+ * keyed by the item's name across the statement, the list landed on another item of that name in another query (the
+ * review of PR 1100: a UNION ALL arm's `x`, an EXISTS's).
  */
-export function wholeRowTwins(tree: TreeValue): Map<string, string[]> {
-  const out = new Map<string, string[]>();
+function itemTwins(tree: TreeValue): WeakMap<TreeNode, string[]> {
+  const out = new WeakMap<TreeNode, string[]>();
   const infix = analysedPrefix(tree);
+  const whole = new WeakSet<TreeNode>();
   const rtables: TreeNode[][] = [];
   const visit = (v: TreeValue): void => {
     if (Array.isArray(v)) { for (const x of v) visit(x); return; }
@@ -952,13 +1200,28 @@ export function wholeRowTwins(tree: TreeValue): Map<string, string[]> {
     if (v._node === "VAR" && num(v.varattno ?? null) === 0) {
       const up = num(v.varlevelsup ?? null) ?? 0, varno = num(v.varno ?? null);
       const rte = varno === null ? undefined : rtables[rtables.length - 1 - up]?.[varno - 1];
-      const names = rte === undefined || num(rte.rtekind ?? null) === RTE_RELATION ? null : twinNames(rte, infix, true);
-      const alias = rte !== undefined && isNode(rte.eref ?? null) ? (rte.eref as TreeNode).aliasname : undefined;
-      if (names !== null && typeof alias === "string") out.set(alias, names);
+      if (rte !== undefined && num(rte.rtekind ?? null) !== RTE_RELATION) whole.add(rte);
     }
     for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x);
   };
   visit(tree);
+  const entries = (v: TreeValue): void => {
+    if (Array.isArray(v)) { for (const x of v) entries(x); return; }
+    if (!isNode(v)) return;
+    if (v._node === "RANGETBLENTRY") { const names = twinNames(v, infix, whole.has(v)); if (names !== null) out.set(v, names); }
+    for (const [k, x] of Object.entries(v)) if (k !== "_node") entries(x);
+  };
+  entries(tree);
+  return out;
+}
+
+/** a query's own FROM items whose columns are renamed (`itemTwins`), by the name the query calls each */
+function twinsOf(rtable: readonly TreeNode[], twins: WeakMap<TreeNode, string[]>): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const rte of rtable) {
+    const names = twins.get(rte), alias = isNode(rte.eref ?? null) ? (rte.eref as TreeNode).aliasname : undefined;
+    if (names !== undefined && typeof alias === "string") out.set(alias, names);
+  }
   return out;
 }
 
@@ -972,22 +1235,26 @@ function renamedOf(v: TreeNode, rtables: TreeNode[][], infix: string): string | 
   return names !== null && names[attno - 1] !== own ? names[attno - 1] ?? null : null;
 }
 
-/** Every subquery or CTE read in FROM whose columns have twins in another case (`"T"` beside `t`), by the name the
- *  query calls it: its columns as DuckDB is to name them (twinNames), every reference renamed alike (Typed.renamed) */
-export function caseTwins(tree: TreeValue): Map<string, string[]> {
+/** THE FROM ITEMS WHOSE COLUMNS ARE RENAMED (`itemTwins`), by their name, for a SELECT whose query the rewrite cannot find
+ *  in the analysis (`QueryOutputs.twins` is the rule): only a name no other FROM item of the statement holds, so the list
+ *  can land on no other item */
+export function uniqueTwins(tree: TreeValue): Map<string, string[]> {
+  const twins = itemTwins(tree);
   const out = new Map<string, string[]>();
-  const infix = analysedPrefix(tree);
+  const held = new Map<string, number>();
   const visit = (v: TreeValue): void => {
     if (Array.isArray(v)) { for (const x of v) visit(x); return; }
     if (!isNode(v)) return;
-    if (v._node === "RANGETBLENTRY" && isNode(v.eref ?? null)) {
-      const names = twinNames(v, infix);
-      const alias = (v.eref as TreeNode).aliasname;
-      if (names !== null && typeof alias === "string") out.set(alias, names);
+    if (v._node === "RANGETBLENTRY" && isNode(v.eref ?? null) && typeof (v.eref as TreeNode).aliasname === "string") {
+      const alias = (v.eref as TreeNode).aliasname as string;
+      held.set(alias, (held.get(alias) ?? 0) + 1);
+      const names = twins.get(v);
+      if (names !== undefined) out.set(alias, names);
     }
     for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x);
   };
   visit(tree);
+  for (const alias of [...out.keys()]) if ((held.get(alias) ?? 0) !== 1) out.delete(alias);
   return out;
 }
 

@@ -9727,3 +9727,41 @@ test("issue 1008, the review of PR 1100: a whole row's names are Postgres's, its
     }
   } finally { await c.end(); }
 });
+
+// THE SECOND REVIEW OF PR 1100. Whether an unmatched row reaches a reader was a list of conditions the code knew, so a
+// WHERE or an inner join that leaves none, which main answered right, was refused: it is the planner's reduction of outer
+// joins now (src/duck/pgtree.ts `extendedReads`). And a subquery's renamed columns were keyed by its name across the
+// statement, so another query's item of that name took its alias list: they are its own query's now (`QueryOutputs.twins`)
+test("issue 1008, the second review of PR 1100: a join the planner finds inner, or always matched, reads its row; a renamed item's columns are its query's alone", async () => {
+  const c = await client();
+  try {
+    const left = "FROM nx_a a LEFT JOIN (SELECT a_id, note FROM nx_b) d ON d.a_id = a.id";
+    // a one-row item: an aggregate over no row
+    const one = "FROM nx_a a LEFT JOIN (SELECT max(b.note) AS mv FROM nx_b b WHERE b.id < 0) x";
+    assert.deepEqual(await unlike(c, [
+      // never true where d is unmatched: a strict function, operator or = ANY of its column, an OR of such, a cast
+      [`SELECT a.id, d::text ${left} WHERE d.note = 'b1' OR d.note = 'far' ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, d::text ${left} WHERE lower(d.note) = 'b1' ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, d::text ${left} WHERE d.note = ANY (ARRAY['b1', 'x']) ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, d::text ${left} WHERE d.a_id + 0 > 0 ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, d::text ${left} WHERE d.note::text = 'b1' ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, d::text ${left} WHERE d.note <> ALL (ARRAY['q']) ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, row_to_json(d) ${left} WHERE (d.note = 'b1') IS TRUE ORDER BY 1`, "ordered"],
+      // an inner join above the outer one, ON its column
+      [`SELECT a.id, d::text ${left} JOIN nx_a o ON o.id = d.a_id ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, d::text ${left}, nx_a o WHERE o.id = d.a_id ORDER BY 1, 2`, "ordered"],
+      // a one-row item ON a condition always true however it is written
+      ...["NOT false", "1.0 = 1.0", "2 > 1", "true IS TRUE", "'t'", "1 = 1.0", "true OR a.id = 1"]
+        .map((on): [string, "ordered"] => [`SELECT a.id, x::text ${one} ON ${on} ORDER BY 1`, "ordered"]),
+      // a FROM item of a renamed item's name in another query: a UNION ALL arm, a WITH query's, an EXISTS's, a case twin's
+      ["SELECT x::text FROM (SELECT b.id, a.id FROM nx_b b JOIN nx_a a ON a.id = b.a_id) x UNION ALL SELECT x.note FROM (SELECT note, a_id FROM nx_b) x ORDER BY 1", "ordered"],
+      ["WITH x AS (SELECT b.a_id, a.id AS a_id FROM nx_b b JOIN nx_a a ON a.id = b.a_id) SELECT x::text FROM x UNION ALL SELECT s.note FROM (SELECT x.note FROM (SELECT note, id FROM nx_b) x) s ORDER BY 1", "ordered"],
+      ["SELECT x::text FROM (SELECT b.id, b.id FROM nx_b b) x WHERE EXISTS (SELECT 1 FROM (SELECT label FROM nx_a) x WHERE x.label = 'one') ORDER BY 1", "ordered"],
+      ["SELECT x.\"T\", x.t FROM (SELECT b.note AS \"T\", a.label AS t FROM nx_b b JOIN nx_a a ON a.id = b.a_id) x UNION ALL SELECT x.t, x.u FROM (SELECT note AS t, note AS u FROM nx_b) x ORDER BY 1, 2", "ordered"],
+    ]), []);
+    // an OR whose arm is not strict in d, and a condition that may be false: unmatched rows nothing tells, refused
+    for (const sql of [`SELECT a.id, d::text ${left} WHERE d.note = 'b1' OR a.id = 3 ORDER BY 1, 2`, `SELECT a.id, x::text ${one} ON false OR a.id = 1 ORDER BY 1`]) {
+      await assert.rejects(answer(c, sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap null-extended-row/.test(e.detail ?? ""), sql);
+    }
+  } finally { await c.end(); }
+});

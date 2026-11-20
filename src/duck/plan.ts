@@ -9,7 +9,7 @@ import { deparseSync, QuoteUtils } from "pgsql-deparser";
 import type { Node } from "libpg-query";
 import { HELD_ROW_INPUT, HELD_TYPE_INPUT } from "../api/postgres/schema.ts";
 import { heldName, heldType, isHeldArray, PARAM_ARRAYS } from "./held-types.ts";
-import { collationOids, functionsCalled, nulledRowTables, outputExpressions, textOrdering, type TreeValue } from "./pgtree.ts";
+import { collationOids, extendedReads, functionsCalled, nulledRowTables, outerJoinQuestions, outputExpressions, textOrdering, type TreeValue } from "./pgtree.ts";
 import { gapRefusal, StatementError, type DuckPlan } from "./statement.ts";
 import { parseSql } from "../api/postgres/parser.ts";
 import { analyze, catalogRows, readParameters } from "./analyze.ts";
@@ -177,6 +177,52 @@ async function distinctKeys(catalog: (bytes: Uint8Array) => Promise<Uint8Array>,
 async function rowKeys(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, tree: PgAnalysis["tree"]): Promise<PrimaryKeys> {
   const relids = nulledRowTables(tree);
   return relids.length === 0 ? new Map() : primaryKeysOf(await catalogRows(catalog, uniqueColumnsSql(relids)));
+}
+
+/**
+ * WHICH WHOLE ROWS AN OUTER JOIN MAY STILL LEAVE UNMATCHED WHERE THEY ARE READ (src/duck/pgtree.ts `extendedReads`, the
+ * planner's reduction of outer joins), by offset; null where the statement holds no whole row an outer join may
+ * NULL-extend, so it asks the catalog nothing. pg_proc says which functions are strict, and a join condition that reads
+ * nothing and calls only immutable functions is evaluated here, as the planner folds it. A condition the catalog cannot
+ * evaluate is not always true (its run will meet the same error), so its row stays one to tell
+ */
+async function extendedRows(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, tree: PgAnalysis["tree"], stmt: Node, base: number): Promise<ReadonlySet<number> | null> {
+  const asked = outerJoinQuestions(tree);
+  if (asked === null) return null;
+  const procs = asked.functions.length === 0 ? [] : await catalogRows(catalog, `SELECT oid::text, proisstrict::text, provolatile::text FROM pg_catalog.pg_proc WHERE oid IN (${asked.functions.map((f) => String(Math.trunc(f))).join(", ")})`);
+  const strict = new Set(procs.filter((r) => r[1] === "true").map((r) => Number(r[0])));
+  const immutable = new Set(procs.filter((r) => r[2] === "i").map((r) => Number(r[0])));
+  const alwaysTrue = new Set<number>();
+  // every expression of a JOIN's condition, by its offset in the analysis's frame (the outermost where several share one)
+  const quals = new Map<number, Node>();
+  const expressions = (v: unknown): void => {
+    if (Array.isArray(v)) { v.forEach(expressions); return; }
+    if (typeof v !== "object" || v === null) return;
+    const [kind, body] = Object.entries(v as Record<string, unknown>)[0] ?? [];
+    const at = typeof body === "object" && body !== null ? (body as { location?: unknown }).location : undefined;
+    if (kind !== undefined && /^[A-Z]/.test(kind) && typeof at === "number" && !quals.has(at - base)) quals.set(at - base, v as Node);
+    Object.values(v).forEach(expressions);
+  };
+  const collect = (v: unknown): void => {
+    if (Array.isArray(v)) { v.forEach(collect); return; }
+    if (typeof v !== "object" || v === null) return;
+    const join = (v as { JoinExpr?: { quals?: unknown } }).JoinExpr;
+    if (join?.quals !== undefined) expressions(join.quals);
+    Object.values(v).forEach(collect);
+  };
+  collect(stmt);
+  for (const c of asked.constant) {
+    const raw = quals.get(c.location);
+    if (raw === undefined || !c.functions.every((f) => immutable.has(f))) continue;
+    try {
+      const [row] = await catalogRows(catalog, `SELECT (${deparseSync(raw, { pretty: false })}) IS TRUE`);
+      if (row?.[0] === "t") alwaysTrue.add(c.location);
+    } catch (e) {
+      // (a constant the catalog refuses, `ON 1 / 0 = 1`: not always true, so its row is told by a column or refused)
+      if (!(e instanceof Error) || !e.message.startsWith("the catalog Postgres refused")) throw e;
+    }
+  }
+  return extendedReads(tree, { strict, alwaysTrue });
 }
 
 /** the primary keys that may prove a grouped LIMIT grouped by a whole key (src/duck/late.ts `keyFirst`), read only for a
@@ -700,6 +746,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   const buckets = outputs ? null : await bucketLookup(catalog, analysis.types, userTypes, copies());
   const keyCounts = await distinctKeys(catalog, analysis.tree);
   const keysOfRows = await rowKeys(catalog, analysis.tree);
+  const extended = await extendedRows(catalog, analysis.tree, stmt, base);
   // WHAT EACH COLLATION OF THE ANALYSIS MEANS (src/duck/collation.ts), resolved before the rewrite reads any: a libc
   // order not read yet is read here, before the plan is made; a collation the source lacks or Mason cannot follow refused
   let collations: StatementCollations;
@@ -709,7 +756,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   // its columns read by a `*` included, whichever module writes it (the rewrite, the late select list, the libc bounds)
   const own = ownPrefix([stmt, analysis.tree], walls?.written ?? []);
   const analysed = performance.now();
-  const rewritten = (l = lookup, sc = scales, bu = buckets, nb = numbered): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, typeNames, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts, boundPaths, scales: sc, buckets: bu, numbered: nb, own, rows: copiedRows(copies(), searchSchemas(searchPath)), rowKeys: keysOfRows });
+  const rewritten = (l = lookup, sc = scales, bu = buckets, nb = numbered): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, typeNames, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts, boundPaths, scales: sc, buckets: bu, numbered: nb, own, rows: copiedRows(copies(), searchSchemas(searchPath)), rowKeys: keysOfRows, extended });
   try {
     ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams, wholeNumericArrays, numbers: numberedReads } = rewritten());
     // the oracle's (`eager`): every read stored before the plan is made, and the plan made again over them
