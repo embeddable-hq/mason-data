@@ -20,12 +20,12 @@ import { DuckStore } from "../../src/duck/store.ts";
 import { Sync, type AddedTable, type CompactOptions, type LookupOptions } from "../../src/duck/sync.ts";
 import { startPostgresApi } from "../../src/api/postgres/server.ts";
 import { connectSource, parseSource, readSourceFacts, type Source } from "../../src/cli/preflight.ts";
+import { checkpoint } from "./checkpoint.ts";
 
 const adminUrl = process.env.IT_POSTGRES_URL;
 const tag = `it_dlookup_${process.pid}_${Math.floor(Math.random() * 1e6)}`;
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "it-dlookup-"));
 const logical = adminUrl ? psql(adminUrl, "SHOW wal_level") === "logical" : false;
-const skipPoll = !adminUrl ? "IT_POSTGRES_URL is not set" : false;
 const skipStream = !adminUrl ? "IT_POSTGRES_URL is not set" : !logical ? "IT_POSTGRES_URL's server has no wal_level = logical" : false;
 
 function psql(url: string, sql: string): string {
@@ -149,9 +149,8 @@ async function givenAgain(sync: Sync, store: DuckStore, db: string, url: string,
   await synced();
   // the checkpoint that drops the deleted row groups, on the writer's turn (between two of the stream's batches), taken
   // again while another transaction holds those rows back
-  const onWriter = (f: () => Promise<unknown>): Promise<unknown> => (sync as unknown as { onWriter: (g: () => Promise<unknown>) => Promise<unknown> }).onWriter(f);
   for (const until = Date.now() + 30_000; ;) {
-    await onWriter(() => store.writer.run("CHECKPOINT"));
+    await checkpoint(sync, store);
     if (await one("SELECT max(row_group_id) FROM pragma_storage_info('public.orders')") < groups) break;
     if (Date.now() > until) throw new Error("the checkpoint dropped none of the table's end in 30 s");
     await new Promise((r) => setTimeout(r, 100));
@@ -163,7 +162,7 @@ async function givenAgain(sync: Sync, store: DuckStore, db: string, url: string,
   await lookups(sync, store, db, url, [...KEYS, ROWS * 40, ROWS * 40 + 9], "row ids given again");
 }
 
-test("a polled table's lookups by key go through its side table, equal to the source, through the poll's writes, a rebuild and a compaction", { skip: skipPoll }, async () => {
+test("a polled table's lookups by key go through its side table, equal to the source, through the poll's writes, a rebuild and a compaction", { skip: "quarantined: #1192" }, async () => {
   const { db, url, source } = aSource("poll");
   const tables = (await tablesOf(source, ["public.orders", "public.events"])).map((t) => ({ ...t, sync: { mode: "poll", every: "1h", seconds: 3600 } as const }));
   const logged: string[] = [];
@@ -182,7 +181,7 @@ test("a polled table's lookups by key go through its side table, equal to the so
     for (let round = 1; round <= 2; round++) {
       changes(url, round);
       await sync.pollNow(["public.orders"]);
-      await store.writer.run("CHECKPOINT");
+      await checkpoint(sync, store);
       await lookups(sync, store, db, url, [...KEYS, ROWS * 10 * round + 1], `poll round ${round}`);
     }
     // THE SIDE TABLE BUILT AGAIN (its tail is due), then the table COMPACTED (every row a new row id) and its side

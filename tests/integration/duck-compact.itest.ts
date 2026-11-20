@@ -19,6 +19,7 @@ import { spawnSync } from "node:child_process";
 import { DuckStore } from "../../src/duck/store.ts";
 import { Sync, type AddedTable, type CompactOptions } from "../../src/duck/sync.ts";
 import { connectSource, parseSource, readSourceFacts, type Source } from "../../src/cli/preflight.ts";
+import { checkpoint } from "./checkpoint.ts";
 
 const adminUrl = process.env.IT_POSTGRES_URL;
 const tag = `it_dcompact_${process.pid}_${Math.floor(Math.random() * 1e6)}`;
@@ -89,17 +90,6 @@ async function keptAside(store: DuckStore, n: number, logged: readonly string[])
 }
 const same = async (store: DuckStore, url: string, step: string): Promise<void> =>
   assert.equal(await rowsOf(store, "SELECT id, v, n FROM public.t ORDER BY 1"), psql(url, "SELECT id, v, n FROM t ORDER BY 1"), `public.t after ${step}`);
-/**
- * THE CHECKPOINT DuckDB TAKES at 16 MiB of log and at every stop, taken here by hand (issue 926). DuckDB 2.0 refuses a
- * plain CHECKPOINT ("there are other write transactions active") while any transaction that began before the last
- * committed UPDATE or DDL is still open, on any connection. The sync reads on connections of its own beside the test:
- * the catalog at the end of each pass, and the stored JSON paths' review every 10 s. And a poll's commit updates the
- * table's row count, and a compaction's swap is DDL. So a plain checkpoint failed whenever one of those reads was in
- * flight. FORCE waits for those transactions to end and aborts none (measured on DuckDB 2.0.0). It runs on the writer's
- * turn, so it never lands inside a poll's or a stream batch's open transaction, where DuckDB refuses it.
- */
-const checkpoint = (sync: Sync, store: DuckStore): Promise<void> =>
-  (sync as unknown as { onWriter(f: () => Promise<void>): Promise<void> }).onWriter(async () => { await store.writer.run("FORCE CHECKPOINT"); });
 
 test("a polled table churned through many polls and checkpoints: compacted from the synced data, within the bound, equal to the source", async () => {
   const { db, url, source } = aSource("poll", 20_000);
