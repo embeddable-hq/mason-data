@@ -289,7 +289,8 @@ test("a read-only run: any number of renames, adds and drops of excluded and syn
 });
 
 /**
- * THE SOURCES FILE REFUSED FOR ANOTHER REASON WHILE AN EXCLUDED COLUMN IS RENAMED TWICE (the review of PR 1065), in a
+ * AN ENTRY REFUSED FOR ANOTHER REASON WHILE AN EXCLUDED COLUMN IS RENAMED TWICE (the review of PR 1065; since issue
+ * 1074 the entry holds its table alone, where it refused the whole file), in a
  * read-only run polled every second: the run's record of what it left out moved at a look whose re-read was refused,
  * and the columns it found arrivals against did not, so the second rename was never seen as the first new name gone.
  * Once the other cause was fixed, the file as the run took it named that name for the run: a column added to another
@@ -327,9 +328,12 @@ test("a read-only run: the file refused for another reason while an excluded col
   };
   const servesT2 = (columns: string) => (): boolean => served("t2")?.columns === columns;
 
-  // t3's listed column renamed to a close name: the file is refused, for t3
+  // t3's listed column renamed to a close name: its entry is refused, and t3 alone held (issue 1074), its line saying
+  // why with the way out a read-only project has
   psql(dbUrl, "ALTER TABLE t3 RENAME COLUMN amount_total TO amount_total2");
-  await until("the file refused for t3", () => { never(); return warnings().some((w) => /tables\.t3\.columns: public\.t3 has no column amount_total/.test(w)); });
+  const t3Line = (): string => (mason("status", "--json").json.tables as Array<{ table: string; error: string | null }> | undefined)?.find((x) => x.table === "public.t3")?.error ?? "";
+  await until("t3 held for its entry", () => { never(); return /tables\.t3\.columns: public\.t3 has no column amount_total/.test(t3Line()); });
+  assert.match(t3Line(), /^public\.t3 is not synced: .* Mason holds the table and serves its synced data as it was\. To sync its columns as the database names them now, write columns: \[id, amount_total2\] on tables\.t3 in the committed sources file, and start Mason with it\.$/);
   // the excluded column renamed twice while it is refused: each line names the column now
   psql(dbUrl, "ALTER TABLE t1 RENAME COLUMN salary TO p1");
   await until("the line to write names p1", () => { never(); return saysLine("p1")(); });
