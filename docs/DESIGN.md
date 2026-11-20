@@ -744,6 +744,14 @@ taken beside it, and the two shared one synced table, which neither served after
 one entry the run syncs is decided on its own, and every other entry is never taken, said with the clash. No entry of
 a group the run syncs none of is taken.
 
+**A `references:` problem is the entry's that names it** (issue 1143). It is said at that entry's key, so
+that entry is held. But a reference into an entry the run does not take, because that entry has a problem of its own or
+lost a clash, is passed over for the referencing entry's verdict. It is neither checked nor carried, as `mason add` and
+the start's check already pass over a reference to a table that failed (`src/cli/source-check.ts`). Otherwise a column
+renamed in `customers` would hold every table that references `customers`, which is the spread this decision removes.
+Passed over, the reference only loses its numbered join keys until the entry is taken again. That costs speed, never an
+answer.
+
 **Fail closed.** A renamed column a `columns:` entry lists is never synced under its new name by a guess. The line the
 hold gives (`renamedColumns`) is checked against `entryProblems`, but only the person writes it: `mason add` through the
 run takes it at once, and a hand edit at the next time the run reads the file (a restart, an add or a remove, or a

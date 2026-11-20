@@ -197,8 +197,10 @@ CLI lacks).
   (`refusedEntryText`, `renamedColumns`: a guess offered, never taken; every way out a line that runs), or, never taken,
   said among the warnings. **A problem across entries (a case clash of tables or schemas) is decided by what the run
   syncs, never the file's order**: the group's one synced entry decided alone, every other never taken (the review of
-  PR 1091: a new entry written first was taken beside the synced one, and the two shared one synced table). A start
-  still refuses the file on any entry.
+  PR 1091: a new entry written first was taken beside the synced one, and the two shared one synced table). **A
+  `references:` problem is the entry's that names it**, but a reference into an entry the run does not take (a problem
+  of its own, or a clash) is passed over for that verdict, neither checked nor carried, so one entry's problem never
+  holds the tables that reference it (`entryTables`, `OwnEntry.passedOver`). A start still refuses the file on any entry.
 - **`mason add` and `mason remove` work before `mason start` as after it** (`needs: "project"`): the sources file is
   the list, and `mason init demo` already writes entries before any run, so `mason init && mason add orders && mason
   start` is a natural order. With Mason up they ask the run (`/api/pick`, `/api/remove`: the copy starts or is dropped
