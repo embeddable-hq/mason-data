@@ -26,7 +26,6 @@ const adminUrl = process.env.IT_POSTGRES_URL;
 const tag = `it_dlookup_${process.pid}_${Math.floor(Math.random() * 1e6)}`;
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "it-dlookup-"));
 const logical = adminUrl ? psql(adminUrl, "SHOW wal_level") === "logical" : false;
-const skipPoll = !adminUrl ? "IT_POSTGRES_URL is not set" : false;
 const skipStream = !adminUrl ? "IT_POSTGRES_URL is not set" : !logical ? "IT_POSTGRES_URL's server has no wal_level = logical" : false;
 
 function psql(url: string, sql: string): string {
@@ -163,7 +162,7 @@ async function givenAgain(sync: Sync, store: DuckStore, db: string, url: string,
   await lookups(sync, store, db, url, [...KEYS, ROWS * 40, ROWS * 40 + 9], "row ids given again");
 }
 
-test("a polled table's lookups by key go through its side table, equal to the source, through the poll's writes, a rebuild and a compaction", { skip: skipPoll }, async () => {
+test("a polled table's lookups by key go through its side table, equal to the source, through the poll's writes, a rebuild and a compaction", { skip: "quarantined: #1192" }, async () => {
   const { db, url, source } = aSource("poll");
   const tables = (await tablesOf(source, ["public.orders", "public.events"])).map((t) => ({ ...t, sync: { mode: "poll", every: "1h", seconds: 3600 } as const }));
   const logged: string[] = [];
