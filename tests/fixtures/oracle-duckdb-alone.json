@@ -1,7 +1,7 @@
 {
-  "statements": 8336,
+  "statements": 8340,
   "mason": {
-    "exact": 7808,
+    "exact": 7812,
     "decided": 46,
     "refused": 482,
     "differs": 0
@@ -10,8 +10,8 @@
     "exact": 1952,
     "name": 1559,
     "refused": 1963,
-    "value": 1228,
-    "rows": 638,
+    "value": 1233,
+    "rows": 637,
     "text": 86,
     "other": 910
   },
@@ -95,7 +95,7 @@
       }
     },
     "everyAsk": {
-      "asked": 114260,
+      "asked": 114321,
       "refused": {
         "array-lower-bound": { "planted": 0, "natural": 2 },
         "array-remove-type": { "planted": 3, "natural": 0 },
