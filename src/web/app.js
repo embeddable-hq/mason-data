@@ -86,7 +86,7 @@
  * A page is registered by its import and its place in PAGES below, its route in PAGE_ROUTES, and its section in
  * index.html.
  */
-import { esc, badge, icon, copyClick, createAsk, overTunnel, renderFailure, updatedText, staleText, placePops, RANGES, DEFAULT_RANGE, rangeOf, rangeOffered, liveTitle, POLL_MS } from "./shared.js";
+import { esc, badge, icon, copyClick, createAsk, overTunnel, renderFailure, updatedText, staleText, placePops, RANGES, DEFAULT_RANGE, rangeOf, rangeOffered, liveTitle, POLL_MS, clip, TITLE_MAX } from "./shared.js";
 import { createCharts } from "./charts.js";
 import { page as statusPage } from "./pages/status.js";
 import { page as tablesPage } from "./pages/tables.js";
@@ -110,9 +110,9 @@ export const PRESS_HOLD_MS = 2000;
 
 // every renderer the tests import from here, wherever it lives now
 export * from "./shared.js";
-export { CATCHING_UP, copyingText, tableLine, keptAge, keptWords, sourceRows, factRows, factNotes, renderFacts, renderStatus } from "./pages/status.js";
+export { CATCHING_UP, copyingText, syncProgressText, tableLine, keptAge, keptWords, sourceRows, factRows, factNotes, renderFacts, renderStatus } from "./pages/status.js";
 export { tableFacts, addedLines, diskNote, diskBytes, estimateCell, removedReport, pickBody, columnsPath, renderTableAdded, renderTablesRemoved, renderTables } from "./pages/tables.js";
-export { renderUsers, usersShowHref, renderAdded, renderAddUser, attributesText, renderUsersConnect, renderAddKinds, renderSharePane, renderShareCard, renderShareOnce, createShare, addedSeen } from "./pages/users.js";
+export { renderUsers, usersShowHref, renderAdded, renderAddUser, attributesText, renderUsersConnect, renderUsersMcp, connectsChoice, rangesOf, mcpSnippets, mcpUrlSnippets, mcpPackage, MCP_NODE, renderAddKinds, renderSharePane, renderShareCard, renderShareOnce, createShare, addedSeen } from "./pages/users.js";
 export { renderRequests } from "./pages/queries.js";
 export { renderRunning, renderSessions, renderClients, renderSlowest, queriesHref } from "./pages/usage.js";
 export { hostLinkUrl, hostView, readHost, renderHostView, renderHostCard, renderHostPart, HOST_BYTES_MAX, HOST_READ_MS, REFRESH_MIN_S, REFRESH_MAX_S, HOST_LIMITS } from "./host-view.js";
@@ -290,9 +290,17 @@ export function renderAccount(account) {
 /** The line over the banner's Failure while the page shows what it read before (`app.stale()`): as of when, and why. */
 const staleNote = (stale, said) => stale === null || said ? "" : `<p class="stale-note">${esc(staleText(stale.at, stale.failure))} What this page shows is from then.</p>`;
 
-/** The heading's line: the database the run copies, and its sources file's name when that is another. */
-function renderWhere(s) {
-  return `${esc(s.source.database)}${s.source.name && s.source.name !== s.source.database ? ` · source ${esc(s.source.name)}` : ""}`;
+/**
+ * The header box's line: the operator's label (`/api/state` `pageTitle.label`: mason serve's MASON_UI_TITLE_FILE, its
+ * first line, cleaned by the run, src/cli/ui-title.ts), else the database's name alone. Escaped: the label is text,
+ * never HTML. The sources file's name is not said here (the box is too narrow to show it: the owner, issue 1181);
+ * mason status says it. The box cuts a long line with "…", so the same text is its title, as every cut value's whole is
+ * (at most TITLE_MAX, `clip`): a hover reads it whole.
+ */
+export function renderWhere(s) {
+  const label = s.pageTitle?.label;
+  const text = typeof label === "string" && label !== "" ? label : String(s.source.database ?? "");
+  return `<span title="${esc(clip(text, TITLE_MAX))}">${esc(text)}</span>`;
 }
 
 /**

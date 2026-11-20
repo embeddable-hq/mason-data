@@ -44,6 +44,7 @@
 import * as os from "node:os";
 import type { Failure, FailureCode, NextStep } from "./command.ts";
 import { version } from "./version.ts";
+import { oneLine } from "../lib/one-line.ts";
 
 /** The hosted service a login goes to when `MASON_CLOUD_URL` is unset: the one place it is named. */
 export const DEFAULT_SERVICE_URL = "https://app.masondata.ai";
@@ -144,19 +145,8 @@ export function serviceText(s: string, max: number, secrets: readonly string[] =
   return echoesSecret(line, secrets) ? "****" : line;
 }
 
-/** `t` AS ONE LINE, as `serviceText` prints a value (pure: no secret read, nothing recorded): every character that would
- *  break or reorder a line replaced by `?`, and no run of spaces. A value equal to its `oneLine` prints as it is. */
-export function oneLine(s: string): string {
-  // C0 (newline, return and tab with it), DEL and C1 (NEL with it); the zero-width and directional marks; the line and
-  // paragraph separators; the bidi embeddings, overrides and isolates; the byte-order mark
-  let t = s.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, "?");
-  // and a lone surrogate, which is no character: --json would write it as an escape (`\udc00`), whose letters and
-  // digits a reader reads (PR 645's review, round 2)
-  t = t.replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, "?");
-  // and no run of spaces: a value padded to a terminal's width aligns nothing, and leaves no gap to break at a column of
-  // its choosing (src/cli/command.ts breaks every line that holds it: serviceStyle)
-  return t.replace(/\s+/g, " ").trim();
-}
+/** `t` AS ONE LINE, as `serviceText` prints a value: src/lib/one-line.ts's, which the MCP endpoint's log reads too. */
+export { oneLine };
 
 /**
  * THE SECRET MASKS OF `serviceText`, ALONE, the one place a service's string is read for a secret: every secret named

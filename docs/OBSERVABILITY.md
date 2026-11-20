@@ -86,7 +86,7 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
   counts every failed event: failed syncs, restarts and the web page's own errors); ONE table of facts, Mason, in the
   page's words (`factRows`, `factNotes`): the Source (the database, its host, its Postgres version, main or read
   replica), the warnings, Mason's version and up for, restarts (`engine`), the free disk and what the synced data uses
-  (`disk`), the tools connected (`sessions`), then quiet lines for a database on another machine and how text sorts; in replication mode a Changes table — the stream (`stream`: running
+  (`disk`), then quiet lines for a database on another machine and how text sorts; in replication mode a Changes table — the stream (`stream`: running
   or why not, position, lag, last batch, as `streamLines` says it) and the slot's hold on the WAL (`stream.slotWal`:
   held, status, room left; `lost`, `unreserved` or no cap are warnings); and the first syncs not finished, a bar each,
   only while there are any. A fact the run could not read (`{ error }`) is said as unknown with its reason, never as 0;
@@ -104,10 +104,10 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
   (`/api/tables/<table>/columns`).
 - **Users** (`#users`): the users first, under Active / Removed tabs — each user's status (Active / Disabled /
   Removed), when it was added, its last use and its Queries, Disable (asks first) / Enable and Remove; then the box that
-  adds one, with two segments, New user and Temporary cloud login (what `mason share` opens), what it adds shown once in
+  adds one, with two segments, New user and Temporary cloud tunnel (what `mason share` opens), what it adds shown once in
   a dialog that closes only at "I have copied it"; then ONE Connect panel for the run (host, port, database, SSL mode
   and the URL with `<user>:<password>`, each with **Copy**), never a URL per user. Reads `/api/users?lastUsed=1` and
-  `/api/state` (on opening, then 30 s), and `/api/share/choices` where a cloud login is offered.
+  `/api/state` (on opening, then 30 s), and `/api/share/choices` where a cloud tunnel is offered.
 - **Observability › Queries** (`#observability/queries`): the request log as a table, newest first — the first 8
   characters of the id, started, duration, status, user, client, rows, the statement (two lines at most), its error's
   first line — with a per-row details (the whole id, ended, bytes sent, the statement and error, the first 16 KiB of
@@ -191,6 +191,7 @@ Key: ✅ built · ⏸ deferred
 | Query ID | ✅ | `requestId` |
 | The plan of a slow statement | ✅ | `plan`, `planTruncated` ("The plan of a slow statement" below): in the row's details, and whole in `mason logs --requests --id <requestId>` |
 | Where an internal error failed | ✅ | `origin` on a row answered XX000: the first frame in Mason's code, a file and a line (src/lib/failure-facts.ts); null on every other row |
+| How long a heavy query waited for its turn | ✅ | `waitedMs` (`waited_ms`; src/duck/admission.ts): 0 when a turn was free, null for a light query, which never waits; in `mason logs --requests --id <requestId>` as `waited` |
 | Rows scanned | ⏸ | **Decide later: may add cost to every query.** DuckDB reports it only with its profiler on per statement, whose cost is not measured. Measure (about half a day) before promising it. |
 | Filters: status, date, user | ✅ | `/api/requests`: outcome, `failed`, since / until, user, client, `slow`, `search`, and paging (`before`) |
 

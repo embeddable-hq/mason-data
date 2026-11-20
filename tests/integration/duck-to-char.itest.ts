@@ -23,6 +23,8 @@ const TIME_FORMATS = [
   "HH", "HH12", "HH24", "hh24:mi:ss", "HH12:MI AM", "HH12:MI am", "HH12:MI P.M.", "HH12:MI p.m.", "MS", "US", "FF1", "FF3", "FF6",
   "SSSS", "SSSSS", "DDD", "DD", "D", "W", "WW", "CC", "J", "RM", "rm", "FMRM", "DDth", "DDTH", "FMDDth", "Mon FMDDth, YYYY", "AD", "BC",
   "\"week\" IW \"of\" IYYY", "YYYY\"\\\"\"MM", "FMHH12:MI", "FMMM/FMDD/YYYY", "TMMonth",
+  // a fraction under FM is still zero-padded, and Y,YYY's ordinal is the year's (issue 464)
+  "FMMS", "FMUS", "FMFF2", "Y,YYYth", "y,yyyTH",
 ];
 const NUMBERS = ["0", "0.5", "-0.5", "5", "-5", "1234.5", "-1234.5", "1234567.891", "89655199.68", "0.004", "999.995", "-0.0001", "12345", "99.5", "-99.5", "0.06"];
 const NUMBER_FORMATS = [

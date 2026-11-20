@@ -51,6 +51,9 @@ export interface PgColumn {
   /** a plain numeric (no precision) whose copy holds each value's own scale in a hidden column (src/duck/scale-column.ts),
    *  that column's name: the rewrite prints each value with it, as Postgres does. Never declared to the catalog */
   scaled?: string | undefined;
+  /** a timestamptz whose copy holds each value's 15-minute bucket in a hidden column (src/duck/bucket-column.ts), that
+   *  column's name: a GROUP BY of a unit of its time groups by it first. Never declared to the catalog */
+  bucket?: string | undefined;
 }
 
 /** A collation of the source (pg_collation), as the catalog declares one it lacks (src/duck/collation.ts SourceCollation) */
@@ -134,7 +137,15 @@ export interface PgSchema {
   /** the source's collations, each declared in the catalog where it lacks it, before the tables (catalog.ts
    *  `catalogDdl`): a statement's COLLATE resolves, or is 42704, as on the source */
   collations?: PgCollation[] | undefined;
+  /** the references whose keys the synced data numbers in hidden columns (src/duck/reference-keys.ts, issue 1144): a
+   *  join on one's columns reads the numbers (src/duck/rewrite.ts `referenceJoins`) */
+  references?: PgNumberedReference[] | undefined;
 }
+
+/** A reference whose keys are numbered: the referencing side (`orders.customer_id`) and the referenced one
+ *  (`customers.id`), each its table, its key's columns in order, and the hidden column holding their number */
+export interface PgNumberedReference { from: PgNumberedSide; to: PgNumberedSide }
+export interface PgNumberedSide { schema: string; table: string; columns: string[]; hidden: string }
 
 /** A source view: its definition with every name outside pg_catalog qualified (src/cli/preflight.ts VIEWS_SQL) */
 export interface PgView { schema: string; name: string; definition: string; description?: string | undefined }

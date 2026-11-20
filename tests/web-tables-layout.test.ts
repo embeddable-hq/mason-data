@@ -3,8 +3,11 @@
  * src/web/shared.js `placePops`): the page over the server's own state (`runState`) and its own files (PAGE_ROUTES).
  *
  * - THE NAME COLUMN KEEPS A USABLE WIDTH at every width from 1000 to 1400 px (it was 2 px at 1024 px: the fixed columns
- *   filled the list's least width): the less important columns give way first — Key, then Size, then Last sync, then
- *   Rows — each hidden column's fact said in the row's note instead, and the page never scrolls sideways.
+ *   filled the list's least width): the less important columns give way first — Key, then Size, Last sync, Rows,
+ *   Columns and Sync — each hidden column's fact said in the row's note instead, and the page never scrolls sideways.
+ * - AN ADDED TABLE'S COLUMNS AND SYNC ARE COLUMNS OF THE LIST (issue 1110): each control is shown once at every width,
+ *   in its column or, where the column gave way, in the row's note, and a press at its centre reaches it. Opening the
+ *   Sync choice or the column form moves no row and no column, its popover beside the control shown.
  * - WHAT ADD OR SYNC NOW ANSWERED COVERS NO OTHER CONTROL: the "said" popover beside a row's actions is placed where it
  *   covers no button, link or box of another row (or of its own), or else lets a click through to what is under it —
  *   at every width from 1000 to 1400 px and on a phone.
@@ -75,7 +78,22 @@ const synced = (table: string) => ({ at, tables: [{ table, added: 1, updated: 2,
  *  state read after it says it ended, with what it did */
 const byHand = new Map<string, unknown>();
 let syncs = 0;
-const stateNow = () => ({ ...STATE, tables: (STATE.tables as Array<{ table: string }>).map((t) => byHand.has(t.table) ? { ...t, syncByHand: byHand.get(t.table) } : t) });
+/** With `follows` (a page opened with `{ follows: true }`), the state read after an Add or a Remove says it: the table
+ *  added has a synced table's fields under its name, the one removed a table not added's. Reset at each page opened. */
+let follows = false;
+/** A page opened with `{ live: true }` has payments kept by replication ("Live (replication)", the longest sync label);
+ *  `{ readOnly: true }` is a server's page whose sources file cannot be changed (the words, no buttons). */
+let variant: { live?: boolean; readOnly?: boolean } = {};
+const addedNow = new Set<string>(), removedNow = new Set<string>();
+const like = (name: string) => (STATE.tables as Array<Record<string, unknown>>).find((t) => t.table === name)!;
+const LIVE = { by: "replication", slot: "mason_shop", state: "streamed", why: null, position: "0/1", lastCommit: null, notRunning: null, syncedAt: at };
+const stateNow = () => ({ ...STATE, ...(variant.readOnly ? { sourcesReadOnly: "This server's sources file can't be changed from here.", sourcesReadOnlyKind: "deployed" } : {}),
+  tables: (STATE.tables as Array<{ table: string }>).map((t) => {
+  if (variant.live && t.table === "public.payments") t = { ...t, kept: LIVE } as typeof t;
+  const u = addedNow.has(t.table) ? { ...like("public.customers"), table: t.table, entry: { ...(like("public.customers").entry as object), name: t.table.slice("public.".length) } }
+    : removedNow.has(t.table) ? { ...like("public.visits"), table: t.table } : t;
+  return byHand.has(t.table) ? { ...u, syncByHand: byHand.get(t.table) } : u;
+}) });
 
 // ------------------------------------------------------------------ the page, served as the run serves it
 
@@ -87,12 +105,33 @@ const server = http.createServer((req, res) => {
   const json = (body: unknown) => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
   if (url.pathname === "/api/state") return json(stateNow());
   if (url.pathname === "/api/usage") return json({ samples: [], copySizes: [] });
+  // what the Sync choice and the column form read as they open (src/cli/sync-choice.ts, `mason tables <table> --json`)
+  const form = /^\/api\/tables\/([^/]+)\/(sync|columns)$/.exec(url.pathname);
+  if (form !== null) {
+    const t = decodeURIComponent(form[1]!);
+    if (form[2] === "columns") return json({ table: t, columns: ["id", "name", "status", "created_at", "api_token"].map((c) => ({ name: c, type: c === "id" ? "bigint" : "text", nullable: true, comment: null, references: null })) });
+    return json({ table: t, sync: { value: "off", from: "default" }, rows: 1200, bigRows: false, live: { allowed: true, checks: [] },
+      polls: [["poll 5m", 300], ["poll 15m", 900], ["poll 1h", 3600], ["poll 1d", 86_400]].map(([sync, seconds]) => ({ sync, seconds, cost: null })) });
+  }
+  if (url.pathname === "/api/remove") {
+    let body = "";
+    req.on("data", (c: Buffer) => { body += c.toString(); });
+    req.on("end", () => {
+      const tables = (JSON.parse(body) as { tables: string[] }).tables;
+      if (follows) for (const t of tables) { removedNow.add(t); addedNow.delete(t); }
+      json({ removed: tables, file: "/app/mason/sources/shop.yml" });
+    });
+    return;
+  }
   if (url.pathname === "/api/pick" || url.pathname === "/api/sync") {
     let body = "";
     req.on("data", (c: Buffer) => { body += c.toString(); });
     req.on("end", () => {
       const asked = JSON.parse(body) as { table?: string; tables?: string[] };
-      if (url.pathname === "/api/pick") return json(added(asked.table!));
+      if (url.pathname === "/api/pick") {
+        if (follows) { addedNow.add(asked.table!); removedNow.delete(asked.table!); }
+        return json(added(asked.table!));
+      }
       const table = asked.tables![0]!;
       const sync = { id: ++syncs, tables: [table], state: "syncing", startedAt: at, endedAt: null };
       byHand.set(table, { ...sync, state: "synced", endedAt: at, answer: synced(table) });
@@ -113,8 +152,12 @@ after(async () => {
   if (ready !== null) await new Promise((r) => server.close(r));
 });
 
-async function open(width: number, o: { touch?: boolean; height?: number } = {}): Promise<Page> {
+async function open(width: number, o: { touch?: boolean; height?: number; follows?: boolean; live?: boolean; readOnly?: boolean } = {}): Promise<Page> {
   browser ??= await playwright!.chromium.launch();
+  follows = o.follows ?? false;
+  variant = { live: o.live ?? false, readOnly: o.readOnly ?? false };
+  addedNow.clear();
+  removedNow.clear();
   // with touch, as a phone or a touch screen taps: the browser moves a tap to the nearest control under the finger
   const p = await browser.newPage({ viewport: { width, height: o.height ?? 900 }, ...(o.touch ? { hasTouch: true, isMobile: width < 641 } : {}) });
   await p.goto(`http://127.0.0.1:${await ready}/#tables`);
@@ -128,33 +171,208 @@ const LAPTOP = [...Array.from({ length: 21 }, (_, i) => 1000 + 20 * i), 1024].so
 
 /** The list's columns as the browser lays them out: each header's width (0: hidden), the page's and the list's
  *  sideways scroll, and, for each hidden column, the rows whose note does not say its fact. */
-const layout = (p: Page) => p.evaluate<{ widths: Record<string, number>; page: number; unsaid: string[] }>(`(() => {
-  const widths = {};
-  for (const th of document.querySelectorAll("#tables table.catalog thead th")) widths[[...th.classList].filter((c) => c !== "num")[0] || "act"] = Math.round(th.getBoundingClientRect().width);
-  const unsaid = [];
-  for (const [cls, w] of Object.entries(widths)) {
-    if (cls === "name" || cls === "act" || cls === "state" || w > 2) continue;
-    for (const tr of document.querySelectorAll("#tables table.catalog tbody tr:not(.under)")) {
-      const note = tr.nextElementSibling;
-      // a cell that says nothing (a table not added has no last sync) has nothing to say in the note either
-      if (!(tr.querySelector("td." + cls)?.textContent ?? "").trim()) continue;
-      const fold = note?.querySelector(".fold.f-" + cls);
-      const name = tr.querySelector("code.name")?.textContent;
-      if (!fold || fold.getBoundingClientRect().width < 1 || !(fold.dataset.fold ?? "").trim()) unsaid.push(name + ": " + cls);
+/** Each list's columns as the browser lays them out (Added, then Not added): each header's width (0: hidden), the
+ *  page's sideways scroll, and, for each hidden column, the rows whose note does not say its fact. */
+const layout = (p: Page) => p.evaluate<{ lists: Array<{ cls: string; widths: Record<string, number> }>; page: number; unsaid: string[] }>(`(() => {
+  const lists = [], unsaid = [];
+  for (const table of document.querySelectorAll("#tables table.catalog")) {
+    const widths = {};
+    for (const th of table.querySelectorAll("thead th")) widths[[...th.classList].filter((c) => c !== "num")[0] || "act"] = Math.round(th.getBoundingClientRect().width);
+    lists.push({ cls: table.className, widths });
+    for (const [cls, w] of Object.entries(widths)) {
+      if (cls === "name" || cls === "act" || cls === "state" || w > 2) continue;
+      for (const tr of table.querySelectorAll("tbody tr:not(.under)")) {
+        const note = tr.nextElementSibling;
+        // a cell that says nothing (a table not added has no last sync) has nothing to say in the note either
+        if (!(tr.querySelector("td." + cls)?.textContent ?? "").trim()) continue;
+        const fold = note?.querySelector(".fold.f-" + cls);
+        const name = tr.querySelector("code.name")?.textContent;
+        // a fact's fold says it by its data-fold; a control's (Columns, Sync) is the control itself
+        if (!fold || fold.getBoundingClientRect().width < 1 || !((fold.dataset.fold ?? "") || fold.textContent).trim()) unsaid.push(name + ": " + cls);
+      }
     }
   }
-  return { widths, page: document.documentElement.scrollWidth - window.innerWidth, unsaid };
+  return { lists, page: document.documentElement.scrollWidth - window.innerWidth, unsaid };
 })()`);
 
-test(`the name column keeps a usable width at every width from 1000 to 1400 px; a hidden column's fact is in the row's note`, { skip: noBrowser }, async () => {
-  for (const width of LAPTOP) {
+/** 375 and 390 px, 1000 to 1400 px every 20 px with 1024, and 1440 to 1600 px every 40 px. */
+const EVERY = [375, 390, ...LAPTOP, 1440, 1480, 1520, 1560, 1600];
+
+test(`each list's name column keeps a usable width at 375 px and every width from 1000 to 1600 px; a hidden column's fact is in the row's note; Not added has no Columns and no Sync (issue 1110)`, { skip: noBrowser }, async () => {
+  for (const width of EVERY) {
     const p = await open(width);
     const l = await layout(p);
     await p.close();
-    assert.ok((l.widths.name ?? 0) >= 180, `${width} px: the name column is ${l.widths.name} px wide (${JSON.stringify(l.widths)})`);
+    assert.deepEqual(l.lists.map((x) => x.cls), ["catalog", "catalog not-added"], `${width} px: Added, then Not added`);
+    for (const { cls, widths } of l.lists) {
+      // a phone's least width is the name, the state and the actions, less than 180 px for the name: it scrolls in its card
+      if (width > 640) assert.ok((widths.name ?? 0) >= 180, `${width} px, ${cls}: the name column is ${widths.name} px wide (${JSON.stringify(widths)})`);
+    }
+    const [added, other] = l.lists.map((x) => x.widths);
+    assert.ok("cols" in added! && "sync" in added!, `${width} px: Added has Columns and Sync`);
+    assert.ok(!("cols" in other!) && !("sync" in other!), `${width} px: Not added has neither (${JSON.stringify(other)})`);
+    // Not added's room goes to its name and its other columns: never fewer of them shown than Added, its name never narrower
+    const shown = (w: Record<string, number>) => ["rows", "key", "last", "size"].filter((c) => (w[c] ?? 0) > 2);
+    assert.ok(shown(other!).length >= shown(added!).length, `${width} px: Not added shows ${shown(other!)} where Added shows ${shown(added!)}`);
+    if (width > 640) assert.ok(other!.name! >= added!.name! - 1 || shown(other!).length > shown(added!).length, `${width} px: Not added's name ${other!.name} px, Added's ${added!.name} px`);
     assert.ok(l.page <= 0, `${width} px: the page scrolls ${l.page} px sideways`);
     assert.deepEqual(l.unsaid, [], `${width} px: each hidden column's fact is in every row's note`);
   }
+});
+
+/** Each added table's Columns and Sync controls: how many of each are shown (a box laid out), where (its cell or its
+ *  note), and whether a press at its centre reaches it. Read in the page, each scrolled to the window's middle. */
+const controls = (p: Page) => p.evaluate<{ rows: number; out: string[]; where: Record<string, string> }>(`(() => {
+  const out = [], where = {};
+  const rows = [...document.querySelectorAll("#tables table.catalog tbody tr.c-added")];
+  for (const tr of rows) {
+    const name = tr.querySelector("code.name")?.getAttribute("title") ?? "?";
+    const note = tr.nextElementSibling;
+    for (const [what, attr] of [["columns", "data-choose"], ["sync", "data-choose-sync"]]) {
+      const all = [...tr.querySelectorAll("[" + attr + "]"), ...note.querySelectorAll("[" + attr + "]")];
+      const shown = all.filter((b) => b.getClientRects().length > 0);
+      if (shown.length !== 1) { out.push(name + "'s " + what + ": " + shown.length + " shown"); continue; }
+      const b = shown[0];
+      where[what] = b.closest("tr.under") ? "note" : "column";
+      b.scrollIntoView({ block: "center", inline: "nearest" });
+      const r = b.getBoundingClientRect();
+      if (r.width < 8 || r.height < 16) { out.push(name + "'s " + what + " is " + Math.round(r.width) + " × " + Math.round(r.height) + " px"); continue; }
+      const hit = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+      if (hit === null || !(hit === b || b.contains(hit))) out.push(name + "'s " + what + " is under " + (hit?.tagName ?? "nothing") + " at its centre");
+      // its words whole: a label wider than its column wraps in its button, never cut
+      if (b.scrollWidth > b.clientWidth + 0.5) out.push(name + "'s " + what + " is cut (" + b.scrollWidth + " > " + b.clientWidth + ")");
+    }
+  }
+  return { rows: rows.length, out, where };
+})()`);
+
+/** Every row and cell of the list, and each header: where it is and how big, to the tenth of a pixel. */
+const boxes = (p: Page) => p.evaluate<string[]>(`(() => {
+  const b = (e) => { const r = e.getBoundingClientRect(); return [r.left, r.top + window.scrollY, r.width, r.height].map((x) => Math.round(x * 10) / 10).join(","); };
+  return [...document.querySelectorAll("#tables table.catalog tr, #tables table.catalog tr > *")].map((e) => e.tagName + " " + b(e));
+})()`);
+
+/** 1000 to 1600 px every 40 px, 900 and 1024 (the icon rail; the width the owner met) and phones. */
+const CONTROL_WIDTHS = [375, 390, 900, 1024, ...Array.from({ length: 16 }, (_, i) => 1000 + 40 * i)].sort((a, b) => a - b);
+
+test(`each added table's Columns and Sync are shown once and can be pressed — in their columns, or in the note where those gave way — at 375 to 1600 px (issue 1110)`, { skip: noBrowser }, async () => {
+  const seen: string[] = [];
+  for (const width of CONTROL_WIDTHS) {
+    const p = await open(width);
+    const c = await controls(p);
+    await p.close();
+    assert.equal(c.rows, 7, `${width} px: the added tables`);
+    assert.deepEqual(c.out, [], `${width} px: each control once, whole, and pressable`);
+    seen.push(`${width}: ${c.where.columns}/${c.where.sync}`);
+  }
+  // both in their columns on a wide screen, both in the note on a phone
+  assert.ok(seen.includes("1600: column/column") && seen.includes("375: note/note"), seen.join(", "));
+});
+
+for (const [what, attr, form] of [["the Sync choice", "data-choose-sync", "form[data-sync-form]"], ["the column form", "data-choose", "form[data-pick-form]"]] as const) {
+  test(`opening ${what} moves no row, cell or column, and its popover is beside the control shown: 375, 900, 1024, 1280 and 1600 px (issue 1110)`, { skip: noBrowser }, async () => {
+    for (const width of [375, 900, 1024, 1280, 1600]) {
+      const p = await open(width);
+      const sel = `#tables [${attr}="public.order_items"]`;
+      await p.evaluate(`[...document.querySelectorAll(${JSON.stringify(sel)})].find((b) => b.getClientRects().length).scrollIntoView({ block: "center" })`);
+      const before = await boxes(p);
+      await p.click(`${sel}:visible`);
+      await p.waitForSelector(`.pop.ask:not([hidden]) ${form}`);
+      await p.waitForTimeout(200);
+      const after = await boxes(p);
+      const beside = await p.evaluate<{ gap: number; right: number }>(`(() => {
+        const pop = document.querySelector(".pop.ask:not([hidden])").getBoundingClientRect();
+        const b = [...document.querySelectorAll(${JSON.stringify(sel)})].find((x) => x.getClientRects().length).getBoundingClientRect();
+        // the popover under or over the control (4 px apart), or, too tall for either side, kept inside the window (placePops);
+        // its right edge on the control's unless the window's gutter moved it
+        const clamped = pop.top <= 16.5 || pop.bottom >= window.innerHeight - 16.5;
+        return { gap: clamped ? 0 : Math.min(Math.abs(pop.top - b.bottom), Math.abs(b.top - pop.bottom)), right: Math.abs(pop.right - b.right) <= 1 || pop.left <= 16.5 || pop.right >= window.innerWidth - 16.5 ? 0 : pop.right - b.right };
+      })()`);
+      await p.close();
+      assert.deepEqual(after.filter((x, i) => x !== before[i]), [], `${width} px: nothing moved`);
+      assert.equal(after.length, before.length, `${width} px: no row or cell added`);
+      assert.ok(beside.gap <= 5 && beside.right === 0, `${width} px: beside the control (${JSON.stringify(beside)})`);
+    }
+  });
+}
+
+/** Every Columns and Sync label shown whose words do not fit inside its box: a button's content box, or, for a
+ *  read-only page's words, its cell's. Measured from the words' own boxes (a range), not the element's scroll width. */
+const unfit = (p: Page) => p.evaluate<{ labels: number; out: string[] }>(`(() => {
+  const out = [];
+  const labels = [...document.querySelectorAll("#tables table.catalog .syncnow")].filter((e) => e.getClientRects().length);
+  for (const e of labels) {
+    const box = e.tagName === "BUTTON" ? e : e.closest("td");
+    const cs = getComputedStyle(box), b = box.getBoundingClientRect();
+    const left = b.left + parseFloat(cs.borderLeftWidth) + parseFloat(cs.paddingLeft), right = b.right - parseFloat(cs.borderRightWidth) - parseFloat(cs.paddingRight);
+    const range = document.createRange();
+    range.selectNodeContents(e);
+    const over = Math.max(0, ...[...range.getClientRects()].map((r) => Math.max(r.right - right, left - r.left)));
+    if (over > 0.05) out.push(JSON.stringify(e.textContent) + " (" + e.tagName.toLowerCase() + ") runs " + over.toFixed(1) + " px past its box");
+  }
+  return { labels: labels.length, out };
+})()`);
+
+test(`every Columns and Sync label reads whole inside its box, "Live (replication)" included, editable and read-only: 375, 900, 1024, 1280 and 1600 px (issue 1110)`, { skip: noBrowser }, async () => {
+  const found: string[] = [];
+  for (const readOnly of [false, true]) {
+    for (const width of [375, 900, 1024, 1280, 1600]) {
+      const p = await open(width, { live: true, readOnly });
+      const live = await p.evaluate<number>(`[...document.querySelectorAll("#tables .syncnow")].filter((e) => e.getClientRects().length && /Live \\(replication\\)/.test(e.textContent)).length`);
+      const u = await unfit(p);
+      await p.close();
+      const what = `${width} px${readOnly ? ", read-only" : ""}`;
+      if (live !== 1) found.push(`${what}: "Live (replication)" shown ${live} times`);
+      if (u.labels < 14) found.push(`${what}: ${u.labels} labels shown`);
+      for (const o of u.out) found.push(`${what}: ${o}`);
+    }
+  }
+  assert.deepEqual(found, [], "every label whole");
+});
+
+/** Every row of both lists and each header: where it is and how big, to the hundredth of a pixel, keyed by the row's
+ *  table (a note by its table too), so a row that changed its list is still told apart. */
+const rowBoxes = (p: Page) => p.evaluate<Record<string, string>>(`(() => {
+  const out = {};
+  const b = (e) => { const r = e.getBoundingClientRect(); return [r.left, r.top + window.scrollY, r.width, r.height].map((x) => x.toFixed(2)).join(","); };
+  for (const tr of document.querySelectorAll("#tables table.catalog tr")) {
+    const own = tr.classList.contains("under") ? tr.previousElementSibling : tr;
+    const name = own?.querySelector("code.name")?.getAttribute("title") ?? "header " + tr.closest("table").className;
+    out[name + (tr.classList.contains("under") ? " (its note)" : "")] = b(tr);
+  }
+  return out;
+})()`);
+
+/** What a click changed: each row whose box is not where it was. */
+const movedRows = (before: Record<string, string>, after: Record<string, string>) =>
+  Object.keys({ ...before, ...after }).filter((k) => before[k] !== after[k]).map((k) => `${k}: ${before[k]} -> ${after[k]}`);
+
+// A CLICK MOVES NO OTHER ROW, ONE THAT CHANGES A ROW'S BUTTONS INCLUDED (the review of PR 1113): a table added from Not
+// added gets its Columns and Sync buttons in its note, and a table removed loses them; a note with them is as tall as
+// one without, so no row under it moves by a pixel
+test(`Add from Not added, and Remove then confirm, move no row by a pixel: 1280, 1024 and 900 px (issue 1110)`, { skip: noBrowser }, async () => {
+  const found: string[] = [];
+  for (const width of [1280, 1024, 900]) {
+    for (const [what, table, open_, confirm, done] of [
+      ["Add", "public.audit_trail", 'button[data-add-table="public.audit_trail"]', null, "#sync-note-tables-public\\.audit_trail"],
+      ["Remove", "public.order_items", 'button[data-remove-table="public.order_items"]', 'button[data-confirm-remove-table="public.order_items"]', null],
+    ] as const) {
+      const p = await open(width, { follows: true });
+      await p.evaluate(`document.querySelector('${open_.replace(/'/g, "\\'")}').scrollIntoView({ block: "center" })`);
+      await p.waitForTimeout(100);
+      const before = await rowBoxes(p);
+      await p.click(open_);
+      if (confirm !== null) await p.click(confirm);
+      // the state read after it says it: the row's buttons changed (added: its Sync in its note; removed: Add)
+      if (done !== null) await p.waitForSelector(done);
+      else await p.waitForSelector(`button[data-add-table="${table}"]`);
+      await p.waitForTimeout(300);
+      const after = await rowBoxes(p);
+      await p.close();
+      for (const m of movedRows(before, after)) found.push(`${width} px, ${what} ${table}: ${m}`);
+    }
+  }
+  assert.deepEqual(found, [], "no row moved");
 });
 
 /** Every table's name and state word that a person cannot read whole: cut inside its cell (its text past its box), not

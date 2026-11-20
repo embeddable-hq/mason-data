@@ -19,6 +19,7 @@
  * its scale, written as the engine's DECIMAL arithmetic (`storedNumeric`); one they don't is refused with its own reason
  * (`notStoredRefusal`). Any other type is refused by name.
  */
+import { OWN_PREFIX } from "./own-names.ts";
 import { deparseSync } from "pgsql-deparser";
 import type { Node } from "libpg-query";
 import { parseSql, PostgresSyntaxError } from "../api/postgres/parser.ts";
@@ -28,6 +29,7 @@ import { StatementError, type DuckPlan } from "./statement.ts";
 import type { NumericProgram } from "../lib/pg-numeric.ts";
 import type { CellConv } from "./types.ts";
 import { relationKey } from "../lib/relation-key.ts";
+import { cteReads } from "./cte-names.ts";
 import { exprType, tableColumnThrough, type TreeNode, type TreeValue } from "./pgtree.ts";
 
 /** A refusal of a generated table: its key in the file (null: the file itself), what is wrong, why, and the ways out. */
@@ -604,7 +606,7 @@ const made = (sql: string, held: number, scale: Scale, from: readonly Stored[]):
  * none loses a digit. Not stored here: a division (the engine divides a numeric as a double; an average is one).
  * One node at a time: its children are `sub`'s (`storedProgram`, which walks each distinct node once).
  */
-function storedNumeric(p: NumericProgram, types: EngineTypes, cells: readonly CellConv[], sub: (x: NumericProgram) => Stored | NotStored): Stored | NotStored {
+function storedNumeric(p: NumericProgram, types: EngineTypes, cells: readonly CellConv[], own: string, sub: (x: NumericProgram) => Stored | NotStored): Stored | NotStored {
   // a numeric read from text is its text until a typmod gives it a scale: nothing else computes over it
   const all = (args: readonly NumericProgram[]): Stored[] | NotStored => {
     const out: Stored[] = [];
@@ -621,7 +623,8 @@ function storedNumeric(p: NumericProgram, types: EngineTypes, cells: readonly Ce
   const toPlace = (fn: string, arg: NumericProgram, n: number): Stored | NotStored => one(arg, (x) => fixed(x, `${fn}(${x.sql}, ${n})`, Math.max(0, n)));
   switch (p.op) {
     case "cell": {
-      const name = `__mason_cell_${p.key}`, type = types.get(name);
+      // (the plan's own prefix names its cells, src/duck/own-names.ts)
+      const name = `${own}cell_${p.key}`, type = types.get(name);
       const sql = `__mason_output.${JSON.stringify(name)}`;
       const d = type === undefined ? null : DECIMAL_TYPE.exec(type);
       if (d !== null) return { sql, held: Number(d[2]), peak: Number(d[2]), scale: Number(d[2]), engine: false };
@@ -704,7 +707,7 @@ function storedNumeric(p: NumericProgram, types: EngineTypes, cells: readonly Ce
  * a node reached under a condition over a computed value is written in its parents, as before this PR. A leaf is short,
  * and written where it is read.
  */
-function storedProgram(p: NumericProgram, types: EngineTypes, cells: readonly CellConv[], column: number): { stored: Stored | NotStored; guards: string[][]; values: string[][] } {
+function storedProgram(p: NumericProgram, types: EngineTypes, cells: readonly CellConv[], column: number, own: string): { stored: Stored | NotStored; guards: string[][]; values: string[][] } {
   const leaf = (x: NumericProgram): boolean => x.op === "cell" || x.op === "literal";
   const judged = new Map<NumericProgram, Stored | NotStored>();
   // a leaf's SQL, or null where it has none to compare (a value not stored): its condition cannot be written
@@ -798,7 +801,7 @@ function storedProgram(p: NumericProgram, types: EngineTypes, cells: readonly Ce
   const sub = (x: NumericProgram): Stored | NotStored => {
     const known = judged.get(x);
     if (known !== undefined) return known;
-    let s = storedNumeric(x, types, cells, sub);
+    let s = storedNumeric(x, types, cells, own, sub);
     if (!("why" in s) && (into.get(x)?.length ?? 0) > 1 && !leaf(x) && s.sql !== "NULL") {
       const guard = guardOf(x);
       if (guard !== null) {
@@ -920,7 +923,7 @@ export function storedColumns(d: DefinitionPlan, types: EngineTypes): { columns:
   // wire's rule) stored `stddev(x)::numeric(p,s)` from the engine's double (PR 202 round 11)
   const engineDouble = (i: number): boolean => { const f = d.forms[i]; return f !== null && f !== undefined && ENGINE_DOUBLES.has(f.why); };
   for (const { column, program, cells } of d.numerics) {
-    const name = d.columns[column]!.name, { stored, guards: ownGuards, values: ownValues } = storedProgram(program, types, cells, column);
+    const name = d.columns[column]!.name, { stored, guards: ownGuards, values: ownValues } = storedProgram(program, types, cells, column, d.plan.own ?? OWN_PREFIX);
     const no = engineDouble(column) ? { why: "engine" as const } : "why" in stored ? stored : verdict(stored);
     if (no !== null) refused.push(notStoredRefusal(name, no, d.forms[column] ?? null, d.roots[column]));
     else { exprs.set(column, (stored as Stored).sql); merge(guards, ownGuards); merge(values, ownValues); }
@@ -939,24 +942,23 @@ export function storedColumns(d: DefinitionPlan, types: EngineTypes): { columns:
 }
 
 /** the tables a definition's SQL names, by name alone (`schema.table`, a bare name `public`'s): what a cycle is told
- *  from before anything is planned. A bare name some WITH of the statement holds is a CTE's and left out. Nothing,
- *  where the SQL does not parse: that is refused at its check. */
+ *  from before anything is planned. A name Postgres binds to a WITH query is left out, as src/duck/cte-names.ts
+ *  `cteReads` says, the one reader of those rules (issue 1096): `WITH orders AS (SELECT * FROM orders) …` reads the
+ *  table orders inside the WITH query's own body. Nothing, where the SQL does not parse: that is refused at its check. */
 export async function readsByName(sql: string): Promise<string[]> {
   const select = await selectOf(sql);
   if ("refused" in select) return [];
-  const ctes = new Set<string>(), qualified = new Set<string>(), bare = new Set<string>();
+  const bound = cteReads(select.stmt), names = new Set<string>();
   const walk = (v: unknown): void => {
     if (Array.isArray(v)) { v.forEach(walk); return; }
     if (typeof v !== "object" || v === null) return;
     const o = v as Record<string, unknown>;
-    const cte = o.CommonTableExpr as { ctename?: string } | undefined;
-    if (cte?.ctename !== undefined) ctes.add(cte.ctename);
     const r = o.RangeVar as { schemaname?: string; relname: string } | undefined;
-    if (r !== undefined) (r.schemaname === undefined ? bare : qualified).add(r.schemaname === undefined ? r.relname : `${r.schemaname}.${r.relname}`);
+    if (r !== undefined) { if (!bound.has(r)) names.add(`${r.schemaname ?? "public"}.${r.relname}`); return; }
     Object.values(o).forEach(walk);
   };
   walk(select.stmt);
-  return [...new Set([...qualified, ...[...bare].filter((n) => !ctes.has(n)).map((n) => `public.${n}`)])].sort();
+  return [...names].sort();
 }
 
 /** a definition in a cycle of generated tables (`cycle`: the tables, from this one round to it again) */

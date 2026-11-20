@@ -14,7 +14,7 @@
  */
 import type { PgConnection } from "../cdc/pg-wire.ts";
 import { connectSource, maskedUrl, parseSource, readSourceFacts, versionProblem, type SourceFacts, type SourceTable } from "./preflight.ts";
-import { addedTables, copiedColumns, entryProblems, effectiveSync, replicatedEntries, shownPath, type ProjectSource, type SourceFile } from "./sources.ts";
+import { addedTables, copiedColumns, entryProblems, effectiveSync, replicatedEntries, shownPath, type ProjectSource, type SourceFile, type TableEntry } from "./sources.ts";
 import { namedPublication, projectReplication, readinessVerdict } from "./replication-mode.ts";
 import { readServerFacts, readSlotFacts, type ProductionCheck, type ServerFacts } from "./replication-checks.ts";
 import { gapProblem, gapStatements, namedPublicationVerdict, readNamedPublication, type NamedPublicationVerdict } from "../duck/publication.ts";
@@ -48,7 +48,7 @@ export interface SourceCheck { problems: SourceProblem[]; tables: number; replic
 export function tableCheck(src: SourceFile, facts: Pick<SourceFacts, "tables">, database: string, root: string): { problems: SourceProblem[]; added: AddedTable[]; streamed: AddedTable[] } {
   const shown = shownPath(root, src.file);
   const problems: SourceProblem[] = [];
-  const ok = [];
+  const ok: TableEntry[] = [];
   // every table the database has under sync: replication, with the columns its entry syncs, whatever else is wrong with
   // it: what a named publication must carry, so its gaps are on the same answer — but never one that cannot be
   // replicated (`unreplicable`), which no statement this check prints may name
@@ -60,7 +60,7 @@ export function tableCheck(src: SourceFile, facts: Pick<SourceFacts, "tables">, 
       const keep = new Set(copiedColumns(t, e));
       streamed.push({ ...t, columns: t.columns.filter((c) => keep.has(c.name)), foreignKeys: [], sync });
     }
-    const said = entryProblems(t, e, facts.tables, database, sync);
+    const said = entryProblems(t, e, facts.tables, database, sync, src.tables);
     if (t === undefined) {
       for (const m of said) problems.push({ code: "missing_table", table: e.table, message: m,
         fix: `remove tables.${e.name} from ${shown}, or have the database's owner make it or grant this user SELECT on it and USAGE on its schema (mason tables lists what it can read)`, sql: null });
@@ -68,7 +68,8 @@ export function tableCheck(src: SourceFile, facts: Pick<SourceFacts, "tables">, 
       for (const m of said) problems.push({ code: "table", table: e.table, message: m, fix: `change tables.${e.name} in ${shown}, or the table on the database, as said`, sql: null });
     } else ok.push(e);
   }
-  const added = addedTables({ ...src, tables: ok }, facts.tables, database, root);
+  // (a reference to a table that failed was held to the whole file above: never refused again for its absence here)
+  const added = addedTables({ ...src, tables: ok }, facts.tables, database, root, src.tables.filter((e) => !ok.includes(e)).map((e) => e.table));
   // every entry kept passed entryProblems, which is all addedTables refuses by: a refusal here is a bug of this module
   if (!Array.isArray(added)) throw new Error(`the tables that passed were refused: ${added.message}`);
   return { problems, added, streamed };

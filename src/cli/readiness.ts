@@ -5,7 +5,7 @@
  * re-exports it).
  */
 import type { RunState } from "./commands.ts";
-import type { CopyProgressView, CopyState, KeptCurrent, Synced } from "../duck/sync.ts";
+import type { CopyProgressView, CopyState, KeptCurrent, PollProgress, Synced } from "../duck/sync.ts";
 import type { GeneratedStatus } from "../duck/generated.ts";
 import { CATCHING_UP, inCatchUp } from "../lib/table-sync.ts";
 
@@ -72,6 +72,56 @@ export function copyingText(copied: number, rowsEstimate: number | null, p?: Cop
   return { fraction, text: parts.join(" · ") };
 }
 
+/**
+ * HOW FAR A SYNC BY HAND OF A TABLE IS, NOW (`/api/state` `tables[].syncProgress`, issue 1173: a sync by hand of a 17 M-row
+ * table showed its old full bar, nothing moving, for minutes). Computed once, on the server, from the sync by hand's start
+ * and the table's last poll (src/duck/sync.ts `PollProgress`, counted on Mason's side as rows arrive); `mason status`
+ * and the web page render it (`syncProgressText`):
+ *  - `step`: `waiting` (its poll has not begun: the sync ahead of it, or another table of the same sync, runs first),
+ *    `starting` its read (the database attached, its columns checked), `reading` its changed rows, `writing` them, `counting` its rows on the database, `deleting` (reading the
+ *    database's keys to find the rows it deleted), `read` (its poll is in; the sync ends with the other tables it covers);
+ *  - `startedAt` the sync by hand's start, `seconds` how long ago that was at the moment asked;
+ *  - `changedRows`, `keysRead`, `keysTotal`, `pieces`: the poll's (`PollProgress`), null where it has none;
+ *  - `share`: how much is done, ONLY where a total is known — the database's keys read against the count of them the
+ *    poll already read, held under 1 — else null, and no bar is drawn. The changed rows have no total (the database
+ *    sends only the rows that changed, and how many only once it has sent them all), so a sync that has only begun is
+ *    never a full bar.
+ */
+export interface SyncProgress {
+  step: "waiting" | "starting" | "reading" | "writing" | "counting" | "deleting" | "read";
+  startedAt: string;
+  seconds: number;
+  changedRows: number | null;
+  keysRead: number | null;
+  keysTotal: number | null;
+  pieces: { written: number; of: number } | null;
+  share: number | null;
+}
+export function syncProgressOf(startedAt: string, p: PollProgress | undefined, now: number = Date.now()): SyncProgress {
+  const seconds = Math.max(0, Math.round((now - Date.parse(startedAt)) / 1000));
+  // a poll begun before this sync was asked is another's (an earlier one, or the pass ahead it waits for)
+  if (p === undefined || Date.parse(p.startedAt) < Date.parse(startedAt)) {
+    return { step: "waiting", startedAt, seconds, changedRows: null, keysRead: null, keysTotal: null, pieces: null, share: null };
+  }
+  const share = p.step === "deleting" && p.keysRead !== null && p.keysTotal !== null && p.keysTotal > 0 ? Math.min(0.99, p.keysRead / p.keysTotal) : null;
+  return { step: p.step === "done" ? "read" : p.step, startedAt, seconds, changedRows: p.changedRows, keysRead: p.keysRead, keysTotal: p.keysTotal, pieces: p.pieces, share };
+}
+
+/** A sync by hand's progress on a table's line (`mason status`; the web page's `syncProgressText` is held equal). */
+export function syncProgressText(p: SyncProgress): string {
+  const took = ` (${duration(p.seconds)})`;
+  const changed = p.changedRows === null ? "its changed rows read" : `${n(p.changedRows)} changed row${p.changedRows === 1 ? "" : "s"} read`;
+  switch (p.step) {
+    case "waiting": return `syncing by hand: waiting for its turn${took}`;
+    case "starting": return `syncing by hand: starting to read it from the database${took}`;
+    case "reading": return `syncing by hand: reading its changed rows from the database${p.changedRows === null ? "" : `, ${n(p.changedRows)} so far`}${took}`;
+    case "writing": return `syncing by hand: ${changed}, writing them${p.pieces === null ? "" : ` (${p.pieces.written} of ${p.pieces.of} pieces written)`}${took}`;
+    case "counting": return `syncing by hand: ${changed}, counting its rows on the database${took}`;
+    case "deleting": return `syncing by hand: ${changed}, finding the rows deleted on the database${p.keysTotal === null ? "" : p.keysRead === null ? `, ${n(p.keysTotal)} keys to read` : `, ${n(p.keysRead)} of ${n(p.keysTotal)} keys read`}${took}`;
+    case "read": return `syncing by hand: ${changed}, finishing the sync${took}`;
+  }
+}
+
 /** A copy's progress on one line, as `mason wait` lists what it waits for: `public.orders: copying 12% · …` (`copyingText`). */
 export function copyProgress(source: string, copied: number, rowsEstimate: number | null, p?: CopyProgressView): string {
   const c = copyingText(copied, rowsEstimate, p);
@@ -81,7 +131,9 @@ export function copyProgress(source: string, copied: number, rowsEstimate: numbe
 /**
  * A TABLE'S SYNC IN ONE WORD, from what the sync has of its copy — the one place it is decided (`/api/state`
  * `tables[].sync.state`, so mason status, the web page and an agent say one thing):
- *  - `waiting`: no copy yet, nor one under way (the sync has not reached it);
+ *  - `waiting`: no copy yet, nor one under way (the sync has not reached it); or its whole sync waits for an open
+ *    transaction on the database to end (`syncWaits`, issue 1066: a wait, never a failure — a table synced before
+ *    serves that copy meanwhile, a first sync is not ready);
  *  - `failed`: its copy failed, or the poll, catch-up or stream keeping it current did (its `error` says why; a table
  *    copied before still serves that copy);
  *  - `syncing`: being copied, or copied again (a table copied before serves that copy meanwhile);
@@ -97,6 +149,7 @@ export type TableSyncState = "synced" | "syncing" | "catching-up" | "failed" | "
 export function syncStateOf(c: CopyState | undefined, now: number = Date.now()): TableSyncState {
   if (c === undefined || c.phase === "waiting") return "waiting";
   if (c.phase === "failed" || c.error !== null) return "failed";
+  if (c.syncWaits !== undefined) return "waiting";
   if (c.phase === "copying" || c.rebuilding === "copy") return "syncing";
   if (inCatchUp(c)) return "catching-up";
   return (behindOf(c.kept, now).behindBySeconds ?? 0) > 0 ? "behind" : "synced";
@@ -174,7 +227,8 @@ export function readiness(s: Pick<RunState, "tables">): Readiness {
     const state = t.sync?.state ?? (t.error ? "failed" : t.copy?.phase === "copying" ? "syncing" : !t.copy ? "waiting" : "synced");
     if (state === "failed") { failed.push(`${t.table}: ${firstLine(t.error ?? "its sync failed (mason status says why)")}`); continue; }
     if (t.copy?.phase === "copying") { waiting.push(copyProgress(t.table, t.copy.rowsCopied, t.rows, t.copy.progress)); continue; }
-    if (!t.copy) { waiting.push(`${t.table}: waiting for its first sync to start`); continue; }
+    // its first sync not begun, or waiting for an open transaction on the database (issue 1066): never a failure
+    if (!t.copy) { waiting.push(`${t.table}: ${t.syncWaits?.why ?? "waiting for its first sync to start"}`); continue; }
     // served, its one catch-up poll not over (issue 834): its synced data is as of before what that poll reads
     if (state === "catching-up") waiting.push(`${t.table}: ${CATCHING_UP}`);
   }

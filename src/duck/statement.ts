@@ -41,6 +41,8 @@ export interface DuckPlan {
   withTies: boolean;
   /** the numeric columns computed as Postgres computes them, from cells DuckDB answers after Postgres's columns */
   exact?: ExactColumn[];
+  /** the prefix of every name the plan's SQL invents (src/duck/own-names.ts): its cells are `<own>cell_<k>` */
+  own?: string;
   /** what Postgres resolved the statement to (src/duck/resolved.ts): each one verified, or the statement was refused */
   resolved: readonly string[];
   /** each function it calls with each argument's type (src/duck/resolved.ts `argumentTypes`) */

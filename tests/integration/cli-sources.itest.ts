@@ -120,13 +120,16 @@ test("init writes the sources file; tables, add and remove read and edit it; the
   assert.deepEqual((customers.json.added as Array<Record<string, unknown>>).map((a) => [a.table, a.columns, a.addedKey]), [["public.customers", ["id", "name"], ["id"]]]);
   const orders = ok(mason("add", "orders", "--json"), "mason add orders");
   assert.deepEqual((orders.json.added as Array<Record<string, unknown>>).map((a) => [a.table, a.columns, a.exclude, a.skippedSecrets]), [["public.orders", null, ["api_token"], ["api_token"]]]);
+  // its foreign key to customers, which the file syncs: written as a reference (issue 1143)
+  assert.deepEqual((orders.json.added as Array<Record<string, unknown>>)[0]!.referencesWritten,
+    [{ table: "public.orders", columns: ["customer_id"], references: "public.customers", targetColumns: ["id"] }]);
   const noKey = mason("add", "events", "--json");
   assert.equal(noKey.status, 1, "a table with no primary key and no --key is refused");
   ok(mason("add", "events", "--key", "tenant_id,id", "--json"), "mason add events --key");
   // a comment of the person's own, kept by every edit after it
   fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("tables:\n", "tables:   # what the dashboards read\n"));
   ok(mason("add", "customers", "--columns", "name,email", "--json"), "mason add customers again, wider");
-  assert.equal(fs.readFileSync(file, "utf8"), HEAD + "tables:   # what the dashboards read\n  customers:\n    columns: [id, name, email]\n  orders:\n    exclude: [api_token]\n  events:\n    key: [tenant_id, id]\n");
+  assert.equal(fs.readFileSync(file, "utf8"), HEAD + "tables:   # what the dashboards read\n  customers:\n    columns: [id, name, email]\n  orders:\n    exclude: [api_token]\n    references:\n      customer_id: customers.id\n  events:\n    key: [tenant_id, id]\n");
 
   ok(mason("wait", "--json"), "mason wait");
   const user = ok(mason("user", "add", "it", "--json"), "mason user add");
@@ -162,9 +165,10 @@ test("init writes the sources file; tables, add and remove read and edit it; the
   const source = psql(dbUrl, "SELECT * FROM events ORDER BY tenant_id, id");
   await until("the poll to bring events' update, delete and insert", () => eventsNow() === source);
 
-  // REMOVE: its entry gone, the rest of the file as it was; its copy dropped
+  // REMOVE: its entry gone, and the reference orders held to it, the rest of the file as it was; its copy dropped
   const removed = ok(mason("remove", "customers", "--json"), "mason remove customers");
   assert.equal(removed.json.file, file);
+  assert.deepEqual(removed.json.referencesRemoved, [{ table: "public.orders", columns: ["customer_id"], references: "public.customers", targetColumns: ["id"] }]);
   assert.equal(fs.readFileSync(file, "utf8"), HEAD + "tables:   # what the dashboards read\n  orders:\n    exclude: [api_token]\n  events:\n    key: [tenant_id, id]\n");
   await until("customers' copy to be dropped", () => spawnSync("psql", ["-X", "-q", api, "-c", "SELECT 1 FROM public.customers LIMIT 1"], { encoding: "utf8" }).status !== 0);
   const later = ok(mason("tables", "--json"), "mason tables, running");

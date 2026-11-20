@@ -119,6 +119,8 @@ export function toCharTime(text: string, fmt: string): string | null {
       const body = fm ? digits : digits.padStart(width, "0");
       return (neg ? "-" : "") + body + (th === null ? "" : ordinal(Math.abs(n), th === "TH"));
     };
+    // a fraction of the second is zero-padded under FM too, as Postgres writes it (`%03d` and the like, whatever the prefix)
+    const fraction = (n: number, width: number): string => String(n).padStart(width, "0") + (th === null ? "" : ordinal(n, th === "TH"));
     const P = pattern.toUpperCase();
     const h12 = hour % 12 === 0 ? 12 : hour % 12;
     const pm = hour >= 12;
@@ -128,18 +130,19 @@ export function toCharTime(text: string, fmt: string): string | null {
       case "HH24": out += num(hour, 2); break;
       case "MI": out += num(minute, 2); break;
       case "SS": out += num(second, 2); break;
-      case "MS": out += num(Math.floor(micro / 1000), 3); break;
-      case "US": out += num(micro, 6); break;
+      case "MS": out += fraction(Math.floor(micro / 1000), 3); break;
+      case "US": out += fraction(micro, 6); break;
       case "FF1": case "FF2": case "FF3": case "FF4": case "FF5": case "FF6": {
         const n = Number(P[2]);
-        out += num(Math.floor(micro / 10 ** (6 - n)), n); break;
+        out += fraction(Math.floor(micro / 10 ** (6 - n)), n); break;
       }
       case "SSSS": case "SSSSS": out += num(hour * 3600 + minute * 60 + second, 0); break;
       case "AM": case "PM": out += pattern === P ? (pm ? "PM" : "AM") : (pm ? "pm" : "am"); break;
       case "A.M.": case "P.M.": out += pattern === P ? (pm ? "P.M." : "A.M.") : (pm ? "p.m." : "a.m."); break;
       case "AD": case "BC": out += pattern === P ? (year <= 0 ? "BC" : "AD") : (year <= 0 ? "bc" : "ad"); break;
       case "A.D.": case "B.C.": out += pattern === P ? (year <= 0 ? "B.C." : "A.D.") : (year <= 0 ? "b.c." : "a.d."); break;
-      case "Y,YYY": { const y = year <= 0 ? 1 - year : year; out += `${Math.floor(y / 1000)},${String(y % 1000).padStart(3, "0")}`; break; }
+      // TH is the ordinal of the whole year, as Postgres reads the text it wrote
+      case "Y,YYY": { const y = year <= 0 ? 1 - year : year; out += `${Math.floor(y / 1000)},${String(y % 1000).padStart(3, "0")}${th === null ? "" : ordinal(y, th === "TH")}`; break; }
       case "YYYY": out += num(year <= 0 ? 1 - year : year, 4); break;
       case "YYY": out += num((year <= 0 ? 1 - year : year) % 1000, 3); break;
       case "YY": out += num((year <= 0 ? 1 - year : year) % 100, 2); break;
@@ -179,29 +182,71 @@ export function toCharTime(text: string, fmt: string): string | null {
   return out;
 }
 
-/** the patterns DuckDB's strftime writes as `toCharTime` does over a year of four digits, AD: each number zero-padded to
- *  its width, each name English (issue 464). A pattern of the time of day is a time's only (a date's would be the
- *  midnight of a zone, which a day of daylight saving may not have) */
-const STRFTIME: ReadonlyMap<string, { spec: string; time: boolean; fm: boolean }> = new Map([
-  ["YYYY", { spec: "%Y", time: false, fm: false }], ["MM", { spec: "%m", time: false, fm: false }], ["DD", { spec: "%d", time: false, fm: false }],
-  ["DDD", { spec: "%j", time: false, fm: false }], ["IYYY", { spec: "%G", time: false, fm: false }], ["IW", { spec: "%V", time: false, fm: false }],
-  // a three-letter name is never padded, FM or not; Month and Day are padded to nine unless FM, which strftime is not
-  ["Mon", { spec: "%b", time: false, fm: true }], ["Dy", { spec: "%a", time: false, fm: true }],
-  ["Month", { spec: "%B", time: false, fm: true }], ["Day", { spec: "%A", time: false, fm: true }],
-  ["HH24", { spec: "%H", time: true, fm: false }], ["MI", { spec: "%M", time: true, fm: false }], ["SS", { spec: "%S", time: true, fm: false }],
-  ["MS", { spec: "%g", time: true, fm: false }], ["US", { spec: "%f", time: true, fm: false }],
+/** an integer a template's number is written from, which the engine reads from the value (src/duck/rewrite.ts `toChar`
+ *  writes each): the year and the ISO year whole and in their last three, two and one digits, the month, the day of the
+ *  month and of the year, the day of the ISO year, the day of the week (Sunday 0) and of the ISO week (Monday 1), the
+ *  week of the month and of the year, the ISO week, the century, the Julian day, the quarter, the hour of 24 and of 12,
+ *  the minute, the second and the second of the day */
+export type NativeInt = "year" | "year3" | "year2" | "year1" | "isoyear" | "isoyear3" | "isoyear2" | "isoyear1" | "month" | "day" | "doy" | "isoyday"
+  | "dow" | "isodow" | "monthweek" | "yearweek" | "isoweek" | "century" | "julian" | "quarter" | "hour" | "hour12" | "minute" | "second" | "daysecond";
+
+/** one piece of the text a template writes, in a form the engine computes natively (issue 464) */
+export type NativePiece =
+  /** written as it is */
+  | { kind: "text"; text: string }
+  /** a strftime specifier: DuckDB's own text of the value */
+  | { kind: "spec"; spec: string }
+  /** a number, zero-padded to `width` digits (0: as it is) */
+  | { kind: "number"; of: NativeInt; width: number }
+  /** a number's ordinal suffix (TH: ST, ND, RD, TH; th: st, nd, rd, th) */
+  | { kind: "ordinal"; of: NativeInt; upper: boolean }
+  /** an English name of strftime's (`%B` the month's, `%A` the day's, `%b` / `%a` their first three letters) in upper or
+   *  lower case, padded with spaces to `pad` characters (0: not padded) */
+  | { kind: "name"; spec: "%B" | "%A" | "%b" | "%a"; letters: "as" | "upper" | "lower"; pad: number }
+  /** `am` before noon, `pm` from noon */
+  | { kind: "meridiem"; am: string; pm: string }
+  /** the month in Roman numerals, padded with spaces to `pad` characters */
+  | { kind: "roman"; lower: boolean; pad: number }
+  /** the first `digits` digits of the six of the microsecond */
+  | { kind: "fraction"; digits: number }
+  /** the year with a comma after its thousands (`Y,YYY`) */
+  | { kind: "thousands" };
+
+/** the number patterns, as `toCharTime` writes them for a year 1 to 9999 AD (their lower case writes the same): the integer, its
+ *  width, the strftime specifier that writes it padded and the one that writes it unpadded (FM), where one does. A
+ *  pattern of the time of day is a time's only: a date's would be the midnight of a zone, which a day of daylight saving
+ *  may not have */
+const NUMBERS: ReadonlyMap<string, { of: NativeInt; width: number; spec?: string; fm?: string; time?: true }> = new Map([
+  ["YYYY", { of: "year", width: 4, spec: "%Y" }], ["YYY", { of: "year3", width: 3 }], ["YY", { of: "year2", width: 2, spec: "%y", fm: "%-y" }], ["Y", { of: "year1", width: 1 }],
+  ["IYYY", { of: "isoyear", width: 4, spec: "%G" }], ["IYY", { of: "isoyear3", width: 3 }], ["IY", { of: "isoyear2", width: 2 }], ["I", { of: "isoyear1", width: 1 }],
+  ["MM", { of: "month", width: 2, spec: "%m", fm: "%-m" }], ["DD", { of: "day", width: 2, spec: "%d", fm: "%-d" }], ["DDD", { of: "doy", width: 3, spec: "%j", fm: "%-j" }],
+  ["IDDD", { of: "isoyday", width: 3 }], ["D", { of: "dow", width: 1 }], ["ID", { of: "isodow", width: 1, spec: "%u", fm: "%u" }],
+  ["W", { of: "monthweek", width: 1 }], ["WW", { of: "yearweek", width: 2 }], ["IW", { of: "isoweek", width: 2, spec: "%V" }],
+  ["CC", { of: "century", width: 2 }], ["J", { of: "julian", width: 0 }], ["Q", { of: "quarter", width: 0 }],
+  ["HH", { of: "hour12", width: 2, spec: "%I", fm: "%-I", time: true }], ["HH12", { of: "hour12", width: 2, spec: "%I", fm: "%-I", time: true }],
+  ["HH24", { of: "hour", width: 2, spec: "%H", fm: "%-H", time: true }], ["MI", { of: "minute", width: 2, spec: "%M", fm: "%-M", time: true }],
+  ["SS", { of: "second", width: 2, spec: "%S", fm: "%-S", time: true }], ["SSSS", { of: "daysecond", width: 0, time: true }], ["SSSSS", { of: "daysecond", width: 0, time: true }],
+]);
+
+/** the named patterns: strftime's name, and whether it is padded to nine unless FM (a three-letter name never is) */
+const NAMES: ReadonlyMap<string, { spec: "%B" | "%A" | "%b" | "%a"; pad: number }> = new Map([
+  ["MONTH", { spec: "%B", pad: 9 }], ["DAY", { spec: "%A", pad: 9 }], ["MON", { spec: "%b", pad: 0 }], ["DY", { spec: "%a", pad: 0 }],
 ]);
 
 /**
- * The strftime format that writes `toCharTime(text, fmt)` for every value whose year is 1 to 9999 AD, or null where no
- * format is proven to (issue 464: the function a row was ×8–18 of Postgres for a grouped month). The template is read
- * as `toCharTime` reads it — its prefixes, its quoted literals, its patterns longest first — and is answered only when
- * every pattern met is in `STRFTIME` as written there: no other case (`MON`, `mon`), no FM on a number or a padded
- * name, no TM, FX, TH or SP. `date` is whether the value is a date (no pattern of the time of day then).
+ * The pieces that write `toCharTime(text, fmt)` natively for every value whose year is 1 to 9999 AD, or null where they
+ * are not proven to (issue 464: the function a row was ×8–18 of Postgres for a grouped month, ×8 for a quarter or a padded
+ * month's name). The template is read as `toCharTime` reads it — its prefixes, its quoted literals, its patterns longest
+ * first. Each number, name, meridiem, era, Roman month and fraction is written as Postgres writes it in each case and
+ * under FM, and a number's TH / th as its ordinal. What stays the function's: TM (a translated name) and FX, a zone's
+ * TZ, TZH, TZM and OF, SP, TH on a pattern that is not a whole number (a name, a meridiem, an era, a Roman month, a
+ * fraction), FM before a literal, and a backslash. `date` is whether the value is a date (no pattern of the time of
+ * day then). A template that writes nothing is null too: DuckDB refuses an empty strftime format as it binds the
+ * statement, whichever rows reach it (the review of PR 955).
  */
-export function strftimeTemplate(fmt: string, date: boolean): string | null {
-  let out = "", i = 0;
-  const literal = (c: string): string => c === "%" ? "%%" : c;
+export function nativeTemplate(fmt: string, date: boolean): NativePiece[] | null {
+  const out: NativePiece[] = [];
+  let i = 0;
   while (i < fmt.length) {
     // one prefix an item, as `toCharTime` reads it
     let fm = false;
@@ -213,22 +258,58 @@ export function strftimeTemplate(fmt: string, date: boolean): string | null {
     if (c === '"') {
       if (fm) return null;
       i++;
-      while (i < fmt.length && fmt[i] !== '"') { if (fmt[i] === "\\") return null; out += literal(fmt[i]!); i++; }
+      let text = "";
+      while (i < fmt.length && fmt[i] !== '"') { if (fmt[i] === "\\") return null; text += fmt[i]!; i++; }
       i++;
+      out.push({ kind: "text", text });
       continue;
     }
     const pattern = TIME_PATTERNS.find((p) => fmt.startsWith(p, i));
-    if (pattern === undefined) { if (fm) return null; out += literal(c); i++; continue; }
+    if (pattern === undefined) { if (fm) return null; out.push({ kind: "text", text: c }); i++; continue; }
     i += pattern.length;
-    if (/^(TH|th|SP|sp)/.test(fmt.slice(i))) return null;
-    const native = STRFTIME.get(pattern);
-    if (native === undefined || (native.time && date)) return null;
-    if (fm !== native.fm && !(native.fm && (pattern === "Mon" || pattern === "Dy"))) return null;
-    out += native.spec;
+    const th = fmt.startsWith("TH", i) ? "TH" : fmt.startsWith("th", i) ? "th" : null;
+    if (th !== null) i += 2;
+    if (fmt.startsWith("SP", i) || fmt.startsWith("sp", i)) return null;
+    const P = pattern.toUpperCase();
+    const upper = pattern === P;
+    const number = NUMBERS.get(P);
+    if (number !== undefined) {
+      if (number.time === true && date) return null;
+      const spec = fm ? number.fm : number.spec;
+      if (spec !== undefined) out.push({ kind: "spec", spec });
+      else out.push({ kind: "number", of: number.of, width: fm || number.width < 2 ? 0 : number.width });
+      if (th !== null) out.push({ kind: "ordinal", of: number.of, upper: th === "TH" });
+      continue;
+    }
+    // the ordinal of Y,YYY is the whole year's
+    if (P === "Y,YYY") { out.push({ kind: "thousands" }); if (th !== null) out.push({ kind: "ordinal", of: "year", upper: th === "TH" }); continue; }
+    if (th !== null) return null;
+    const name = NAMES.get(P);
+    if (name !== undefined) {
+      // a pattern's case is the name's: MONTH, Month, month
+      const letters = upper ? "upper" : pattern[0] === P[0] ? "as" : "lower";
+      const pad = fm ? 0 : name.pad;
+      out.push(letters === "as" && pad === 0 ? { kind: "spec", spec: name.spec } : { kind: "name", spec: name.spec, letters, pad });
+      continue;
+    }
+    switch (P) {
+      case "AM": case "PM": if (date) return null; out.push(upper ? { kind: "spec", spec: "%p" } : { kind: "meridiem", am: "am", pm: "pm" }); continue;
+      case "A.M.": case "P.M.": if (date) return null; out.push(upper ? { kind: "meridiem", am: "A.M.", pm: "P.M." } : { kind: "meridiem", am: "a.m.", pm: "p.m." }); continue;
+      // every year the pieces write is AD
+      case "AD": case "BC": out.push({ kind: "text", text: upper ? "AD" : "ad" }); continue;
+      case "A.D.": case "B.C.": out.push({ kind: "text", text: upper ? "A.D." : "a.d." }); continue;
+      case "RM": out.push({ kind: "roman", lower: !upper, pad: fm ? 0 : 4 }); continue;
+      case "MS": case "US": case "FF1": case "FF2": case "FF3": case "FF4": case "FF5": case "FF6": {
+        // zero-padded under FM too
+        if (date) return null;
+        const digits = P === "MS" ? 3 : P === "US" ? 6 : Number(P[2]);
+        out.push(digits === 3 ? { kind: "spec", spec: "%g" } : digits === 6 ? { kind: "spec", spec: "%f" } : { kind: "fraction", digits });
+        continue;
+      }
+      default: return null;
+    }
   }
-  // a template that writes nothing (`FM`, `""`) is the function's: DuckDB refuses an empty format as it binds the
-  // statement, whichever rows reach it (the review of PR 955)
-  return out === "" ? null : out;
+  return out.some((p) => p.kind !== "text" || p.text !== "") ? out : null;
 }
 
 // ------------------------------------------------------------------------------------------------- numbers

@@ -23,7 +23,7 @@ import { reach } from "./state.ts";
 import { err as styleErr, out as styleOut, stepRenderer } from "./style.ts";
 import { alive, type DevRun } from "./runs.ts";
 import { appEnvValue } from "../lib/dotenv.ts";
-import { newSharePassword, shareSecret, type OpenedShare, type ShareChoice, type ShareTunnel } from "./share-run.ts";
+import { newSharePassword, shareSecret, SHARE_SSLMODE, type OpenedShare, type ShareChoice, type ShareTunnel } from "./share-run.ts";
 import { probeShare, startTunnel, sweepTunnelFiles, TOKEN_RE, TUNNELS, tunnelPlan, type OpenTunnel, type TunnelPlan, type Via } from "./tunnel.ts";
 import { parseDuration } from "../lib/table-sync.ts";
 import { connectionUrl } from "./pg-url.ts";
@@ -208,15 +208,15 @@ async function holding(h: Holding): Promise<number> {
   await tell({ host: tunnel.host, port: tunnel.port, endsAt: tunnel.endsAt, state: "up", pid: tunnel.pid });
   const next: NextStep[] = [["mason status", "the share, its sessions and the logins refused"], ["mason logs --requests", "what the tool asks"]];
   // what a tool pastes: the share's address, user and password, by the one builder every printed URL comes from
-  const url = connectionUrl({ url: "", host: tunnel.host, port: tunnel.port, database: opened.database, sslmode: "require" }, opened.user, password);
+  const url = connectionUrl({ url: "", host: tunnel.host, port: tunnel.port, database: opened.database, sslmode: SHARE_SSLMODE }, opened.user, password);
   if (json) {
-    out(jsonText(SHARE, { share: { url, host: tunnel.host, port: tunnel.port, database: opened.database, user: opened.user, password, sslmode: "require", fingerprint: opened.fingerprint,
+    out(jsonText(SHARE, { share: { url, host: tunnel.host, port: tunnel.port, database: opened.database, user: opened.user, password, sslmode: SHARE_SSLMODE, fingerprint: opened.fingerprint,
       role: opened.role, reads: opened.reads, via: plan.via, endsAt: tunnel.endsAt, verified: first.verified } }, next));
   } else {
     const st = styleOut();
     out(reportText({
       headline: `Try mason with your favorite postgres client: ${url}`,
-      details: [["host", tunnel.host], ["port", String(tunnel.port)], ["database", opened.database], ["user", opened.user], ["password", password], ["sslmode", "require"],
+      details: [["host", tunnel.host], ["port", String(tunnel.port)], ["database", opened.database], ["user", opened.user], ["password", password], ["sslmode", SHARE_SSLMODE],
         ["certificate", `SHA-256 ${opened.fingerprint}`], ["reads", opened.role === null ? `${opened.reads} (this project has no roles file)` : `the role ${opened.role}: ${opened.reads}`],
         ["via", plan.via], ["ends", endsText(tunnel.endsAt, Date.now())]],
       tips: [

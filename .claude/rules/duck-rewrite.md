@@ -1,6 +1,7 @@
 ---
 paths:
   - "src/duck/analyze.ts"
+  - "src/duck/bucket-group.ts"
   - "src/duck/distinct-key.ts"
   - "src/duck/explain.ts"
   - "src/duck/functions.ts"
@@ -8,16 +9,24 @@ paths:
   - "src/duck/grants.ts"
   - "src/duck/jsonb-order.ts"
   - "src/duck/jsonb.ts"
+  - "src/duck/key-lookup.ts"
   - "src/duck/late.ts"
   - "src/duck/libc-bound.ts"
   - "src/duck/libc-order.ts"
+  - "src/duck/own-names.ts"
   - "src/duck/pg-eval-worker.ts"
   - "src/duck/pg-eval.ts"
   - "src/duck/pgtree.ts"
   - "src/duck/plan.ts"
   - "src/duck/resolved.ts"
   - "src/duck/rewrite.ts"
+  - "src/duck/reference-keys.ts"
+  - "tests/duck-reference-keys.test.ts"
   - "src/duck/row-filter.ts"
+  - "src/duck/side-first.ts"
+  - "tests/duck-side-first.test.ts"
+  - "src/duck/units.ts"
+  - "tests/duck-units.test.ts"
   - "src/duck/to-char.ts"
   - "src/duck/types.ts"
   - "src/duck/verified.ts"
@@ -31,6 +40,7 @@ paths:
   - "tests/duck-libc-order.test.ts"
   - "tests/duck-plans.test.ts"
   - "tests/duck-row-filter.test.ts"
+  - "tests/duck-time-bucket.test.ts"
   - "tests/duck-wire.test.ts"
   - "tests/integration/duck-oracle.itest.ts"
   - "tests/integration/duck-to-char.itest.ts"
@@ -50,6 +60,31 @@ paths:
   read's column qualified in one arm of its CASE: DuckDB's 42804, a review finding). The walker records a node
   of the statement met twice outside its own rule's answer (`nodesPlacedTwice`, src/duck/rewrite.ts), and
   `tests/duck-wire.test.ts`, `tests/duck-corpus.test.ts` and the oracle hold it to none. ("A `->>` is DuckDB's own read")
+- **What a bare name in a FROM reads is decided once, by Postgres's scoping, in `src/duck/cte-names.ts`** (issue 981):
+  the listener's route and the hidden columns' view (`exposes`, `hideKept`, src/duck/kept-route.ts) ask `cteReads`.
+  The rewrite first renames apart a WITH query whose name the statement gives to anything else (`cteNamesApart`: its
+  reads keep the old name as their alias), so every later reader, DuckDB included, meets one meaning per name. It
+  compares names without case, as DuckDB binds them, in the clash and in the new name (the review of PR 1093:
+  `WITH small AS (…) … FROM "Small"` read the WITH query, and a table `"__MASON_WITH0"` the renamed one). Why:
+  each reader resolved names by rules of its own. Each read a WITH query's own body `FROM t` as the WITH query, where
+  Postgres reads the table (a count of 0, and XX000 from a pass-through followed into itself), and `hideKept` read a
+  name a set operation's arm's own WITH binds as the table of that name.
+- **A date and time unit is read once, by Postgres's own tables, in `src/duck/units.ts`** (issue 1167): `funcCall`
+  writes the unit of `extract`, `date_part` and `date_trunc` as its one name (`seconds`, `secs` and `s` as `second`)
+  before any rule reads it, and refuses a unit the type has not in Postgres's SQLSTATE and words. A rule after it
+  matches one name per unit, never a list of spellings. Why: each rule matched the spellings it listed, so
+  `date_part('seconds', t)` took the engine's whole second and lost the fraction `date_part('second', t)` kept.
+- **Every name Mason invents for a statement begins with ONE prefix, chosen for that statement** (`ownPrefix`,
+  src/duck/own-names.ts, issue 1024): `__mason_`, else `__mason<n>_` for the first n that no string of the statement's
+  parse tree or of Postgres's analysis holds, in any case. The analysis names every column of every table read, so a
+  column only a `*` or a whole row reaches counts too. src/duck/plan.ts chooses it and hands it to the rewrite (the
+  cells, FETCH … WITH TIES, a lambda's parameter, a list function's step, an alias, `cteNamesApart`), to src/duck/late.ts
+  and to src/duck/libc-bound.ts; src/duck/pgtree.ts renames case twins apart by the analysed tree's own
+  (`analysedPrefix`), and a generated table reads the plan's cells by its plan's (`DuckPlan.own`). A role's filtered
+  reads' own names are left out of the test (`Walls.written`). A function keeps its `__mason_` name. A new invented
+  name takes the prefix, never a literal `__mason_`. Why: a table's column `__mason_rid` answered NULLs under a top N
+  over a LEFT JOIN, a jsonb column `__mason_v` was read as a lambda's parameter, and a table `__mason_late` as the kept
+  rows. `tests/duck-own-names.test.ts`, the oracle's `issue 1024:` statements. ("The names Mason invents")
 - **A rewrite the deparser cannot spell is a refusal, never a different statement**: the rewritten tree is deparsed,
   parsed again and compared node for node (`treeDifference`). ("How a statement is answered")
 - **No DuckDB macro**: with the `postgres` extension loaded, a macro with a lambda or calling a macro
@@ -65,6 +100,59 @@ paths:
     arithmetic ~8; a TIMESTAMP ↔ TIMESTAMPTZ cast is ICU's too, so never "cast, truncate, cast back". The session's
     zone is read where the statement executes (`current_setting('TimeZone')`), never the rewriter's: a prepared
     statement's plan is made at its Parse and run after a later `SET TimeZone`;
+  - **a time's unit grouped by its bucket** (`src/duck/bucket-group.ts`, issue 1146): a GROUP BY whose key holds the
+    hour, day, week, month, quarter or year of a synced `timestamptz` column, in the session's zone, is two queries.
+    The inner one groups by the column's hidden 15-minute bucket (duck-copy.md) and the other keys, and adds up each
+    aggregate's part. The outer one truncates each bucket's start once and adds the parts up again. The inner one is two
+    branches, a UNION ALL: the rows whose bucket is not `BUCKET_NONE`, which read the bucket and never the time, and the
+    rows whose bucket is, which read the time. On a table that holds no such row the engine's statistics plan the second
+    branch empty, so a cold query reads the bucket alone. The statistics are read as the statement is planned, in its
+    own transaction (a prepared statement is planned again as it runs), never kept in a plan. It holds because
+    every zone has been a multiple of 15 minutes from UTC since 1980, so a bucket never straddles a unit's edge
+    (`tests/duck-bucket-zones.test.ts` checks every zone the engine knows). What it is used for is read from speed:
+    - in UTC (`isUtc` of the zone the plan is made in) only over a table the sync counted at 10 M rows or more
+      (`UTC_BUCKET_ROWS`, issue 1174): below, the instant's arithmetic costs less than a second GROUP BY. The plan is
+      exact in any zone either way, and the plan cache keeps a plan by its zone;
+    - one column's bucket a SELECT, the first key's. Grouped by two columns' buckets, the inner groups are pairs, nearly
+      a group a row. Every other key, a unit of another column included, is one inner key computed a row, never its
+      columns apart.
+    Each guard keeps the exact answer:
+    - only sum, count, min, max, any_value and avg (a sum over a count) are split, with no DISTINCT, ORDER BY or
+      WITHIN GROUP. A sum or avg of a float keeps its plan, because doubles added in another order move in the last
+      digit. Anything else (a window, a grouping set, a subquery, a volatile function, DISTINCT, a set operation, a
+      `*`) keeps the statement as it was;
+    - the inner keys are the GROUP BY's, made as its keys are read. A list, HAVING or ORDER BY expression that needs
+      another (a column no key holds, or one spelled otherwise) keeps the plan: the outer GROUP BY could not read it;
+    - an ORDER BY item is what Postgres binds it to, never what its form matches: an integer alone is the output at
+      that position and a name alone that is an output's is that output, both kept as they are; anything else is an
+      expression over the input's columns, a name inside it never an output. Why: `ORDER BY 1, 2` of an ICU text came
+      to the post-pass as `s COLLATE en_us`, and its `s` was read as an output it is not; `1 AS one` grouped made
+      `ORDER BY 1` a sort by the constant (PR 1149's review);
+    - a row whose bucket is `BUCKET_NONE` (before 1980, infinite, from year 10000) is truncated as before, in the second
+      branch. Both branches read the FROM and the WHERE, so a statement whose FROM or WHERE could answer twice
+      differently keeps its plan: a volatile call, a LIMIT or OFFSET inside, a sample, a LATERAL item or a function in
+      the FROM, a WITH query with any of these;
+    - the zones that changed offset at a minute past midnight since 1980 (`OFF_BOUNDARY_ZONES`: St. John's and Goose
+      Bay to 2011, Moncton to 2006, Gaza and Hebron in 2010–11, Casey in 2020–22) are read from the session at run
+      time, and there every row is truncated as before. Mason refuses a fixed-offset session zone (22023), so none
+      needs a guard;
+  - **a key over one side of a grouped join is computed on that side, before the join** (`sideFirst`,
+    src/duck/side-first.ts, issue 1160): a GROUP BY key that reads one table of the FROM alone becomes a column of a
+    derived table of that table, under its FROM name, listing each column the SELECT reads of it by name (never a `*`:
+    `exposes`). Before the bucket's grouping, which then groups by the column. Each guard keeps the answer Postgres's:
+    - the key computes on rows the join drops, so it cannot fail and is not volatile (`safe`, a short list; a truncation's
+      integer arithmetic only where its every value is proven to fit 64 bits). A Mason function, error(), a cast that can
+      fail, a zone's conversion and arithmetic on a number's column stay where they are;
+    - on the side an outer join extends with NULLs, the key is NULL where its columns are (`nullIn`): a COALESCE stays;
+    - a column is bound as Postgres bound it: by its qualifier, or a bare name by the analysed FROM item. A name that
+      cannot be told, a whole row, a `*`, `rowid`, a subquery anywhere in the SELECT's clauses, a LATERAL item, USING,
+      NATURAL, a join's alias, a grouping set, a set operation, and a key spelled otherwise in the list than in the
+      GROUP BY keep the SELECT as it was;
+    - it is applied only where it saves work (`smallEnough`): every FROM item a synced table with a count, the side at
+      most half the rows of the biggest other, and no WHERE or ON conjunct that reads another item, other than an
+      equality of two columns, which could leave the join fewer rows than the side. At equal sizes it saves nothing
+      (55 against 54 ms); under a filter that keeps a month of 50 M orders it costs (35 to 42 ms in UTC). DETECTOR:
+      tests/duck-side-first.test.ts, tests/duck-plans.test.ts, the oracle's "issue 1160: …" statements;
   - **a LEFT JOIN of a list's rows ON TRUE is an INNER lateral of a list never empty only where its rows' order
     decides the answer** (`leftLateral`, `markBounds`, `limitBounds`, the functions' `orNull`): DuckDB's LEFT lateral is
     a delimiter join over the whole base, whose LIMIT read every row (37.9 s for a 100-row preview) and whose order
@@ -113,16 +201,22 @@ paths:
     UNION, an IN, a CASE or a comparison it was cast to a type that rounds the other's decimals, and a product of it
     passed 38 places where Postgres answers. `tests/duck-wire.test.ts` "issues 464, 465", the plan fixture's BINS, the
     oracle's `bin:` statements over `bins`;
-  - **a to_char of a time in a format DuckDB's strftime writes as Postgres does is `strftime`** (`strftimeTemplate`,
-    src/duck/to-char.ts; `toChar`, issue 464: the function a row, a grouped month was ×8–18 of Postgres over 4.5 M
-    rows): the template read as the function reads it, and taken only when every pattern is one strftime writes alike
-    (YYYY MM DD DDD IYYY IW Mon Dy FMMonth FMDay HH24 MI SS MS US, a date's without the time of day) and the format is
-    a constant; anything else (Q, a padded name, FM on a number, TH, TM, another case, a parameter, a template that
-    writes nothing, which DuckDB refuses as it binds, and a volatile value, which the guard would read twice) is the function's.
-    The value is read in the session's zone by DuckDB's calendar, as the function's text of it was, and only for a
-    year 1 to 9999 AD in any zone (a CASE: NULL is NULL, ±infinity, BC and a year past 9999 the function's).
-    `tests/duck-functions.test.ts` holds each taken template to the function, `tests/duck-wire.test.ts` "issue 464"
-    the wire in three zones, the plan fixture's `issue 464` and the oracle's `issue 464: to_char` statements;
+  - **a to_char of a time in a template the engine writes as Postgres does is the engine's own text**
+    (`nativeTemplate`, src/duck/to-char.ts; `toChar`, `nativeText`, src/duck/rewrite.ts; issue 464: the function a
+    row, a grouped month was ×8–18 of Postgres over 4.5 M rows, a quarter or a padded month's name ×8–9 over a million):
+    the template read as the function reads it, each pattern a piece (strftime's specifiers and literal text as one
+    strftime call, a number Postgres pads that strftime does not from `date_part` through `printf`, a name in another
+    case or padded to nine through `upper`, `lower` and `rpad`, TH as the number's ordinal, a meridiem by the hour, an
+    era as AD, a Roman month by `split_part`), joined by `||`, and taken only when every pattern is one the pieces write
+    and the format is a constant. What stays the function's: TM, FX, a zone's TZ, TZH, TZM and OF, SP, TH on anything
+    but a whole number or Y,YYY, FM before a literal, a backslash, a date's pattern of the time of day (a date is a
+    zone's midnight, which a day of daylight saving may not have), a parameter, a template that writes nothing (DuckDB
+    refuses an empty format as it binds), and a volatile value, which the guard would read twice. The value is read in
+    the session's zone by DuckDB's calendar, as the function's text of it was, and only for a year 1 to 9999 AD in any
+    zone (a CASE: NULL is NULL, ±infinity, BC and a year past 9999 the function's). `tests/duck-functions.test.ts` holds
+    each taken template's SQL to the function over times at their edges, `tests/duck-wire.test.ts` "issue 464" the
+    wire to Postgres in three zones, `tests/duck-plans.test.ts` "issue 464: to_char of …" the rows the function is
+    handed over the shop (none), and the oracle's `issue 464: to_char` statements;
   - **a mode() of a text or varchar under a libc order keys each distinct value once** (`modeKeyedOnce`, issue 464: the
     libc key's function a row, a status by tenant was ×6 of Postgres over a million rows): its ORDER BY is
     `(SELECT __mason_libc_key_or_null(x, collate)) NULLS FIRST, x`, a scalar subquery of the value, which the engine
@@ -446,7 +540,7 @@ paths:
   sum, avg or window sum adds the program's text (`summed`); a cast to text, varchar, float8 or an integer reads the
   program's text (`typeCast`); a `*` beside a program is written out (`starsWrittenForExact`) so its cells ride. Each
   asks `duckExact` first, so a DECIMAL column, an integer or a sum of one keeps its native plan with no `__mason_*`
-  call. The hidden cells are named by `cellPrefix`, which no name the statement writes begins with.
+  call. The hidden cells are named by `cellPrefix`, the statement's own prefix and `cell_` (src/duck/own-names.ts).
   `tests/duck-wire.test.ts` "exact path: …". Round 2 (issue 358) adds: a set operation's ORDER BY, LIMIT and WITH TIES
   key each output by its record (`recordOrderKey`, `setOperationExactKeys`); a VALUES or nested arm is typed by
   Postgres's analysis and wrapped to the one cell count (`exactArms`, `armWrapped`); a numeric column whose arms write
@@ -501,6 +595,26 @@ paths:
   Never `JSON.stringify` a program, nor recurse over one without a memo: a DAG's tree is k^depth. Detector:
   tests/duck-plan-time.test.ts (`numericShapes` at depth 32 within the bound, the record linear), `tests/duck-wire.test.ts`
   "issue 484", tests/pg-numeric.test.ts "a shared program", tests/duck-generated-round11-13-14.test.ts "round 14, a numeric".
+- **A join on a numbered reference reads its hidden integer keys, only where FALSE and NULL do the same**
+  (`referenceJoins`, src/duck/reference-keys.ts, issue 1144). An equality of a reference's key columns, every column of
+  the key, is written as the equality of the two rows' hidden numbers only as a top-level conjunct of a JOIN's ON or of
+  a WHERE. A NULL key's numbers are -1 and 0, so they never match, which is FALSE where `=` says NULL: a value, a NOT,
+  an OR or a CASE would tell them apart. Each column is a VAR of a table of the same query (`levelsUp` 0, no subquery's
+  column, no USING or NATURAL), read by its FROM item's name, compared by an operator of `NUMBERED_EQUALITY`. A `*` over
+  a synced table plans the statement without numbers (`exposes`): its view does not list them. The plan keeps the
+  statement without numbers beside it (`PlannedSql.numbers.plain`), and the runner runs that one where a row is not
+  numbered yet (src/duck/store.ts `numbersHold`). A generated table's run never reads numbers. DETECTOR:
+  tests/duck-reference-keys.test.ts, the oracle's "reference: …" statements.
+- **A lookup by key on a table with a side table reads the side table** (`routeLookups`, src/duck/key-lookup.ts; issue
+  1148). It routes one table alone in its FROM, with a top-level `key = <constant>` or `key IN (<constants>)`. The
+  conjunct is REPLACED by `rowid IN (<side table> UNION ALL <tail>)`, never kept beside it: kept, DuckDB pushes it into
+  the scan and reads every row group's keys first. A table read through its view of its visible columns becomes a
+  derived table of those columns, under its name. A name a WITH query holds, `ONLY`, column aliases and a column named
+  by its schema are left as they are. **A name is held to the relation Postgres resolved it to** (the analysed range
+  tables' relids, `analysedRelations`), never looked up again in the search path: a bare name is routed only when
+  Postgres read exactly one relation of that name, and it is the one with the side table (the review of PR 1153: the
+  first schema whose table had a side table was taken, and `a.orders` was answered from `public.orders`'s row ids). DETECTOR: `tests/duck-key-lookup.test.ts`, the oracle (every table with a key has
+  a side table there).
 
 ## What a column is
 
@@ -583,10 +697,29 @@ paths:
   É by `strip_accents`; where it does not decompose, a `replace`, which on glibc's en_US writes Ø, ł, ð, Đ, Ħ, ŀ, ſ, ª
   and ¹ ² ³; a mark of no first-level weight dropped), each read from the order and `strip_accents` held to `stripped`
   over every character of `FOLD_BLOCKS`; a head of ASCII alone is read unfolded, since folding every value doubled a
-  unique wide column's time. Anything else is sent as written (GROUP BY, DISTINCT, WITH TIES, a set operation, a
+  unique wide column's time. **A grouped min / max keys each group's candidates alone, where its groups are few**
+  (`pickGrouped`, the third round of issue 666: keyed a row, 5 to 28 s against Postgres's 0.1 to 0.5 s): a pass over
+  the SELECT's rows gives each group its thresholds and its least and greatest value by their bytes (one value: its
+  answer, unkeyed), a second its DISTINCT candidates, each keyed once, and each group's least and greatest candidate by
+  the key is a WITH query's row, LEFT JOINed to the SELECT's rows; the engine's `arg_min` / `arg_max` stays as written,
+  its rows narrowed to those holding that value. **Few is a probe's, never a guess**: `approx_count_distinct` of the
+  keys at most a sixteenth of the rows (`GROUPS_FEW`, a HyperLogLog of a few kilobytes); otherwise the WITH queries read
+  no row and the key a row answers, as written, the aggregate holding what it held. A row a group of thresholds,
+  candidates and picks beside the aggregate held more than the key a row did, and spilled past the ceiling (53400)
+  where it answered: 3.9 M groups over 4.5 M rows, two at once under a 3 GB ceiling (the second review of PR 1104);
+  the DISTINCT (group, value) pairs, materialised, had done so at 16 and 64 at once (the first). Only where every key
+  of the GROUP BY can be computed again over the same rows: no grouping set, no `*` in the list, and no key that reads
+  a subquery, calls a function of Mason's or a window, or is a bare name an output gives another meaning. A value the
+  order cannot key is picked first and marked, and the engine's `error()` raises its refusal on a row of its group the
+  statement reads, as the key a row did. Every WITH query is keyed by the value AND its order: one value under two
+  collations is two (the first review: `min(n), min(n COLLATE zh)` answered the first's for both). **A SELECT DISTINCT sorted by a libc key sorts its distinct rows** (`distinctSorted`: 13 to 18 s
+  keyed a row): it is a SELECT of its outputs over the DISTINCT as a derived table, each key written over those columns,
+  and a LIMIT over it is then a top N as above; a DISTINCT ON, a `*`, an output of no name and a key reading anything but
+  the outputs stay as written. Anything else is sent as written (a grouped top N, WITH TIES, a set operation, a
   window, FILTER, and a join as a join; but a top N over joined tables that src/duck/late.ts writes as a SELECT of one
-  FROM item, the preserved side limited first or the row numbers chosen, is bounded there as any other). Detector: `libc top N:` (tests/duck-wire.test.ts) and the `text under libc:` plan
-  entries and rows test (tests/duck-plans.test.ts), the oracle's `text top N:` and `text min/max:`.
+  FROM item, the preserved side limited first or the row numbers chosen, is bounded there as any other). Detector: `libc top N:` and
+  `libc grouped:` (tests/duck-wire.test.ts), the `text under libc:` plan entries and the rows tests (tests/duck-plans.test.ts),
+  the oracle's `text top N:`, `text min/max:` and `text keyed once a group:`.
 - **A tie under ICU is two strings, ordered by their bytes** (U+FE0F is ignorable there): every order under ICU ends in
   the bytes, `sortKeys`, `icuKey`, `textMinMax`.
 - **A refusal raised at a row never quotes the row** (issue 128): it reaches any user, in a tool's error box and the
@@ -793,3 +926,7 @@ Run each probe that applies: the implementer before each push, and the fresh rev
   answer. The decision: the two operands are compared under the one type Postgres's analysis of the SubLink's operator
   resolved, written together or not at all, the subselect's side over its output columns whatever its form;
   `char-padding-in-sublink-test` (PR 674).
+- A lookup by key on a table with a side table, in each shape a tool sends (`WHERE id = $1`, `id IN (…)`, `o.id = …`
+  under an alias, beside other conjuncts, inside a CTE, a subquery or a UNION arm, `SELECT *` over a table with a hidden
+  column, a CTE named as the table), after inserts, updates and deletes since its build: a row missed or doubled, or a
+  route that still scans every row group (`EXPLAIN ANALYZE`; issue 1148).

@@ -497,13 +497,38 @@ under another transaction's write fails its commit, hence swaps on the writer's 
   picking the row's scale by `arg_min` / `arg_max` cost about 2× grouped and 10× ungrouped, for a value already equal).
 - **A failed copy backs off** (`copyRetryDelayMs`: four times the attempt, at least 5 minutes, doubled per failure, at
   most 6 hours; at once after a restart or a column change) and keeps its committed chunks.
+- **A whole read is served only together with its catch-up** (issue 1066, 2026-11-15; `catchUpSide`). The chunks keep
+  the rows written before the first snapshot's xmin, and the catch-up poll from that watermark brought the copy
+  current — after the swap, so the table served in between held only what the chunks kept. The review of #1058 met the
+  worst case: a TRUNCATE, then a transaction left open, then the reload committed. No rewrite came after the open
+  transaction began, so #1058's wait did not apply, and every row was past the watermark: the sync again swapped in 0
+  rows and served them until its catch-up. Waiting on more cases would not close the class: any load or update since
+  the oldest open transaction began was missing the same way, for the catch-up's time or, when the catch-up failed,
+  for its back-off. So the decision is that what a swap puts in is the whole table as of one snapshot: the one poll
+  runs into the side table first, the swap carries that poll's snapshot as the watermark, and under replication the
+  changes the stream held from before that poll are applied in the swap's own writer's turn. It costs the source
+  nothing more (the same poll, earlier); the table serves its previous data for the poll's time longer. The review of
+  PR 1084 found what the stream holds meanwhile is acknowledged as it is held: a sync again whole whose column change
+  was reverted while it read (issue 79) had its table back in the stream, served, and a side poll that failed dropped
+  those changes for good, and let changes decoded in the side table's wider columns reach the narrower table served.
+  So a table served is marked behind, in the ledger, as the side table's catch-up begins, and a catch-up that ends
+  without a swap ends its stay: one poll from its own watermark catches it up, as main's catch-up after a swap did. #1058's wait
+  stays for a rewrite after the open transaction began: there the chunks read nothing, and the catch-up would read every
+  row in one read of the source.
+- **A sync that waits is never a failure** (issue 1066). #1058 recorded a first sync that waited for an open
+  transaction as `failed`, and kept an error on the line of a table synced again whole, so `mason status` and the page
+  said Failed and `mason wait` exited 1, while Mason only waited and would go on by itself. A wait is now its own state
+  (`CopyState.syncWaits`, `sync.state` `waiting`, a `sync_waits` event), and its words name the transaction only while
+  it is still open, read at every check (`holderSql`): with two transactions older than the rewrite, #1058's words kept
+  naming the first after it ended, a pid another session may hold by then.
 - **`mason stop` interrupts a copy**, re-sent every 50 ms (DuckDB loses an interrupt that arrives before its statement
   starts), and cancels on the source a chunk the interrupt has not ended within 200 ms ("A stop while a read waits on
   the source"); the table is `waiting`, never failed.
 - **The catalog serves a table the moment its copy commits**, on a connection no copy holds (after a restart it had been
   empty for hours behind a large copy).
 - **An enum array is read as `text[]`**: a passthrough read hands it over as one VARCHAR DuckDB cannot cast.
-- **ZSTD strings, the disk projection**: `.claude/rules/duck-memory.md` "Memory and the machine" (JSON text 0.66 → 0.26 GB/M rows).
+- **ZSTD strings by default, the dictionary for short or repeated text**: `.claude/rules/duck-memory.md` "Memory and the
+  machine" (JSON text 0.66 → 0.26 GB/M rows); "Text compression by column" (a status 645 → 41 MB at 100 M rows).
 
 ## Keeping a copy current
 
@@ -802,6 +827,71 @@ its owner name each synced table whole, never with a column list.
 `tests/integration/duck-stream.itest.ts` ("Mason's own publication names each table whole", "a publication an earlier
 Mason made with column lists").
 
+### A lookup by key (issue 1148; 2026-11-18)
+
+**The problem.** A synced table has no index. `WHERE id = $1` scans the key column, and only each row group's min and
+max can skip a row group. On the cold benchmark at 100 M orders, one order by its uuid key took 13 s (Postgres 0.02 s).
+Every uuid falls inside every row group's min and max, so DuckDB read 1.8 GB of keys from disk.
+
+**The decision: a side table of keys and row ids, sorted by key, for a table whose key is scattered.**
+`_mason."key_lookup:<schema>.<table>"` holds `(k, rid)`, sorted by `k`. Its own min and max cut a lookup to one row
+group. The planner replaces `key = <constant>` or `key IN (<constants>)` with `rowid IN (<the side table's row ids>
+UNION ALL <the rows written since it was built>)`. DuckDB pushes the few row ids into the table's scan, one row group
+a row. `src/duck/key-lookup.ts` has the design in its header.
+
+**Chosen by the table's own row groups, not by the key's type** (the owner's suggestion, measured). A sample of 256
+keys, one a row-id step across the table, is held against each row group's min and max of the key column
+(`pragma_storage_info`, metadata). A table is given a side table when a key falls in 8 or more row groups on average
+(`LOOKUP_MIN_ROW_GROUPS`). Measured at 20 M rows on DuckDB 2.0.0, a fresh engine for each lookup, the table's blocks
+it loaded:
+
+| table (20 M rows) | row groups | a key in | plain lookup loads | with a side table | side table on disk |
+|---|---|---|---|---|---|
+| bigint key, appended in order | 163 | 1 | 0.3 MiB | 1.5 MiB | 0.75 MiB |
+| bigint key, 1 % of rows updated | 165 | 3 | 1.3 MiB | 1.3 MiB | 59 MiB |
+| bigint key, 30 % of rows updated | 223 | 61 | 24.5 MiB | 1.0 MiB | 61 MiB |
+| uuid key (random) | 163 | 163 | 325.8 MiB | 1.8 MiB | 346 MiB |
+
+An update is written as a delete and an insert at the table's end, so a heavily updated serial table's newest row
+groups each hold keys from the whole range. Type alone ("uuid yes, integers no") would leave that table reading 25
+times what it needs. It would also build a side table for an append-only uuid-v7 table, whose keys are in order. The
+measured spread chooses right in both. Warm, a routed lookup costs about 1 ms where a plain one on an ordered key costs
+0.3 ms, so a clustered table is left alone. A table without a side table is measured again at most hourly
+(`LOOKUP_REMEASURE_MS`), as an update load can scatter it.
+
+At 100 M uuid rows: the spread read took 1.2 s, the build 8.1 s (a sort of 100 M keys), and the side table 1.8 GiB
+(about 19 bytes a row: a random uuid does not compress). A plain lookup loaded 1,628 MiB, a routed one 2.0 MiB. Warm,
+lookups took 27–87 ms plain and 4–15 ms routed. The OS page cache was warm in these runs. The cold benchmark is the
+measure of record.
+
+**What it holds, and why no write path writes it.** The ledger `_mason.key_lookups` keeps `covered` for each table.
+Every visible row whose row id is below `covered` has its entry, and no entry below `covered` names another key's row.
+Rows at and past `covered` are read from the table itself, by row-id range (the tail). An insert appends past
+`covered`. A deleted or updated row's old entry names a deleted row, which no read sees. So the side table needs no
+write in a write's transaction. That is as well, since DuckDB gives a transaction's own rows row ids from `MAX_ROW_ID`
+up until it commits. It is built again, sorted, once its tail passes 1 % of the table's rows (`LOOKUP_TAIL_SHARE`).
+At 100 M rows that is a rebuild for each million rows written, about 9 s on the rebuilds' connection.
+
+**A row id is given again** (measured on DuckDB 2.0.0, `max_vacuum_tasks` 0). Once the rows at a table's end are all
+deleted and a checkpoint drops their row groups, the next insert takes the first row id past the rows left. That row
+would fall below `covered` with no entry, and a lookup would miss it. So every transaction that may add rows to a
+table with a side table first lowers `covered` to the rows' end (`lowerCovered`). That covers a poll's and a stream
+batch's writes, and the stored JSON fills. An UPDATE that DuckDB writes as a delete and an insert (a list or struct
+column, measured) goes through the same writes. It reads one row group's row ids: 0.6 ms at 20 M rows, 3 ms at 100 M.
+A build takes its snapshot on the writer's turn, and keeps its end as `floor`. Every lowering lowers `floor` too, and
+the swap sets `covered` to `floor`. A table replaced whole (a copy, a compaction) has new row ids. Its side table covers
+nothing from that swap on (`coverNothing`, in the swap's transaction) until it is built again.
+
+**Why the key's conjunct is replaced, not kept beside the route.** With `key = v` kept, DuckDB pushes it into the
+table's scan and reads every row group's keys before the row-id filter. Replaced, it pushes `rowid = N` (one row
+group). The invariant above makes the replacement exact.
+
+**What is left out.** A lookup inside a join, or by a key of two columns, is not routed. A table whose key is a type
+DuckDB keeps no min and max of is not given one.
+
+**Where.** `src/duck/key-lookup.ts`, `src/duck/sync.ts` (`buildLookup`, `lookupDue`, `writeStaged`, `applyChanges`),
+`src/duck/plan.ts`; `tests/duck-key-lookup.test.ts`, `tests/integration/duck-key-lookup.itest.ts`.
+
 ## The statement path
 
 ### How a statement is answered: Postgres decides, DuckDB computes
@@ -854,6 +944,35 @@ a function Postgres has, and the rewrite answered the length of its text. A lite
 (`'0800.2b01.0203'`), which Postgres's own input function does at the rewrite; but a money's text is the source's
 lc_monetary's. And pgjdbc asks for `timetz`, `point` and `box` in binary once a statement has run five times, which a BI
 tool's repeated query does: those three have their binary form, and any other is refused by name.
+
+### The names Mason invents (issue 1024, 2026-11-16)
+
+The rewrite writes names of its own into the SQL it sends the engine. Each was a fixed `__mason_…` name, and a source
+column, an alias, a table or a WITH query of the same name took its place, or was taken for it:
+
+- a table with a column `__mason_rid` answered NULLs for every one of its columns under a top N over a LEFT JOIN. The
+  side limited first was `SELECT *, t.rowid AS __mason_rid`, whose `*` listed the table's column first, and the join
+  read that as the row number;
+- a jsonb column `__mason_v`, read bare by a native `->`, was the lambda's parameter inside the lambda, and answered
+  NULLs or the engine's type error;
+- a table `__mason_late` was read as the kept rows of a top N, and a table `__mason_ties_bound` as FETCH … WITH TIES's
+  bound;
+- a subquery with columns `"T"`, `t` and `t__mason_2` gave two columns one name when it renamed the twins apart, and
+  the engine read the wrong one.
+
+Three modules had already met the class and fixed their own case: the hidden cells (`cellPrefix`, issue 239), the
+libc bounds (`fresh`, the review of PR 945) and the WITH queries renamed apart (`cteNamesApart`, the review of PR 1093).
+Each picked its names its own way, and the rest picked none. So the decision is ONE prefix per statement, chosen once
+(`ownPrefix`, src/duck/own-names.ts), that every invented name begins with. It is `__mason_` unless a string of the
+statement's parse tree or of Postgres's analysis holds it, in any case, and then `__mason<n>_`. The analysis matters as
+much as the text: its range table names every column of every table read, so a column the statement never writes, which
+reaches the engine through a `*` or a whole row, counts.
+
+The test is a substring of the trees' text, so a literal that holds `__mason_` moves the prefix too. That costs
+nothing: the statement is answered alike, under other names. A statement with no such string is sent exactly as
+before, so no plan changed. A role's filtered reads are written into the statement before it is analysed, and their
+names (`__mason_barrier`, `__mason_parent<n>`) are left out of the test, so a filtered statement keeps `__mason_`.
+Functions keep their names: a function is named in a namespace of its own.
 
 ### What is not supported, and how the list stays true
 
@@ -2375,6 +2494,38 @@ scope either way: how long a statement runs depends on rows it cannot read, on P
 `src/cli/user.ts` (`attributesToAdd`); `tests/duck-roles-rows-wire.test.ts`, `tests/cli-roles.test.ts`,
 `tests/duck-row-filter.test.ts`, the oracle's `rowFilterCases`.
 
+### A password checked for a sign-in page: `mason user check` (2026-11-17, issue 1115)
+
+**Decision.** `mason user check <name>` reads a password from stdin and answers `ok`, `wrong`, `disabled` or `removed`
+with the user's id (`--json` `{ user, answer, id }`), an exit code an answer (0, 3, 4, 5: `CommandSpec.answers`, which
+the spec as data lists beside 0, 1 and 2). It is for an operator's own sign-in page in front of Mason (the MCP endpoint
+over HTTPS, issue 1115, signs a hosted agent in through the operator's authorization server, whose page asks Mason
+whether a person's Mason password is right). It judges the password as the listener does — the MAC over the name and
+the id, compared in constant time (`checkPassword`, src/duck/users.ts) — and never the address: the page's browser is
+not the client a user's ranges are about. `removed` is the password of a user of that name that was removed, so an old
+password of a name removed and added again says `removed` with the OLD id, never `wrong`, and never the new user's id.
+
+- **The user's id is its stable identity**, and already was: the 16 hex digits `mason user add` makes and
+  `.mason/users.json` keeps (`id`, required of every entry since users began, so no user exists without one: nothing to
+  migrate), shown by `mason user list` and its `--json`. Disable and enable keep it; remove and add make a new one. So a
+  page or a token that carries the id tells a re-added user from the one it was issued for.
+- **Nothing secret on a line**: the password is stdin's (a hidden prompt at a terminal, src/cli/secret-input.ts), never an
+  argument; a word on the line with a password's shape is refused without being repeated; nothing prints or logs it.
+- **Its line is untrusted** (review of PR 1124): the name is what a person typed into a sign-in page, so `check` reads its
+  line itself, before the spec's parser — `--json`, `--` and one word — and any other option is a wrong line (exit 2):
+  `--help`'s exit 0 would have been `ok` to a page that signs in on exit 0. No word of the line is repeated unless it is
+  exactly a user's name of the file: a password typed on the line, near its shape (`\r` after it, inside a URL, cut
+  short, after `--role`), was printed back in full by the generic refusals. A word that is no user's is answered `wrong`
+  with `user` null, after the same work. The reader takes EVERY line whose verb is `check`, wherever options or `--`
+  put it (`verbAt`, src/cli/command.ts, finds the verb as the spec's parser does): its re-check found
+  `mason user --json check <name>` falling through to `add`, making the page's word a user and exiting 0; `add`
+  is now reached by its own verb alone.
+- **The page must limit attempts**: `check` answers `wrong` as often as it is asked, so a page that lets anyone ask makes
+  it a free oracle. The docs say to count failures by the browser's address, the replica and the user name.
+
+**Where.** src/cli/user.ts (`checkCommand`, `checkSecret`, `CHECK_EXIT`), src/duck/users.ts (`checkPassword`),
+src/cli/command.ts (`CommandSpec.answers`); tests/duck-users.test.ts, tests/cli-commands.test.ts, tests/cli-help.test.ts.
+
 ### An MCP server (2026-10-29)
 
 **Decision.** `mason mcp` is an MCP server on stdio — newline-delimited JSON-RPC, stdout the protocol's alone — that is
@@ -2407,15 +2558,193 @@ exit codes, `mason help agent`). A tool error carrying the SQLSTATE and HINT is 
 instead of giving up; a `kept` line is what stops it presenting a copy over the poll's row limit as current. And every
 statement lands in the request log under the agent's name.
 
-**Not yet: the same server inside `mason serve`, over HTTPS.** A hosted agent (claude.ai, a team's agent platform)
-cannot spawn a process; it needs MCP's Streamable HTTP transport on the server. What that would take: a route on
-`mason serve` beside `/healthz` (its own port or path, TLS as the Postgres API's: `MASON_PG_TLS_CERT` or the operator's
-proxy), the same tools over the same session code, and authorization by MCP's OAuth 2.1 profile — Mason as the
-resource server, publishing its protected-resource metadata, the bearer token mapped to a `mason user` so the request
-log still names who asked — or, before an authorization server exists, a user's password as a bearer token for the
-clients that take a static header. The tool code would not change; the transport and the login would.
+**Over HTTPS, inside `mason serve`**: "An MCP server over HTTPS", below — the same session code, another transport and
+another login.
 
 **Where.** `src/cli/mcp.ts`, `src/cdc/pg-wire.ts` (`extended`, `cancel`); `tests/cli-mcp.test.ts`, `tests/pg-wire.test.ts`.
+
+### An MCP server over HTTPS (2026-11-17, issue 1115)
+
+**Decision.** `mason serve` serves `mason mcp`'s tools over MCP's Streamable HTTP transport, for a hosted agent
+(claude.ai, ChatGPT, a team's agent platform) that cannot start a process, with Mason as an OAuth 2.1 resource server
+(MCP's authorization profile). Off unless configured: `MASON_MCP_URL`, `MASON_MCP_ISSUER` and `MASON_MCP_JWKS_URL`
+together, or the start is refused naming what is missing. The owner's spec (2026-11-17) decided each point below.
+
+- **Where: `/mcp` on the port `mason serve` already listens on** (MASON_HEALTH_PORT, beside `/healthz`), so a relay in
+  front forwards one port. `POST /mcp` takes one JSON-RPC message and answers it as JSON, `DELETE /mcp` ends a session,
+  `GET` is 405 (Mason sends nothing of its own). The protected resource's metadata (RFC 9728) is at
+  `/.well-known/oauth-protected-resource` and at RFC 9728's insertion of the public path
+  (`/.well-known/oauth-protected-resource/mcp`), on that port.
+- **Two eras, chosen as 2026-07-28 says a server of both chooses** ("Versioning and Compatibility": "A dual-era server
+  selects its behavior from how the client opens"; built to the published text, the second review of PR 1125,
+  2026-11-17). **An `initialize` is the legacy era**: 2025-11-25 (claude.ai's documentation still points at it;
+  2025-06-18 and 2025-03-26 are answered too), where it opens a session (`Mcp-Session-Id`); one asking for 2026-07-28,
+  which has no `initialize`, or for a version Mason does not know, is answered with 2025-11-25. **A request carrying
+  2026-07-28's per-request `_meta`, or the `MCP-Protocol-Version` header 2026-07-28, is that revision's**, and is
+  answered as its text says:
+  - no session ("Streamable HTTP": an `Mcp-Session-Id` is ignored, none minted) and no `initialize`: each request's
+    `_meta` carries `io.modelcontextprotocol/protocolVersion` and `…/clientCapabilities`, or it is `-32602`, 400 ("Base
+    protocol": "_meta");
+  - a version other than 2026-07-28 in `_meta`, or a header no revision of Mason's has, is `UnsupportedProtocolVersion`
+    (`-32022`, 400) listing what Mason speaks ("Versioning": "Protocol version negotiation");
+  - the `MCP-Protocol-Version`, `Mcp-Method` and, for `tools/call` and `resources/read`, `Mcp-Name` headers (its
+    `=?base64?…?=` form decoded) must be present and equal to the body, or `HeaderMismatch` (`-32020`, 400) ("Streamable
+    HTTP": "Request metadata", "Server validation");
+  - `server/discover` (a server MUST: "Discovery") says the versions, the capabilities and the instructions; `tools/list`,
+    `tools/call`, `resources/list`, `resources/templates/list` and `resources/read` are answered as in 2025-11-25, a
+    resource not found `-32602` ("Resources": "Error handling");
+  - every result carries `resultType: "complete"` and `_meta["io.modelcontextprotocol/serverInfo"]` ("Base protocol":
+    "ResultType", "Per-response protocol fields"); `server/discover`, the lists and `resources/read` carry `ttlMs`
+    (300,000) and `cacheScope: "public"`, since they change only with a release and are the same for every user
+    ("Caching");
+  - **a cancel is the client closing its request's connection** ("Streamable HTTP": "Cancellation"; "Cancellation":
+    "Transport-specific cancellation"): the statement is cancelled where it runs and nothing more is written. A
+    `notifications/cancelled` POST, which 2026-07-28 no longer expects on HTTP, still reaches the user's requests;
+  - the client is named by `_meta`'s `io.modelcontextprotocol/clientInfo`, so `application_name` is
+    `mason-mcp/<its name>`; only a request that carries none falls back to its User-Agent's first word (the first
+    implementation's own choice, kept as the last fallback);
+  - **not answered, 404 `-32601`** ("Streamable HTTP": "a server that does not implement the requested RPC method MUST
+    respond with 404"): `ping` and `logging/setLevel` (removed by 2026-07-28); `subscriptions/listen`, since Mason's
+    tools and resources never change while it runs (it declares no `listChanged` and no `subscribe`, so no notification
+    would ever flow); prompts and completion (Mason declares neither). Mason sends no `notifications/message`, so a
+    request's `io.modelcontextprotocol/logLevel` changes nothing, and it asks no input of the client (MRTR), so it
+    requires no client capability. Answers are JSON, never an SSE stream, which the text allows ("the server MUST
+    return either application/json or text/event-stream").
+- **The public address is a setting, never what Mason sees.** Replicas sit behind a relay, so the address a client
+  reaches is not the listen address, the Host header or X-Forwarded-*. `MASON_MCP_URL` (https, or http to this machine
+  for a test) is the resource the metadata publishes, the audience every token must name EXACTLY (a string, or a list
+  of it alone: a token for this and another resource is one the other could replay here), and the base of the 401's
+  `WWW-Authenticate: Bearer resource_metadata="…"`. A token whose audience is the address Mason sees is refused.
+- **The token**: a JWT whose `iss` is `MASON_MCP_ISSUER` exactly, signed by a key of the JWK set at `MASON_MCP_JWKS_URL`
+  (configured, never discovered: one URL the operator names, at most 100 keys). An asymmetric `alg` alone (RS*, PS*, ES*, EdDSA; never `none` nor HS*, which a public key
+  could forge), the `kid` a key published for signatures, of the alg's own type, `crit` refused, `exp` required, `nbf` /
+  `iat` within 60 s of skew. Node's `crypto` verifies (no dependency). **Fail closed**: keys that cannot be fetched or
+  read (no answer, a redirect — never followed —, too large, not JSON) refuse every token with 503. Mason issues no
+  token and runs no sign-in page.
+- **The keys' cache, and what a fetch costs the issuer** (the review of PR 1125, 2026-11-17). Keys are used for at most
+  **5 minutes** (`KEYS_TTL_MS`), less when the JWKS answer's `Cache-Control: max-age` says less (`no-store` / `no-cache`
+  read as 0), never more, and never under a minute: **a key the issuer removes is refused within 5 minutes**. Past their
+  life they are never used again — **no grace period**: a fetch that fails then refuses every token (503) until one
+  succeeds, as fail closed asks (a grace would let a key the issuer revoked during an outage keep signing). Fetches are
+  **single-flight and at most one a minute** (`REFRESH_MIN_MS`), whatever asks — keys past their life, a `kid` they lack
+  — so a burst of tokens, valid or not, costs the issuer one request a minute; **while fetches fail the wait doubles**,
+  1, 2, 4, 8 minutes, **bounded at 10** (`BACKOFF_MAX_MS`), and every token meanwhile is 503 without a fetch. Before,
+  a key was trusted for an hour after its removal, and 53 requests against a failing JWKS made 28 fetches.
+  **An issuer outage longer than the keys' life stops the endpoint, by design**: every token is 503 ("the token could not
+  be checked") until a fetch succeeds, and mason serve's log names the JWKS URL and why. The operator's step is to make
+  that URL reachable from the replica; nothing in Mason extends the keys' life.
+  **The keys' life, the wait between fetches and the back-off are timed on a monotonic clock** (`performance.now()`),
+  never the wall clock (the second review of PR 1125, 2026-11-17): with the wall clock stepped back an hour, a key the
+  issuer removed was accepted for that whole hour, and a back-off would have held every token at 503 until the clock
+  caught up. A token's `exp`, `nbf` and `iat` are wall-clock times, and are read on the wall clock.
+- **The user, looked up at every request.** One claim names the `mason user` (`MASON_MCP_USER_CLAIM`, default
+  `mason_user`), another holds its id (`MASON_MCP_USER_ID_CLAIM`, default `mason_user_id`): the 16 hex digits `mason user
+  add` made and `mason user list` shows (`mason user check` answers it too, for the operator's sign-in page). The users
+  file is read for every request, never cached for the token's life (`LiveUsers.vouched`), and again by the listener
+  before every statement: a user removed or disabled is refused at once, and a user removed and added again — a new id —
+  refuses the old token (`user_removed`), each 403 with the command that fixes it. The client holds a valid token of the
+  operator's issuer, so it is told which; the Postgres API keeps a missing user and a limited one alike for a stranger.
+- **Addresses still apply, judged on the real client.** `MASON_MCP_PROXY_FROM` names the relay's addresses, read by
+  `MASON_PG_PROXY_FROM`'s own reader (never every address). From a peer it names, the client is the **last entry of
+  `X-Forwarded-For`** — the one that peer appended; every entry before it came to the relay from the client, which can
+  write anything there. From any other peer the header is ignored and the peer is judged. A named relay's request without
+  the header, or with a last entry that is not one address, is refused (400): it could not tell. **The entry is read in
+  the forms relays write** (`forwardedAddress`, the review of PR 1125): a port beside it (`203.0.113.7:51234`,
+  `[2001:db8::1]:443`) is dropped, and a v4-mapped address (`::ffff:203.0.113.7`, nginx on a dual-stack `[::]` listener)
+  is the IPv4 client, as the relay's own peer address is when the setting is matched (`shownAddress`); a bare IPv6 address
+  is read whole, never as one with a port, and anything else that is not one address (a CIDR, a name, `unknown`, a zone,
+  a leading zero) is still 400. `X-Forwarded-For` rather
+  than `Forwarded` (RFC 7239): it is what relays and load balancers append by default (nginx, HAProxy, cloud load
+  balancers), where `Forwarded` is rarely sent, and the rule — the trusted peer's own entry, the last — is the same for
+  both. A user's "connects from" ranges are judged on that address by the endpoint and, through the PROXY header the
+  door's connection carries, by the listener at login and before every statement; the request log names it. No setting
+  bypasses the check (an earlier draft's `MASON_MCP_FROM=token` is gone), and nothing here changes the Postgres API's.
+- **Presets for a hosted agent's addresses**: the Users page's Connects from offers, under "A hosted agent's servers",
+  "claude.ai" (named "Claude (Anthropic)" until issue 1155, when a person using Claude Code chose it and was refused), the outbound
+  ranges Anthropic publishes for MCP tool calls (https://platform.claude.com/docs/en/api/ip-addresses, "Outbound IP
+  addresses"), and "ChatGPT on the web", the file OpenAI's page of IP egress ranges
+  (https://developers.openai.com/api/docs/guides/ip-addresses, "Outbound IP addresses": "ChatGPT integrations —
+  Plugins, connectors, GPT Actions, and agentic commerce") names for them, https://openai.com/chatgpt-connectors.json
+  (289 ranges, its `creationTime` 2026-11-06; `chatgpt-actions.json` beside it is GPT Actions' alone and not used), so a
+  user held to them connects through this endpoint from that agent alone (`src/cli/address-presets.ts`, `/api/state`
+  `addressPresets`). The ranges are written as a user's ranges are kept (one address without its `/32`), so a user given a
+  company's list is shown as that company's ("from ChatGPT's servers (289 ranges)"), the choice names the
+  company (`preset:<id>`), never a wall of CIDRs in the box, and a user takes up to 1,000 ranges (`MAX_RANGES`, 100
+  before, which OpenAI's list did not fit). **They ship with the release; Mason never fetches them at run time** (a vendor's page
+  changing under a run would change who connects without anyone deciding it). **How they stay up to date**:
+  `scripts/connector-ranges.ts` reads each source again — a page's CIDRs under its heading, or a JSON file's
+  `prefixes` (`ipv4Prefix` and `ipv6Prefix`) — and says what drifted (exit 1; 3 when a source could not be read or holds
+  what is not a range: never "no drift"), and `--write` updates the module, so a change is a reviewed pull request and a release note. The
+  proposal is a weekly scheduled CI job running it, which opens an issue on drift (not added: a process change is the
+  owner's).
+- **The same session code**: an MCP session is `mason mcp`'s `McpServer` (src/cli/mcp.ts), its messages handed to it
+  whole; only how it reaches the Postgres API differs (`McpLink`). Its connections go to the run's own listener through a
+  door of their own (`openLocal`, src/api/postgres/server.ts): on loopback, every connection beginning with a PROXY v2
+  header naming the client, its password a secret this process alone holds with the user's id — never a user's password,
+  so no other process on the machine logs in there, whatever header it sends. A cancellation is a CancelRequest for its
+  statement, as over stdio.
+- **Nothing off loopback in clear**: the health port is plain HTTP, so with `MASON_HEALTH_HOST` off loopback (its default
+  is 0.0.0.0) the endpoint is refused unless `MASON_MCP_PLAIN=1` says TLS is terminated in front (a relay, a proxy), as
+  `MASON_PG_PLAIN` says it of the Postgres API. A token never reaches a log line, an error or an answer.
+- **Bounds**: a message at most 1 MiB, a token 16 KiB, a session ended after an hour unused, and a session bound to its
+  user and id (another's token naming it is told it does not exist).
+- **Sessions: one user never ends another's** (the review of PR 1125). At most **32 sessions a user**
+  (`MAX_USER_SESSIONS`): past it the user's own least recently used session that runs nothing makes way, or, each of
+  them running a request, the new one is refused 429. At most **1,000 in all** (`MAX_SESSIONS`): past it a session
+  **unused for 10 minutes** (`EVICTABLE_IDLE_MS`) and running nothing makes way, whoever's — abandoned in all but name;
+  its client meets a 404 and initializes again — else the new session is refused **503 with Retry-After**, never made
+  by ending a session in use. Before, the oldest session made way whatever it was doing, so one user opening sessions
+  ended everyone else's.
+- **The health port's limits**, now that it answers whoever reaches /mcp (`HEALTH_LIMITS`, src/cli/serve.ts; not
+  settings): a request's headers within **10 s**, its body within **30 s**, an idle keep-alive connection closed after
+  **5 s**, at most **1,024 connections** (one past it is closed at once), and at most **256 JSON-RPC requests running**
+  on /mcp (`MAX_REQUESTS`: past it 503 with Retry-After; a cancellation and a DELETE are never held to it, or a client at
+  the bound could not stop what holds it there), **each request of a JSON-RPC batch counted**: a batch is admitted whole
+  or refused whole (503), never in part. A body is at most 1 MiB (`MAX_BODY`). Node's `requestTimeout` times the request alone, never the answer, and
+  an answer is written once its query ends, so **a tool call that runs for minutes is answered whole** (the test runs one
+  twice the request timeout). **/healthz under the cap**: /mcp's running requests alone stay far under the connection
+  cap, so a platform's health check is answered beside them; connections that send nothing are closed within 10 s, so
+  only a flood that keeps opening connections faster than that can hold the cap, and while it does a health check can be
+  refused — that is not guaranteed against, and a platform that health-checks the port should allow for a retry.
+
+- **A JSON-RPC batch, by the revision** (the second review of PR 1125, 2026-11-17: a batch counted as one request,
+  so with the bound at 4 a batch of 40 queries ran all 40 at once, and one of 8,000 grew the process by about 0.7 GB).
+  The revisions disagree: **2025-03-26** says a server "MUST support receiving JSON-RPC batches"; **2025-06-18** removed
+  batching ("the body of the POST request MUST be a single JSON-RPC request, notification, or response"), and
+  **2025-11-25** and **2026-07-28** say the same. So a batch is taken under **2025-03-26 alone** (`BATCH_VERSION`: the
+  session's agreed revision, else the `MCP-Protocol-Version` header), of at most **32 messages** (`MAX_BATCH`, and
+  never more requests than `MAX_REQUESTS`), each request in it counted against `MAX_REQUESTS`; under any other revision
+  it is refused **400** with JSON-RPC's `-32600` (Invalid Request), as those revisions forbid it. Refusing batches
+  everywhere would have broken a revision Mason says it speaks; counting them everywhere would accept what three of the
+  four forbid. A batch of notifications alone (cancellations) is never held to the bound.
+
+- **`Origin` is validated, as MCP Streamable HTTP's MUST says** (the owner's decision, 2026-11-17, the third review of
+  PR 1125). The bearer token already makes DNS rebinding harmless here — no cookie or ambient credential exists, and a
+  cross-origin preflight is 401 with no CORS headers — but the MUST is cheap to meet. A request carrying `Origin` is a
+  browser's and is answered only when `MASON_MCP_ORIGINS` names that origin exactly (default: none), else 403
+  `origin_not_allowed` naming the setting; `Origin: null` (a sandboxed page, a file) is present and never named, so
+  refused. It is judged first, before the token is read, under every revision, so a page elsewhere learns nothing of
+  the token check. A request with no `Origin` is not judged: hosted agents call from their servers and desktop apps from
+  their own process, and neither sends one (Node's `fetch` sends none; checked). Each entry is held at the start to the
+  form a browser sends (`entry === new URL(entry).origin`, http or https, no `*`), since an entry written otherwise would
+  never match; a bad entry refuses the start, said as its origin alone or not at all, never a path or a user.
+- **A client never writes a line of the log** (the third review of PR 1125: a cancellation's `reason`, `bye\n[mcp]
+  refused a request from …`, logged a second, forged line to `mason serve`'s stdout, the platform's log; a method held
+  NEL and CSI). Every value that came from the network — a JSON-RPC method, id or reason, a header, a client's name, a
+  token's claim, an error another server's answer made — reaches a log line through ONE function, `untrustedText`
+  (src/lib/one-line.ts): `oneLine`'s rule, the one `serviceText` applies to a hosted service's text (every C0 and C1
+  control, newline, CR, DEL, U+2028 / U+2029, the directional marks and bidi overrides as `?`), and a length cap. The
+  endpoint's own `log` makes every line one line too, so a site that missed the function still cannot start a line (a
+  stack is then said on one line).
+
+**Left out.** No server-sent events: every answer is JSON. No CORS headers: an origin `MASON_MCP_ORIGINS` names is let
+through, and a page that needs CORS to read the answer is not served yet. Opaque (non-JWT) tokens and token introspection are not read; no scope is required.
+
+**Where.** `src/cli/mcp-http.ts` (the endpoint, `clientOf`), `src/cli/mcp-oauth.ts` (the settings, the token),
+`src/cli/mcp.ts` (`McpServer`, `McpLink`), `src/cli/address-presets.ts`, `scripts/connector-ranges.ts`,
+`src/api/postgres/server.ts` (`openLocal`), `src/api/postgres/proxy.ts` (`proxyHeaderFor`), `src/duck/users.ts`
+(`LiveUsers.vouched`), `src/cli/serve.ts`; `tests/cli-mcp-http.test.ts`, `tests/cli-security.test.ts`,
+`tests/serve.test.ts`, `tests/web-page.test.ts`.
 
 ### One OID for a type the source made: the catalog's (2026-11-12, issue 861)
 
@@ -2969,7 +3298,8 @@ every thread at the pool's first task and aborts with no message if one cannot b
 process with exit 133. 64 was the first choice and the table's; the review chose 32, because nothing was measured past
 eight statements, 16 already fixed five, and the old queue was the only limit on how much memory statements take at
 once. So 32 covers the same data with half the thread exposure (at 2 vCPU, eight heavy, one run: p50 321 ms, worst 1.5 s, 32 s of wall time). An admission
-limit would be the one fact to derive this from; it would be new behaviour, so it was not added here.
+limit would be the one fact to derive this from; it would be new behaviour, so it was not added here. Heavy statements
+later got one, and light ones none ("Heavy statements take a turn"), so the pool still sizes the light ones.
 
 **A thread limit is read, because its failure is silent.** A platform restarting a process that aborts with no message
 is a loop nobody can read. `src/cli/pool-size.cjs` reads `pids.max` (both cgroup versions) and `Max processes` first, and
@@ -2986,6 +3316,74 @@ parking its threads on FIFOs. On 22.13 the pool had started with four threads be
 static import, because the ES loader reads its files through it; on 24 and 26 it had not, and a first import is enough.
 A CommonJS entry got its size on all three, so `src/cli/mason.cjs` is the `bin`, the image's `mason` and the run's
 command, and `main.ts` imports `pool-size.cjs` first for `node src/cli/main.ts` in a checkout, which needs 23.6 or later.
+
+### Heavy statements take a turn (2026-11-17, issue 1132)
+
+**Measured on the published machine** (4 CPUs, the engine at 4 GiB, Mason 0.23.0, docs/MEASUREMENTS.md): ten clients
+each sent a join of 100 M orders to 5 M customers on a UUID key at once, and it took 659 to 669 s against 17.9 s for one.
+Each join's hash table was about 170 MiB. Past about six at once the engine switched to a partitioned join and spilled:
+48.7 GB written to its temporary file, most of it read back, at the disk's 130 MB/s. The same ten against the engine
+alone with at most N at once: N=1 50.8 s, N=4 40.7 s with nothing spilled, about 6 41.2 s with 0.5 GB, about 8 519 s
+with 38 GB. 5.5 GiB did not stop the spill. `UV_THREADPOOL_SIZE=4` took the cell to 37.6 s, but that is "The pool"'s
+failure: small statements behind big ones.
+
+**Measured here** (a laptop, 10 cores, the engine's threads set to 4; synthetic, 50 M orders and 2.5 M customers on UUID
+keys, warm), the same join through the listener, ten clients at once, runs alternating main and the change:
+
+| | engine memory | ten joins, wall | peak spilled | a lookup by key sent during them (alone: about 30 ms) |
+|---|---|---|---|---|
+| main | 2 GiB | 16.3, 7.8, 13.6, 22.3, 21.1 s | 7.3, 1.8, 6.2, 9.1, 10.6 GB | 13.9, 5.8, 10.8, 19.3, 17.5 s |
+| two turns (derived) | 2 GiB | 7.4, 7.9, 6.8, 7.4, 7.5 s | 0 | 128, 188, 65, 137, 149 ms |
+| main | 4 GiB | 5.9, 10.1 s | 0, 0.7 GB | 4.1, 8.1 s |
+| four turns | 4 GiB | 6.1, 6.2 s | 0 | 0.7, 1.1 s |
+
+One join alone took 0.8 to 1.2 s either way. Sixty-four of the joins at once, at 2 GiB with a pool of 64, took 44 s
+with nothing spilled and none failed, the lookup beside them 46 to 130 ms. Ten "count by status" at once took 1.1 s either way, never counted heavy.
+The lookup waited on main because the engine's threads run tasks first come, first served, and ten joins' tasks were
+ahead of its own: no turn is involved, it is light. With four joins running it still shares the four threads, which is
+the 0.7 to 1.1 s.
+
+**Which statement is heavy is the engine's plan**, read before the statement runs with a plain EXPLAIN on its own
+connection (`SessionRunner.weigh`): the rows a join's build side, a group by's groups, a sort, a window and a
+materialized CTE keep, summed (`keptRows`). An aggregate that holds every value (a median, `string_agg`, `array_agg`)
+keeps its input. Measured with the engine at 4 threads, the peak of `duckdb_memory()` beside one statement: a build side
+of 2 M rows of a UUID and a timestamp 110 MB (55 B a row), a sort of 20 M rows 1,016 MB (53 B a row), a group by into
+2 M groups over 20 M rows 805 MB (400 B a group, a partial table on each thread), a group by month 5 MB. So
+`KEPT_ROW_BYTES` is 64, the low end. A statement is heavy when its rows times that pass its share of the memory with the
+32 statements all running, the pool's default size (`heavyRowsFor`, `LIGHT_AT_ONCE`): at 4 GiB, about 2.1 M rows. That
+many light ones can then run at once and fit. It is not read from `UV_THREADPOOL_SIZE`: statements are not held to the
+pool (at a pool of 1, ten joins still ran together and spilled 0.5 GB), and a small pool must not make every join
+light.
+- The engine estimates a group by of an expression (`date_trunc('month', x)`, `payload ->> 'source'`) at half its
+  input, having no statistics for it, so such a group by over a large table is counted heavy though it keeps a few
+  groups. It waits only while every turn is taken, and it is a full scan that would share the threads anyway. A group by
+  of a column (`status`) is estimated from the column's distinct count, and is light.
+- A statement whose tree has no join, no FROM of several items, no subquery expression, no WITH, no set operation, no
+  GROUP BY, DISTINCT, ORDER BY or window, and no aggregate that is DISTINCT, ordered or holds every value keeps nothing
+  (`mayKeepRows`, `PlannedSql.keepsNone`), and is not weighed: the EXPLAIN cost 0.5 ms on a small statement (p50
+  0.76 ms on main, 1.27 ms weighed, 0.77 ms not weighed). A statement that may keep rows pays it.
+- The top N over every column is a semi join of the table to its own top rows on the row id, estimated at every row: a
+  join on `rowid = rowid` gives at most its build side's rows, so it is light.
+
+**How many turns is one a GiB of `store.memoryLimitBytes`, at most one a thread of the engine** (`heavyTurns`): 4 GiB
+gives the four that were fastest on the published machine. A heavy statement uses every thread, so a fifth at once on
+4 CPUs only splits them. The threads are the engine's own `threads` setting, which reads a container's CPU limit. Not a
+budget of estimated bytes: the engine's group-by estimate (above) would have run the 100 M join alone, and one at a time
+was slower (50.8 s) than four. `MASON_HEAVY_QUERIES` sets it.
+
+**Where it waits: the listener's thread, in `RemoteRunner.admit`.** The executor holds one `Admission` for the instance
+whose memory it guards. The statement's signal is there, so its cancel and its statement_timeout end the wait as they
+end a run (57014, the timeout's words). The listener's dispatch would have had the signal too, but not the engine, and
+the worker has the engine but hears a cancel only once its loop turns. A waiting statement holds nothing on the worker
+and no libuv thread, so "The pool" still serves the light ones. The listener asks for the turn before `run` (and an
+EXPLAIN ANALYZE's `explain`), and holds it until the answer's first rows (`heldUntilFirstRows`), its wait on its row (`waited_ms`).
+PR 1136's review found the first version held the turn until the answer ended. A client that stopped reading kept it: a
+named portal suspended by an Execute's row limit and left idle past its COMMIT, or an unnamed one suspended before a Sync
+(Execute and Flush, as a streaming cursor reads). Another session's heavy statement then waited without end, or until its
+statement_timeout. So the turn is now released at the first rows. What a heavy statement keeps is built before them: a
+join's build side, a group by's groups, a sort's rows each end a pipeline the rows come out of only once it is done. What
+is left is a scan and a probe at the client's pace. A portal left suspended still holds its memory (its hash table), as it
+does in Postgres, but no turn.
 
 ### Local gates (2026-10-30)
 
@@ -3575,7 +3973,102 @@ aggregate and the bounds over 30 M distinct values). A first letter of no decomp
 (Hangul, Cyrillic) still has no run. A list of distinct values, a grouped min / max and `FETCH FIRST … WITH TIES` still
 key every row (over the 4.5 M sales, `SELECT DISTINCT code … ORDER BY code` 15.4 s at main and 14.0 s here, Postgres
 0.37–0.85 s; a grouped min / max 16.3 and 12.9 s, 0.42–1.13 s; `FETCH FIRST 5 ROWS WITH TIES` 47 and 30 s, 3.7–6.4 s):
-they are written elsewhere in the rewrite, and are issue 666's next step.
+they are written elsewhere in the rewrite, and are issue 666's next step (the next section answers the first two).
+
+### Grouped and listed: each group's candidates (2026-11-16, issue 666)
+
+After the second round, a grouped min / max and a list of distinct values still keyed every row: over the synthetic
+data below, 5 to 32 s against Postgres's 0.1 to 0.5 s. A grouped min / max wrote the key a row inside `arg_min`, and
+`SELECT DISTINCT x … ORDER BY x` computed the ORDER BY's key for every row before the DISTINCT.
+
+**A grouped min / max keys each group's candidates, where its groups are few** (`pickGrouped`, src/duck/libc-bound.ts).
+The bounds work for a group as they work for a statement. A first pass over the SELECT's rows gives each group its
+thresholds (its least hi and greatest lo) and its least and greatest value by their bytes, which are one where the
+group holds one value: that value is its answer, with no key. A second pass gives each group of more than one value its
+DISTINCT candidates, each keyed once. Each group's least and greatest candidate by the key is a row of a WITH query,
+LEFT JOINed to the SELECT's rows, and the engine's `arg_min` / `arg_max` stays as written, its rows narrowed to those
+holding that value. Few is a probe's: `approx_count_distinct` of the GROUP BY's keys at most a sixteenth of the rows
+(a HyperLogLog of a few kilobytes, one more scan). Otherwise the WITH queries read no row, and the key a row answers as
+written. These forms came first:
+- **The key once a distinct value, joined back** (#1089's form for `mode()`): the codes by region went from 12 s to
+  0.7 s, but 0.9 M names in 20 groups went from 5.4 s to 11.5 s. Every distinct name is keyed (0.84 M of them), and each
+  of min and max planned its own join.
+- **The DISTINCT (group, value) pairs, materialised, each weighed once a distinct value** (the PR's first form): the
+  names by region in 2.1 s, the codes in 0.5 s. Over the first data below, the pairs' DISTINCT read 3,886,072 (region,
+  name) pairs of 832,632 distinct names (its EXPLAIN ANALYZE, and `count(DISTINCT name)`). The review of PR 1104 ran
+  the names by region 16 and 64 at once: some refused with 53400, past the spill ceiling, where the key a row answered
+  every one.
+- **Two passes, each pick a lookup of its group** (the second form): a row a group, and 64 at once answered. But with
+  as many groups as rows the thresholds, the candidates, the picks and four lookups beside the aggregate held more than
+  the key a row did. The second review grouped 4.5 M rows by 3.9 M names: 1.5 times main's spill alone, and 2 or 3 at
+  once refused with 53400 (and once a raw XX000 of the same ceiling) where main answered. Hence the probe, and the
+  pick narrowed in place of the lookups: no aggregate is added beside the one written.
+- **The check of a value the order cannot key.** Inside a lookup, it was computed for every group the rows hold,
+  before a HAVING or an outer query's WHERE dropped one. So it refused a statement main answered (the test's
+  `WHERE q.g = '1'` over a grouped derived table). Now the engine's own `error()` raises the order's refusal on a row
+  holding its group's pick where that pick is marked unkeyed: a row the statement reads, as the key a row raised it.
+**One value under two orders is two WITH queries.** The first review also found them cached by the value alone, so
+`SELECT g, min(n), min(n COLLATE zh) … GROUP BY g` answered the database's least for both (`中` sorts first under
+zh_CN, `a` under en_US). Every WITH query this module writes is keyed by the value and its order. The keys of the
+GROUP BY must be computed again over the same rows (`groupKeys`): a grouping set, a `*` in the list, a key that calls a
+function of Mason's (a jsonb's or a numeric's key) or reads a subquery, and a bare name an output gives another meaning
+stay as written.
+
+**A SELECT DISTINCT sorted by a libc key sorts its distinct rows** (`distinctSorted`). It becomes a SELECT of its
+outputs over the DISTINCT as a derived table, each key written over those columns. Under a LIMIT, that is a top N of
+one FROM item, which the second round keys for its candidates alone.
+
+**Measured** over the wire on a shared 4-core machine (load 1 to 6), main and the change in turn, three rounds each, a
+4 GiB engine limit, with the source Postgres 16 (`en_US.utf8`) beside them. A time is the best of three. The data: 4.5 M
+sales with a status 97 % one value, 16,900 codes, 3.9 M distinct names (4.47 M distinct (region, name) pairs) and 20
+regions.
+
+| statement | main | this change | Postgres |
+|---|---|---|---|
+| `region, min(code), max(code) … GROUP BY region` | 13.0 s | 1.24 s | 0.33 s |
+| `region, min(name), max(name) … GROUP BY region` | 31.0 s | 3.17 s | 0.36 s |
+| `status, min(name), max(name) … GROUP BY status` | 30.9 s | 3.27 s | 0.38 s |
+| the same by `id % 100000` (100,000 groups), `LIMIT 5` | 35.7 s | 5.56 s | 0.72 s |
+| `name, min(status), max(code), count(*)` by name (3.9 M groups: many), `LIMIT 5` | 57.1 s | 58.3 s | 4.77 s |
+| `SELECT DISTINCT code … ORDER BY code` | 12.1 s | 0.14 s | 0.35 s |
+| `SELECT DISTINCT name … ORDER BY name LIMIT 100` | 34.1 s | 1.99 s | 4.90 s |
+| `SELECT DISTINCT status … ORDER BY status` | 17.2 s | 0.05 s | 0.18 s |
+| `* ORDER BY code FETCH FIRST 10 ROWS WITH TIES` | 14.7 s | 15.6 s | 2.01 s |
+
+The ungrouped min / max and the top N were unchanged. Grouped by the names themselves, the groups are many, and most
+of the time is the ORDER BY's key of each of the 3.9 M groups, which this change does not touch.
+
+**Many at once**, each statement started at once, the server's peak resident memory and the peak size of its spill
+directory across the run, main and the change in turn under the same load (a 1 GiB engine limit beside a 3 GB spill
+ceiling, or 4 GiB beside the default, half the free disk, 4.5 GB here). The names by region (few groups):
+
+| at once | limit | main | this change |
+|---|---|---|---|
+| 16 | 1 GiB, 3 GB | 16 answered in 585 s, peak 721 MiB, no spill | 16 answered in 61 s, peak 779 MiB, no spill |
+| 64 | 4 GiB, default | 64 answered in 2,232 s, peak 1,388 MiB, no spill | 64 answered in 226 s, peak 958 MiB, no spill |
+
+The names by name (`name, min(status), max(code), count(*) … GROUP BY name ORDER BY name LIMIT 5`: many groups, so the
+key a row). The spill varies from run to run by up to a factor of two at 8 at once, so every run is listed:
+
+| at once | limit | main: peak spill (each run) | this change: peak spill (each run) | answered |
+|---|---|---|---|---|
+| 1 | 1 GiB, 3 GB | 625, 553 MiB | 621, 685, 603 MiB | all, both |
+| 2 | 1 GiB, 3 GB | 1,597, 1,490, 1,704, 1,655 MiB | 1,702, 1,568, 1,660, 1,421 MiB | all, both |
+| 3 | 1 GiB, 3 GB | 2,318, 2,529 MiB | 2,362, 2,443 MiB | all, both |
+| 8 | 4 GiB, default | 715, 1,725 MiB | 881, 730 MiB | all, both |
+
+Peak resident memory ranged alike: 1.6–2.1 GiB for both from 1 to 3 at once, 4.4 GiB for both at 8. The times were
+within 10 % of each other. The PR's earlier rounds measured "many at once" under the server's default engine limit:
+the harness never handed the engine the limit it named, so those numbers are not repeated here.
+
+**What is left.** A grouped min / max over many groups keys every row, as before. `FETCH FIRST … WITH TIES` still keys
+every row (15 s against 2.0 s); its first n rows plus their ties
+are the rows a top N's threshold keeps, so the second round's filter would serve it. A grouped top N, a window's ORDER
+BY, a FILTER'd or grouping-set min / max, and a SELECT DISTINCT with no LIMIT over values each their own (every value
+keyed once) are as before or close to it.
+**Where.** `src/duck/libc-bound.ts` (`pickGrouped`, `groupedQueries`, `groupKeys`, `distinctSorted`);
+`tests/duck-wire.test.ts` "libc grouped", `tests/duck-plans.test.ts` (the `text under libc:` entries and the rows
+test), the oracle's `text keyed once a group:`, `collation: a grouped min and max …` and `issue 666:` statements.
 
 ## Measurements
 
@@ -3986,6 +4479,259 @@ old data is not free space, and the new must fit beside it.
 CTE) was no faster. The read is made only when asked (issue 890), and the estimate is computed with it, never at a
 read of the run's state.
 
+### Text compression by column (issue 1140, 2026-11-18)
+
+**Decision.** The instance still forces ZSTD (`force_compression`, src/duck/store.ts `INSTANCE_SETTINGS`), as the
+default. But when a table's copy is made, each text column (VARCHAR or JSON) is given its own method in the table's
+definition, `USING COMPRESSION`, which wins over the instance's (src/duck/text-compression.ts `textStorage`):
+- **the dictionary** (`dict_fsst`, the analyzer's own choice for text) when the sample's values average under 64 bytes,
+  or repeat (its distinct values at most an eighth of its values);
+- **ZSTD** for long values that do not repeat, and for a column whose text could reach 16 KiB. For a text, varchar or
+  char, that is a sampled value of 16 KiB or more. For any other type (json, jsonb, citext, xml and the rest), the
+  sample has only each value's size as Postgres stored it, so the dictionary needs every sampled value stored
+  uncompressed and under 2,000 bytes (`dictionaryHolds`). Such a value prints in under 12,000 bytes of text. A value
+  Postgres compressed says nothing of its text's length, and before Postgres 14 the source cannot say which it
+  compressed, so those columns keep ZSTD.
+
+The inputs come from one sample of the source, read in the copy's transaction (`beginCopy`, `textStorageOf`). It reads
+about 100 pages chosen at random (`TABLESAMPLE SYSTEM … REPEATABLE`), and sends back one row of aggregates. It reads
+at most 10,000 rows, and a wide table gives far fewer: about 1,900 rows from 100 pages of a table of 527 pages. Lengths come first, read from each value's header (`octet_length` of a text; `pg_column_size` of a json or
+jsonb, whose text would have to be made whole, with `pg_column_compression` from Postgres 14), so no large value is
+taken out of its TOAST table. Only the long columns the dictionary could hold are then hashed for their distinct values
+(`hashtextextended`, which a FIPS-mode Postgres allows where it refuses `md5`), on the same pages. The rows hashed are
+held to about 16 MiB of text, a stored size counted at six times itself, the most its text can be. A compaction decides again from
+the table's own rows (src/duck/compact.ts `rewrite`): eight runs of row ids, at most a piece's rows, halved when it runs
+out of memory. A column with no value sampled (an empty table) gets no clause and keeps the instance's ZSTD.
+
+**Why the instance keeps ZSTD.** A column's own method holds for every row written to it later, by the poll or the
+stream, through a checkpoint and a restart (the definition is in the file). A table made before this change has no
+clause, so its new rows keep the instance's ZSTD, as before. The other way round, dropping `force_compression`, would
+have stored those tables' new rows by the analyzer, and a JSON column with one large document in a row group is stored
+Uncompressed: an upgrade would have grown every append-only JSON table. Every path that makes a table without a clause (a
+generated table's `CREATE TABLE AS`, a stored JSON path's `ADD COLUMN`) also keeps today's ZSTD. A column given
+`dict_fsst` under the forced instance stores exactly what the analyzer would: the same bytes and times in every shape
+below.
+
+**Why.** On the cold benchmark at 100 M orders, `orders.status` (six values) took 645 MB under ZSTD and 41 MB with the
+analyzer's choice, and "count by status" read cold took 4.03 s against 0.17 s, with the same answer. ZSTD was forced in
+the first place because the analyzer stored a large JSON column Uncompressed (0.66 GB a million rows, against 0.26 GB
+forced). Both hold: the dictionary for what dashboards group and filter on, ZSTD for documents.
+
+**When the analyzer stores text Uncompressed.** The dictionary cannot hold a value of 16 KiB or more (DuckDB 2.0 at
+256 KiB blocks: 16,383 bytes kept it, 16,384 did not). One such value in a row group, and the whole row group is stored
+Uncompressed, a forced `dict_fsst` included (it falls back, it never fails). Documents of 700 bytes with one of 45 KB in a
+hundred took 1,451 MB a million rows Uncompressed, against 312 MB under ZSTD. A sample may miss rare large values in a
+short column, and the cost is not small. A row group holds 122,880 rows, so a large value in one row of 100,000 puts
+one in nearly every row group, and nearly the whole column is stored Uncompressed. The review of PR 1141 measured
+5 M rows of such a short column at 63 MB, against 21 MB under ZSTD. That is the worst case of a text column given the
+dictionary: three times ZSTD's size, never the 51 times a large document stored Uncompressed costs. A compaction
+decides again from the table's own rows, and so sees a large value the source's sample missed only if its own sample
+holds one.
+
+The first version of this rule measured a json or jsonb by its size as stored, and compared that with the 16 KiB
+limit, which applies to the text. The review of PR 1141 found 20,000 jsonb documents of 800 keys and five distinct
+values, 51,892 bytes of text each and 3,383 bytes stored compressed. They were given the dictionary and took 995 MB
+Uncompressed, against 19.3 MB under ZSTD on main. A stored size now gives the dictionary only when no value is
+compressed and every one is small.
+
+**Measured.** DuckDB 2.0.0, 4 threads, a laptop. One column of a million rows of each shape, the
+same rows in the same order for each method. The size is the database file's after a checkpoint. "Fresh scan" is
+`sum(strlen(v))` in a newly opened instance: the engine's own cache is cold, but the OS's page cache is not (it could not
+be dropped here), so a read from disk costs the bytes on top. "Filter" and "group by" are warm, the best of five.
+`dict_fsst` (a column's own, under the forced instance) gave the same bytes and times as the analyzer in every shape.
+Every answer was the same under both methods.
+
+| Shape (avg bytes, distinct) | MB analyzer | MB ZSTD | fresh scan ms | filter ms | group by ms |
+|---|---|---|---|---|---|
+| status (7 B, 6) | 0.8 | 6.8 | 1 / 4 | 1 / 5 | 1 / 7 |
+| country code (2 B, 209) | 1.6 | 6.8 | 1 / 2 | 1 / 2 | 1 / 3 |
+| name (18 B, 8 k) | 2.6 | 8.9 | 1 / 6 | 1 / 6 | 2 / 10 |
+| email (27 B, unique) | 8.7 | 13.1 | 5 / 7 | 7 / 7 | 14 / 16 |
+| hex id (32 B, unique) | 18.4 | 21.8 | 6 / 4 | 5 / 4 | 8 / 9 |
+| URL (43 B, unique) | 10.8 | 13.1 | 5 / 10 | 12 / 18 | 25 / 27 |
+| small JSON (68 B, unique) | 29.6 | 28.1 | 8 / 13 | 18 / 24 | 19 / 26 |
+| free text, random words (113 B, unique) | 62.7 | 55.8 | 10 / 25 | 33 / 48 | 16 / 29 |
+| free text, a sentence or two (175 B, unique) | 34.6 | 38.8 | 10 / 29 | 30 / 52 | 129 / 146 |
+| free text, random words (223 B, unique) | 123.0 | 100.7 | 21 / 53 | 59 / 103 | 18 / 59 |
+| long label (186 B, 40) | 1.3 | 8.9 | 1 / 7 | 1 / 6 | 1 / 13 |
+| text of 220 B, 1,000 values | 4.7 | 51.7 | 1 / 25 | 2 / 64 | 5 / 28 |
+| text of 220 B, 5,000 values | 96.2 | 87.8 | 17 / 48 | 55 / 88 | 15 / 47 |
+| JSON (708 B, unique) | 275.0 | 209.5 | 38 / 117 | 132 / 194 | 112 / 195 |
+| JSON (704 B, 300 values) | 2.6 | 40.9 | 1 / 29 | 1 / 103 | 79 / 108 |
+| JSON (704 B, 1,000 values) | 87.0 | 98.6 | 15 / 54 | 69 / 130 | 93 / 137 |
+| JSON (706 B, 3,000 values) | 230.7 | 158.3 | 33 / 87 | 104 / 164 | 105 / 168 |
+| long JSON (1,734 B, unique) | 682.1 | 518.8 | 197 / 298 | 179 / 406 | 269 / 476 |
+| JSON (1,127 B), one of 45 KB in 100 | 1,451.0 Uncompressed | 312.2 | 193 / 201 | 92 / 255 | 138 / 305 |
+
+So the rule's thresholds. Below 64 bytes the dictionary is 1.2 to 8.5 times smaller, and as fast or faster except on hex
+ids. From 64 bytes, of values that do not repeat, ZSTD is smaller in every shape but one: 5 to 16 % for random words and
+small JSON, 24 % from 700 bytes, and 36 % for the cold benchmark's jsonb (below). Sentences of 175 bytes are the
+exception, 11 % larger. ZSTD reads such a column 1.5 to 3 times slower when it is cached. But a dashboard filters and
+groups on short codes, not on unique documents, and a cold read pays for a column's bytes. So from 64 bytes: ZSTD. Values that repeat are many times smaller in the
+dictionary at any length, until there are too many distinct values for a block's dictionary: 1,000 of 220 B or of 700 B
+still repeat, 3,000 of 700 B and 5,000 of 220 B no longer do. A sample of 10,000 rows sees 1,000 distinct at a tenth,
+3,000 at about three tenths, so the line is an eighth. A smaller sample, from a wide table, sees a larger share
+distinct, so it calls fewer columns repeated.
+
+**The cold benchmark's columns, and why the threshold is 64 bytes.** The rule first gave the dictionary to everything
+under 256 bytes. On the cold benchmark at 100 M orders (`scripts/bench-replica-cold.ts` `coldDataSql`), that made a
+count by status 4.03 s to 0.51 s, but the synced data grew from 8.29 to 8.91 GiB (+7.5 %). Its columns, measured at 2 M
+rows from the same SQL on a laptop, each column in a file of its own (MB, ZSTD against the dictionary; a warm filter
+the best of five):
+
+| Column (avg bytes, distinct) | MB ZSTD | MB dictionary | warm filter ms |
+|---|---|---|---|
+| `orders.status` (7 B, 6) | 12.5 | 1.3 | 5 / 1 |
+| `orders.note` (34 B, 4; 30 % non-null) | 12.8 | 1.3 | 8 / 2 |
+| `orders.payload` jsonb (156 B of text, 176 B stored, unique) | 65.5 | 102.3 | 92 / 67 |
+| `customers.name` (small at 2 M) | 0.8 | 0.8 | 1 / 1 |
+| `customers.email` (small at 2 M) | 0.8 | 1.0 | 1 / 1 |
+
+At 100 M rows the payload costs about 1.8 GB more with the dictionary, against about 1.1 GB the status and the note
+save. That is the box's +0.62 GiB. With the threshold at 64 bytes, the payload keeps ZSTD and the status and note keep
+the dictionary. The price is the payload's warm filter, 92 ms against 67 ms over 2 M rows.
+
+**What it costs a first sync.** Nothing measurable. The sample is two small reads on the source, and a dictionary is
+no slower to write than ZSTD. The real sync of 2 M orders from a local Postgres 18 (a six-value status, an email, a jsonb
+of ~350 bytes), main against this change, three runs alternated: 5.16, 5.51 and 5.62 s against 4.67, 5.23 and 5.37 s.
+The file went from 287.8 to 278.7 MB (the jsonb, ZSTD under both, is most of it), and a count by status in a fresh
+instance from 6–9 ms to 2–3 ms, with the same answer.
+
+**An upgrade.** Nothing is read again. A table synced before keeps its stored method until it is synced again whole or
+compacted (Mason compacts a table by itself once half its blocks are waste: deleted rows, or a row group per checkpoint). Then the rule applies.
+
+**Not done.** A generated table is made by `CREATE TABLE AS`, which takes no clause, so its text keeps the instance's
+ZSTD. A stored JSON path's column too, until its table is compacted. The disk check's `STORED_SHARE` (0.4) was measured
+with ZSTD everywhere, so it now over-estimates a table of short text, which only errs on the safe side.
+
+### A time's 15-minute bucket (issue 1146, 2026-11-18)
+
+**Decision.** Beside each `timestamptz` column, a synced table holds an INTEGER: the value's 15 minutes of UTC
+(src/duck/bucket-column.ts). A GROUP BY of a timestamptz column's hour, day, week, month, quarter or year, planned in a
+zone other than UTC, or in UTC over a table of 10 M rows or more (issue 1174), groups by that bucket first
+(src/duck/bucket-group.ts). It then works out the unit once a bucket,
+instead of once a row. The rules are in duck-copy.md and duck-rewrite.md ("a time's unit grouped by its bucket").
+
+**Why it is exact.** Every zone the engine knows has been a multiple of 15 minutes from UTC since 1980. So a local
+hour, day, week, month, quarter or year starts on a bucket's edge, and a bucket never straddles two units.
+`tests/duck-bucket-zones.test.ts` checks this for every zone the engine knows, so an engine upgrade that changes the
+zone data fails CI. The test also found what the issue missed:
+- Six zones changed offset at a minute past midnight since 1980, off a bucket's edge. They are St. John's (and its
+  names CNT and Canada/Newfoundland) and Goose Bay until 2011, Moncton until 2006, Gaza and Hebron in 2010 and 2011,
+  and Casey from 2020 to 2022. In these zones a bucket can hold both sides of a change.
+- So the plan reads the session's zone where it runs. In those zones (`OFF_BOUNDARY_ZONES`) every row is truncated as
+  before. A zone added to the engine's data with such a change fails the test until it is named.
+- Pacific/Kiritimati's −10:40 ended in 1979, which is the 1980 cutoff.
+
+**A cold query reads the bucket alone** (the owner's decision on PR 1149, 2026-11-18). The issue proposed reading
+the column's earliest value from its statistics as the plan is made, and keeping today's plan when it is before 1980 or
+infinite. But a plan is cached by its text, and a prepared statement keeps its plan, so such a guard goes stale as rows
+sync. The first form of this change truncated each such row itself, and so read the time column as well as the bucket:
+a cold read saved no bytes. Now:
+- The bucket is NULL for a NULL, and `BUCKET_NONE` (-1) for a value no bucket decides: before 1980, from year 10000,
+  ±infinity. Every write path computes it from the row (`bucketSql`), so the write that adds such a row marks it in its
+  own transaction.
+- The inner query is a UNION ALL of two branches. One takes the rows whose bucket is not -1 and reads the bucket. The
+  other takes the rows whose bucket is -1 and reads the time.
+- On a table that holds no -1, the engine's own statistics of the bucket say the second branch's filter is false, and
+  it plans that branch as an empty result. The join beside it reads one vector and stops. So the time is not read.
+- The statistics are read as the statement is planned, in the transaction that runs it. A statement prepared before a
+  row of -1 was committed, and run after, still counted that row (measured on the engine directly). Nothing about the
+  rows is recorded beside them, and nothing a cached plan holds can go stale.
+  `tests/duck-time-bucket.test.ts` plans a statement on a clean table, then writes such a row by insert and by update,
+  and holds the answers to Postgres. A plan whose second branch is always empty fails it.
+- On a table that holds such a row, the second branch reads the time only in the row groups whose bucket's minimum is
+  -1. A deleted row leaves the statistics wide until a compaction rewrites the table, which costs speed, never an answer.
+- The owner suggested a flag kept beside the table and read through a session variable. A variable is set before the
+  statement and folded into it as it is bound, outside the statement's own transaction. So a write committed in between
+  could meet a flag that still said "clean". The bucket's own statistics have no such gap.
+- Both branches read the FROM and the WHERE. A statement whose FROM or WHERE could answer twice differently keeps its
+  plan: a volatile call, a LIMIT or OFFSET, a sample, a LATERAL item or a function in the FROM, a WITH query with one.
+
+**When it is used, by measurement:**
+- **In UTC, only over a table of 10 M rows or more** (issue 1174, below). There the truncation is already the
+  instant's arithmetic, so the bucket saves less, and the second GROUP BY costs more where a bucket holds few rows. The
+  plan reads the rows the sync counted in the copy of the column's table (`UTC_BUCKET_ROWS`, src/duck/rewrite.ts). A
+  table the sync has not counted keeps the arithmetic. The plan is exact in any zone either way. The plan cache keeps a
+  plan by its zone, so only a prepared statement can run a plan made in another zone, and it answers right with
+  either plan (`tests/duck-time-bucket.test.ts`).
+- **One column's bucket a statement**, the first key's. Grouped by two columns' buckets, the inner groups are pairs of
+  buckets, nearly one a row. Every other key, a unit of another column included, is one inner key, computed a row.
+  At 5 M rows (24 rows a bucket) a month and a week of two columns took 139 ms against main's 125. At 50 M rows (240 a
+  bucket) it took 559 ms against 1,000, so it stays.
+- **A sum or an average of a float keeps its plan.** Doubles added in another order can differ in the last digit. The
+  oracle found it ("675" where Postgres has "675.0000000000001").
+
+**A `timestamp` has no bucket.** Its truncation never reads the session's zone. It is the engine's arithmetic, which
+the bucket did not beat in UTC.
+
+**A table synced before has no bucket**, and keeps today's plan until it is synced again whole. Nothing is read again
+on upgrade.
+
+**Measured** on a laptop against main (5026d3da), over a synthetic source synced into a fresh file: 50 M orders with
+two timestamptz columns (a quarter of one NULL), joined to 2.5 M customers. The times are in order, each with its own
+microseconds. Warm, over the Postgres API, min of 2 runs alternating main and head, one client and ten at once. The
+last column is the statement's SQL run in a fresh engine instance over the file, its own buffer cold: the bytes it read
+(the profiler's `total_bytes_read`) and its time. The machine's page cache was not cleared.
+
+| Query | Zone | 1 client, main → head | 10 clients, main → head | read cold, main → head |
+|---|---|---:|---:|---:|
+| Revenue by month | Asia/Kathmandu | 456 → 60 ms | 5,092 → 594 ms | 182.7 → 44.6 MB, 533 → 62 ms |
+| Orders by day | Asia/Kathmandu | 456 → 76 ms | 4,424 → 607 ms | 182.7 → 44.6 MB, 501 → 60 ms |
+| Revenue by month, joined to customers (the cold benchmark's) | Asia/Kathmandu | 1,185 → 775 ms | 12,256 → 7,875 ms | 336.9 → 212.1 MB, 1,275 → 832 ms |
+| Month by status and ship week (two columns) | Asia/Kathmandu | 1,000 → 559 ms | 10,014 → 5,969 ms | 346.6 → 247.7 MB, 1,021 → 564 ms |
+| Revenue by month | UTC | 126 → 134 ms | 1,244 → 1,397 ms | 182.7 → 185.6 MB, 145 → 142 ms |
+| Revenue by month, joined to customers | UTC | 565 → 497 ms | 4,844 → 4,523 ms | 336.9 → 353.1 MB, 499 → 553 ms |
+
+- In UTC both send the engine the same SQL. Timed alone over the two files, alternating, revenue by month took 132 ms
+  at main and 126 at the head with one connection, and 1,435 ms at both with ten. The differences above are noise.
+- **The first sync** took 12.04 s against 11.27 s (+7%, the min of 2).
+- **The synced data** took 584.9 MB against 557.1 MB (+5%). At 5 M rows with rows in random time order, the worst case
+  for the bucket's compression, it took 94.6 MB against 70.0 MB (+35%).
+- A query that also filters on the time (`WHERE created_at >= …`) reads the time for its own filter.
+
+**In UTC too, over a big table (issue 1174, 2026-11-19).** Profiling the cold benchmark at 100 M orders found ten
+clients in UTC limited by CPU, and revenue by month cheaper grouped by the bucket by hand (10.3 against 6.9
+CPU-seconds a query). So a plan made in UTC takes the bucket too, where the table is big enough. Measured on a laptop
+(Apple, 10 cores, 32 GiB, Node 26) over the cold benchmark's data (`coldDataSql`): 30 M orders and 1.5 M customers
+over two years, synced from a local Postgres 18. Beside them, tables of 5,000 and 1 M rows and samples of 3 M, 6 M and
+10 M orders, all over the same two years (70,080 buckets). Warm, one client over the Postgres API, the median of 7
+runs. Main (db568e92) and the head were each started over the same file in turn. CPU is the Mason process's own time
+over the query (`ps`). The "by the bucket" column below 10 M is the head before it was limited to 10 M, which took the
+bucket over every table.
+
+| Query, in UTC | Table's rows | main: wall, CPU | by the bucket: wall, CPU |
+|---|---:|---:|---:|
+| Revenue by month, joined to customers (the cold benchmark's) | 30 M | 226 ms, 1.78 s | 166 ms, 1.44 s |
+| Orders by month | 30 M | 78 ms, 0.71 s | 44 ms, 0.32 s |
+| Orders by day | 30 M | 63 ms, 0.54 s | 44 ms, 0.32 s |
+| Orders by hour | 30 M | 101 ms, 0.62 s | 78 ms, 0.36 s |
+| Orders by day and status | 30 M | 104 ms, 0.70 s | 81 ms, 0.54 s |
+| By month / day / hour | 10 M | 30 / 26 / 70 ms, 0.24 / 0.18 / 0.24 s | 20 / 20 / 56 ms, 0.12 / 0.12 / 0.16 s |
+| By month / day / hour | 6 M | 19 / 17 / 49 ms, 0.14 / 0.11 / 0.16 s | 15 / 17 / 52 ms, 0.08 / 0.08 / 0.13 s |
+| By month / day / hour | 3 M | 12 / 12 / 42 ms, 0.07 / 0.06 / 0.10 s | 13 / 16 / 53 ms, 0.05 / 0.06 / 0.10 s |
+| Customers by month / day | 1.5 M | 7 / 7 ms, 0.04 / 0.03 s | 10 / 10 ms, 0.03 / 0.03 s |
+| By month / hour | 1 M | 7 / 39 ms, 0.03 / 0.07 s | 11 / 54 ms, 0.03 / 0.08 s |
+| By month / day / hour | 5,000 | 3 / 5 / 13 ms | 8 / 9 / 19 ms |
+
+- Ten clients at once, each sending the query once, the slowest of the ten, the median of 5 rounds: revenue by month
+  joined to customers took 2,276 ms at main and 1,796 ms at the head (19.8 against 15.9 CPU-seconds). Orders by month
+  took 799 ms against 391 (7.4 against 3.4 CPU-seconds).
+- Revenue by month in Asia/Kathmandu, which took the bucket before, measured the same at both (201 and 187 ms).
+- Every answer was the same at both (an md5 of the rows).
+- **Why 10 M.** What decides is the rows a bucket holds, which the plan cannot know: it knows the table's rows, not the
+  span of its times. At 43 rows a bucket (3 M rows over two years) the bucket cost the same CPU and up to 11 ms more. At
+  86 (6 M) it cost less CPU and about the same time, and from 143 (10 M) less of both. 10 M rows over six years of times
+  is still about 45 a bucket. A smaller table loses at most a few milliseconds by the arithmetic, so it keeps it.
+- The oracle's tables are small, so its statements in UTC take the arithmetic. The bucket's plan in UTC is held to
+  Postgres by `tests/duck-time-bucket.test.ts`, whose tables the sync is told are big.
+
+**The benchmark's joined query, and its customer's year.** It groups by `date_trunc('year', c.created_at)` too, which
+the plan works out once a joined row, after the join. Measured by hand on the head's file at 50 M, in Kathmandu, warm:
+main's plan took 1,036 ms, the head's 665 ms, and the same with the year worked out once a customer before the join
+(a subquery over customers) 293 ms, with the same answer. So moving the second column's unit below the join would take
+the query to about a third of main's time. That is a change of its own, not this one.
+
 ### A small table's size: not measured until DuckDB's own checkpoint (issue 815; the owner, 2026-11-11)
 
 **What was wrong.** A copy's size is its distinct blocks (`pragma_storage_info`), and a copy whose rows are all in the
@@ -4099,14 +4845,44 @@ A tuned Postgres would close part of the gap, not 23×.
 
 ### Mason against a Postgres read replica
 
-**Decision.** `scripts/bench-replica.ts` sweeps each axis until Postgres's p95 of a six-statement mix reaches a target
-(`--target-postgres-seconds`; a minute for a published run): rows at 8 clients about √10 a step (`nextSize`), then
-clients at the largest size under the target, doubling (`clientSteps`) to 1,024. Each engine is measured with the other
-stopped. docs/MEASUREMENTS.md ("When is Mason faster?") and the README's headline numbers are rendered from its fixture; `docs/BENCHMARK.md` has the method
-in full (a replica's settings and indexes for the container's memory, answers compared before timing, the median of
-runs).
+**Decision (2026-11-17, #1121).** The published run is the cold mode (`node scripts/bench-replica.ts --cold`,
+`scripts/bench-replica-cold.ts`). Three queries (a count over every row, a sum by month over a join, a lookup by primary
+key) at 1 M, 10 M and 100 M rows, sent once by 1 client or by 10 at the same moment. Before every run the engine is
+restarted and the OS page cache dropped. A cell's number is the median of 3 runs of the slowest client. Postgres and
+Mason (the `mason-data` image) each run in a container with the same `--cpus`, `--memory` and `--memory-swap`. The
+client is pgbench, timed by its per-transaction log. The data has random UUID primary keys and no index on status.
+Each run records what the measured engine read from disk (its cgroup's `io.stat`), and the fixture names the disk.
+docs/BENCHMARK.md "The cold mode" has the method in full.
 
-**Why.** A grid compares sizes someone picked; a replica's owner asks where Postgres stops being usable. An idle engine
+**Why.**
+- **The reader's question.** A reader asks how long one query takes the first time, with one user and with ten. The
+  warm mode's p95 over a mix of six queries does not answer that, and it hides which query was slow.
+- **Equal resources.** In the warm mode Postgres ran in a container with a memory limit, while Mason ran in the script's
+  process with no limit on its page cache. A cgroup v2 limit counts the page cache, so a container each with the same
+  limits gives both the same cache. Mason is the image a deployment runs, so its engine gets what it gets in production
+  (half the container).
+- **Cold is the hard case, and repeatable.** A warm cache measures the machine's RAM against the table's size. A
+  restart and a dropped page cache make every run start from the disk, so 3 runs agree.
+- **The lookup trap.** A pgbench script that picks each client's row inside the SQL (`CASE :client_id WHEN 0 THEN …`)
+  made Mason's lookup look many times slower than it is, because its engine does not push that filter down. Each client
+  is sent its row as a plain literal (`\if :client_id = …` in the script), and a test holds the script to it.
+- **The data an application has (Tom, 2026-11-17).** Many applications key their tables by UUID, and a random key
+  spreads a lookup's index over the whole table. A count by a column with no index is what a dashboard often sends; with
+  an index on status, Postgres could answer it from the index alone. The first runs had bigint keys and that index, and
+  were stopped for this.
+- **The disk decides Postgres's cold time.** A cold scan is bounded by the disk's throughput, so each run's bytes read
+  and the disk's own numbers are published beside the times.
+- **One engine at a time.** Mason is stopped while Postgres is measured. Postgres must stay up while Mason is measured,
+  because a Mason start reads its source's catalog, so it is restarted first and left idle.
+
+**Before (the warm mode, kept).** `scripts/bench-replica.ts` without `--cold` sweeps each axis until Postgres's p95 of a six-statement mix reaches a target
+(`--target-postgres-seconds`; a minute for its main run): rows at 8 clients about √10 a step (`nextSize`), then
+clients at the largest size under the target, doubling (`clientSteps`) to 1,024. Each engine is measured with the other
+stopped. It was the published run until #1121, and its renderer is kept, held by `tests/fixtures/bench-replica-warm.json`;
+`docs/BENCHMARK.md` "The warm mode" has the method in full (a replica's settings and indexes for the container's memory,
+answers compared before timing, the median of runs).
+
+**Why it swept.** A grid compares sizes someone picked; a replica's owner asks where Postgres stops being usable. An idle engine
 keeps its buffers and takes the other's page cache, which on a 15 GiB machine is the comparison itself.
 `max_connections` is raised past the clients so the sweep measures answers, not refusals (a replica's default is 100).
 
@@ -4127,3 +4903,124 @@ itself" has the current run's tallies). When it was added, of 2,753 statements M
 30.9 % exactly, 25.0 % the right rows under its own names, 16.2 % refused with its error, 12.6 % a wrong value, 6.1 % wrong
 rows or order. By group on DuckDB alone: common whole statements 80 % identical, the BI shapes 21 %, the type matrix 36 %;
 what fails includes integer division (`7 / 2` is 3.5), LIKE's escapes, an array's text (`[0,1]`), a libc collation's order.
+
+### Joins on hidden integer keys (issue 1144, 2026-11-18)
+
+**Decision.** For each reference the sources file names (`references:`), where the referenced key is clearly larger
+than a small integer (a UUID, a text, a key of several columns, or an integer whose range is at least 64 times its
+rows), the synced data holds a dictionary of the key's values (`_mason.ref_keys_…`), each given a number once, and a
+hidden BIGINT on both tables: the number of the row's key. A join on the reference's columns, as a conjunct of an ON or
+a WHERE, joins on the two numbers (src/duck/reference-keys.ts, src/duck/rewrite.ts `referenceJoins`). A dense integer
+key (a serial) gets none: the engine bit-packs it to the few bits its number would take.
+
+**Why a dictionary, not the referenced row's number.** The issue proposed numbering the referenced rows and giving each
+referencing row its row's number, with a check that the referenced key is unique and a fallback to the plain join for
+an orphan. A dictionary of the values instead makes the number a function of the value: two rows' numbers are equal
+exactly when their keys are. So uniqueness and orphans need no check. A key held twice has one number, an orphan's key
+has a number no referenced row holds, a row deleted and inserted again keeps its key's number. A NULL key is -1 on the
+referenced side and 0 on the other, so it never matches. That differs from `=` only in FALSE against NULL, which is why
+only a conjunct of an ON or a WHERE is rewritten. The cost is that the dictionary keeps a deleted key's number for ever.
+
+**Why numbers are given on the writer alone.** A number must never be given twice. Two connections that each read the
+dictionary's largest number and added to it would. So the writer alone adds to a dictionary: the stream's batches and
+the writer's polls number their rows in their own transaction, and the rest (a first sync, a catch-up, a compaction) is
+numbered on the writer's turn after, a chunk at a time. A side table is numbered before its swap from the dictionary as
+it is, read only, and a key new since then is left for the writer.
+
+**Why whether a number is still right is read from the store (the review of PR 1159).** The first version decided it
+from what the numbering's last turn had found: the hidden columns each table held (`present`) and the dictionaries it
+had made (`made`). A swap or a compaction cleared a table from `present` until the next turn, 50 ms later. A stream
+batch in that window updated a key in place without clearing its number, so the row kept its old key's number, and
+nothing was left unnumbered for the check to see. A FULL JOIN then answered 324 323 251 where Postgres answered 349 348
+275. And a dictionary was named for its key's table and columns alone. After a type change at the source on both sides
+(uuid to text, bigint to text), the old dictionary stayed, the new values were cast into it, and `upper(<uuid>)` or
+`'01000003'` joined a key it is not equal to (62 rows against 60). A value the old type could not hold failed the side
+table's numbering at every retry, and the table never synced again. Now every write decides from the store in its own
+transaction, a dictionary belongs to its key's types, a hidden column's name carries its dictionary's, a dictionary is
+dropped only once no column holds its numbers, and a row is numbered only where no cast is needed. So a number cannot
+outlive its key, whatever a swap, a timer, a restart or a change of type does.
+
+**Why numbering never joins on a row id.** The first version numbered a batch's rows by `UPDATE … FROM (…) s WHERE
+t.rowid = s.r`. Under DuckDB 2.0.0, the join filter on the row id read past the scan's vector: the process aborted in
+1 run of 4 of a stream batch on 20,000 rows (macOS's allocator caught the corruption; Guard Malloc showed the read in
+`BloomFilterExecutor::FilterSelection`). The update now joins on the key's own columns, from the batch's distinct keys
+and their numbers, which no run of 3 under Guard Malloc or 10 under load crashed.
+
+**Why the check is a transaction, not a condition.** A row not numbered yet holds NULL, and joined on numbers it would
+match nothing. So a statement that joins on numbers first checks, in a transaction, that no row of those tables is
+unnumbered, and then runs in the same snapshot (src/duck/store.ts `numbersHold`). Otherwise it runs as written. The first
+version put the check in the statement's WHERE, as `CASE WHEN EXISTS (… IS NULL) THEN error(…)`. DuckDB evaluates a WHERE
+only on rows that reach it, and an inner join whose only pair was an unnumbered row answered no row and raised nothing.
+A check on each key as the join reads it (`CASE WHEN h IS NULL THEN error() ELSE h END`) did raise, but it hid the column
+from the planner: the join's estimate was 746 billion rows, and its min-max filter on the probe side was gone.
+
+**Measured.** 100 M orders, 5 M customers for each kind of key, synthetic (scratch Postgres 18 on the same laptop: 10
+cores, 32 GiB, NVMe). One query: revenue by order month and signup year over the join, 72 rows. Before is the same
+build with no `references:` (what main does).
+
+| key | the orders' key column read | warm (min of 5) | cold (3 runs) |
+|---|---|---|---|
+| UUID | 1.60 GiB → 0.31 GiB | 0.83 s → 0.83 s | 1.07–1.20 s → 0.83–0.88 s |
+| text (`cus_` and 16 hex digits) | 1.20 GiB → 0.31 GiB | 1.42 s → 0.83 s | 1.63–1.71 s → 0.87–0.93 s |
+| sparse 60-bit integer | 0.79 GiB → 0.31 GiB | 0.82 s → 0.85 s | 0.89–0.92 s → 0.84–0.88 s |
+| dense serial (no hidden key) | 0.40 GiB, the same | 0.82 s → 0.85 s | 0.86–0.90 s → 0.85–0.89 s |
+
+The first sync of the five tables took 40.6 s before and 53.5 s after. The synced data grew from 4.04 GiB to 5.19 GiB.
+
+The cold runs read 42 GB before each run to push the tables out of the page cache, then ran the SQL Mason sent in a
+new engine instance. On a local NVMe disk the read is cheap, so a cold run costs little more than a warm one. What a
+join reads drops by 0.5 to 1.3 GiB for each reference at this size, and on a disk that reads 125 MB/s (an EBS gp3
+volume's baseline) that is 4 to 10 s a query. Warm, a UUID and a sparse integer join as fast as their numbers do. A
+text key joins faster on its number (1.42 s → 0.83 s). The cost is the hidden columns: about 312 MiB a reference on the
+orders (about 26 bits for each of 100 M rows), 13 MB on each customers table, and the dictionaries. The first
+sync took 13 s more for three references.
+
+### A key of one side, computed on that side (issue 1160, 2026-11-18)
+
+**Decision.** In a grouped join, a GROUP BY key that reads one table alone is computed in a derived table of that
+table, before the join, and the statement groups by its column (src/duck/side-first.ts). The cold benchmark's revenue
+query groups by the orders' month and the customers' signup year. The year was computed once a joined row, 20 times a
+customer. Now it is computed once a customer. The derived table keeps the table's FROM name and lists each column the
+SELECT reads of it, hidden ones included, so the join on a reference's numbers (issue 1144) and a time's bucket (issue
+1146) read as before.
+
+**Why only a key that cannot fail.** Computed before the join, the key is computed on every row of its table, also on
+the rows the join drops. A key that can raise an error would raise it for a row Postgres never computes it on. So only a
+short list of nodes moves, each one the engine computes from any value of its type. The edges were measured on the
+engine, not assumed. A time zone's conversion (`timezone(zone, ts)`) raises "Unable to convert TIMESTAMPTZ to local
+TIMESTAMP" at the engine's last instant in a +14 zone, so it stays. ICU's date_trunc, date_part and a cast to a date do
+not raise there. A date's truncation raises past the last timestamp, so it stays. The integer arithmetic the rewrite
+writes a truncation in moves only where interval arithmetic over the times a copy can hold proves every value fits 64
+bits. A Mason function stays, since it may refuse a row.
+
+**Why the null-extended side needs a strict key.** On the side an outer join extends with NULLs, the derived table's
+column is NULL on an extended row. Postgres computes the key there over NULL columns. A truncation of NULL is NULL, so
+it moves. `coalesce(c.region, 'none')` is 'none', so it stays.
+
+**Why the key is applied only where it saves work.** It saves work only where the join has more rows than the side.
+The plan knows no join's size, only each table's count from the sync. So it moves a key only where its table holds at
+most half the rows of the biggest other table, and no WHERE or ON conjunct filters the other tables. Measured on 50 M
+orders and 2.5 M customers (below), a filter that kept one month of orders made the move cost: 35 to 42 ms in UTC, 50 to
+56 ms in Asia/Kathmandu. A filter that kept six months made it save, 202 to 113 ms in Asia/Kathmandu. That gain is
+left, since the plan cannot tell the two apart. At equal sizes it saves nothing.
+
+**Why a bucket's truncation moves too.** Issue 1146 groups a time's unit by its 15-minute bucket. Left to that rewrite,
+the customers' month is a bucket per joined row, then a truncation per bucket. Moved, it is a truncation per customer.
+A month of the customers' signups over 50 M orders in Asia/Kathmandu took 383 ms by the bucket and 233 ms computed first.
+A key of the larger side keeps its bucket.
+
+**Measured.** 50 M orders and 2.5 M customers, synthetic, with the customers' reference declared (issue 1144) and the
+times' buckets (issue 1146). Laptop: Apple, 10 cores, 32 GiB. The SQL Mason sent, run warm on the synced data, the
+median of 5 to 7 runs, every answer the same by a digest of its rows.
+
+| query | zone | before | after |
+|---|---|---|---|
+| revenue by order month and signup year | Asia/Kathmandu | 660 ms | 283 ms |
+| revenue by order month and signup year | UTC | 383 ms | 331 ms |
+| customers joined to customers (2.5 M each), forced | Asia/Kathmandu | 54 ms | 55 ms |
+| customers joined to customers (2.5 M each), forced | UTC | 37 ms | 39 ms |
+| orders joined to orders (50 M each), forced | Asia/Kathmandu | 827 ms | 835 ms |
+| orders joined to orders (50 M each), forced | UTC | 598 ms | 561 ms |
+
+The joins of two equal sides were written by hand with the key moved ("forced"), since the size rule keeps them. They
+show it saves nothing there, so the rule costs nothing.

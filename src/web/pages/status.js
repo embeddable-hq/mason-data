@@ -1,7 +1,7 @@
 /**
  * THE OVERVIEW (#overview; `#status`, its old address, lands here; the module and its section keep the id `status`): what `mason status` prints — the run in one word (`readiness`)
  * and what it means for the synced data in a line with the Source under it, the facts card "Mason" (the Source, the
- * warnings, Mason's version, uptime and restarts, the disk, the tools connected), the changes the stream carries (replication
+ * warnings, Mason's version, uptime and restarts, the disk), the changes the stream carries (replication
  * mode: its position, lag, last batch and the slot's hold on the database's WAL), the copies not finished (a bar each,
  * only while there are any), and the last day's unsupported SQL in a line. The statements, the slow, the refused and the
  * failed ones are the Queries page's; the sync's failures Sync events'. Reads `/api/state` every poll, the request log's
@@ -57,17 +57,38 @@ export function copyingText(copied, rowsEstimate, p) {
 }
 
 /**
+ * A SYNC BY HAND'S PROGRESS on a table's line (`/api/state` `tables[].syncProgress`, issue 1173): src/cli/readiness.ts
+ * `syncProgressText`, line for line (tests/web-page.test.ts holds the two equal).
+ */
+export function syncProgressText(p) {
+  const took = ` (${duration(p.seconds)})`;
+  const changed = p.changedRows === null ? "its changed rows read" : `${n(p.changedRows)} changed row${p.changedRows === 1 ? "" : "s"} read`;
+  switch (p.step) {
+    case "waiting": return `syncing by hand: waiting for its turn${took}`;
+    case "starting": return `syncing by hand: starting to read it from the database${took}`;
+    case "reading": return `syncing by hand: reading its changed rows from the database${p.changedRows === null ? "" : `, ${n(p.changedRows)} so far`}${took}`;
+    case "writing": return `syncing by hand: ${changed}, writing them${p.pieces === null ? "" : ` (${p.pieces.written} of ${p.pieces.of} pieces written)`}${took}`;
+    case "counting": return `syncing by hand: ${changed}, counting its rows on the database${took}`;
+    case "deleting": return `syncing by hand: ${changed}, finding the rows deleted on the database${p.keysTotal === null ? "" : p.keysRead === null ? `, ${n(p.keysTotal)} keys to read` : `, ${n(p.keysRead)} of ${n(p.keysTotal)} keys read`}${took}`;
+    default: return `syncing by hand: ${changed}, finishing the sync${took}`;
+  }
+}
+
+/**
  * AN ADDED TABLE'S LINE, as `mason status` and `mason wait` print it after its bar (src/cli/commands.ts `tableLines`):
- * its state (done, unsynced, failed, copying, catching-up, waiting), how full its bar is, and what it says — a copied one with how it is kept
- * current and how old its copy is (`keptAge`).
+ * its state (done, unsynced, failed, copying, catching-up, syncing, waiting), how full its bar is, and what it says — a copied one with how it is kept
+ * current and how old its copy is (`keptAge`). `syncing` is a sync asked by hand running now (`syncProgress`, issue
+ * 1173): its fraction is null where no total is known, and the page then draws no bar — never the full bar of the sync
+ * before it.
  */
 export function tableLine(t, now = Date.now()) {
+  if (t.copy?.phase === "done" && t.syncProgress) return { state: "syncing", fraction: t.syncProgress.share, what: syncProgressText(t.syncProgress) };
   if (t.error) return { state: "failed", fraction: 1, what: t.copy?.phase === "done" ? copiedFailedText(t, now) : `its first sync failed: ${firstLine(t.error)}` };
   if (t.copy?.phase === "copying") {
     const c = copyingText(t.copy.rowsCopied, t.rows, t.copy.progress);
     return { state: "copying", fraction: c.fraction ?? 0, what: /^\d/.test(c.text) ? `syncing ${c.text}` : c.text };
   }
-  if (!t.copy) return { state: "waiting", fraction: 0, what: "waiting for its first sync to start" };
+  if (!t.copy) return { state: "waiting", fraction: 0, what: t.syncWaits?.why ?? "waiting for its first sync to start" };
   const age = keptWords(t, now), space = compactionWords(t.copy.compaction, now);
   const what = `${n(t.copy.rowsCopied ?? 0)} rows · synced${t.copy.retired ? ` · ${t.copy.retired}` : ""}${age ? ` · ${age}` : ""}${space ? ` · ${space}` : ""}`;
   // in its one catch-up poll: at work, the accent as mason status paints it cyan (paintBar), never amber (issue 834)
@@ -157,7 +178,7 @@ export function copyBar(table, l, fraction = l.fraction, _from) {
   const waiting = l.state === "waiting";
   const value = Math.floor(Math.max(0, Math.min(1, fraction)) * 100);
   return `<span class="copybar${waiting ? " indeterminate" : ""}" role="progressbar" aria-valuemin="0" aria-valuemax="100"` +
-    `${waiting ? "" : ` aria-valuenow="${value}"`} aria-label="${esc(`${table}: its first sync`)}" aria-valuetext="${esc(waiting ? l.what : `${value}%, ${l.what}`)}">` +
+    `${waiting ? "" : ` aria-valuenow="${value}"`} aria-label="${esc(`${table}: ${l.state === "syncing" ? "its sync by hand" : "its first sync"}`)}" aria-valuetext="${esc(waiting ? l.what : `${value}%, ${l.what}`)}">` +
     `<span class="track" aria-hidden="true"><span class="fill"${waiting ? "" : ` style="width: ${value}%"`}></span></span></span>` +
     // a copy not begun has no share yet: no "0%" at its end (its line says it waits)
     (waiting ? "" : ` <span class="pct">${percent(fraction)}</span>`);
@@ -374,11 +395,12 @@ const sinceText = (iso, now) => `${iso.slice(0, 10) === new Date(now).toISOStrin
  * database or a read replica: issue 935 names it Source, as the box at the top and `mason status` do); the run's
  * warnings (where the database is and whether it is the main one are never among them: issue 888 — the card says both
  * from `source.remote` and `source.standby`, never by reading a warning's words); Mason's version and how long it has
- * been up; its restarts, only when there were any; the free disk beside what the synced data takes; and the tools
- * connected. A fact the run did not say is absent; one it could not read says so, with its reason (never a 0).
+ * been up; its restarts, only when there were any; and the free disk beside what the synced data takes. Who is
+ * connected is not here: it is the Usage page's (issue 1111). A fact the run did not say is absent; one it could not
+ * read says so, with its reason (never a 0).
  */
 export function factRows(s, now = Date.now()) {
-  const src = s.source, e = s.engine, d = s.disk, ss = s.sessions;
+  const src = s.source, e = s.engine, d = s.disk;
   const rows = [["Source", src.demo ? `the demo database Mason runs · Postgres ${pgVersion(src.version)}`
     : `${src.database} on ${src.host} · Postgres ${pgVersion(src.version)} · ${src.standby ? "a read replica" : "your main database"}`, false]];
   rows.push(...s.warnings.map((w) => ["Warning", w, true]));
@@ -392,10 +414,6 @@ export function factRows(s, now = Date.now()) {
     const over = d.freeBytes !== null && d.projectedBytes !== null && d.projectedBytes > d.freeBytes;
     rows.push(["Disk", d.freeBytes === null ? `${firstLine(d.error ?? "the free space could not be read")}${uses}${adds}`
       : `${fileSize(d.freeBytes)} free${typeof d.reserveBytes === "number" ? ` · ${fileSize(d.reserveBytes)} kept for queries that spill to disk` : ""}${uses}${adds}${over ? ". That is more than is free: the sync stops before the disk fills" : ""}`, d.freeBytes === null || over]);
-  }
-  if (ss !== undefined) {
-    const tools = "error" in ss ? null : ss.byClient.length;
-    rows.push(["Connected tools", tools === null ? `unknown: ${firstLine(ss.error)}` : ss.open === 0 ? "none" : `${n(Math.max(1, tools))} connected`, false]);
   }
   return rows;
 }
@@ -440,7 +458,8 @@ function renderProgress(s, isOpen = () => false, shares = new Map(), before = ne
   }
   // as tableLines orders them: the finished first, in the order they finished, then the failed, the copying, the waiting
   const rank = { done: 0, unsynced: 0, failed: 1, copying: 2, "catching-up": 2, waiting: 3 };
-  const lines = picked.map((t) => ({ t, l: tableLine(t) })).filter(({ l }) => l.state !== "done")
+  // a table synced by hand now is served, synced before: not among the tables not synced yet (the Tables page says its sync)
+  const lines = picked.map((t) => ({ t, l: tableLine(t) })).filter(({ l }) => l.state !== "done" && l.state !== "syncing")
     .sort((a, b) => rank[a.l.state] - rank[b.l.state] || (a.t.copy?.updatedAt ?? "").localeCompare(b.t.copy?.updatedAt ?? "") || a.t.table.localeCompare(b.t.table));
   if (!lines.length) return "";
   return `<h3>Tables not synced yet (${lines.length} of ${picked.length} added)</h3>` +

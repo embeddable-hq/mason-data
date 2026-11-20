@@ -90,11 +90,11 @@ let held: Array<() => void> | null = null;
 let pending: Array<{ path: string; res: http.ServerResponse }> | null = null;
 /** Whether every change is cut as it comes (`answerHeld("network")`). */
 let cutting = false;
-/** The users, the running queries, a cloud login: what the Users and Usage pages read. */
+/** The users, the running queries, a cloud tunnel: what the Users and Usage pages read. */
 const USERS = { users: [{ name: "metabase", id: "0123456789abcdef", addedAt: at, live: true, from: null },
   { name: "looker", id: "fedcba9876543210", addedAt: at, disabledAt: at, live: true, from: ["192.0.2.0/24"] }], lastUsedNote: null, requestLogDays: 7 };
 const RUNNING = { running: [{ session: 4, statement: 9, user: "metabase", applicationName: "Metabase", method: "QUERY", startedAt: at, runningMs: 1500, rows: 0, query: "SELECT count(*) FROM orders", queryTruncated: false }] };
-const LISTED = { user: "share_a1b2c3", from: "page", role: null, reads: "every synced table", openedAt: at, via: "pinggy", host: "relay.example", port: 41234, endsAt: null, state: "up" };
+const LISTED = { user: "share_a1b2c3", from: "page", role: null, reads: "every synced table", openedAt: at, via: "pinggy", host: "relay.example", port: 41234, database: "shop", sslmode: "require", endsAt: null, state: "up" };
 const shareOf = (s: Record<string, unknown>, open: boolean) => ({ ...s, share: open ? { port: 40001, fingerprint: "AA", sessions: 0, refusedLogins: 0, droppedConnections: 0, shares: [LISTED] } : null, shareEnded: null });
 const choiceOf = (name: string) => ({ table: name, sync: { value: "off", from: "default" }, rows: 1200, polls: [{ sync: "poll 5m", seconds: 300, cost: null }], bigRows: false,
   live: { allowed: true, checks: [{ name: "wal_level", state: "ok", detail: "logical" }] } });
@@ -104,7 +104,7 @@ const server = http.createServer((req, res) => {
   // the network failing: the browser tries a change again on a fresh connection once its first is cut, so each is cut
   if (req.method !== "GET" && cutting) { res.socket?.destroy(); return; }
   if (req.method !== "GET" && pending !== null) { pending.push({ path: url.pathname, res }); return; }
-  if (url.pathname === "/api/state") return json(mode === "cloud login open" ? shareOf(MODES.editable!, true) : MODES[mode]);
+  if (url.pathname === "/api/state") return json(mode === "cloud tunnel open" ? shareOf(MODES.editable!, true) : MODES[mode]);
   if (url.pathname === "/api/usage") return json({ since: at, until: at, stepSeconds: 60, sampleSeconds: 60, keptDays: 7, samples: [], copySizes: [] });
   if (url.pathname === "/api/activity") return json({ since: at, keptDays: 7, clients: [], slowest: [], clientsTotal: { clients: 0, sessions: 0 },
     window: { days: 1, covered: 1, statements: 0, completed: 0, refused: 0, failed: 0, cancelled: 0, rows: 0, bytesSent: 0, durationMs: { avg: 0, p50: 0, p95: 0 } } });
@@ -223,15 +223,15 @@ const ACTIONS: Array<{ name: string; hash: string; mode?: string; wait: string; 
   { name: "Remove a table", hash: "#tables", wait: "#tables table.catalog tbody tr", open: 'button[data-remove-table="public.customers"]', send: 'button[data-confirm-remove-table="public.customers"]' },
   { name: "Add", hash: "#tables", wait: "#tables table.catalog tbody tr", send: 'button[data-add-table="public.audit"]' },
   { name: "Add with Columns…", hash: "#tables", wait: "#tables table.catalog tbody tr", open: 'button[data-choose="public.audit"]', send: 'form[data-pick-form="public.audit"] button[type="submit"]' },
-  { name: "a table's columns saved", hash: "#tables", wait: "#tables table.catalog tbody tr", open: 'button[data-choose="public.customers"]', send: 'form[data-pick-form="public.customers"] button[type="submit"]' },
-  { name: "a table's sync saved", hash: "#tables", wait: "#tables table.catalog tbody tr", open: 'button[data-choose-sync="public.customers"]', send: 'form[data-sync-form="public.customers"] button[type="submit"]' },
+  { name: "a table's columns saved", hash: "#tables", wait: "#tables table.catalog tbody tr", open: 'button[data-choose="public.customers"]:visible', send: 'form[data-pick-form="public.customers"] button[type="submit"]' },
+  { name: "a table's sync saved", hash: "#tables", wait: "#tables table.catalog tbody tr", open: 'button[data-choose-sync="public.customers"]:visible', send: 'form[data-sync-form="public.customers"] button[type="submit"]' },
   { name: "Disable", hash: "#users", wait: "#users table.users tbody tr", open: 'button[data-disable="metabase"]', send: 'button[data-confirm-disable="metabase"]' },
   { name: "Enable", hash: "#users", wait: "#users table.users tbody tr", send: 'button[data-enable="looker"]' },
   { name: "Remove a user", hash: "#users", wait: "#users table.users tbody tr", open: 'button[data-remove="metabase"]', send: 'button[data-confirm-remove="metabase"]' },
   { name: "From…", hash: "#users", wait: "#users table.users tbody tr", open: 'button[data-from="metabase"]', send: '#user-from button[type="submit"]' },
   { name: "Add a user", hash: "#users", wait: "#add-user", fill: ["#user-name", "grafana"], send: "#add-user-submit" },
-  { name: "Open a cloud login", hash: "#users", wait: "#add-user", open: 'button[data-add-kind="share"]', send: "#share-open:not([disabled])" },
-  { name: "Stop a cloud login", hash: "#users", mode: "cloud login open", wait: "#share-stop", send: "#share-stop" },
+  { name: "Open a cloud tunnel", hash: "#users", wait: "#add-user", open: 'button[data-add-kind="share"]', send: "#share-open:not([disabled])" },
+  { name: "Stop a cloud tunnel", hash: "#users", mode: "cloud tunnel open", wait: "#share-stop", send: "#share-stop" },
   { name: "Cancel a query", hash: "#observability/usage", wait: "#usage-running table tbody tr", open: 'button[data-ask-cancel="4:9"]', send: 'button[data-confirm-cancel="4:9"]' },
 ];
 

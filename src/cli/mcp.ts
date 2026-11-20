@@ -15,6 +15,9 @@
  * every failure on stderr); what it says goes to stderr. A tool's failure is Mason's refusal (SQLSTATE, message,
  * DETAIL, HINT) as an MCP tool error, never a stack.
  *
+ * `mason serve` serves the same session (`McpServer`) over Streamable HTTP to a hosted agent, signed in by OAuth
+ * (src/cli/mcp-http.ts): only the transport and how a session reaches the Postgres API (`McpLink`) differ.
+ *
  * The protocol is written here, not taken from `@modelcontextprotocol/sdk`: that package brings seventeen runtime
  * dependencies (an HTTP server, an OAuth library, two schema validators) for the stdio surface this file holds whole —
  * initialize, ping, tools/list, tools/call, resources/list, resources/read, cancellation — as src/cdc/pg-wire.ts holds
@@ -29,6 +32,8 @@ import { PgConnection, PgError, pgIdent, pgLiteral, socketErrorText, type Extend
 import { qualifiedName, type TableName } from "../duck/explain.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { withLocalSettings } from "../lib/local-settings.ts";
+import { DEFAULT_MCP_ICONS, type McpIcon } from "./mcp-icon.ts";
+import { untrustedText } from "../lib/one-line.ts";
 
 /** The URL a client is shown in the help: a user's, as mason user add prints it. */
 const EXAMPLE_URL = "postgres://claude:<password>@127.0.0.1:5433/mason";
@@ -126,6 +131,19 @@ function connect(s: Source, applicationName: string): Promise<PgConnection> {
     applicationName, connectTimeoutMs: 10_000, textForms: [] });
 }
 
+/**
+ * HOW A SESSION OF THE MCP SERVER REACHES THE POSTGRES API: a connection a call, as one user, under the
+ * application_name the client's initialize named. Over stdio it is the URL's (`sourceLink`); over HTTPS on `mason serve`
+ * it is the run's own listener, as the user the bearer token names (src/cli/mcp-http.ts). The tools are the same code.
+ */
+export interface McpLink {
+  connect(applicationName: string): Promise<PgConnection>;
+  /** where it connects, as a tool's error says it (host:port) */
+  where: string;
+}
+
+const sourceLink = (s: Source): McpLink => ({ connect: (name) => connect(s, name), where: `${s.host}:${s.port}` });
+
 /** Why a connection failed, in the failure shape: nothing listening, a password refused, a database it does not serve. */
 export function connectFailure(e: unknown, s: Source): Failure {
   const where = `${s.host}:${s.port}`;
@@ -166,7 +184,7 @@ export async function mcp(argv: string[]): Promise<number> {
   try { (await connect(source, "mason-mcp")).close(); }
   catch (e) { return failed("mcp", connectFailure(e, source), { json }); }
   log(`serving ${maskedUrl(source.url)} as ${source.user}, over MCP on stdio, until stdin closes`);
-  await serve(new McpServer(source), process.stdin, (line) => { process.stdout.write(`${line}\n`); });
+  await serve(new McpServer(sourceLink(source), log), process.stdin, (line) => { process.stdout.write(`${line}\n`); });
   return 0;
 }
 
@@ -290,7 +308,18 @@ export const RESOURCES = [
   { uri: "mason://help/mcp", name: "mcp", title: "mason mcp", description: "mason help mcp: this server's tools, and how to add it to a client", mimeType: "text/plain" },
 ] as const;
 
-const INSTRUCTIONS = "Mason serves read-only tables synced from an application's Postgres database, for analytical SQL (scans and aggregates). " +
+/** what this server can do and who it is, as initialize says it (and, over HTTP under MCP 2026-07-28, server/discover
+ *  and every result's `_meta`: src/cli/mcp-http.ts) */
+export const SERVER_CAPABILITIES = { tools: { listChanged: false }, resources: { listChanged: false } } as const;
+/** MCP's `Implementation`: who this server is, with its icons (src/cli/mcp-icon.ts: Mason's logo unless mason serve's
+ *  MASON_MCP_ICON names another), a sentence of what it is and where it is published */
+export interface ServerInfo { name: string; title: string; version: string; description: string; websiteUrl: string; icons: readonly McpIcon[] }
+export const SERVER_DESCRIPTION = "Read-only tables synced from an application's Postgres database, for analytical SQL.";
+export const WEBSITE_URL = "https://github.com/embeddable-hq/mason-data";
+export const serverInfo = (icons: readonly McpIcon[] = DEFAULT_MCP_ICONS): ServerInfo =>
+  ({ name: "mason", title: "Mason", version: version(), description: SERVER_DESCRIPTION, websiteUrl: WEBSITE_URL, icons });
+
+export const INSTRUCTIONS = "Mason serves read-only tables synced from an application's Postgres database, for analytical SQL (scans and aggregates). " +
   "Call tables first, describe a table before querying it, and write Postgres's SQL. Each table says how current it is. " +
   "When a statement is refused, its hint says what to write instead.";
 
@@ -305,13 +334,36 @@ async function relations(pg: PgConnection): Promise<Relation[]> {
   return r.rows.map(([schema, name, kind]) => ({ schema: schema!, name: name!, kind: kind === "v" || kind === "m" ? "view" : "table" }));
 }
 
-class McpServer {
+/** One MCP session: the protocol's methods and the tools, over whatever carries its messages (stdio here; Streamable
+ *  HTTP on `mason serve`, src/cli/mcp-http.ts), each message one JSON text handed to `handle`. */
+export class McpServer {
   private applicationName = "mason-mcp";
-  private readonly source: Source;
+  private readonly link: McpLink;
+  private readonly log: (line: string) => void;
+  /** the protocol versions it answers in kind, the first the one a client asking for another is answered with */
+  private readonly versions: readonly string[];
+  /** what initialize says this server is (its icons the endpoint's, over HTTP) */
+  private readonly info: ServerInfo;
   /** the requests being answered, by their id (a cancellation names one) */
   private readonly calls = new Map<string, Call>();
 
-  constructor(source: Source) { this.source = source; }
+  constructor(link: McpLink, logLine: (line: string) => void, versions: readonly string[] = PROTOCOL_VERSIONS, info: ServerInfo = serverInfo()) {
+    this.link = link; this.log = logLine; this.versions = versions; this.info = info;
+  }
+
+  /** names the client where no initialize does (a request of MCP's stateless revision over HTTP): application_name's part */
+  named(client: string | null): void {
+    const c = clientPart(client);
+    this.applicationName = c === null ? "mason-mcp" : `mason-mcp/${c}`;
+  }
+
+  /** the application_name its statements carry: mason-mcp/<the client's name>, once initialize named it */
+  get application(): string { return this.applicationName; }
+
+  /** every request being answered cancelled, as a notifications/cancelled of each would (the session closed under it) */
+  cancelAll(reason: string): void {
+    for (const [key, call] of this.calls) this.cancelCall(key, call, reason);
+  }
 
   /** One line of input: the answer to write, or null for a notification (or a batch of them). */
   async handle(line: string): Promise<unknown> {
@@ -354,7 +406,7 @@ class McpServer {
       // a request the client cancelled is answered no further (MCP: the receiver SHOULD NOT send a response)
       if (call.cancelled) return null;
       if (e instanceof RpcFailure) return rpcError(id, e.code, e.message);
-      log(`${method} failed: ${(e as Error).message}`);
+      this.log(`${untrustedText(method, 60)} failed: ${untrustedText((e as Error).message, 500)}`);
       return rpcError(id, RPC.internal, (e as Error).message);
     } finally { this.calls.delete(key); }
   }
@@ -365,11 +417,20 @@ class McpServer {
     const requestId = params.requestId;
     const call = isId(requestId) ? this.calls.get(`${typeof requestId}:${requestId}`) : undefined;
     if (call === undefined) return;   // answered already, or never asked: MCP says to ignore it
+    // the reason is the client's words: one line of the log, never a line of its own (untrustedText)
+    this.cancelCall(JSON.stringify(requestId), call, `cancelled by the client${typeof params.reason === "string" ? `: ${untrustedText(params.reason)}` : ""}`);
+  }
+
+  /** A request's statement cancelled where it runs (Postgres's CancelRequest), then its connections closed. */
+  private cancelCall(shown: string, call: Call, why: string): void {
+    if (call.cancelled) return;
     call.cancelled = true;
-    log(`request ${JSON.stringify(requestId)} cancelled by the client${typeof params.reason === "string" ? `: ${params.reason}` : ""}`);
+    // `shown` is the client's id (a string id may hold anything)
+    const id = untrustedText(shown, 80);
+    this.log(`request ${id} ${why}`);
     for (const pg of call.connections) {
       // the statement is cancelled where it runs, then its connection closed: the call's work ends at once
-      void pg.cancel().catch((e: unknown) => { log(`cancelling request ${JSON.stringify(requestId)}: ${(e as Error).message}`); })
+      void pg.cancel().catch((e: unknown) => { this.log(`cancelling request ${id}: ${(e as Error).message}`); })
         .finally(() => pg.close());
     }
   }
@@ -382,9 +443,9 @@ class McpServer {
         const client = clientPart((params.clientInfo as { name?: unknown } | undefined)?.name);
         this.applicationName = client === null ? "mason-mcp" : `mason-mcp/${client}`;
         return {
-          protocolVersion: PROTOCOL_VERSIONS.includes(asked as never) ? asked : PROTOCOL_VERSIONS[0],
-          capabilities: { tools: { listChanged: false }, resources: { listChanged: false } },
-          serverInfo: { name: "mason", title: "Mason", version: version() },
+          protocolVersion: this.versions.includes(asked as never) ? asked : this.versions[0],
+          capabilities: SERVER_CAPABILITIES,
+          serverInfo: this.info,
           instructions: INSTRUCTIONS,
         };
       }
@@ -422,15 +483,15 @@ class McpServer {
       if (call.cancelled) throw e;
       // an answer of Mason's this server could not read, or a fault of its own: said so, to report — never "Mason is down"
       if (e instanceof BadAnswer || e instanceof TypeError || e instanceof RangeError || e instanceof ReferenceError || e instanceof SyntaxError) {
-        log(`${tool.name}: ${(e as Error).stack ?? (e as Error).message}`);
+        this.log(`${tool.name}: ${(e as Error).stack ?? (e as Error).message}`);
         const text = `mason mcp could not read Mason's answer: ${(e as Error).message}. This is a bug in mason mcp: report it, with the statement.`;
         return { content: [{ type: "text", text }], structuredContent: { error: { message: text } }, isError: true };
       }
       // what is left is the connection's (pg-wire throws a PgError for every answer the server gave): Mason down, or
       // restarting; said as a tool error, so the agent can say it and try again
       const reason = e instanceof Error ? socketErrorText(e) : String(e);
-      log(`${tool.name}: ${reason}`);
-      const text = `Mason did not answer (${this.source.host}:${this.source.port}): ${reason}. mason status, beside the run, says whether it is up.`;
+      this.log(`${tool.name}: ${reason}`);
+      const text = `Mason did not answer (${this.link.where}): ${reason}. mason status, beside the run, says whether it is up.`;
       return { content: [{ type: "text", text }], structuredContent: { error: { message: text } }, isError: true };
     }
   }
@@ -462,7 +523,7 @@ class McpServer {
 
   /** A connection of this call's, closed when it ends; a cancellation of the call reaches it (`notification`). */
   private async open(call: Call): Promise<PgConnection> {
-    const pg = await connect(this.source, this.applicationName);
+    const pg = await this.link.connect(this.applicationName);
     call.connections.add(pg);
     if (call.cancelled) pg.close();
     return pg;
@@ -558,7 +619,7 @@ class McpServer {
   }
 
   private query(pg: PgConnection, sql: string, maxRows: number, timeoutMs: number): Promise<Record<string, unknown>> {
-    return limited(pg, timeoutMs, async () => {
+    return limited(pg, timeoutMs, this.log, async () => {
       const r = await pg.extended(sql, maxRows);
       if (r.empty) throw badArgument("sql", "a statement (it holds only comments or whitespace)");
       return { columns: await this.columns(pg, r), rows: r.rows, row_count: r.rows.length, truncated: r.suspended, ...(r.command ? { command: r.command } : {}) };
@@ -566,7 +627,7 @@ class McpServer {
   }
 
   private explain(pg: PgConnection, sql: string, analyze: boolean, timeoutMs: number): Promise<Record<string, unknown>> {
-    return limited(pg, timeoutMs, async () => {
+    return limited(pg, timeoutMs, this.log, async () => {
       const prefix = `EXPLAIN ${analyze ? "(ANALYZE) " : ""}`;
       let r: ExtendedResult;
       // a refusal's position is the statement's, not the EXPLAIN's around it
@@ -654,8 +715,8 @@ function copyFacts(c: CopyRow | { error: string } | undefined): Record<string, u
 /** A tool call's statement under its `timeout_ms`: `SET LOCAL statement_timeout` in one read-only transaction around it
  *  (src/lib/local-settings.ts), never a session SET, which a pooler in transaction mode in front of the server hands on
  *  to its next clients (issue 930). The statement's own error is thrown as it was, its position unchanged. */
-function limited<T>(pg: PgConnection, timeoutMs: number, work: () => Promise<T>): Promise<T> {
-  return withLocalSettings({ query: (sql) => pg.query(sql), settings: [["statement_timeout", timeoutMs]], work, answers: () => !pg.closed, log });
+function limited<T>(pg: PgConnection, timeoutMs: number, logLine: (line: string) => void, work: () => Promise<T>): Promise<T> {
+  return withLocalSettings({ query: (sql) => pg.query(sql), settings: [["statement_timeout", timeoutMs]], work, answers: () => !pg.closed, log: logLine });
 }
 
 /** A refusal as the model reads it: Postgres's fields, as psql prints them, and the same as structured content.

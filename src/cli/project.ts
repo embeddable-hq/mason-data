@@ -15,6 +15,7 @@
  * lives (`--project <name>` and `mason list` found a project through its container's labels, and there is no
  * container).
  */
+import { MCP_SETTINGS } from "./mcp-oauth.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomBytes } from "node:crypto";
@@ -31,6 +32,7 @@ import { UI_ACCOUNT_SETTING, uiAccountSetting } from "./ui-account.ts";
 import { UI_OVERVIEW_CARD_SETTING, uiOverviewCardSetting } from "./ui-host-view.ts";
 import { UI_DEPLOY_DOCS_URL_SETTING, uiDeployDocsSetting } from "./ui-deploy-docs.ts";
 import { UI_ICON_SETTING, uiIconSetting } from "./ui-icon.ts";
+import { notTitleSettings, titleSettingsSet, UI_TITLE_FILE_SETTING } from "./ui-title.ts";
 import { NAV_SETTINGS, navSettingsSet, notNavSettings, uiNavSetting } from "./ui-nav.ts";
 import { PG_PUBLIC_URL_SETTING, pgPublicUrlSetting } from "./pg-public-url.ts";
 import { UI_READ_ONLY_ALLOW_FIX, UI_READ_ONLY_ALLOW_SETTING, UI_READ_ONLY_SETTING, uiReadOnlyAllowSetting, uiReadOnlySetting } from "./ui-read-only.ts";
@@ -477,6 +479,12 @@ export function startSettingRefusal(p: Project, env: NodeJS.ProcessEnv, o: { ser
     return { message: `${UI_SOCKET_SETTING} is mason serve's setting, and mason start ignores no setting silently`, code: "refused",
       fix: `unset ${UI_SOCKET_SETTING}: mason ui opens this run's page` };
   }
+  // the MCP endpoint is a server's (src/cli/mcp-http.ts): a laptop's agent runs mason mcp
+  const mcp = MCP_SETTINGS.filter((k) => (env[k] ?? "") !== "");
+  if (!o.serve && mcp.length > 0) {
+    return { message: `${mcp.join(" and ")} ${mcp.length === 1 ? "is mason serve's setting" : "are mason serve's settings"}, and mason start ignores no setting silently`, code: "refused",
+      fix: `unset ${mcp.join(" and ")}: an agent on this machine runs mason mcp (mason help mcp)` };
+  }
   // the run's file is a server's supervisor's (src/cli/ui-run-file.ts): a laptop's commands read the project's config
   if (!o.serve && env[UI_RUN_FILE_SETTING]) {
     return { message: `${UI_RUN_FILE_SETTING} is mason serve's setting, and mason start ignores no setting silently`, code: "refused",
@@ -530,6 +538,17 @@ export function startSettingRefusal(p: Project, env: NodeJS.ProcessEnv, o: { ser
   }
   const icon = uiIconSetting(env);
   if (icon !== null && typeof icon !== "string") return { message: icon.problem, code: "refused", fix: "set it as mason serve --help says, or unset it" };
+  // the header's label is a server's too (src/cli/ui-title.ts): a name that is not the setting refuses either start,
+  // with a did you mean, and the setting refuses mason start's
+  const notTitle = notTitleSettings(env);
+  if (notTitle.length > 0) {
+    return { message: notTitle.join("; "), code: "refused",
+      fix: `unset ${titleSettingsSet(env).filter((k) => k !== UI_TITLE_FILE_SETTING).join(" and ")}, and name the file in ${UI_TITLE_FILE_SETTING} (mason serve --help)` };
+  }
+  if (!o.serve && env[UI_TITLE_FILE_SETTING]) {
+    return { message: `${UI_TITLE_FILE_SETTING} is mason serve's setting, and mason start ignores no setting silently`, code: "refused",
+      fix: `unset ${UI_TITLE_FILE_SETTING}: mason start's page is yours alone, opened with mason ui` };
+  }
   // the address clients reach is a server's (src/cli/pg-public-url.ts): mason start's URL is this machine's own
   if (!o.serve && env[PG_PUBLIC_URL_SETTING]) {
     return { message: `${PG_PUBLIC_URL_SETTING} is mason serve's setting, and mason start ignores no setting silently`, code: "refused",

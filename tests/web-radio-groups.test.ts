@@ -5,6 +5,10 @@
  * - Choosing "only these addresses" or "anywhere" moves nothing in its form — the add form's Name, Role, the choice and
  *   Add a user, and From…'s popover — at 1280, 1024, 900 and 375 px (the widths web-ui.md walks), and the address
  *   field hidden under anywhere is out of the tab order and the accessibility tree.
+ * - Choosing a hosted agent's servers (claude.ai, ChatGPT on the web) moves nothing either, and shows the line under the
+ *   choice that says who connects from them (issue 1155), unseen under every other choice.
+ * - Connect an AI agent with the MCP endpoint on, and New user added's MCP URL and its section, at 1280 and 390 px: no
+ *   sideways scroll, closed or open (issue 1155).
  * - In a radio group the radios line up: one column, every radio at one left edge (stacked), or one row at one height
  *   — never a row that wraps one choice under the group's label.
  * The one test of the page that measures geometry, because what it holds is geometry: the page as served (src/web, its
@@ -40,12 +44,13 @@ type Page = {
   goto(url: string): Promise<unknown>;
   waitForSelector(selector: string, o?: { state?: string; timeout?: number }): Promise<unknown>;
   check(selector: string): Promise<void>;
+  fill(selector: string, value: string): Promise<void>;
   selectOption(selector: string, value: string): Promise<unknown>;
   click(selector: string): Promise<void>;
   evaluate<T, A>(fn: (arg: A) => T, arg: A): Promise<T>;
   close(): Promise<void>;
 };
-type Route = { request(): { url(): string }; fulfill(o: { status: number; contentType?: string; body: string | Buffer }): Promise<void> };
+type Route = { request(): { url(): string; method(): string }; fulfill(o: { status: number; contentType?: string; body: string | Buffer }): Promise<void> };
 type Browser = { newPage(o: { viewport: { width: number; height: number } }): Promise<Page>; close(): Promise<void> };
 
 /** Playwright's Chromium, when this machine has it (its module where Node finds it, its browser installed); else why not. */
@@ -89,6 +94,14 @@ function state(): unknown {
   return JSON.parse(JSON.stringify(runState(ctx, COPIES, null, Date.parse("2026-10-27T10:00:00.000Z"))));
 }
 
+/** `POST api/users`'s answer (mason user add --json), synthetic: a made-up password and the test's own host */
+const ADDED = { user: "agent", id: "fedcba9876543210", addedAt: "2026-10-27T09:12:00.000Z", password: `mason_fedcba9876543210_${"e".repeat(32)}`, database: "shop",
+  url: `postgres://agent:mason_fedcba9876543210_${"e".repeat(32)}@127.0.0.1:5433/shop`, host: "127.0.0.1", port: 5433, sslmode: "disable", roleFrom: "none" };
+/** mason serve's MCP endpoint, on (`/api/state` `mcp`): synthetic addresses */
+const MCP = { mcp: { url: "https://mason.example.test/mcp", issuer: "https://auth.example.test" } };
+const sideways = (page: Page): Promise<number[]> => page.evaluate(() => [document.documentElement.scrollWidth, window.innerWidth], null);
+const seen = (page: Page, sel: string): Promise<boolean | null> => page.evaluate((s) => document.querySelector(s)?.checkVisibility({ visibilityProperty: true }) ?? null, sel);
+
 const USERS = { users: [{ name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", live: true, from: null, role: "analyst" }],
   lastUsedNote: null, requestLogDays: 7 };
 /** `GET api/tables/<table>/sync`'s answer (src/cli/sync-choice.ts SyncChoice): off now, four polls, Live allowed */
@@ -98,12 +111,13 @@ const SYNC_CHOICE = { table: "public.customers", sync: { value: "off", from: "de
 const TYPES: Record<string, string> = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css", ".woff2": "font/woff2" };
 
 /** The page as served at `hash`: its files from src/web, the reads its pages make from the fixtures, anything else a 404. */
-async function served(browser: Browser, width: number, hash: string, ready: string): Promise<Page> {
+async function served(browser: Browser, width: number, hash: string, ready: string, more: Record<string, unknown> = {}): Promise<Page> {
   const page = await browser.newPage({ viewport: { width, height: 900 } });
-  const answers: Record<string, string> = { "api/state": JSON.stringify(state()), "api/users": JSON.stringify(USERS),
+  const answers: Record<string, string> = { "api/state": JSON.stringify({ ...(state() as object), ...more }), "api/users": JSON.stringify(USERS),
     "api/tables/public.customers/sync": JSON.stringify(SYNC_CHOICE) };
   await page.route(`${ORIGIN}/**`, async (route) => {
     const p = decodeURIComponent(new URL(route.request().url()).pathname.replace(/^\/+/, "")) || "index.html";
+    if (p === "api/users" && route.request().method() === "POST") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(ADDED) });
     if (answers[p] !== undefined) return route.fulfill({ status: 200, contentType: "application/json", body: answers[p]! });
     const file = path.join(WEB, p);
     if (!p.startsWith("api/") && file.startsWith(WEB + path.sep) && fs.existsSync(file)) {
@@ -179,6 +193,15 @@ for (const width of [1280, 1024, 900, 375]) {
     await page.selectOption("#add-user-connects", "any");
     assert.deepEqual(moved(any, await boxes(page, "#add-user")), [], "anywhere again moved nothing");
     assert.deepEqual(await reachable(page, "#add-user-from"), { focusable: false, hidden: true });
+    // a hosted agent's servers (issue 1155): nothing moves, and the line under the choice is seen only then
+    assert.equal(await seen(page, "#add-user .preset-hint"), false, "anywhere: no hint");
+    await page.selectOption("#add-user-connects", "preset:claude");
+    assert.deepEqual(moved(any, await boxes(page, "#add-user")), [], "a hosted agent's servers moved nothing");
+    assert.equal(await seen(page, "#add-user .preset-hint"), true, "a hosted agent's servers: the hint is seen");
+    assert.deepEqual(await reachable(page, "#add-user-from"), { focusable: false, hidden: true });
+    await page.selectOption("#add-user-connects", "only");
+    assert.equal(await seen(page, "#add-user .preset-hint"), false, "only these addresses: no hint");
+    await page.selectOption("#add-user-connects", "any");
     // the page is no wider than the screen in either state (a phone never scrolls sideways)
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth, null), true, "no sideways scroll");
   }));
@@ -199,8 +222,8 @@ for (const width of [1280, 1024, 900, 375]) {
 
 for (const width of [1280, 375]) {
   test(`a table's Sync choice: its radios one a line at one left edge, at ${width} px (issue 875)`, { skip }, () => inChromium(async (browser) => {
-    const page = await served(browser, width, "tables", "[data-choose-sync]");
-    await page.click('[data-choose-sync="public.customers"]');
+    const page = await served(browser, width, "tables", "[data-choose-sync]:visible");
+    await page.click('[data-choose-sync="public.customers"]:visible');
     await page.waitForSelector("form.syncpick input[type=radio]", { timeout: 5_000 });
     assert.equal(await page.evaluate(() => document.querySelectorAll("form.syncpick input[type=radio]").length, null), 6, "Off, four polls and Live");
     assert.equal(await radiosLie(page, "form.syncpick"), "column");
@@ -216,5 +239,29 @@ for (const hash of ["observability/queries", "observability/usage", "observabili
     const page = await served(browser, 375, hash, control);
     assert.equal(await page.evaluate((sel) => document.querySelectorAll(`${sel} .off`).length, control), 2, "30 and 90 days shown disabled (7 days kept)");
     assert.deepEqual(await page.evaluate(() => [document.documentElement.scrollWidth, window.innerWidth], null), [375, 375], "a phone never scrolls the page sideways");
+  }));
+}
+
+for (const width of [1280, 390]) {
+  test(`Connect an AI agent with the MCP endpoint on, and New user added's MCP URL and section: no sideways scroll, closed or open, at ${width} px (issue 1155)`, { skip }, () => inChromium(async (browser) => {
+    const page = await served(browser, width, "users", "#users-mcp-url", MCP);
+    assert.deepEqual(await sideways(page), [width, width], "the box, its fallback closed");
+    assert.equal(await seen(page, "#users-mcp-claude-code"), false, "the mason mcp way closed");
+    await page.click('details[data-open="users-mcp-fallback"] > summary');
+    await page.waitForSelector("#users-mcp-claude-code", { state: "visible", timeout: 5_000 });
+    assert.deepEqual(await sideways(page), [width, width], "the box, its fallback open");
+    // New user added: the Postgres URL and the MCP URL up front, the instructions closed under them
+    await page.fill("#user-name", "agent");
+    await page.click("#add-user button[type=submit]");
+    await page.waitForSelector("#added-mcp-url", { state: "visible", timeout: 5_000 });
+    assert.equal(await seen(page, "#added-url"), true, "the Postgres URL up front");
+    assert.equal(await seen(page, "#added-mcp-claude-code-url"), false, "the instructions closed");
+    assert.deepEqual(await sideways(page), [width, width], "the dialog, closed");
+    await page.click('details[data-open="added-mcp"] > summary');
+    await page.waitForSelector("#added-mcp-claude-code-url", { state: "visible", timeout: 5_000 });
+    await page.click('details[data-open="added-mcp-fallback"] > summary');
+    await page.waitForSelector("#added-mcp-claude-code", { state: "visible", timeout: 5_000 });
+    assert.deepEqual(await sideways(page), [width, width], "the dialog, both open");
+    assert.equal(await page.evaluate(() => { const d = document.querySelector("#once") as unknown as { scrollWidth: number; clientWidth: number }; return d.scrollWidth <= d.clientWidth; }, null), true, "the dialog never scrolls sideways");
   }));
 }

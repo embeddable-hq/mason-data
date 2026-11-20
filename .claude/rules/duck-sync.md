@@ -4,6 +4,9 @@ paths:
   - "src/duck/publication.ts"
   - "src/duck/stream.ts"
   - "src/duck/sync.ts"
+  - "src/duck/reference-keys.ts"
+  - "tests/integration/duck-reference-keys.itest.ts"
+  - "tests/integration/duck-reference-keys-stale.itest.ts"
   - "src/cli/dev.ts"
   - "tests/duck-events.test.ts"
   - "tests/duck-publication.test.ts"
@@ -18,6 +21,9 @@ paths:
   - "tests/duck-compact.test.ts"
   - "tests/duck-compact-room.test.ts"
   - "tests/integration/duck-compact.itest.ts"
+  - "src/duck/key-lookup.ts"
+  - "tests/duck-key-lookup.test.ts"
+  - "tests/integration/duck-key-lookup.itest.ts"
 ---
 
 <!-- Loaded only when a matching file is read or edited (the paths above). CLAUDE.md lists every rules file. -->
@@ -31,8 +37,12 @@ paths:
   whatever transaction is open there, so the stream's batches, the polls, the source's attach/detach (instance-wide,
   counted per user) and every rebuild's SWAP (a DROP under another transaction's write fails its commit) each wait for
   the one before. A turn never queues another and waits for it: it would wait for itself.
-- **A rebuilt table is caught up by ONE poll from its watermark before it is kept current again** (`_mason.catch_up`,
-  written with the swap): skipped by the stream and the polls until then. In replication mode the stream HOLDS its
+- **A rebuilt table is caught up by ONE poll from its watermark before it is kept current again**: a whole read's
+  poll runs into its side table BEFORE the swap (`catchUpSide`; duck-copy.md "A whole read is served only together
+  with its catch-up", issue 1066: swapped in first, a table served what its whole read kept until that poll, 0 rows
+  after a TRUNCATE and a reload around an open transaction), and a table marked behind otherwise (`_mason.catch_up`: a
+  slot new to it, a sync switched to replication, a key refused, a crash between a swap and its held changes) is
+  caught up by `catchUp`, skipped by the stream and the polls until then. In replication mode the stream HOLDS its
   changes from just before that poll and applies them after it — the stream acknowledges what it skips, so a table
   joining late is missing exactly what that poll reads (src/duck/stream.ts "why replaying is safe"). A table whose sync
   is `off` is caught up too: one scan per rebuild, then served as of it.
@@ -300,11 +310,37 @@ paths:
   stream's last position; `caughtUp` waits for the spill; a stop or a replay that fails before it ends leaves it
   `behind`, as its mark says. DETECTOR: `tests/duck-compact.test.ts`, `tests/integration/duck-compact.itest.ts`, the
   bulk test of `tests/integration/duck-stream.itest.ts` (compaction checked every 3 s).
+- **Every transaction that may add rows to a table with a side table for its lookups by key first lowers its
+  `covered`** (`lowerCovered`, src/duck/key-lookup.ts; issue 1148; docs/DESIGN.md "A lookup by key"). Once a table's
+  last row groups are all deleted and a checkpoint drops them, DuckDB gives their row ids again, below what the side
+  table covers, and a lookup would miss the new row. A poll's and a batch's `writeStaged`, the stream's
+  `applyChanges` and the stored JSON fills lower it. A new writer of a synced table must too. A table replaced whole
+  (a copy's swap, a compaction's) calls `coverNothing` in the swap's transaction. A build takes its snapshot on the
+  writer's turn (`beginBuild`), and swaps on it (`swapBuilt`). No write path writes the side table. DETECTOR:
+  `tests/duck-key-lookup.test.ts` "a row id given again", `tests/integration/duck-key-lookup.itest.ts`.
 - **No INSERT … SELECT into an empty CREATE TABLE AS of the same transaction** (`writeByKey`; the review of PR 856):
   DuckDB 2.0.0 reads back NOTHING of a table made by `CREATE TABLE AS … LIMIT 0` and filled by one INSERT … SELECT of a
   row group's rows (122,880) or more in that transaction (`count(*)` says them all; lost even after the COMMIT), and a
   write by key of more keys deleted none and inserted every row twice. Fill it by VALUES, or make it before the
   transaction or by an explicit CREATE TABLE. DETECTOR: `tests/duck-compact.test.ts` "a held set of 300,000 changes".
+- **A reference's hidden integer keys are numbered on the writer alone** (src/duck/reference-keys.ts, issue 1144). A
+  key's number is given once, in its dictionary (`_mason.ref_keys_…`), and never changed, so two connections giving
+  numbers at once could give one twice: only the writer adds to a dictionary. A stream batch and a writer's poll number
+  the rows they wrote in their own transaction (`fillIn`), and an update in place that sets a key's column unnumbers its
+  row in the same statement (`unnumberedSet` in `updateCarried`). Both decide from the store, in the write's own
+  transaction: the hidden columns the table holds now, never what an earlier turn found (`present`), which a swap or a
+  compaction leaves behind until the next turn. A catch-up, a compaction and a first sync's rows are numbered on the
+  writer's turn after (`numbersRun`, `fill`, a chunk a turn). A side table is numbered from the dictionaries as they are
+  before its swap (`fillSide`): a key new since is left for the writer, and a failure there drops the side's hidden
+  column, never the sync. A dictionary belongs to its key's types (`dictionaryOf`), a hidden column's name begins with
+  its dictionary's, and a dictionary is dropped only once no column holds its numbers: so a type changed at the source
+  gives new dictionaries and columns, and a number is never read against another dictionary. A row is numbered only
+  where its key's columns are of its dictionary's types (`fits`), so no cast fails or matches two values. Never join on
+  `rowid` in a numbering statement: DuckDB 2.0.0's join filter on a row id corrupted the heap (`numberRows`). A new
+  write path into a synced table leaves its rows NULL in the hidden column, which costs the faster join and never an
+  answer. The schema names a reference to the listener once both its hidden columns are there (`schemaBuilt`), and is
+  built again whenever the numbering's references differ from those it was built with. DETECTOR:
+  tests/integration/duck-reference-keys.itest.ts, tests/integration/duck-reference-keys-stale.itest.ts.
 
 ## What the sync records
 
@@ -328,7 +364,7 @@ paths:
   was kept only as a table's CURRENT error, wiped by the next success, and earlier ones only in the log file): the sync
   says each where it logs it (`Sync.event`: copy, poll, catch-up and stream failures, the database out of reach, a copy
   finished, a table current again — the last detected in `record`, the one place an error is cleared — and a sync asked
-  by hand, `synced`, in the words mason sync answers: without it a person who synced read the list as a sync lost — and its failure, `sync_failed` (`POST /api/sync` answers the page as it starts, issue 1007) —
+  by hand, `synced`, in the words mason sync answers: without it a person who synced read the list as a sync lost — and its failure, `sync_failed` (`POST /api/sync` answers the page as it starts, issue 1007), and a whole sync that waits for an open transaction, `sync_waits`, which is no failure (issue 1066) —
   and the scheduled syncs that succeed, `polled` a poll and `streamed` ONE a table a minute of the stream's changes
   (`reportStream`, never one a batch), which a reader gets only when it asks (`SCHEDULED`, `?scheduled=1`,
   `--scheduled`: in the query, so they never take a failure's place among the newest asked for)), `SyncEvents`
@@ -379,3 +415,6 @@ Run each probe that applies: the implementer before each push, and the fresh rev
 - A replicated table leaving the stream for a re-sync whose column change is reverted before it swaps: back in the
   stream with no catch-up (issue 79).
 - A slot invalidated for another reason (a conflict on a standby): blamed on `max_slot_wal_keep_size` (issue 74).
+- A table with a side table for its lookups by key (`lookup: { minRowGroups: 0 }`), its last row group's rows all
+  deleted at the source, synced, a checkpoint, then new rows inserted by a poll and by the stream: each new row found
+  by `WHERE id = $1`, and the same through a compaction and a copy (issue 1148).

@@ -80,14 +80,19 @@ export interface ShareTunnel {
 
 export interface OpenedShare { user: string; port: number; fingerprint: string; database: string; role: string | null; reads: string }
 
+/** The SSL mode a tool connects to a share with: the share's socket takes TLS alone, and its certificate is self-signed,
+ *  so `require` (encrypt, check no certificate). One constant, read by `mason share`, the page's share and `state()`. */
+export const SHARE_SSLMODE = "require";
+
 /** `/api/state` `share`, `mason status`: nothing in it logs anyone in. */
 export interface ShareState {
   port: number; fingerprint: string; sessions: number; refusedLogins: number; droppedConnections: number;
   /** `from`: who opened it and holds it, `mason share` (its connection) or the web page (its beats, src/cli/page-share.ts) */
-  shares: Array<{ user: string; from: ShareFrom; role: string | null; reads: string; openedAt: string; via: string | null; host: string | null; port: number | null; endsAt: string | null; state: string }>;
+  /** `database` and `sslmode`: what a tool's form asks for beside the host and port, the same for every share */
+  shares: Array<{ user: string; from: ShareFrom; role: string | null; reads: string; openedAt: string; via: string | null; host: string | null; port: number | null; database: string; sslmode: typeof SHARE_SSLMODE; endsAt: string | null; state: string }>;
 }
 
-/** Who opened a share and holds it: `mason share`, or the web page's Temporary cloud login (src/cli/page-share.ts). */
+/** Who opened a share and holds it: `mason share`, or the web page's Temporary cloud tunnel (src/cli/page-share.ts). */
 export type ShareFrom = "command" | "page";
 
 /** The last share that ended, and why: `/api/state` `shareEnded`, so a page that held it says why it is gone. */
@@ -98,7 +103,7 @@ interface Held { user: string; from: ShareFrom; secret: string; role: string | n
 /** How each holder ends its share, as a refusal names it. */
 const HOW_TO_END: Record<ShareFrom, [string, string]> = {
   command: ["mason share", "Ctrl-C in the terminal running mason share ends it"],
-  page: ["the web page", "Stop, under Temporary cloud login on the web page's Users page, ends it (mason ui opens the page)"],
+  page: ["the web page", "Stop, under Temporary cloud tunnel on the web page's Users page, ends it (mason ui opens the page)"],
 };
 
 export interface ShareDeps {
@@ -249,12 +254,12 @@ export class RunShares {
     if (open === undefined) return null;
     const [who, how] = HOW_TO_END[open.from];
     return { message: `a share is open already: ${open.user}, opened by ${who}${open.tunnel.host !== undefined ? ` at ${open.tunnel.host}:${open.tunnel.port}` : ""}`, code: "refused",
-      why: "one share at a time between the web page and mason share: each is a public address someone must be watching", fix: `${how}, then ${from === "page" ? "Open a cloud login" : "run mason share"} again`,
+      why: "one share at a time between the web page and mason share: each is a public address someone must be watching", fix: `${how}, then ${from === "page" ? "Open a cloud tunnel" : "run mason share"} again`,
       next: [["mason status", "the share open now"]] };
   }
 
   /** What a share with no role named reads (`shareRole`'s answer, the one authority): the web page asks it to offer the
-   *  roles beside Open a cloud login, as `mason share` would. */
+   *  roles beside Open a cloud tunnel, as `mason share` would. */
   async choices(): Promise<{ role: string | null; reads: string } | { failure: Failure; choices?: ShareChoice[] }> {
     return shareRole(undefined, await this.deps.listener.checkRoles());
   }
@@ -355,6 +360,6 @@ export class RunShares {
     if (this.socket === null || this.live === null) return null;
     return { port: this.live.port, fingerprint: this.socket.fingerprint, sessions: this.live.sessions, refusedLogins: this.refused, droppedConnections: this.dropped,
       shares: [...this.held.values()].map((h) => ({ user: h.user, from: h.from, role: h.role, reads: h.reads, openedAt: h.openedAt, via: h.tunnel.via ?? null, host: h.tunnel.host ?? null, port: h.tunnel.port ?? null,
-        endsAt: h.tunnel.endsAt ?? null, state: h.tunnel.state ?? "opening" })) };
+        database: this.deps.database, sslmode: SHARE_SSLMODE, endsAt: h.tunnel.endsAt ?? null, state: h.tunnel.state ?? "opening" })) };
   }
 }

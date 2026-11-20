@@ -173,6 +173,33 @@ test("a compaction out of memory: its pieces halve and it ends whole; one under 
   try { assert.equal(await one(again.writer, "SELECT count(*) FROM public.t"), 400); } finally { await again.close(); }
 });
 
+test("a compaction stores each text column by the rule, from the table's own rows (issue 1140): a table synced before it gets the dictionary on its short and repeated columns, zstd on its long ones, its rows, NOT NULL and defaults as they were", { timeout: 600_000 }, async () => {
+  const store = await DuckStore.open(path.join(dir, "text.db"), () => undefined, { memoryLimit: "256MB" });
+  const c = await store.instance.connect();
+  const methods = async (): Promise<unknown[][]> => (await store.writer.runAndReadAll(`SELECT column_name, string_agg(DISTINCT compression, ',' ORDER BY compression) FROM pragma_storage_info('public.t') ` +
+    `WHERE column_name IN ('status', 'label', 'doc', 'note') AND segment_type <> 'VALIDITY' GROUP BY column_name ORDER BY column_name`)).getRowsJS();
+  const answer = "SELECT status, count(*)::INT, count(DISTINCT label)::INT, count(DISTINCT doc)::INT, count(DISTINCT note)::INT, sum(strlen(doc))::BIGINT FROM public.t GROUP BY status ORDER BY status";
+  try {
+    // as a Mason before the rule made it: every text column the instance's zstd
+    await store.writer.run("CREATE TABLE public.t (id BIGINT NOT NULL, status VARCHAR NOT NULL, label VARCHAR, doc JSON, note VARCHAR DEFAULT 'none')");
+    for (let k = 0; k < 4; k++) {
+      await store.writer.run(`INSERT INTO public.t SELECT i, (['shipped','pending','paid','returned'])[1 + (i % 4)::INT], 'Plan ' || (i % 40) || ': ' || repeat('priority support, unlimited seats, audit logs; ', 6), ` +
+        `'{"id":' || i || ',"events":[' || array_to_string(list_transform(range(6), x -> '{"ref":"' || md5((i * 31 + x)::VARCHAR) || '","kind":"view"}'), ',') || ']}', 'n' || i FROM range(${k * 100_000}, ${(k + 1) * 100_000}) r(i)`);
+    }
+    await store.writer.run("CHECKPOINT");
+    assert.deepEqual(await methods(), [["doc", "ZSTD"], ["label", "ZSTD"], ["note", "ZSTD"], ["status", "ZSTD"]], "before: the instance's zstd on every text column");
+    const before = (await store.writer.runAndReadAll(answer)).getRowsJS();
+    await compactNow(store, c, 400_000);
+    await store.writer.run("CHECKPOINT");
+    assert.deepEqual(await methods(), [["doc", "ZSTD"], ["label", "DICT_FSST"], ["note", "DICT_FSST"], ["status", "DICT_FSST"]],
+      "the status and the note short, the label long but of 40 values: the dictionary; the JSON documents long and each its own: zstd");
+    assert.match(String((await store.writer.runAndReadAll("SELECT sql FROM duckdb_tables() WHERE schema_name = 'public' AND table_name = 't'")).getRowsJS()[0]![0]),
+      /^CREATE TABLE public\.t\(id BIGINT NOT NULL, status VARCHAR USING COMPRESSION DICT_FSST NOT NULL, "label" VARCHAR USING COMPRESSION DICT_FSST, doc JSON USING COMPRESSION ZSTD, note VARCHAR DEFAULT\('none'\) USING COMPRESSION DICT_FSST\);$/,
+      "the methods in the table's definition, so rows written later keep them; NOT NULL and the default kept");
+    assert.deepEqual((await store.writer.runAndReadAll(answer)).getRowsJS(), before, "the same rows");
+  } finally { c.closeSync(); await store.close(); }
+});
+
 test("readers during a compaction and its swap see the whole table every time, never a missing table or half of one", { timeout: 600_000 }, async () => {
   const store = await aTable("readers", 400_000);
   // as a churn left it: a quarter deleted, written again

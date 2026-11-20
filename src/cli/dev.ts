@@ -25,7 +25,6 @@
  *
  * What a run keeps between runs (the API key, the copy, the users, the logs) is in the project's `.mason/`.
  */
-import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Server } from "node:http";
 import { choosePgPort, freePort } from "./ports.ts";
@@ -40,11 +39,13 @@ import { navOf, uiNavSetting } from "./ui-nav.ts";
 import { overviewCardOf, uiOverviewCardSetting } from "./ui-host-view.ts";
 import { DEPLOY_DOCS_DEFAULT, deployDocsOf, uiDeployDocsSetting } from "./ui-deploy-docs.ts";
 import { iconOf, uiIconSetting } from "./ui-icon.ts";
+import { TitleFile } from "./ui-title.ts";
 import { createRunServer, listenOnLoopback, metricsFacts, usageFacts, type RunContext } from "./run-server.ts";
 import { UiErrors } from "./ui-errors.ts";
 import type { RunMetrics } from "./metrics.ts";
 import { readGenerated } from "./generated-files.ts";
-import { addedTables, effectiveSync, entryName, excludeOf, goneNotes, leftOutText, LeftOutRecord, replicatedEntries, rereadSources, shownPath, syncWritten, withTable, type LeftOut, type RunSources, type SourceFile } from "./sources.ts";
+import { addedTables, effectiveSync, entryName, excludeOf, goneNotes, leftOutText, LeftOutRecord, replicatedEntries, rereadSources, shownPath, syncWritten, type LeftOut, type RunSources, type SourceFile } from "./sources.ts";
+import { Refusal, writeLeftOut } from "./source-edit.ts";
 import { newToken } from "./security.ts";
 import { alive, liveRun, processStart } from "./runs.ts";
 import { DEMO_DIR, DUCK_FILE, projectReadOnlySetting, projectSource, projectWriteRefusal, startSettingRefusal, theProject, writeConfig, type PostgresListener, type ProjectConfig } from "./project.ts";
@@ -67,6 +68,7 @@ import { UI } from "./ui.ts";
 import { cliPinProblem, ensurePin } from "./pin.ts";
 import { DEFAULT_MEMORY_LIMIT, DuckStore, DUCKDB_VERSION, machineMemory, memoryProblems, memoryProblemText, memoryWarning } from "../duck/store.ts";
 import { copyChunkSecondsOf, copyParallelOf, humanBytes, Sync, syncModeOf, type CopyState } from "../duck/sync.ts";
+import { heavyQueriesOf } from "../duck/admission.ts";
 import { storeJsonPathsOf } from "../duck/kept.ts";
 import { libcOrderNote, readLibcOrder, type LibcOrder } from "../duck/libc-order.ts";
 import { isLibcCollation, type SourceCollation } from "../duck/collation.ts";
@@ -106,7 +108,9 @@ export interface ServeHooks {
    *  the run then stops with that as its lastStop, and never says it is ready */
   ready: (run: { tables: () => CopyState[]; metrics: () => Promise<Omit<RunMetrics, "uptimeSeconds">>;
     /** the page's port on 127.0.0.1 and the run's token: what MASON_UI_RUN_FILE writes (src/cli/ui-run-file.ts) */
-    page: { port: number; token: string } }) => string | null;
+    page: { port: number; token: string };
+    /** the listener, the users and the database a tool names: what `mason serve`'s MCP endpoint reaches (src/cli/mcp-http.ts) */
+    postgres: { listener: Pick<PgApiServer, "openLocal">; users: LiveUsers; database: string } }) => string | null;
   /** a SIGTERM or SIGINT is stopping it */
   stopping: () => void;
   /** the engine stopped under it (its thread died, or the synced data was invalidated): the run ends, exit 1, for the
@@ -116,6 +120,10 @@ export interface ServeHooks {
   page?: (server: Server) => void;
   /** that socket's path: `/api/state` `pageSocket` */
   socket?: string;
+  /** the MCP endpoint's public address and issuer (src/cli/mcp-http.ts): `/api/state` `mcp` */
+  mcp?: { url: string; issuer: string };
+  /** the file the page's header label is read from (MASON_UI_TITLE_FILE, src/cli/ui-title.ts), absolute */
+  titleFile?: string;
 }
 
 /** a line to the run's terminal, which a full disk never ends (src/cli/run-output.ts), a write under .mason/ that
@@ -488,6 +496,10 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   let storeJsonPaths: boolean;
   try { storeJsonPaths = storeJsonPathsOf(process.env); }
   catch (e) { say(`mason start: ${(e as Error).message}`); return 1; }
+  // how many heavy statements run at once (src/duck/admission.ts), unless derived from the memory and the CPUs
+  let heavyQueries: number | null;
+  try { heavyQueries = heavyQueriesOf(process.env); }
+  catch (e) { say(`mason start: ${(e as Error).message}`); return 1; }
 
   begin("Opening the synced data");
   const duckFile = path.join(home, DUCK_FILE);
@@ -496,7 +508,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const memoryLimit = process.env.MASON_DUCKDB_MEMORY || undefined;
   // what statements may spill (src/duck/store.ts spillCeiling): past it a statement fails alone, and the disk is kept
   const spillLimit = process.env.MASON_SPILL_LIMIT || undefined;
-  try { store = await DuckStore.open(duckFile, (l) => logLine(`[engine] ${l}`), { ...(memoryLimit === undefined ? {} : { memoryLimit }), ...(spillLimit === undefined ? {} : { spillLimit }) }); }
+  try { store = await DuckStore.open(duckFile, (l) => logLine(`[engine] ${l}`), { ...(memoryLimit === undefined ? {} : { memoryLimit }), ...(spillLimit === undefined ? {} : { spillLimit }), heavyQueries }); }
   catch (e) { fail("Opening the synced data"); say(`  ${(e as Error).message}`); return 1; }
   // THE COPY'S THREAD DYING (src/duck/executor.ts: V8 out of heap there, an uncaught error), or the synced data
   // invalidated by a fatal error (a checkpoint on a full disk, issue 830), ends the run, said, for its supervisor (or
@@ -508,7 +520,8 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     if (crash !== null) crash(reason);
     else say(`  ! the engine stopped: ${reason}`);
   });
-  done(`the synced data in ${path.relative(project.root, duckFile)} (mason destroy deletes it; engine ${DUCKDB_VERSION}), at most ${(memoryLimit ?? DEFAULT_MEMORY_LIMIT).trim()} of memory (MASON_DUCKDB_MEMORY), spilling at most ${humanBytes(store.spillLimitBytes)} to ${path.relative(project.root, duckFile)}.tmp (MASON_SPILL_LIMIT)`);
+  done(`the synced data in ${path.relative(project.root, duckFile)} (mason destroy deletes it; engine ${DUCKDB_VERSION}), at most ${(memoryLimit ?? DEFAULT_MEMORY_LIMIT).trim()} of memory (MASON_DUCKDB_MEMORY), spilling at most ${humanBytes(store.spillLimitBytes)} to ${path.relative(project.root, duckFile)}.tmp (MASON_SPILL_LIMIT), ` +
+    `${store.admission.turns === 1 ? "1 heavy query" : `${store.admission.turns} heavy queries`} at once (MASON_HEAVY_QUERIES)`);
   // UNDER THE MEMORY FLOOR the run goes on and warns (src/duck/store.ts memoryWarning, the one text): here at its start,
   // in its log, and in its warnings, which mason status, --json and the web page read for as long as it runs
   const memoryWarned = memoryWarning(machineMemory(), process.env);
@@ -572,15 +585,10 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
       // every entry or none: read, edited and written at once, between two reads of the run (one thread: an edit by
       // mason add is never interleaved). What fails is said, and the columns left out for this run all the same
       try {
-        let text = fs.readFileSync(file.file, "utf8");
-        for (const a of arrived) {
-          const r = withTable(text, { ...a.entry, exclude: excludeOf(a) });
-          if ("problem" in r) throw new Error(`it cannot be edited: ${r.problem}`);
-          text = r.text;
-        }
-        fs.writeFileSync(file.file, text);
+        // exclude: alone written on each, every other line and comment as it was, read back before it is written
+        writeLeftOut(project.root, file.file, file.name, arrived.map((a) => ({ table: a.entry.table, exclude: excludeOf(a) })));
         written = true;
-      } catch (e) { why = `${shown}: ${(e as Error).message}`; }
+      } catch (e) { why = e instanceof Refusal ? e.message : `${shown}: ${(e as Error).message}`; }
     }
     for (const a of arrived) {
       // written, the file holds the whole exclude: now (`excludeOf` of the entry as the run took it); else kept for this run
@@ -798,6 +806,10 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   });
   const setupPort = o.exactPort === true ? o.port : await freePort(o.port, chosen);
   const token = newToken();
+  // MASON_UI_TITLE_FILE (src/cli/ui-title.ts): read once now, so a problem is in the log from the start; again as the
+  // page loads. A read never throws: what it found is said by mason status
+  const pageTitle = o.serve?.titleFile !== undefined ? new TitleFile(o.serve.titleFile, (l) => logLine(`[ui] ${l}`)) : null;
+  if (pageTitle !== null) void pageTitle.read();
   const runCtx: RunContext = {
     source, facts: () => catalog.facts(), freshFacts: async () => { await catalog.fresh({ waitMs: STATE_WAIT_MS }); }, factsNow: (carried) => actRead(catalog, carried, source.database), warnings: runWarnings, textOrder,
     // the slot and publication while a table's sync is replication (the run streams), as the sync says it now
@@ -825,8 +837,12 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     pageCard: o.serve !== undefined ? overviewCardOf(uiOverviewCardSetting(process.env)) : null,
     // MASON_UI_ICON: a server's page has the host's icon in its tab (mason start refuses it above)
     pageIcon: o.serve !== undefined ? iconOf(uiIconSetting(process.env)) : null,
+    // MASON_UI_TITLE_FILE: a server's header box shows the file's first line, read again as the page loads (mason start
+    // refuses it above)
+    pageTitle,
     // MASON_UI_SOCKET: the page on a Unix socket too (src/cli/ui-socket.ts), or null
     pageSocket: o.serve?.socket ?? null,
+    mcp: o.serve?.mcp ?? null,
     demo: cfg.demo === true,
     users: { file: path.join(home, USERS_FILE), apiKey: cfg.apiKey, database, postgresUrl, postgresPublicUrl },
     // the roles as the listener holds them: their row filters checked by its catalog (a filter Postgres refuses is a problem)
@@ -996,7 +1012,8 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   if (elsewhere) say(`  ${elsewhere}`);
   // before the ready line: what a serve writes when it answers (MASON_UI_RUN_FILE) is there when a supervisor reads it
   // a step of it that failed stops the run, said in its words, and the ready line is never printed: it did not get ready
-  const notReady = o.serve?.ready({ tables: () => sync.state(), metrics: () => metricsFacts(runCtx), page: { port: setupPort, token } }) ?? null;
+  const notReady = o.serve?.ready({ tables: () => sync.state(), metrics: () => metricsFacts(runCtx), page: { port: setupPort, token },
+    postgres: { listener: api, users, database } }) ?? null;
   if (notReady !== null) { stopFor(notReady); return await stopped; }
   say(READY);
   say("");

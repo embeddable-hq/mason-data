@@ -1,13 +1,18 @@
 ---
 paths:
+  - "src/duck/bucket-column.ts"
   - "src/duck/extensions.ts"
   - "src/duck/sync.ts"
+  - "src/duck/text-compression.ts"
+  - "tests/duck-bucket-zones.test.ts"
   - "tests/duck-copy-disk.test.ts"
   - "tests/duck-copy-order.test.ts"
   - "tests/duck-copy-retry.test.ts"
   - "tests/duck-extensions.test.ts"
+  - "tests/duck-text-compression.test.ts"
   - "tests/integration/duck-poll.itest.ts"
   - "tests/integration/duck-rewrite.itest.ts"
+  - "tests/integration/duck-time-bucket.itest.ts"
 ---
 
 <!-- Loaded only when a matching file is read or edited (the paths above). CLAUDE.md lists every rules file. -->
@@ -29,7 +34,8 @@ paths:
   there; the last chunk open-ended) appended in a DuckDB transaction of its own with ITS OWN row in
   `_mason.copy_chunks` (its page range, rows, the source's filenode; keyed by source and first page), COMMITTED — what
   the copy was begun with (first snapshot, columns, exact numerics, pages) is `_mason.copy_progress`, written once in a
-  transaction of its own; then swapped in on the writer's turn (`swap`, which removes both) and caught up (`catchUp`).
+  transaction of its own; then caught up by one poll into the side table (`catchUpSide`, below) and swapped in on the
+  writer's turn (`swap`, which removes both).
   A copy that died (a crash, `mason stop`, a failure) continues with exactly the ranges no chunk committed
   (`chunksToRead`) when its columns are the same, said; a stop rolls back only the chunks in flight, and a copy that
   ends before any chunk committed keeps nothing. `rowsSoFar` is the committed chunks' rows (exact). Step 0 (`recopy`) is
@@ -60,6 +66,12 @@ paths:
   checkpoint never merges the small row groups a copy of large values leaves (`max_vacuum_tasks` 0, read back at every
   open, `instanceSettingsProblem`): such a merge that did not fit invalidated the whole database (issue 371; docs/DESIGN.md
   "No checkpoint merges row groups"). `duck-poll.itest.ts` holds both shapes and the two out-of-memory paths (docs/DESIGN.md "Large values out of line").
+- **Whether a chunk that failed committed is its ledger row's to say, never the error's** (issue 1152; `committedRow`):
+  a COMMIT can answer out of memory after its chunk committed, and its ROLLBACK then says "no transaction is active".
+  Read as rolled back, its range was given back and read again into `copy_chunks`' key, and the first sync failed with
+  `Duplicate key … first_page`. So after any failure a chunk's row is read on its connection: there, the chunk is the
+  copy's (an out of memory still makes it one reader, halved); not there, it is given back; unreadable, the copy fails
+  and its retry continues from the ledger. `tests/demo-source.test.ts` holds both errors.
 - **A copy's progress is rendered between commits** (`CopyLive`, `copyProgressNow`, `CopyState.progress`): the chunks
   done and about how many in all, the ones reading and how long the oldest has, the readers' measured rate and the time
   the pages left take at it, and the rows the chunks in flight have read by now at that rate, each held under 90 % of
@@ -102,9 +114,18 @@ paths:
   file must be that one (else started over); a resumed copy checks its file once (`resumedFileHolds`), and one begun
   with no chunk committed begins again. A file the snapshot sees whose catalog row was written at or after the
   watermark, by a rewrite (`relfilenode` no longer the oid), is checked for a row the hold keeps: none (an ALTER, a
-  TRUNCATE and a load, pg_repack) and the copy WAITS for the open transaction that holds the watermark back, checked
-  every `REWRITE_RECHECK_MS` (30 s), never backed off, said once and on the table's line, the old copy serving; a
-  CLUSTER, VACUUM FULL or SET TABLESPACE keeps each row's xmin and goes on. **That check reads a SAMPLE, never the
+  TRUNCATE and a load, pg_repack) and the copy WAITS for the open transaction that holds the watermark back (else its
+  catch-up would read every row in one read of the source), checked every `REWRITE_RECHECK_MS` (30 s), never backed
+  off, the old copy serving; a CLUSTER, VACUUM FULL or SET TABLESPACE keeps each row's xmin and goes on. **A wait is
+  never a failure** (issue 1066: #1058 recorded a first sync that waited as `failed`, so `mason add t && mason wait`
+  exited 1 while Mason only waited): no `error` of its own (it clears only the whole sync's own, `wholeErrors`, or an
+  older Mason's wait, `OLDER_WAIT_ERROR`; a stream's or a poll's stays), a first sync's phase `waiting`, said as `CopyState.syncWaits` (its
+  why and when it was checked), `sync.state` `waiting`, a `sync_waits` event that is no failure, and on the table's
+  line (`notStreamedReason`), each time in the words of its last check. **The transaction is named only while it is
+  open, and only one running at the snapshot** (`holderSql`, `holderOf`, `snapshotHolder`, read at every check, the
+  decided ones included; a resumed sync's old snapshot taken with none running has the next id as its xmin, which a
+  later transaction takes): #1058's words kept naming the
+  first of two transactions older than the rewrite after it ended, a pid another session may hold by then. **That check reads a SAMPLE, never the
   whole table** (issue 1066: #1058's read every row of an ALTERed table under AccessShareLock, minutes on a large one,
   a migration's ALTER queued behind it and the application behind the ALTER): `rowsHeldSql` reads the first
   `HELD_SAMPLE_ROWS` visible rows of a plain scan (no ctid, no ORDER BY), since a rewrite treats every row alike, under
@@ -114,8 +135,23 @@ paths:
   waits rather than swap in part of it. **A poll is held
   to its snapshot's file the same way**: a read whose file is not the one the snapshot sees writes nothing and fails
   (its count found 0 and deleted every key). `tests/integration/duck-rewrite.itest.ts` holds each, in both modes.
-  Still served late, by design: rows written after the oldest open transaction began, on a table not rewritten, wait
-  for the catch-up.
+- **A whole read is served only together with its catch-up** (issue 1066; `catchUpSide`, `swapCaughtUp`): the chunks
+  keep only the rows written before the first snapshot's xmin, which an open transaction holds back, so a TRUNCATE,
+  then a transaction left open, then the reload, was swapped in with 0 rows and served so until its catch-up — and
+  every load or update since the oldest open transaction began was missing the same way, on a smaller scale. So the
+  ONE poll from the whole read's watermark runs INTO THE SIDE TABLE (`poll`'s `into`, which moves nothing of the table
+  served), and the swap carries that poll's snapshot as the watermark: what is swapped in is the whole table as of one
+  snapshot, or nothing is. Until then the table serves its previous synced data, or is not served. Under replication
+  the stream holds the table's changes from a writer's turn before that poll, in the side table's columns
+  (`sideColumns`) and a stay that goes on past the swap, and the swap's turn applies them (`applySideHeld`), the
+  table marked behind in the swap's transaction until then (a crash between is caught up by one poll). A mark set
+  while it caught up (a slot made, `makingSlot`) is left to its own catch-up. **A table served is marked behind, in
+  the ledger, as its side table's catch-up begins, and a catch-up that ends without a swap ends its stay**
+  (`releaseSide`; the review of PR 1084: a sync again whole whose column change was reverted while it read had its
+  table back in the stream, served, and a failed side poll dropped what the stream held and had acknowledged, for
+  good, and wrote changes decoded in the side table's wider columns to the table served): one poll from the table's
+  own watermark catches it up, and nothing decoded in the side's columns reaches it. `tests/integration/duck-rewrite.itest.ts`
+  "loaded again after a transaction began" and "loses no change the stream held" hold it.
 - **A passthrough read (`pq`) names its columns through `pgColumnSql`**, the copy's chunks and the poll alike: an exact
   numeric as text, and as `text[]` a citext[] / inet[] / json[] (`KEPT_ARRAYS`) and an enum array (`enumLists`, by its
   stored type) — `postgres_query` hands each over as one VARCHAR DuckDB cannot cast to the column (the
@@ -127,6 +163,32 @@ paths:
   never listed (the copy's view of its visible columns, stored JSON paths on or off), and the rewrite reads it only to
   print (`scaleOf`): keys, filters and aggregates stay the engine's DECIMAL. A copy without it is read again once
   (`SCALE_LAYOUT`). Why: Postgres prints `12.5` beside `12.49`, and one DECIMAL scale printed `12.50`.
+- **A reference's hidden integer keys are a column a side table gets before its swap** (src/duck/reference-keys.ts
+  `fillSide`, issue 1144): added to the side table and numbered from the dictionary, read only, on the rebuilds'
+  connection, in chunks the stop can interrupt. Never listed, like the scale column. A key the dictionary lacks stays
+  NULL until the writer numbers it.
+- **A timestamptz's 15-minute bucket is a hidden column every write computes** (`src/duck/bucket-column.ts`, issue
+  1146). Beside each `timestamptz` column the copy holds an INTEGER, the value's 15 minutes of UTC (`bucketSql`). It is
+  NULL for a NULL, and `BUCKET_NONE` (-1) for a value no bucket decides: before 1980, from year 10000, ±infinity. The
+  column's own statistics are then what says a table holds no such row, so nothing is recorded beside it, and a write
+  that adds one says so in its own transaction. The copy's chunks, the poll's `writeStaged`, the
+  stream's `writeByKey` and `updateCarried` each compute it from the value, and a compaction keeps it. A new write path
+  into a copy names it too, or a GROUP BY of a unit groups that table's rows by a stale bucket. It is never listed. A
+  copy an older Mason made has none, and serves with today's plan until it is synced again whole. A `timestamp` has
+  none: its truncation never reads the session's zone, so grouping by its unit is already the engine's arithmetic.
+  Why: a GROUP BY of a month in a zone other than UTC worked the calendar out once a row; grouped by the bucket first,
+  it works it out once a bucket (duck-rewrite.md "A time's unit grouped by its bucket").
+- **Each text column is compressed by its own values** (`src/duck/text-compression.ts`, issue 1140): `beginCopy` reads
+  one sample of the source in the copy's snapshot (`sourceLengthsSql`, then `sourceDistinctSql`: about 100 pages by
+  `TABLESAMPLE SYSTEM`, at most 10,000 rows, one row of aggregates back each), and gives each VARCHAR or JSON column
+  `USING COMPRESSION` in the side table's definition (`textStorage`): the dictionary (`dict_fsst`) for values under 64
+  bytes or repeated, ZSTD for long values that do not repeat or a column whose text could reach 16 KiB. A json's or
+  jsonb's sample is its size as stored, so it gets the dictionary only when every value is uncompressed and under 2,000
+  bytes (`dictionaryHolds`). Why: a jsonb stored compressed at 3 KB was 52 KB of text, and the dictionary stored it
+  Uncompressed, 51 times ZSTD's size. A compaction decides again from the table's own rows (`rewrite`,
+  `syncedLengthsSql`). Why: the instance's forced ZSTD stored a six-value status 16 times larger than the dictionary, and
+  a count by it read cold took 4.03 s against 0.17 s. The definition carries the choice, so a new path that makes a
+  synced table must give its text columns a clause, or they fall back to the instance's ZSTD.
 - **What heap order gives up**, said as such: a wide uuid-keyed table's click takes seconds, a point lookup by a random
   uuid is a scan, and uniqueness is the write path's (the oracle holds every copy to the source), not the engine's. The
   later step is a sort by a declared time column once the sources file names one.

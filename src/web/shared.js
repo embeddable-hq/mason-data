@@ -326,7 +326,7 @@ export const staleText = (at, failure) => `As of ${utcMinute(at.toISOString()).s
 
 /** The longest one request to the run may take, its answer whole, in ms: past it the request is aborted and said as its
  *  failure, so a button never stays busy for ever (issue 1033). A catalog read the run is still making answers well
- *  within it (src/cli/source-catalog.ts ACT_WAIT_MS: 20 s), and a cloud login opens within 30 s. */
+ *  within it (src/cli/source-catalog.ts ACT_WAIT_MS: 20 s), and a cloud tunnel opens within 30 s. */
 export const ASK_MS = 60_000;
 
 /**
@@ -493,11 +493,24 @@ export const ROOMS = { sync: "Syncing…", add: "Adding…", copy: "Press ⌘C",
  * `data-pop-close` button) or `status` (an answer or a refusal: read out, and up until it is dismissed — its Dismiss,
  * Escape (the page's `dismiss`), or the next action's answer or question in its place). `label` names a dialog for a
  * screen reader. A popover that can be closed (it has a `data-pop-close` button) has an X at its top right too
- * (`POP_X`), which presses that button: the same close, whatever the popover.
+ * (`POP_X`), which presses that button: the same close, whatever the popover. `orAnchor` is the id of the same control
+ * written a second time, for when the stylesheet shows it there instead (a Tables column with no room, whose control is
+ * in the row's note): the popover is placed beside whichever of the two is shown.
  */
-export const pop = (anchor, html, { kind = "status", label = "" } = {}) =>
-  `<div class="pop ${kind === "dialog" ? "ask" : "said"}" data-anchor="${esc(anchor)}" role="${kind === "dialog" ? "dialog" : "status"}"${label ? ` aria-label="${esc(label)}"` : ""}>` +
+export const pop = (anchor, html, { kind = "status", label = "", orAnchor = "" } = {}) =>
+  `<div class="pop ${kind === "dialog" ? "ask" : "said"}" data-anchor="${esc(anchor)}" role="${kind === "dialog" ? "dialog" : "status"}"${label ? ` aria-label="${esc(label)}"` : ""}${orAnchor ? ` data-or-anchor="${esc(orAnchor)}"` : ""}>` +
   `${html.includes("data-pop-close") ? POP_X : ""}${html}</div>`;
+
+/** A popover's anchor (`pop`): its `data-anchor`, or its `data-or-anchor` where the first is not shown (no box: the
+ *  stylesheet hides it) and the second is. null when neither is in the document. */
+function anchorOf(doc, el) {
+  const first = doc.getElementById(el.dataset.anchor);
+  const or = el.dataset.orAnchor ? doc.getElementById(el.dataset.orAnchor) : null;
+  // a box the browser lays out has client rects; one `display: none` (or inside such) has none. A document that cannot
+  // tell (a test's fake) keeps the first
+  const shown = (e) => e !== null && (typeof e.getClientRects !== "function" || e.getClientRects().length > 0);
+  return first !== null && (or === null || shown(first)) ? first : shown(or) ? or : first ?? or;
+}
 
 /** A popover's X (`pop`): its own Dismiss or Cancel pressed by the shell's click (`data-pop-x`, src/web/app.js), so it
  *  never has an action of its own to drift from that button's. Named Close for a screen reader; the icon says nothing. */
@@ -528,7 +541,7 @@ export function placePops(doc, win) {
   // the answers shown now, by `roomKey`: the room of one no longer shown is given back
   const shownSaid = new Set();
   for (const el of doc.querySelectorAll(".pop[data-anchor]")) {
-    const a = doc.getElementById(el.dataset.anchor);
+    const a = anchorOf(doc, el);
     if (a === null || typeof a.getBoundingClientRect !== "function") { el.hidden = true; continue; }
     el.hidden = false;
     const r = a.getBoundingClientRect();
@@ -628,6 +641,13 @@ const popScroll = new Map();
 /** A text with its Copy button (`copyClick` copies what the `<code id>` holds): a URL, a psql line, a password. */
 export const copyable = (id, text, afterHtml = "") =>
   `<span class="copyrow"><code id="${esc(id)}">${esc(text)}</code> ${button("Copy", { copy: id }, "small", { room: ROOMS.copy })}${afterHtml ? ` ${afterHtml}` : ""}</span>`;
+
+/** A block of code with its Copy button (`copyClick` copies what the `<code id>` holds): a command or a client's settings,
+ *  its lines kept as they are and scrolled inside its own box, so a long line never widens the page. `afterHtml`: under
+ *  the Copy (a "Shown once" badge). */
+export const copyBlock = (id, text, afterHtml = "") =>
+  `<div class="copyblock"><pre><code id="${esc(id)}">${esc(text)}</code></pre>` +
+  `<span class="copyblock-side">${button("Copy", { copy: id }, "small", { room: ROOMS.copy })}${afterHtml}</span></div>`;
 
 /** How long a Copy button says Copied (or what to press) before it says Copy again. */
 export const COPIED_MS = 2000;

@@ -13,14 +13,15 @@
 import { parentPort, workerData, type TransferListItem } from "node:worker_threads";
 import type { DuckDBConnection, DuckDBInstance, DuckDBValue } from "@duckdb/node-api";
 import { openDuck, SessionRunner } from "./store.ts";
-import { FUNCTION_CALLS, FUNCTION_ROWS, registerLibcOrder, useCancelTable } from "./functions.ts";
+import { FUNCTION_CALLS, FUNCTION_ROWS, registerLibcOrder, useCancelTable, useTallyTable } from "./functions.ts";
 import { stopPgEval } from "./pg-eval.ts";
 import type { DuckAnswer, DuckSession } from "../api/postgres/server.ts";
 import { StatementError } from "./statement.ts";
 import { invalidationOf, STOPPING, wireError, type Reply } from "./executor.ts";
 
-const { cancels } = workerData as { cancels: Int32Array };
+const { cancels, tallies } = workerData as { cancels: Int32Array; tallies: BigInt64Array };
 useCancelTable(cancels);
+useTallyTable(tallies);
 const port = parentPort!;
 
 let instance: DuckDBInstance | null = null;
@@ -108,7 +109,7 @@ async function answer(m: Request): Promise<{ value: unknown; transfer?: Transfer
   // asked once the stop began: a session's statement is told so (57P01), anything else refused, never started under the
   // closing instance
   if (stopping && !DURING_STOP.has(m.op)) {
-    if (["runner.open", "runner.run", "runner.explain", "answer.fetch"].includes(m.op)) throw new StatementError(STOPPING, "");
+    if (["runner.open", "runner.run", "runner.explain", "runner.weigh", "answer.fetch"].includes(m.op)) throw new StatementError(STOPPING, "");
     throw new Error(`the engine is closing: ${m.op} does not start on it any more`);
   }
   switch (m.op) {
@@ -220,6 +221,18 @@ async function answer(m: Request): Promise<{ value: unknown; transfer?: Transfer
       statements.set(k, s);
       runner.next = Number(m.seq);
       try { return { value: await runner.explain(m.sql as never, m.params as (string | null)[], m.session as DuckSession, s.controller.signal, m.how as never) }; }
+      finally { statements.delete(k); }
+    }
+    case "runner.weigh": {
+      // the rows the statement's plan keeps in memory, by the engine's estimates (src/duck/admission.ts): abortable as an
+      // EXPLAIN is, by its own number
+      const runner = need(runners, Number(m.runner), "session");
+      const k = key(Number(m.runner), Number(m.seq));
+      const s: InFlight = { controller: new AbortController(), answer: null };
+      if (m.aborted !== null) abortWith(s.controller, m.aborted as { fields?: StatementError["fields"] });
+      statements.set(k, s);
+      runner.next = Number(m.seq);
+      try { return { value: await runner.weigh(m.sql as never, m.params as (string | null)[], m.session as DuckSession, s.controller.signal) }; }
       finally { statements.delete(k); }
     }
     case "runner.close": {
