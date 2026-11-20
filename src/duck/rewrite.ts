@@ -33,7 +33,7 @@ import type { PgAnalysis } from "./analyze.ts";
 import type { CellConv } from "./types.ts";
 import { pathIndex, PG_SESSION_SEPARATOR, SESSION_VARIABLE, SETTINGS_VARIABLE, TURN_FUNCTION, type JsonKind, type PgKind } from "./functions.ts";
 import { cellsOf, evaluateText, mapCells, numericLiteral, programJson, type NumericProgram } from "../lib/pg-numeric.ts";
-import { analysedQueries, caseTwins, FIRST_USER_OID, implicitTimetzCasts, joinsUsing, setOperationOutputs, type Grouping, type Keys, type QueryOutputs, type TreeValue, type Typed } from "./pgtree.ts";
+import { analysedQueries, FIRST_USER_OID, uniqueTwins, implicitTimetzCasts, type Unmatched, joinsUsing, setOperationOutputs, type Grouping, type Keys, type QueryOutputs, type TreeValue, type Typed } from "./pgtree.ts";
 import { evaluated, keysBound, type Unbound } from "./constant-key.ts";
 import { cteNamesApart } from "./cte-names.ts";
 import { OWN_PREFIX, ownPrefix } from "./own-names.ts";
@@ -44,6 +44,7 @@ import { jsonbText, parseJson, storedPairs, type Json } from "./jsonb.ts";
 import { atTimeZoneOf, isUtc, UTC_NAMES } from "../lib/timezone.ts";
 import type { CaseMapping, DuckCollation, StatementCollations } from "./collation.ts";
 import { pgTrim } from "./text.ts";
+import type { PrimaryKeys } from "./distinct-key.ts";
 import { NUMBERED_EQUALITY, type NumberedLookup, type NumberedRead } from "./reference-keys.ts";
 import { bucketGroups, shape, type BucketMark } from "./bucket-group.ts";
 import { sideFirst } from "./side-first.ts";
@@ -82,7 +83,10 @@ type Fields = ReadonlyArray<{ oid: number; typmod?: number }>;
 type GroupedAs = "engine" | "keyed" | "cells";
 
 /** a column of a table's row type, as the catalog has it (its collation pg_attribute's attcollation) */
-export interface RowColumn { name: string; type: number; typmod: number; collation: number }
+export interface RowColumn { name: string; type: number; typmod: number; collation: number; /** its number in the table (pg_attribute's attnum) */ attno?: number }
+
+/** count(*) and count(any) (pg_proc): never NULL, a subquery's output that tells its matched rows (`rowPresence`) */
+const COUNT_STAR = 2803, COUNT_ANY = 2147;
 
 /** Postgres's DEFAULT_COLLATION_OID: the database's collation, a collatable type's own (typcollation) */
 const DEFAULT_COLLATION_OID = 100;
@@ -301,6 +305,13 @@ class Rewriter {
   boundPaths: ReadonlyMap<number, string> = new Map();
   /** the plain numerics whose copy holds each value's own scale (`scaleOf`) */
   scales: ScaleLookup | null = null;
+  /** the primary keys of the tables a statement reads, where it holds a whole row an outer join may NULL-extend
+   *  (src/duck/plan.ts `rowKeys`): what tells an unmatched row (`rowPresence`) */
+  rowKeys: PrimaryKeys = new Map();
+  /** the offsets of the VARs an outer join may still leave unmatched where they are read, once the planner's reduction
+   *  of outer joins is applied (src/duck/plan.ts `extendedRows`, src/duck/pgtree.ts `extendedReads`); null: every VAR
+   *  Postgres's analysis marks (`Typed.nulled`) */
+  extended: ReadonlyMap<number, Unmatched> | null = null;
   /** the timestamptz columns whose copy holds each value's 15-minute bucket (src/duck/bucket-column.ts); null for none */
   buckets: BucketLookup | null = null;
   /** each truncation written of such a column, by its form (src/duck/bucket-group.ts `shape`): what `bucketGroups` reads */
@@ -357,15 +368,15 @@ class Rewriter {
     this.types = analysis.types; this.analysed = analysis.outputs; this.base = base; this.collations = collations; this.params = analysis.params; this.userTypes = userTypes; this.rowTypes = rowTypes; this.timeZone = timeZone; this.dateStyle = dateStyle;
     this.enums = enums; this.kept = kept; this.citextHeld = citextHeld; this.typeNames = typeNames;
     for (const at of keyCounts) this.keyCounts.add(at + base);
-    this.twins = caseTwins(analysis.tree);
     this.analysisTree = analysis.tree;
   }
 
   /** Postgres's analysis of the statement, for what is read of it only where asked (`setOperationColumns`) */
   private readonly analysisTree: TreeValue;
 
-  /** the subqueries and CTEs whose columns have twins in another case, by the name the query calls them (caseTwins) */
-  private readonly twins: Map<string, string[]>;
+  /** the FROM items whose columns are renamed, by a name no other item of the statement holds (`uniqueTwins`): for a
+   *  SELECT whose query `analysedQuery` cannot find; computed where first asked */
+  private uniqueTwinNames: Map<string, string[]> | undefined;
 
   /**
    * THE count(DISTINCT x) WHOSE DISTINCT CHANGES NOTHING, by the raw node's offset: x a column unique on the source and
@@ -618,8 +629,6 @@ class Rewriter {
 
   /** every CTE the statement declares, by name, from the queries walked so far (a subquery may read an outer one's) */
   private readonly ctes = new Map<string, AstNode>();
-  /** a CTE's column list (`WITH q(a, b) AS …`), by its query: the names its columns are read by outside it */
-  private readonly cteColumns = new WeakMap<AstNode, string[]>();
 
   /** What Postgres made of this raw node: its entry at the node's offset, of a kind the raw kind is analysed into. */
   typed(n: AstNode): Typed | null {
@@ -1023,7 +1032,7 @@ class Rewriter {
         }
         // a bare name another FROM item has in another case (`"Email"` beside `email`) is ambiguous to DuckDB, which
         // binds names case-insensitively: it is qualified with the FROM item Postgres resolved it to
-        // and a column its subquery has twice in two cases (`"T"`, `t`) is that subquery's renamed one (caseTwins)
+        // and a column its subquery has twice in two cases (`"T"`, `t`) is that subquery's renamed one (`itemTwins`)
         const fields = (b.fields ?? []) as AstNode[];
         const last = fields.at(-1);
         // a function's whole row by its FROM name alone, where the function is one column and no row (`e` of
@@ -1037,11 +1046,13 @@ class Rewriter {
         return null;
       }
       case "RangeSubselect": case "RangeVar": {
-        // a subquery or a CTE whose columns have twins in another case: named by an alias list, the twins renamed
+        // a subquery or a CTE whose columns have twins: named by an alias list, the twins renamed (`twinsNamed`)
         const alias = b.alias as Body | undefined;
-        const name = alias?.aliasname ?? (k === "RangeVar" ? b.relname : undefined);
-        const names = typeof name === "string" && alias?.colnames === undefined ? this.twins.get(name) : undefined;
-        if (names !== undefined) b.alias = { ...(alias ?? {}), aliasname: name, colnames: names.map(S) };
+        if (alias?.colnames === undefined) {
+          const name = alias?.aliasname ?? (k === "RangeVar" && b.schemaname === undefined ? b.relname : undefined);
+          const names = this.twinLists.get(b) ?? (typeof name === "string" ? (this.uniqueTwinNames ??= uniqueTwins(this.analysisTree)).get(name) : undefined);
+          if (names !== undefined && typeof name === "string") b.alias = { ...(alias ?? {}), aliasname: name, colnames: names.map(S) };
+        }
         // a VALUES list's columns by Postgres's names, which DuckDB's are not (a `*`'s key reads them by name)
         const rows = k === "RangeSubselect" && isNode(b.subquery) ? bodyOf(b.subquery).valuesLists as AstNode[] | undefined : undefined;
         if (Array.isArray(rows) && rows.length > 0 && alias?.colnames === undefined) {
@@ -1179,14 +1190,115 @@ class Rewriter {
     while (q.op !== undefined && q.op !== "SETOP_NONE" && q.larg !== undefined) q = q.larg as Body;
     const targets = (q.targetList ?? []) as AstNode[];
     if (targets.some((x) => hasStar(bodyOf(x).val))) throw new Unrewritable("a row of a subquery that selects * is not supported by Mason", "name the subquery's columns", "row-value");
-    // (a CTE's column list names its columns outside it: `WITH q(a, b) AS (SELECT id, tenant …) SELECT q FROM q`)
-    const listed = this.cteColumns.get(source[0]!.query);
+    const names = this.rowColumnNames(t, targets.length);
     return targets.map((x, i) => {
       const val = bodyOf(x).val as AstNode;
-      const name = listed?.[i] ?? bodyOf(x).name ?? figureColname(val);
       const typed = this.typed(val);
-      return { name, value: this.typedRef([alias, name], typed?.type ?? TEXT, typed?.typmod ?? -1, typed?.collation ?? 0), type: typed?.type ?? null };
+      return { name: names.shown[i]!, value: this.typedRef([alias, names.read[i]!], typed?.type ?? TEXT, typed?.typmod ?? -1, typed?.collation ?? 0), type: typed?.type ?? null };
     });
+  }
+
+  /**
+   * THE COLUMN NAMES OF A SUBQUERY'S OR A WITH QUERY'S WHOLE ROW, as the engine reads them: Postgres's own
+   * (`Typed.rowColumns`: a WITH query's column list, an output's name or the one Postgres made up), read by `rowFields`
+   * and `rowPresence` alike. A name the item holds twice is renamed in each place (`itemTwins`), so each column is
+   * read by a name of its own.
+   */
+  private rowColumnNames(t: Typed, width: number): { shown: string[]; read: string[] } {
+    const names = t.rowColumns;
+    if (names === undefined || names.read.length !== width || names.shown.length !== width) throw new Unrewritable("a row of this FROM item is not supported by Mason", "name its columns instead", "row-value");
+    if (new Set(names.read.map((x) => x.toLowerCase())).size !== width) throw new Error("a whole row's columns are named twice after their renaming (itemTwins): report it, with the statement");
+    return names;
+  }
+
+  /**
+   * A WHOLE ROW AN OUTER JOIN MAY NULL-EXTEND IS NULL WHERE NOTHING MATCHED, never a row of NULLs (issue 1008): `b` of
+   * `a LEFT JOIN b`, a RIGHT JOIN's left side, either side of a FULL JOIN, a nested join's, a table's or a subquery's or
+   * a WITH query's alike. Postgres decides which rows may be (`Typed.nulled`, its `varnullingrels`); this is the ONE place
+   * that says how such a row is told from a matched row of NULLs: a column of it that no matched row holds NULL — a
+   * column of its table's primary key (the key Mason syncs it by, held NOT NULL on the source while it is the key: a NOT
+   * NULL that is no key may be dropped there after the catalog read it), or a subquery's output that is one of those
+   * read bare, a count or a constant. Every reader of the row (`rowValues`: its text, its json, json_agg's element) is
+   * NULL where that column is. Null where no unmatched row reaches the reader, as the planner's reduction of outer
+   * joins decides it (`unmatched`); a row nothing tells is refused by name.
+   */
+  private rowPresence(n: AstNode, select: Body): AstNode | null {
+    if (kindOf(n) !== "ColumnRef") return null;
+    const t = this.typed(n);
+    if (t === null || t.node !== "VAR" || !this.unmatched(n, t) || !this.isRowType(t.type)) return null;
+    const alias = String(bodyOf(((bodyOf(n).fields ?? []) as AstNode[])[0]!).sval);
+    const refuse = (why: string): never => {
+      throw new Unrewritable(`the whole row of ${alias}, which an outer join may leave unmatched, is not supported by Mason: ${why}`,
+        `name its columns (json_build_object('id', ${alias}.id, …), or CASE WHEN ${alias}.id IS NULL THEN NULL ELSE … END over them)`, "null-extended-row");
+    };
+    // a one-row item is unmatched exactly where its join's condition is not true: that condition, evaluated again
+    const on = this.unmatchedBy(n);
+    if (on?.by === "on") {
+      const quals = this.joinCondition(select, on.at);
+      if (quals === null) return refuse("Mason cannot find its join's condition");
+      return caseWhen([[this.clone(quals), boolConst(true)]], null);
+    }
+    const inKey = (relid: number | undefined, attno: number | undefined): boolean => relid !== undefined && attno !== undefined && this.rowKeys.get(relid)?.has(attno) === true;
+    const table = this.rowTypes.get(t.type);
+    if (table !== undefined) {
+      const c = table.find((x) => inKey(t.rowOf, x.attno));
+      if (c === undefined) return refuse("its table has no primary key");
+      return this.typedRef([alias, c.name], c.type, c.typmod, c.collation);
+    }
+    const source = this.fromSources(select).filter((q) => q.alias === alias);
+    if (source.length !== 1) return refuse("Mason cannot tell its unmatched rows");
+    const q = bodyOf(source[0]!.query);
+    if (q.op !== undefined && q.op !== "SETOP_NONE") return refuse("it is a set operation's");
+    if (((q.groupClause ?? []) as AstNode[]).some((g) => kindOf(g) === "GroupingSet")) return refuse("its query has grouping sets");
+    const targets = (q.targetList ?? []) as AstNode[];
+    const names = this.rowColumnNames(t, targets.length);
+    for (const [i, x] of targets.entries()) {
+      const val = bodyOf(x).val as AstNode;
+      if (!isNode(val) || hasStar(val)) continue;
+      const v = this.typed(val);
+      const present = v !== null && (
+        (v.node === "VAR" && !this.unmatched(val, v) && v.levelsUp === 0 && inKey(v.relation?.relid, v.relation?.attno))
+        || (v.node === "AGGREF" && (v.oid === COUNT_STAR || v.oid === COUNT_ANY) && bodyOf(val).over === undefined)
+        || (v.node === "CONST" && v.datum !== null));
+      if (present) return this.typedRef([alias, names.read[i]!], v.type, v.typmod, v.collation);
+    }
+    return refuse("none of its subquery's columns is a column of a table's primary key, a count or a constant");
+  }
+
+  /** whether a VAR an outer join may NULL-extend may still be unmatched where it is read: Postgres's analysis marks it
+   *  (`Typed.nulled`), and the planner's reduction of outer joins does not clear it (`extended`) */
+  private unmatched(n: AstNode, t: Typed): boolean {
+    return t.nulled === true && (this.extended === null || this.unmatchedBy(n) !== undefined);
+  }
+  /** how a VAR an outer join may leave unmatched is told (`Unmatched`); undefined where nothing leaves it so, or where no
+   *  reduction was decided (every VAR Postgres marks is then told by a column) */
+  private unmatchedBy(n: AstNode): Unmatched | undefined {
+    const at = bodyOf(n).location;
+    return this.extended === null || typeof at !== "number" ? undefined : this.extended.get(at - this.base);
+  }
+  /** the condition of the JOIN of this SELECT's FROM whose condition holds an expression at `at` (the analysis's offset:
+   *  a cast's constant is at its literal, the raw cast at its `::`), or null. Two joins' conditions share no offset */
+  private joinCondition(select: Body, at: number): AstNode | null {
+    let found: AstNode | null = null;
+    const holds = (v: unknown): boolean => {
+      if (Array.isArray(v)) return v.some(holds);
+      if (v === null || typeof v !== "object") return false;
+      return (v as Body).location === at + this.base || Object.values(v as Body).some(holds);
+    };
+    const visit = (x: unknown): void => {
+      if (found !== null || !isNode(x) || kindOf(x) !== "JoinExpr") return;
+      const quals = bodyOf(x).quals as AstNode | undefined;
+      if (isNode(quals) && holds(quals)) { found = quals; return; }
+      visit(bodyOf(x).larg); visit(bodyOf(x).rarg);
+    };
+    for (const x of (select.fromClause ?? []) as unknown[]) visit(x);
+    return found;
+  }
+
+  /** a reader of a whole row (`rowValues`) as Postgres reads a NULL-extended one: `ifNull` (NULL, json_agg's `null`)
+   *  where its presence (`rowPresence`) is NULL */
+  private rowOrNull(present: AstNode | null, value: AstNode, ifNull: AstNode = nullConst()): AstNode {
+    return present === null ? value : caseWhen([[isNull(present), ifNull]], value);
   }
 
   /** a row's text as record_out writes it: each column's text, quoted where it must be, NULL as nothing */
@@ -1217,14 +1329,14 @@ class Rewriter {
       if (inList) {
         const cols = this.rowFields(v, b);
         if (cols !== null) {
-          const text = this.recordText(cols);
+          const text = this.rowOrNull(this.rowPresence(v, b), this.recordText(cols));
           this.rowTexts.add(bodyOf(text));
           return text;
         }
       }
       if (k === "TypeCast" && isNode(body.arg) && textTypes.has(lastName(body.typeName?.names))) {
         const cols = this.rowFields(body.arg as AstNode, b);
-        if (cols !== null) return this.recordText(cols);
+        if (cols !== null) return this.rowOrNull(this.rowPresence(body.arg as AstNode, b), this.recordText(cols));
       }
       if (k === "FuncCall" && Array.isArray(body.args) && body.args.length >= 1 && body.over === undefined) {
         const name = lastName(body.funcname);
@@ -1232,11 +1344,13 @@ class Rewriter {
         if (cols !== null) {
           if (body.args.length > 1) throw new Unrewritable(`${name}() of a row with more arguments is not supported by Mason`, `${name}(row)`, "row-value");
           const json = this.rowJson(cols, name);
-          if (name === "to_json" || name === "row_to_json") return json;
-          if (name === "to_jsonb") return cast(fn("__mason_jsonb_text", [json]), ["json"]);
+          const present = this.rowPresence(body.args[0] as AstNode, b);
+          if (name === "to_json" || name === "row_to_json") return this.rowOrNull(present, json);
+          if (name === "to_jsonb") return this.rowOrNull(present, cast(fn("__mason_jsonb_text", [json]), ["json"]));
           if (body.agg_distinct === true) throw new Unrewritable(`${name}(DISTINCT …) is not supported by Mason`, `select the DISTINCT values in a subquery and ${name} them`, "json-agg-distinct");
-          // json_agg puts a line break before each row but the first (json_agg_transfn: a composite's or an array's)
-          const array = linedAgg(body, concat(strConst("\n "), json), this.done);
+          // json_agg puts a line break before each row but the first (json_agg_transfn: a composite's or an array's), and
+          // none before a NULL row, which it writes `null`
+          const array = linedAgg(body, this.rowOrNull(present, concat(strConst("\n "), json), strConst("null")), this.done);
           return name === "jsonb_agg" ? cast(fn("__mason_jsonb_text", [array]), ["json"]) : array;
         }
       }
@@ -1256,8 +1370,8 @@ class Rewriter {
     for (const c of (b.withClause?.ctes ?? []) as AstNode[]) {
       if (!isNode(c) || typeof bodyOf(c).ctename !== "string" || !isNode(bodyOf(c).ctequery)) continue;
       this.ctes.set(bodyOf(c).ctename, bodyOf(c).ctequery as AstNode);
-      if (Array.isArray(bodyOf(c).aliascolnames)) this.cteColumns.set(bodyOf(c).ctequery as AstNode, names(bodyOf(c).aliascolnames));
     }
+    this.twinsNamed(b);
     // a window's ORDER BY key in a grouped SELECT is read per group (`overGroups`): its query, for the key's rule
     const targets = (b.targetList ?? []) as AstNode[];
     if ((Array.isArray(b.groupClause) && b.groupClause.length > 0) || b.havingClause !== undefined || targets.some((t) => this.hasAggregate(bodyOf(t).val))) {
@@ -1472,6 +1586,38 @@ class Rewriter {
     });
     return out;
   }
+
+  /**
+   * A FROM ITEM WHOSE COLUMNS HAVE TWINS IS NAMED BY AN ALIAS LIST OF ITS COLUMNS AS THE ENGINE READS THEM, the twins
+   * renamed (src/duck/pgtree.ts `itemTwins`): a subquery or a CTE read here. The lists are this SELECT's own query's
+   * (`QueryOutputs.twins`), recorded by the item itself (`twinLists`), whose own rule writes the list where it always did,
+   * so they reach this SELECT's own FROM items alone: by name across the statement, a list landed on another query's
+   * item of the same name (the review of PR 1100). An item whose SELECT is not found in the analysis, or that the rewrite
+   * made, takes a name no other item of the statement holds (`uniqueTwins`). An item with an alias list of its own keeps
+   * it.
+   */
+  private twinsNamed(b: Body): void {
+    const from = (b.fromClause ?? []) as unknown[];
+    if (from.length === 0) return;
+    const twins = this.analysedQuery((b.targetList ?? []) as AstNode[])?.twins;
+    if (twins === undefined || twins.size === 0) return;
+    const visit = (x: unknown): void => {
+      if (!isNode(x)) return;
+      const k = kindOf(x), xb = bodyOf(x);
+      if (k === "JoinExpr") { visit(xb.larg); visit(xb.rarg); return; }
+      if (k !== "RangeSubselect" && k !== "RangeVar") return;
+      const alias = xb.alias as Body | undefined;
+      const name = alias?.aliasname ?? (k === "RangeVar" ? xb.relname : undefined);
+      // (a RangeVar so named is a CTE's reference: a table's or a view's columns are never twins, `itemTwins`, and a name
+      // is one FROM item's in its query)
+      if (k === "RangeVar" && xb.schemaname !== undefined) return;
+      const names = typeof name === "string" && alias?.colnames === undefined ? twins.get(name) : undefined;
+      if (names !== undefined) this.twinLists.set(xb, names);
+    };
+    for (const x of from) visit(x);
+  }
+  /** each FROM item's columns as the engine reads them, by the item, as the SELECT holding it recorded them (`twinsNamed`) */
+  private readonly twinLists = new WeakMap<Body, string[]>();
 
   /** a SELECT's query in Postgres's analysis, found by an offset its targets hold (a subquery's targets are its own);
    *  one whose targets hold none (`TABLE t`) by the FROM it reads and its own limits' offsets (`picked`); else undefined */
@@ -8818,6 +8964,11 @@ export interface RewriteOptions {
   boundPaths?: ReadonlyMap<number, string>;
   /** the plain numerics whose copy holds each value's own scale (src/duck/scale-column.ts, src/duck/plan.ts `scaleLookup`) */
   scales?: ScaleLookup | null;
+  /** the primary keys of the tables a statement reads, where it holds a whole row an outer join may NULL-extend
+   *  (src/duck/plan.ts `rowKeys`) */
+  rowKeys?: PrimaryKeys;
+  /** the VARs an outer join may still leave unmatched where they are read (src/duck/plan.ts `extendedRows`) */
+  extended?: ReadonlyMap<number, Unmatched> | null;
   /** the references whose keys the synced data numbers (src/duck/reference-keys.ts, src/duck/plan.ts `numberedLookup`) */
   numbered?: NumberedLookup | null;
   /** the timestamptz columns whose copy holds each value's 15-minute bucket (src/duck/bucket-column.ts, src/duck/plan.ts
@@ -8856,7 +9007,7 @@ export interface ScaleLookup {
 }
 
 export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(), citextHeld = new Set(), typeNames = new Map(), rowTypes = new Map(), timeZone = "UTC", dateStyle = "ISO, MDY", enums = { labels: new Map(), arrays: new Map() }, kept = null,
-  wireBound = false, keyCounts = new Set(), boundPaths = new Map(), scales = null, buckets = null, numbered = null, own: prefix = ownPrefix([stmt, analysis.tree]), rows = null }: RewriteOptions):
+  wireBound = false, keyCounts = new Set(), boundPaths = new Map(), scales = null, buckets = null, numbered = null, own: prefix = ownPrefix([stmt, analysis.tree]), rows = null, rowKeys = new Map(), extended = null }: RewriteOptions):
   { tree: AstNode; withTies: boolean; exact: ExactColumn[]; clock: { parse?: number; exec?: number }; jsonReads: JsonRead[]; unboundedLateral: boolean; pathParams: number[]; wholeNumericArrays: number[];
     numbers: NumberedRead[] } {
   const r = new Rewriter(analysis, base, collations, userTypes, rowTypes, timeZone, dateStyle, enums, kept, keyCounts, citextHeld, typeNames);
@@ -8864,6 +9015,8 @@ export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(
   r.scales = scales;
   r.buckets = buckets;
   r.numbered = numbered;
+  r.rowKeys = rowKeys;
+  r.extended = extended;
   if (joinsUsing(analysis.tree, new Set([JSONB, JSONB_ARRAY]))) {
     throw new Unrewritable("a JOIN … USING or a NATURAL JOIN on a jsonb column is not supported by Mason (Postgres equates jsonb by its own rules)", "JOIN … ON a.j = b.j", "jsonb-compare");
   }

@@ -238,6 +238,14 @@ const DDL = [
   "CREATE TABLE public.aparams (id INTEGER PRIMARY KEY, s SMALLINT, b BIGINT, x VARCHAR, u UUID, n DECIMAL(30,20), f BOOLEAN, d DATE, ts TIMESTAMPTZ, fl DOUBLE)",
   `INSERT INTO public.aparams (id, s, b, x, u, n, f, d, ts, fl) VALUES ${APARAMS}`,
   `INSERT INTO public.aparams (id, ts, d) VALUES ${AZONES}`,
+  // issue 1008: two tables whose whole rows are the source's (a row type of their own), one LEFT JOINed to the other
+  "CREATE TABLE public.nx_a (id INTEGER PRIMARY KEY, label VARCHAR)",
+  "INSERT INTO public.nx_a VALUES (1, 'one'), (2, 'two'), (3, NULL), (4, 'four')",
+  "CREATE TABLE public.nx_b (id INTEGER PRIMARY KEY, a_id INTEGER, note VARCHAR, amount DECIMAL(10,2))",
+  "INSERT INTO public.nx_b VALUES (1, 1, 'b1', 1.50), (2, 2, NULL, NULL), (3, 9, 'far', 2.00)",
+  // a NOT NULL the catalog still holds, which the source dropped since: rows of a NULL n are synced
+  "CREATE TABLE public.nx_c (n INTEGER, id INTEGER PRIMARY KEY, v VARCHAR)",
+  "INSERT INTO public.nx_c VALUES (NULL, 1, 'c1'), (30, 3, NULL), (NULL, 4, 'c4')",
   // issue 1006, after the others: a column of each type extract and date_part read
   "CREATE TABLE public.parts (id INTEGER PRIMARY KEY, ts TIMESTAMP, tz TIMESTAMPTZ, d DATE, t TIME, ttz TIMETZ, iv INTERVAL)",
   `INSERT INTO public.parts VALUES ${PARTS}`,
@@ -331,6 +339,12 @@ const PG_DDL = [
   "CREATE TABLE public.aparams (id integer PRIMARY KEY, s smallint, b bigint, x text, u uuid, n numeric(30,20), f boolean, d date, ts timestamptz, fl double precision)",
   `INSERT INTO public.aparams (id, s, b, x, u, n, f, d, ts, fl) VALUES ${APARAMS}`,
   `INSERT INTO public.aparams (id, ts, d) VALUES ${AZONES}`,
+  "CREATE TABLE public.nx_a (id integer PRIMARY KEY, label text)",
+  "INSERT INTO public.nx_a VALUES (1, 'one'), (2, 'two'), (3, NULL), (4, 'four')",
+  "CREATE TABLE public.nx_b (id integer PRIMARY KEY, a_id integer, note text, amount numeric(10,2))",
+  "INSERT INTO public.nx_b VALUES (1, 1, 'b1', 1.50), (2, 2, NULL, NULL), (3, 9, 'far', 2.00)",
+  "CREATE TABLE public.nx_c (n integer, id integer PRIMARY KEY, v text)",
+  "INSERT INTO public.nx_c VALUES (NULL, 1, 'c1'), (30, 3, NULL), (NULL, 4, 'c4')",
   "CREATE TABLE public.parts (id integer PRIMARY KEY, ts timestamp, tz timestamptz, d date, t time, ttz timetz, iv interval)",
   `INSERT INTO public.parts VALUES ${PARTS}`,
 ];
@@ -403,6 +417,13 @@ const schema: PgSchema = {
     { name: "aparams", primaryKey: ["id"], joins: [],
       columns: [{ name: "id", type: "int4" }, { name: "s", type: "int2" }, { name: "b", type: "int8" }, { name: "x", type: "text" }, { name: "u", type: "uuid" },
         { name: "n", type: "numeric", spelled: "numeric(30,20)" }, { name: "f", type: "bool" }, { name: "d", type: "date" }, { name: "ts", type: "timestamptz" }, { name: "fl", type: "float8" }] },
+    // issue 1008: whole rows of the source's row types (a source OID of their own)
+    { name: "nx_a", primaryKey: ["id"], joins: [], rowTypeOid: 99101, columns: [{ name: "id", type: "int4" }, { name: "label", type: "text" }] },
+    { name: "nx_b", primaryKey: ["id"], joins: [], rowTypeOid: 99102,
+      columns: [{ name: "id", type: "int4" }, { name: "a_id", type: "int4" }, { name: "note", type: "text" }, { name: "amount", type: "numeric", spelled: "numeric(10,2)" }] },
+    // its n NOT NULL as the catalog read it before the source dropped it (the review of PR 1100)
+    { name: "nx_c", primaryKey: ["id"], joins: [], rowTypeOid: 99103,
+      columns: [{ name: "n", type: "int4", notNull: true }, { name: "id", type: "int4" }, { name: "v", type: "text" }] },
     { name: "parts", primaryKey: ["id"], joins: [],
       columns: [{ name: "id", type: "int4" }, { name: "ts", type: "timestamptz", spelled: "timestamp without time zone" }, { name: "tz", type: "timestamptz" }, { name: "d", type: "date" },
         { name: "t", type: "text", spelled: "time without time zone" }, { name: "ttz", type: "text", spelled: "time with time zone" }, { name: "iv", type: "text", spelled: "interval" }] },
@@ -626,7 +647,7 @@ test("what reads no table is the catalog Postgres's; a schema'd table is in the 
     // machine as Postgres names it
     assert.match(String((await answer(c, "SELECT version()")).rows[0]![0]), /^PostgreSQL 18\.6 \(mason-data 0\.6\.1\) on (aarch64|x86_64)-(linux|darwin)$/);
     const tables = await answer(c, "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ('public', 'sales') ORDER BY 1, 2");
-    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "aparams"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "bins"], ["public", "chars"], ["public", "clock_times"], ["public", "deep_t"], ["public", "ga"], ["public", "instants"], ["public", "invoices"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnat"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "parts"], ["public", "pnum"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "timetz_runs"], ["public", "timetz_runs3"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["public", "wides"], ["sales", "accounts"], ["sales", "invoices"]]);
+    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "aparams"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "bins"], ["public", "chars"], ["public", "clock_times"], ["public", "deep_t"], ["public", "ga"], ["public", "instants"], ["public", "invoices"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnat"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "nx_a"], ["public", "nx_b"], ["public", "nx_c"], ["public", "orders"], ["public", "paid_orders"], ["public", "parts"], ["public", "pnum"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "timetz_runs"], ["public", "timetz_runs3"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["public", "wides"], ["sales", "accounts"], ["sales", "invoices"]]);
     const cols = await answer(c, "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = 'sales' AND table_name = 'invoices' ORDER BY ordinal_position");
     assert.deepEqual(cols.rows, [["id", "integer"], ["total", "numeric"]]);
   } finally { await c.end(); }
@@ -9449,6 +9470,52 @@ test("collation resolver: two libc collations in one session, each by its own or
   } finally { await c.end(); await a.close(); }
 });
 
+test("issue 1008: a whole row an outer join leaves unmatched is NULL in every reader, never a row of NULLs; one Mason cannot tell is refused by name", async () => {
+  const c = await client();
+  try {
+    // a 3 and 4 match no b; b 2 matched, its note and amount NULL: a row of NULLs beside its key, never NULL itself
+    const left = "FROM nx_a a LEFT JOIN nx_b b ON b.a_id = a.id";
+    assert.deepEqual(await unlike(c, [
+      [`SELECT a.id, row_to_json(b), b::text, to_json(b), to_jsonb(b), b ${left} ORDER BY 1`, "ordered"],
+      [`SELECT a.id, coalesce(b::text, 'none'), length(b::text), row_to_json(b.*), b.*::text ${left} ORDER BY 1`, "ordered"],
+      [`SELECT json_agg(b ORDER BY a.id), jsonb_agg(b ORDER BY a.id) ${left}`, "ordered"],
+      [`SELECT a.label IS NULL, json_agg(b ORDER BY a.id), jsonb_agg(b ORDER BY a.id), count(*) ${left} GROUP BY 1 ORDER BY 1`, "ordered"],
+      [`SELECT a.id, json_agg(b) FILTER (WHERE a.id > 1) ${left} GROUP BY a.id ORDER BY 1`, "ordered"],
+      [`SELECT a.id, row_to_json(b) ${left} GROUP BY a.id, b.id ORDER BY 1`, "ordered"],
+      [`SELECT a.id, (SELECT row_to_json(b)) ${left} ORDER BY 1`, "ordered"],
+      [`SELECT a.id, row_to_json(b) ${left} WHERE row_to_json(b) IS NULL ORDER BY 1`, "ordered"],
+      [`SELECT a.id, row_to_json(b) ${left} ORDER BY a.id LIMIT 2 OFFSET 1`, "ordered"],
+      // the other outer joins, a join nested on the nullable side, and two LEFT JOINs in a row
+      ["SELECT b.id, row_to_json(a), a::text FROM nx_a a RIGHT JOIN nx_b b ON b.a_id = a.id ORDER BY 1", "ordered"],
+      ["SELECT a.id, b.id, row_to_json(a), row_to_json(b), b::text FROM nx_a a FULL JOIN nx_b b ON b.a_id = a.id ORDER BY 1 NULLS FIRST, 2", "ordered"],
+      ["SELECT a.id, row_to_json(b), row_to_json(a2) FROM nx_a a LEFT JOIN (nx_b b JOIN nx_a a2 ON a2.id = b.id) ON b.a_id = a.id ORDER BY 1", "ordered"],
+      ["SELECT a.id, row_to_json(b), a2::text FROM nx_a a LEFT JOIN nx_b b ON b.a_id = a.id LEFT JOIN nx_a a2 ON a2.id = b.id + 2 ORDER BY 1", "ordered"],
+      // a subquery's and a WITH query's whole row, told by a column that is never NULL: its key, a count, a constant
+      ["SELECT a.id, row_to_json(d), d::text FROM nx_a a LEFT JOIN (SELECT id, note FROM nx_b) d ON d.id = a.id ORDER BY 1", "ordered"],
+      ["SELECT a.id, row_to_json(d), d::text FROM nx_a a LEFT JOIN (SELECT b.a_id AS k, count(*) AS n FROM nx_b b GROUP BY b.a_id) d ON d.k = a.id ORDER BY 1", "ordered"],
+      ["SELECT a.id, row_to_json(d) FROM nx_a a LEFT JOIN (SELECT 1 AS one, note FROM nx_b WHERE id = 2) d ON d.one = a.id ORDER BY 1", "ordered"],
+      ["WITH w AS (SELECT id, note FROM nx_b) SELECT a.id, row_to_json(w), w::text FROM nx_a a LEFT JOIN w ON w.id = a.id ORDER BY 1", "ordered"],
+      // a subquery of one row joined ON TRUE is never left unmatched: its row of NULLs is a row
+      ["SELECT a.id, row_to_json(l), l::text FROM nx_a a LEFT JOIN LATERAL (SELECT max(b.amount) AS m, max(b.note) AS n FROM nx_b b WHERE b.a_id = a.id) l ON true ORDER BY 1", "ordered"],
+      ["SELECT a.id, row_to_json(l), l::text FROM nx_a a LEFT JOIN LATERAL (SELECT a.label AS x, a.id + 1 AS y) l ON true ORDER BY 1", "ordered"],
+      // an inner join's whole row, and a table's own whole row, stay as they were
+      ["SELECT a.id, row_to_json(b), b::text FROM nx_a a JOIN nx_b b ON b.a_id = a.id ORDER BY 1", "ordered"],
+      ["SELECT row_to_json(b), b::text FROM nx_b b ORDER BY b.id", "ordered"],
+    ]), []);
+    // a subquery whose every column may be NULL in a matched row (a nullable column; a key an outer join inside may
+    // NULL-extend; a set operation's): nothing tells an unmatched row from it, so it is refused by name
+    for (const sql of ["SELECT a.id, row_to_json(d) FROM nx_a a LEFT JOIN (SELECT note FROM nx_b) d ON d.note = a.label ORDER BY 1",
+      "SELECT a.id, row_to_json(d) FROM nx_a a LEFT JOIN (SELECT a2.id FROM nx_b b LEFT JOIN nx_a a2 ON a2.id = b.a_id) d ON d.id = a.id ORDER BY 1",
+      "SELECT a.id, d::text FROM nx_a a LEFT JOIN (SELECT id, note FROM nx_b UNION ALL SELECT id, label FROM nx_a) d ON d.id = a.id ORDER BY 1",
+      // one row, but joined on a condition it may fail, or filtered by a HAVING, or a join around it that may leave it unmatched
+      "SELECT a.id, row_to_json(l) FROM nx_a a LEFT JOIN LATERAL (SELECT max(b.amount) AS m FROM nx_b b WHERE b.a_id = a.id) l ON l.m > 1 ORDER BY 1",
+      "SELECT a.id, row_to_json(l) FROM nx_a a LEFT JOIN LATERAL (SELECT max(b.amount) AS m FROM nx_b b WHERE b.a_id = a.id HAVING max(b.amount) > 1) l ON true ORDER BY 1",
+      "SELECT a.id, row_to_json(l) FROM nx_a a LEFT JOIN (nx_b b CROSS JOIN LATERAL (SELECT max(a2.label) AS m FROM nx_a a2 WHERE a2.id = b.id) l) ON b.a_id = a.id ORDER BY 1"]) {
+      await assert.rejects(answer(c, sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap null-extended-row/.test(e.detail ?? "") && /json_build_object/.test(e.hint ?? ""), sql);
+    }
+  } finally { await c.end(); }
+});
+
 // THE REVIEW OF PR 1104: a grouped min / max keyed one value under two libc orders in one statement from ONE WITH query,
 // cached by the value alone (src/duck/libc-bound.ts `pickGrouped`, and the ungrouped `of`), so `min(d), min(d COLLATE
 // zh)` answered the first's for both, and a min of one order beside a max of the other read one query. Each pick is held
@@ -9622,4 +9689,144 @@ test("the review of PR 1092: a TABLESAMPLE's arguments never run in the catalog 
     }
     assert.deepEqual(await state(), before, "the catalog every session shares is as it was");
   } finally { await c.end(); await other.end(); }
+});
+
+// THE REVIEW OF PR 1100: a whole row's columns named by one reader, Postgres's (a WITH query's column list, a name held
+// twice); an unmatched row told by its table's primary key alone, never a NOT NULL the source may drop; and no refusal
+// where no unmatched row reaches a reader (a strict WHERE, a one-row item ON a condition always true)
+test("issue 1008, the review of PR 1100: a whole row's names are Postgres's, its presence is its key, and a join that leaves nothing unmatched is answered", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      // a WITH query's column list, which names its columns otherwise than its SELECT does
+      ["WITH w(note, id) AS (SELECT id, note FROM nx_b) SELECT a.id, w::text, row_to_json(w) FROM nx_a a LEFT JOIN w ON true ORDER BY a.id, w.note", "ordered"],
+      ["WITH w(k, nn) AS (SELECT id, note FROM nx_b) SELECT a.id, w::text, row_to_json(w) FROM nx_a a LEFT JOIN w ON w.k = a.id ORDER BY a.id", "ordered"],
+      // a name a subquery holds twice: each column read by a name of its own, the json's keys Postgres's
+      ["SELECT a.id, x::text, row_to_json(x) FROM nx_a a LEFT JOIN (SELECT note AS id, a_id, id FROM nx_b) x ON x.a_id = a.id ORDER BY a.id", "ordered"],
+      ["SELECT a.id, x::text, row_to_json(x) FROM nx_a a LEFT JOIN (SELECT b.id, a2.id FROM nx_b b JOIN nx_a a2 ON a2.id = b.a_id) x ON true ORDER BY a.id, 2", "ordered"],
+      ["SELECT x::text, row_to_json(x) FROM (SELECT 1 AS k, 2 AS k, 3 AS \"K\") x", "ordered"],
+      // a NOT NULL the catalog holds and the source dropped: the row is told by its key, so a matched row of a NULL n is a row
+      ["SELECT a.id, c::text, row_to_json(c), c FROM nx_a a LEFT JOIN nx_c c ON c.id = a.id ORDER BY a.id", "ordered"],
+      // a one-row subquery ON a condition always true is never unmatched
+      ["SELECT a.id, x::text FROM nx_a a LEFT JOIN (SELECT max(b.note) AS mv FROM nx_b b WHERE b.id > 5) x ON 1 = 1 ORDER BY a.id", "ordered"],
+      ["SELECT a.id, x::text FROM nx_a a LEFT JOIN (SELECT max(b.note) AS mv FROM nx_b b WHERE b.id > 5) x ON TRUE AND TRUE ORDER BY a.id", "ordered"],
+      ["SELECT a.id, x::text FROM nx_a a LEFT JOIN LATERAL (SELECT max(b.note) AS mv FROM nx_b b WHERE b.a_id = a.id) x ON 1 = 1 ORDER BY a.id", "ordered"],
+      ["SELECT a.id, x::text FROM nx_a a LEFT JOIN (SELECT max(b.note) AS mv FROM nx_b b WHERE b.id > 5 GROUP BY ()) x ON true ORDER BY a.id", "ordered"],
+      ["WITH m AS (SELECT max(b.note) AS mv FROM nx_b b WHERE b.id > 5) SELECT a.id, m::text FROM nx_a a LEFT JOIN m ON true ORDER BY a.id", "ordered"],
+      // a WHERE strict in the item's column leaves no unmatched row
+      ["SELECT a.id, x::text FROM nx_a a LEFT JOIN (SELECT a_id, note FROM nx_b) x ON x.a_id = a.id WHERE x.note = 'b1' ORDER BY a.id", "ordered"],
+      ["SELECT a.id, x::text FROM nx_a a LEFT JOIN (SELECT a_id, note FROM nx_b) x ON x.a_id = a.id WHERE x.a_id > 0 ORDER BY a.id", "ordered"],
+      ["WITH w AS (SELECT a_id, note FROM nx_b) SELECT a.id, w::text FROM nx_a a LEFT JOIN w ON w.a_id = a.id WHERE w.a_id IS NOT NULL AND a.id > 0 ORDER BY a.id", "ordered"],
+      // a one-row item ON a condition never true: unmatched on every row, told by that condition (the third review)
+      ["SELECT a.id, x::text FROM nx_a a LEFT JOIN (SELECT max(b.note) AS mv FROM nx_b b) x ON 1 = 2 ORDER BY a.id", "ordered"],
+    ]), []);
+    // a WHERE that is not strict in it and a NOT NULL column that is no key still leave unmatched rows nothing tells:
+    // refused
+    for (const sql of ["SELECT a.id, x::text FROM nx_a a LEFT JOIN (SELECT n, v FROM nx_c) x ON x.v = a.label ORDER BY a.id",
+"SELECT a.id, x::text FROM nx_a a LEFT JOIN (SELECT a_id, note FROM nx_b) x ON x.a_id = a.id WHERE x.note IS NULL OR a.id > 0 ORDER BY a.id"]) {
+      await assert.rejects(answer(c, sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap null-extended-row/.test(e.detail ?? ""), sql);
+    }
+  } finally { await c.end(); }
+});
+
+// THE SECOND REVIEW OF PR 1100. Whether an unmatched row reaches a reader was a list of conditions the code knew, so a
+// WHERE or an inner join that leaves none, which main answered right, was refused: it is the planner's reduction of outer
+// joins now (src/duck/pgtree.ts `extendedReads`). And a subquery's renamed columns were keyed by its name across the
+// statement, so another query's item of that name took its alias list: they are its own query's now (`QueryOutputs.twins`)
+test("issue 1008, the second review of PR 1100: a join the planner finds inner, or always matched, reads its row; a renamed item's columns are its query's alone", async () => {
+  const c = await client();
+  try {
+    const left = "FROM nx_a a LEFT JOIN (SELECT a_id, note FROM nx_b) d ON d.a_id = a.id";
+    // a one-row item: an aggregate over no row
+    const one = "FROM nx_a a LEFT JOIN (SELECT max(b.note) AS mv FROM nx_b b WHERE b.id < 0) x";
+    assert.deepEqual(await unlike(c, [
+      // never true where d is unmatched: a strict function, operator or = ANY of its column, an OR of such, a cast
+      [`SELECT a.id, d::text ${left} WHERE d.note = 'b1' OR d.note = 'far' ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, d::text ${left} WHERE lower(d.note) = 'b1' ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, d::text ${left} WHERE d.note = ANY (ARRAY['b1', 'x']) ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, d::text ${left} WHERE d.a_id + 0 > 0 ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, d::text ${left} WHERE d.note::text = 'b1' ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, d::text ${left} WHERE d.note <> ALL (ARRAY['q']) ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, row_to_json(d) ${left} WHERE (d.note = 'b1') IS TRUE ORDER BY 1`, "ordered"],
+      // an inner join above the outer one, ON its column
+      [`SELECT a.id, d::text ${left} JOIN nx_a o ON o.id = d.a_id ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, d::text ${left}, nx_a o WHERE o.id = d.a_id ORDER BY 1, 2`, "ordered"],
+      // a one-row item ON a condition always true however it is written
+      ...["NOT false", "1.0 = 1.0", "2 > 1", "true IS TRUE", "'t'", "1 = 1.0", "true OR a.id = 1"]
+        .map((on): [string, "ordered"] => [`SELECT a.id, x::text ${one} ON ${on} ORDER BY 1`, "ordered"]),
+      // a FROM item of a renamed item's name in another query: a UNION ALL arm, a WITH query's, an EXISTS's, a case twin's
+      ["SELECT x::text FROM (SELECT b.id, a.id FROM nx_b b JOIN nx_a a ON a.id = b.a_id) x UNION ALL SELECT x.note FROM (SELECT note, a_id FROM nx_b) x ORDER BY 1", "ordered"],
+      ["WITH x AS (SELECT b.a_id, a.id AS a_id FROM nx_b b JOIN nx_a a ON a.id = b.a_id) SELECT x::text FROM x UNION ALL SELECT s.note FROM (SELECT x.note FROM (SELECT note, id FROM nx_b) x) s ORDER BY 1", "ordered"],
+      ["SELECT x::text FROM (SELECT b.id, b.id FROM nx_b b) x WHERE EXISTS (SELECT 1 FROM (SELECT label FROM nx_a) x WHERE x.label = 'one') ORDER BY 1", "ordered"],
+      ["SELECT x.\"T\", x.t FROM (SELECT b.note AS \"T\", a.label AS t FROM nx_b b JOIN nx_a a ON a.id = b.a_id) x UNION ALL SELECT x.t, x.u FROM (SELECT note AS t, note AS u FROM nx_b) x ORDER BY 1, 2", "ordered"],
+    ]), []);
+    // an OR whose arm is not strict in d, and a condition that may be false: unmatched rows nothing tells, refused
+    for (const sql of [`SELECT a.id, d::text ${left} WHERE d.note = 'b1' OR a.id = 3 ORDER BY 1, 2`]) {
+      await assert.rejects(answer(c, sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap null-extended-row/.test(e.detail ?? ""), sql);
+    }
+  } finally { await c.end(); }
+});
+
+// THE THIRD REVIEW OF PR 1100. "Never true where the row is unmatched" was decided by a condition's shape: a nested
+// IS NOT NULL or IS TRUE counted as strict and a whole row read in the WHERE as a proof, so an unmatched row read as a
+// row of NULLs; EXISTS, IN, LATERAL and a scalar subquery counted as nothing, and a one-row item's ON had to be a
+// constant the catalog evaluated, so what main answered was refused. A condition is evaluated in three-valued logic now,
+// the unmatched side's columns NULL (src/duck/pgtree.ts `outerJoinsOf`), and a one-row item is told by its ON, evaluated
+// again. One test a finding
+const NX_TABLE = "FROM nx_a a LEFT JOIN nx_b b ON b.a_id = a.id";
+const NX_LEFT = "FROM nx_a a LEFT JOIN (SELECT a_id, note FROM nx_b) d ON d.a_id = a.id";
+const NX_ONE = "FROM nx_a a LEFT JOIN (SELECT max(b.note) AS mv FROM nx_b b WHERE b.id < 0) x";
+const refusedNullExtended = async (c: pg.Client, statements: readonly string[]): Promise<void> => {
+  for (const sql of statements) await assert.rejects(answer(c, sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap null-extended-row/.test(e.detail ?? ""), sql);
+};
+
+test("issue 1008, the third review of PR 1100: a null or truth test inside NOT, a comparison or another test is true for an unmatched row, which stays NULL", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      [`SELECT a.id, b::text ${NX_TABLE} WHERE (b.note IS NOT NULL) = false ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, row_to_json(b) ${NX_TABLE} WHERE NOT (b.id IS NOT NULL) ORDER BY 1`, "ordered"],
+      [`SELECT a.id, row_to_json(b) ${NX_TABLE} WHERE NOT (b.id = 1 IS TRUE) ORDER BY 1`, "ordered"],
+      [`SELECT a.id, row_to_json(b) ${NX_TABLE} WHERE (b.id IS NOT NULL) IS FALSE ORDER BY 1`, "ordered"],
+      [`SELECT a.id, json_agg(b) ${NX_TABLE} WHERE NOT (b.a_id IS NOT NULL) GROUP BY a.id ORDER BY 1`, "ordered"],
+      // (a test that is never true for an unmatched row still proves the join inner)
+      [`SELECT a.id, d::text ${NX_LEFT} WHERE (d.note IS NOT NULL) IS NOT FALSE AND a.id > 0 ORDER BY 1, 2`, "ordered"],
+    ]), []);
+    // a subquery's unmatched row such a test lets through: nothing tells it, refused
+    await refusedNullExtended(c, [`SELECT a.id, d::text ${NX_LEFT} WHERE NOT (d.note IS NOT NULL) ORDER BY 1, 2`]);
+  } finally { await c.end(); }
+});
+
+test("issue 1008, the third review of PR 1100: a whole row read in the WHERE is the row Postgres reads, NULL where nothing matched", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      [`SELECT a.id, b::text ${NX_TABLE} WHERE length(b::text) > 0 ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, b::text ${NX_TABLE} WHERE row_to_json(b) IS NOT NULL ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, row_to_json(b) ${NX_TABLE} WHERE to_jsonb(b) ? 'id' ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, b::text ${NX_TABLE} WHERE b::text <> '' ORDER BY 1, 2`, "ordered"],
+    ]), []);
+    await refusedNullExtended(c, [`SELECT a.id, d::text ${NX_LEFT} WHERE length(d::text) > 0 ORDER BY 1, 2`]);
+  } finally { await c.end(); }
+});
+
+test("issue 1008, the third review of PR 1100: EXISTS, IN, LATERAL and a scalar subquery prove a join inner; a one-row item is told by its ON", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      [`SELECT a.id, d::text ${NX_LEFT} WHERE EXISTS (SELECT 1 FROM nx_a o WHERE o.id = d.a_id) ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, d::text ${NX_LEFT} WHERE d.a_id IN (SELECT id FROM nx_a) ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, d::text ${NX_LEFT}, LATERAL (SELECT d.note AS lt) l WHERE l.lt = 'b1' ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, d::text ${NX_LEFT} JOIN LATERAL (SELECT d.note AS lt) l ON l.lt = 'b1' ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, d::text ${NX_LEFT} WHERE (SELECT d.note) = 'b1' ORDER BY 1, 2`, "ordered"],
+      ...["now() IS NOT NULL", "(SELECT true)", "current_setting('DateStyle') LIKE 'ISO%'", "true AND a.id = 1", "1 = 2", "NULL::boolean", "false OR a.id = 1"]
+        .map((on): [string, "ordered"] => [`SELECT a.id, x::text ${NX_ONE} ON ${on} ORDER BY 1`, "ordered"]),
+      // a LIMIT that keeps its one row
+      ["SELECT a.id, x::text FROM nx_a a LEFT JOIN (SELECT max(b.note) AS mv FROM nx_b b WHERE b.id < 0 LIMIT 1) x ON true ORDER BY 1", "ordered"],
+    ]), []);
+    // Postgres's own error where it raises one, as main
+    await assert.rejects(answer(c, `SELECT a.id, x::text ${NX_ONE} ON 1 / 0 = 1 ORDER BY 1`), (e: pg.DatabaseError) => e.code === "22012");
+    // an ON that reads the item's own column: its row of NULLs where it matched is not told from no match, refused
+    await refusedNullExtended(c, [`SELECT a.id, x::text FROM nx_a a LEFT JOIN (SELECT max(b.note) AS mv FROM nx_b b) x ON x.mv IS NULL ORDER BY 1`]);
+  } finally { await c.end(); }
 });

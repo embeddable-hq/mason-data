@@ -26,6 +26,7 @@ export const GAP_CASES: Array<{ gap: GapId; sql: string }> = [
   { gap: "similar-to-forms", sql: "SELECT id FROM typed WHERE t SIMILAR TO vc ORDER BY id" },
   { gap: "array-remove-type", sql: "SELECT id, array_remove(ARRAY[iv], iv) FROM typed ORDER BY id" },
   { gap: "json-agg-distinct", sql: "SELECT json_agg(DISTINCT i4) FROM typed WHERE id < 100" },
+  { gap: "null-extended-row", sql: "SELECT a.id, row_to_json(d) FROM top_a a LEFT JOIN (SELECT name FROM top_a) d ON d.name = a.note ORDER BY 1" },
   { gap: "json-rows-in-select", sql: "SELECT jsonb_array_elements('[1, 2]'::jsonb) FROM public.one" },
   { gap: "regexp-flags", sql: "SELECT id, regexp_replace(t, 'a', 'x', 1, 1) FROM typed ORDER BY id" },
   { gap: "regexp-functions", sql: "SELECT id, regexp_count(t, 'a') FROM typed ORDER BY id" },

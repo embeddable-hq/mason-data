@@ -9,7 +9,7 @@ import { deparseSync, QuoteUtils } from "pgsql-deparser";
 import type { Node } from "libpg-query";
 import { HELD_ROW_INPUT, HELD_TYPE_INPUT } from "../api/postgres/schema.ts";
 import { heldName, heldType, isHeldArray, PARAM_ARRAYS } from "./held-types.ts";
-import { collationOids, functionsCalled, outputExpressions, textOrdering, type TreeValue } from "./pgtree.ts";
+import { collationOids, extendedReads, functionsCalled, nulledRowTables, outerJoinQuestions, outputExpressions, textOrdering, type TreeValue, type Unmatched } from "./pgtree.ts";
 import { gapRefusal, StatementError, type DuckPlan } from "./statement.ts";
 import { parseSql } from "../api/postgres/parser.ts";
 import { analyze, catalogRows, readParameters } from "./analyze.ts";
@@ -167,6 +167,30 @@ async function distinctKeys(catalog: (bytes: Uint8Array) => Promise<Uint8Array>,
   const relids = distinctCountTables(tree);
   if (relids.length === 0) return new Set();
   return distinctKeyCounts(tree, uniqueColumnsOf(await catalogRows(catalog, uniqueColumnsSql(relids))));
+}
+
+/** THE PRIMARY KEYS OF THE TABLES A STATEMENT READS, read only where it holds a whole row an outer join may NULL-extend
+ *  (`nulledRowTables`): a key column NULL is the row NULL-extended (src/duck/rewrite.ts `rowPresence`, issue 1008). The
+ *  catalog's primary key is the key Mason syncs the table by, which the sync holds to the source before each read
+ *  (src/cdc/key-held.ts), and no row of the copy has a NULL in it. A NOT NULL column that is no key may lose its NOT NULL
+ *  on the source after the catalog read it, so it is never asked */
+async function rowKeys(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, tree: PgAnalysis["tree"]): Promise<PrimaryKeys> {
+  const relids = nulledRowTables(tree);
+  return relids.length === 0 ? new Map() : primaryKeysOf(await catalogRows(catalog, uniqueColumnsSql(relids)));
+}
+
+/**
+ * WHICH WHOLE ROWS AN OUTER JOIN MAY STILL LEAVE UNMATCHED WHERE THEY ARE READ, and how each is told (src/duck/pgtree.ts
+ * `extendedReads`, the planner's reduction of outer joins), by offset; null where the statement holds no whole row an
+ * outer join may NULL-extend, so it asks the catalog nothing. pg_proc says which functions are strict and which volatile
+ */
+async function extendedRows(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, tree: PgAnalysis["tree"]): Promise<ReadonlyMap<number, Unmatched> | null> {
+  const asked = outerJoinQuestions(tree);
+  if (asked === null) return null;
+  const procs = asked.functions.length === 0 ? [] : await catalogRows(catalog, `SELECT oid::text, proisstrict::text, provolatile::text FROM pg_catalog.pg_proc WHERE oid IN (${asked.functions.map((f) => String(Math.trunc(f))).join(", ")})`);
+  const strict = new Set(procs.filter((r) => r[1] === "true").map((r) => Number(r[0])));
+  const volatile = new Set(procs.filter((r) => r[2] === "v").map((r) => Number(r[0])));
+  return extendedReads(tree, { strict, volatile });
 }
 
 /** the primary keys that may prove a grouped LIMIT grouped by a whole key (src/duck/late.ts `keyFirst`), read only for a
@@ -650,8 +674,8 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
     for (const [oid, name] of await catalogRows(catalog, "SELECT t.oid::text, 'rowtype:' || n.nspname || '.' || t.typname FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE t.oid >= 16384 AND t.typtype = 'c'")) {
       catalogTypes.set(Number(oid), name!);
       if (!used.has(Number(oid))) continue;
-      const columns = await catalogRows(catalog, `SELECT a.attname, a.atttypid::text, a.atttypmod::text, a.attcollation::text FROM pg_attribute a JOIN pg_type t ON t.typrelid = a.attrelid WHERE t.oid = ${Number(oid)} AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`);
-      rowTypes.set(Number(oid), columns.map(([n, type, typmod, collation]) => ({ name: n!, type: Number(type), typmod: Number(typmod), collation: Number(collation ?? 0) })));
+      const columns = await catalogRows(catalog, `SELECT a.attname, a.atttypid::text, a.atttypmod::text, a.attcollation::text, a.attnum::text FROM pg_attribute a JOIN pg_type t ON t.typrelid = a.attrelid WHERE t.oid = ${Number(oid)} AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`);
+      rowTypes.set(Number(oid), columns.map(([n, type, typmod, collation, attno]) => ({ name: n!, type: Number(type), typmod: Number(typmod), collation: Number(collation ?? 0), attno: Number(attno) })));
     }
     resolved = await nameUserKeys((sql) => catalogRows(catalog, sql), resolved);
   }
@@ -689,6 +713,8 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   // generated table's run, whose stored columns hold none
   const buckets = outputs ? null : await bucketLookup(catalog, analysis.types, userTypes, copies());
   const keyCounts = await distinctKeys(catalog, analysis.tree);
+  const keysOfRows = await rowKeys(catalog, analysis.tree);
+  const extended = await extendedRows(catalog, analysis.tree);
   // WHAT EACH COLLATION OF THE ANALYSIS MEANS (src/duck/collation.ts), resolved before the rewrite reads any: a libc
   // order not read yet is read here, before the plan is made; a collation the source lacks or Mason cannot follow refused
   let collations: StatementCollations;
@@ -698,7 +724,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   // its columns read by a `*` included, whichever module writes it (the rewrite, the late select list, the libc bounds)
   const own = ownPrefix([stmt, analysis.tree], walls?.written ?? []);
   const analysed = performance.now();
-  const rewritten = (l = lookup, sc = scales, bu = buckets, nb = numbered): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, typeNames, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts, boundPaths, scales: sc, buckets: bu, numbered: nb, own, rows: copiedRows(copies(), searchSchemas(searchPath)) });
+  const rewritten = (l = lookup, sc = scales, bu = buckets, nb = numbered): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, typeNames, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts, boundPaths, scales: sc, buckets: bu, numbered: nb, own, rows: copiedRows(copies(), searchSchemas(searchPath)), rowKeys: keysOfRows, extended });
   try {
     ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams, wholeNumericArrays, numbers: numberedReads } = rewritten());
     // the oracle's (`eager`): every read stored before the plan is made, and the plan made again over them

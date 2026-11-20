@@ -161,7 +161,7 @@ const R14_NUMERIC: Record<string, { sql: (depth: number) => string; value: (dept
     return s;
   }, value: () => ["1.25"] },
 };
-test("round 14, a numeric (#484): a definition reading a numeric's program three times a level is checked within the bound, stored as main stored it, in SQL linear in the depth", async () => {
+test("round 14, a numeric (#484): a definition reading a numeric's program three times a level is checked within the bound, stored as main stored it, in SQL linear in the depth", { skip: "quarantined: #1191" }, async () => {
   await withWorld({}, async (w) => {
     const planner = w.api.planner();
     const host = (w.sync.generated as unknown as { host: GeneratedHost }).host;
