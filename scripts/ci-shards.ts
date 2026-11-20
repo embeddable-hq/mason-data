@@ -61,7 +61,7 @@ const REST_WEIGHTS: Readonly<Record<string, number>> = {
   "tests/integration/duck-stream.itest.ts": 223,
   "tests/integration/duck-pool.itest.ts": 219,
   "tests/integration/cli-upgrade.itest.ts": 194,
-  "tests/integration/cli-entry-hold.itest.ts": 240,
+  "tests/integration/cli-entry-hold.itest.ts": 320,
   "tests/integration/duck-secret.itest.ts": 160,
   "tests/integration/duck-libc-read.itest.ts": 155,
   "tests/integration/cli-case-names.itest.ts": 84,

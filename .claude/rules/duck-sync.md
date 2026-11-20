@@ -90,8 +90,10 @@ paths:
   table whose ENTRY the run's re-read cannot take is held the same way (`setTables`' `held`, issue 1074), as the run
   took it before, its record left as it was: one entry's problem never stops the others being kept current. Such a
   table is still LOOKED AT on the database as its `sync:` would read it (`lookAtHeld`): its catalog row read again
-  alone, and the sources file read against it when the row changed in what an entry is checked by (src/cli/dev.ts
-  `onHeldLook`; never a shape compared with the one it was synced with, which a rename put back equals). A polled one
+  alone, and the sources file read against it when the row differs, in what an entry is checked by, from the row the
+  file was last read against (src/cli/dev.ts `onHeldLook`, `heldReadAgainst`; never the catalog's row before the look,
+  which a whole read of the catalog by `mason status` or the page refreshes without reading the file: the third review
+  of PR 1091 found such a look saw no change, and the table stayed held for the run). A polled one
   at its interval (`heldLooks`), a replicated one every `HELD_LOOK_REPLICATED_MS` and at a relation message
   (`relationSeen`), one under `sync: off` at `mason sync` of it (`/api/sync` looks before it refuses). So a hold the
   database fixes (a rename put back, a `key:`'s unique index restored) is let go with no restart (the reviews of PR

@@ -760,9 +760,12 @@ table's columns changing). The run has no watch on the file: the README says a h
 **A held table is still looked at on the database** (the reviews of PR 1091). A held table is not polled or caught up,
 so at first nothing looked at it again. A rename put back on the database, or a unique index a `key:` needs restored,
 left it held for good, serving stale rows. Main had kept polling the table and recovered. Now the run reads a held
-table's catalog row again on the schedule its `sync:` would read it, and reads the sources file against it when the row
-changed in what an entry is checked by. Its size and statistics are left out of that comparison, so a look that finds
-nothing new costs one catalog row and no more. A polled table is looked at at its poll interval, and a replicated one
+table's catalog row again on the schedule its `sync:` would read it. It reads the sources file against that row when the
+row differs from the one the file was last read against, in what an entry is checked by. Its size and statistics are
+left out of that comparison, so a look that finds nothing new costs one catalog row and no more. The comparison is never
+with the catalog's row just before the look. A whole read of the catalog, which `mason status` and the web page ask for
+once the last one is a minute old, refreshes that row without reading the file. A look after it saw no change, and the
+table stayed held for the rest of the run (the third review of PR 1091). A polled table is looked at at its poll interval, and a replicated one
 every minute and at a stream's relation message. A table under `sync: off` is looked at when `mason sync` asks for it,
 before the sync is refused, since that is the only time such a table is read. Once its entry passes, the table is let
 go and caught up by one poll. A first version compared only the column shape of a polled or replicated table, so it

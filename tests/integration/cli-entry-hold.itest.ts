@@ -189,7 +189,7 @@ test("a hold the database fixes is let go with no restart, polled and streamed, 
   fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace(/^sync: off {3}#.*$/m, "sync: poll 1s"));
   ok(mason("add", "t3", "--columns", "id,amount_total", "--json"), "mason add t3 --columns id,amount_total");
   ok(mason("add", "s3", "--columns", "id,amount", "--sync", "replication", "--json"), "mason add s3 --sync replication");
-  ok(mason("add", "k", "--key", "id", "--json"), "mason add k --key id");
+  ok(mason("add", "k", "--key", "id", "--sync", "poll 20s", "--json"), "mason add k --key id --sync 'poll 20s'");
   ok(mason("add", "o3", "--columns", "id,amount_total", "--sync", "off", "--json"), "mason add o3 --sync off");
   ok(mason("start", "--json"), "mason start");
   ok(mason("wait", "--timeout", "120", "--json"), "mason wait");
@@ -218,19 +218,24 @@ test("a hold the database fixes is let go with no restart, polled and streamed, 
   await until("t3 (polled) and s3 (streamed) to be let go and serve the database's rows", () => serves("t3", "amount_total") && serves("s3", "amount"), 180_000);
   await until("both lines to say synced", () => [line("public.t3"), line("public.s3")].every((l) => l !== undefined && l.error === null && l.sync?.state === "synced"));
 
-  // A KEY: WHOSE UNIQUE INDEX IS DROPPED holds its table; restored, the table is let go by itself (the second review of
-  // PR 1091: main recovered in about 9 s, and the head held it until another read of the file)
-  // (a column added beside it: the run reads k's catalog again, and finds its key no longer held there)
+  // A KEY: WHOSE UNIQUE INDEX IS DROPPED holds its table (polled every 20 s); and A SYNC: OFF TABLE held by a rename
+  // (the second review of PR 1091: main recovered from each, and the head held them until another read of the file).
+  // (a column added beside k's drop: the run reads k's catalog again, and finds its key no longer held there)
   psql(dbUrl, "DROP INDEX k_id; ALTER TABLE k ADD COLUMN w int DEFAULT 1");
   await until("k to be held for its key", () => /tables\.k\.key: no unique index/.test(line("public.k")?.error ?? ""));
-  psql(dbUrl, "CREATE UNIQUE INDEX k_id ON k (id); UPDATE k SET v = 999 WHERE id = 2");
-  await until("k to be let go and serve the database's rows", () => serves("k", "v", "w"), 90_000);
-
-  // A SYNC: OFF TABLE held by a rename, the rename put back: mason sync of it looks at it again, lets it go and syncs it
   psql(dbUrl, "ALTER TABLE o3 RENAME COLUMN amount_total TO amount_total2; UPDATE o3 SET amount_total2 = 7777 WHERE id = 1");
   assert.equal(mason("sync", "o3", "--json").status, 1, "mason sync o3 while its column is renamed");
   await until("o3 to be held", () => /tables\.o3\.columns: public\.o3 has no column amount_total/.test(line("public.o3")?.error ?? ""));
-  psql(dbUrl, "ALTER TABLE o3 RENAME COLUMN amount_total2 TO amount_total; UPDATE o3 SET amount_total = 4444 WHERE id = 2");
+  // BOTH FIXED ON THE DATABASE, THEN A WHOLE READ OF THE CATALOG before either is looked at (the third review of PR
+  // 1091: mason status reads the catalog whole once the last read is CATALOG_FRESH_MS old, and the look then found its
+  // row as that read left it, no change, so the table stayed held for the run). Quiet past that age, then one status
+  await new Promise((r) => setTimeout(r, 65_000));
+  psql(dbUrl, "CREATE UNIQUE INDEX k_id ON k (id); UPDATE k SET v = 999 WHERE id = 2; " +
+    "ALTER TABLE o3 RENAME COLUMN amount_total2 TO amount_total; UPDATE o3 SET amount_total = 4444 WHERE id = 2");
+  ok(mason("status", "--json"), "mason status, a whole read of the catalog");
+  // the sync: off one is looked at by mason sync of it: let go, and synced
   ok(mason("sync", "o3", "--json"), "mason sync o3 once the rename is put back");
   assert.ok(serves("o3", "amount_total"), "o3 serves the database's rows");
+  // the polled one at its next look: let go, and synced
+  await until("k to be let go and serve the database's rows", () => serves("k", "v", "w"), 90_000);
 });

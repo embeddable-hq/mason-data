@@ -545,6 +545,11 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const syncMode = syncModeOf(process.env);
   // THE SYNC'S EVENTS (src/duck/events.ts): its failures and notable events, kept as the request log is, before the sync
   // that records them starts
+  // EACH HELD TABLE'S CATALOG ROW AS THE SOURCES FILE WAS LAST READ AGAINST IT (`entryFacts`), set by every read of the
+  // file (`added`): what a look of it compares the row now with. Never the catalog's row before the look, which a whole
+  // read of the catalog (mason status, the web page) refreshes without reading the file (the third review of PR 1091:
+  // that look found no change, and the table stayed held for the run)
+  const heldReadAgainst = new Map<string, string>();
   let events: SyncEvents;
   try { events = await SyncEvents.open(store, logLine, { days: keptDays }); }
   catch (e) { fail("Opening the synced data"); say(`  the sync's events (${EVENTS_TABLE}) could not be opened: ${(e as Error).message}`); await store.close(); return 1; }
@@ -564,10 +569,10 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
       // read against it only when the row changed in what an entry is checked by (its size and statistics left out), so
       // a hold the database fixed (a rename put back, a unique index restored) is let go with no restart
       onHeldLook: async (held) => {
-        const heldRowsBefore = held.map((s) => entryFacts(catalog.facts().tables.find((x) => x.source === s)));
         const heldRead = await catalog.refreshTables(held);
         if ("failed" in heldRead) throw new Error(heldRead.failed);
-        if (held.every((s, i) => entryFacts(catalog.facts().tables.find((x) => x.source === s)) === heldRowsBefore[i])) return false;
+        // against the row the file was last read against (`heldReadAgainst`), never the catalog's before this read
+        if (held.every((s) => entryFacts(catalog.facts().tables.find((x) => x.source === s)) === heldReadAgainst.get(s))) return false;
         await added();
         return true;
       },
@@ -662,6 +667,8 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     // the run cannot take holds its table alone (issue 1074): never confirmed, held as the run took it before
     const held = new Map(untaken.filter((x) => x.held).map((x) => [x.table, x.text]));
     const notTaken = new Set(untaken.map((x) => x.table));
+    heldReadAgainst.clear();
+    for (const s of held.keys()) heldReadAgainst.set(s, entryFacts(now.tables.find((x) => x.source === s)));
     return sync.setTables(sources.tables, { confirmed: r.problem === null ? (edit.confirmed ?? []).filter((c) => !notTaken.has(c.table)) : [], readOnly, held });
   };
 
