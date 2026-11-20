@@ -212,3 +212,83 @@ test("cancel() sends Postgres's CancelRequest with the key the server gave at st
     assert.deepEqual([cancels[0]!.readInt32BE(0), cancels[0]!.readInt32BE(4), cancels[0]!.readInt32BE(8), cancels[0]!.readInt32BE(12)], [16, 80877102, 4242, -7]);
   } finally { c.close(); server.close(); }
 });
+
+// ------------------------------------------------------------------ the server's name in the TLS handshake (SNI)
+
+/**
+ * A server that answers the SSLRequest with S and takes the TLS handshake with `cert`. It records the name the client
+ * sent as SNI (null: none), then closes. Neon's proxy, and others, route a connection by that name (issue 1193).
+ */
+async function sniServer(cert: { cert: string; key: string }): Promise<{ port: number; heard: () => Promise<string | null>; close: () => void }> {
+  const net = await import("node:net");
+  const tls = await import("node:tls");
+  let said!: (name: string | null) => void;
+  const heard = new Promise<string | null>((r) => { said = r; });
+  const socks = new Set<import("node:net").Socket>();
+  let name: string | null = null;
+  const server = net.createServer((sock) => {
+    socks.add(sock);
+    sock.on("error", () => { /* the client may abort a handshake it refuses: the test reads what was heard */ });
+    sock.on("close", () => said(name));
+    sock.once("data", () => {
+      sock.write("S");
+      const secure = new tls.TLSSocket(sock, {
+        isServer: true, cert: cert.cert, key: cert.key,
+        SNICallback: (n, cb) => { name = n; cb(null, tls.createSecureContext(cert)); },
+      });
+      secure.on("error", () => { /* as above */ });
+      secure.on("close", () => said(name));
+      secure.on("secure", () => secure.destroy());
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, r));   // every address: localhost may be ::1 or 127.0.0.1
+  return {
+    port: (server.address() as { port: number }).port,
+    // once the client's connect has ended: a client that failed before its handshake (main on Node 26, an IP as
+    // servername) leaves its socket open, and ending ours says what was heard (nothing) instead of waiting for ever
+    heard: () => { for (const s of socks) s.destroy(); return heard; },
+    close: () => server.close(),
+  };
+}
+
+type TlsMode = "prefer" | "require" | "verify-ca" | "verify-full";
+
+/** connects as Mason does, under `mode`: the SNI the server heard, and how the connect ended */
+async function connectHeard(host: string, mode: TlsMode, cert: { cert: string; key: string }): Promise<{ sni: string | null; error: string }> {
+  const s = await sniServer(cert);
+  try {
+    const error = await PgConnection.connect({ host, port: s.port, user: "u", password: "p", database: "d", sslmode: mode, connectTimeoutMs: 5_000 })
+      .then((c) => { c.close(); return "connected"; }, (e: Error) => e.message);
+    return { sni: await s.heard(), error };
+  } finally { s.close(); }
+}
+
+test("the server's name goes out as SNI under every sslmode that uses TLS, and an IP address sends none, as libpq does", async () => {
+  const { selfSignedCertificate } = await import("../src/cli/self-signed-cert.ts");
+  const cert = selfSignedCertificate("localhost");
+  for (const mode of ["prefer", "require", "verify-ca", "verify-full"] as const) {
+    assert.equal((await connectHeard("localhost", mode, cert)).sni, "localhost", `sslmode=${mode}, a host name`);
+    assert.equal((await connectHeard("127.0.0.1", mode, cert)).sni, null, `sslmode=${mode}, an IPv4 address`);
+  }
+});
+
+test("sending the name changes no verification: prefer and require check nothing, verify-full checks the chain and the name", async () => {
+  const tls = await import("node:tls");
+  const { selfSignedCertificate } = await import("../src/cli/self-signed-cert.ts");
+  const mine = selfSignedCertificate("localhost"), other = selfSignedCertificate("db.example.com");
+  const refusedCert = /certificate|altnames|self[- ]signed|CN/i;
+  // not trusted: prefer and require take any certificate, of any name; verify-ca and verify-full refuse it
+  for (const cert of [mine, other]) {
+    for (const mode of ["prefer", "require"] as const) assert.doesNotMatch((await connectHeard("localhost", mode, cert)).error, refusedCert, mode);
+    for (const mode of ["verify-ca", "verify-full"] as const) assert.match((await connectHeard("localhost", mode, cert)).error, /self[- ]signed/i, mode);
+  }
+  // trusted: verify-ca takes either name; verify-full takes only the certificate that names the host
+  const roots = tls.getCACertificates("default");
+  tls.setDefaultCACertificates([...roots, mine.cert, other.cert]);
+  try {
+    for (const cert of [mine, other]) assert.doesNotMatch((await connectHeard("localhost", "verify-ca", cert)).error, refusedCert, "verify-ca");
+    assert.doesNotMatch((await connectHeard("localhost", "verify-full", mine)).error, refusedCert, "verify-full, its name");
+    assert.match((await connectHeard("localhost", "verify-full", other)).error, /Host: localhost\. is not cert's CN: db\.example\.com/, "verify-full, another name");
+    assert.match((await connectHeard("127.0.0.1", "verify-full", mine)).error, /IP: 127\.0\.0\.1 is not in the cert's list/, "verify-full, an IP the certificate does not name");
+  } finally { tls.setDefaultCACertificates(roots); }
+});
