@@ -9,7 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { ANSWERS, DEVICE, ME, MAIN, SECRETS, credentials, envFor, fakeService, granted, home, mason, mode, newToken, noTokenLeaked, pending, saved, writeSaved, type Reply, type Req, type Script } from "./hosted-fake.ts";
 
 test("mason login: the page and the code on stderr at once, before it is approved; then signed in, its organisations a line each, saved 0600 in a 0700 folder", async () => {
@@ -321,6 +321,18 @@ test("mason login again replaces this machine's login to that service and revoke
     assert.equal(saved(h).logins[fake.url]!.token, token);
     assert.deepEqual(fake.requests.filter((r) => r.path === "/oauth/revoke").map((r) => r.form.token), [old]);
   } finally { await fake.close(); }
+});
+
+test("mason login --help and mason logout --help name Mason Cloud, its address, and MASON_CLOUD_URL for another service", () => {
+  for (const cmd of ["login", "logout"]) {
+    const r = spawnSync(process.execPath, [MAIN, cmd, "--help"], { encoding: "utf8", env: { ...process.env, NO_COLOR: "1" } });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /Mason Cloud \(https:\/\/app\.masondata\.ai\), or the service MASON_CLOUD_URL names/, `mason ${cmd} --help`);
+    assert.doesNotMatch(r.stdout, /a hosted Mason service/, `mason ${cmd} --help`);
+  }
+  const top = spawnSync(process.execPath, [MAIN, "--help"], { encoding: "utf8", env: { ...process.env, NO_COLOR: "1" } });
+  assert.match(top.stdout, /sign this machine in to Mason Cloud/);
+  assert.match(top.stdout, /sign this machine out of Mason Cloud/);
 });
 
 test("no token reaches any stdout or stderr of mason login or mason logout, in any run of this file, success or failure", () => {

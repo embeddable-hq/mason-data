@@ -910,7 +910,7 @@ are refused), and `from` with neither ranges nor `--any`, or with both. Nothing 
   given, each in its one form (the network in lower case, IPv6 shortened, no prefix for one address: `192.0.2.10`).
 - A user's ADDRESS RANGES are where it may connect from: a connection from any other address is refused before its
   password is checked. `from`'s body replaces them: `{ "from": [ranges…] }`, each in its one form, or `{ "from": null }`
-  for `--any` (any address: its ranges removed). In every answer a user's `from` is `null` (any address) or 1 to 100
+  for `--any` (any address: its ranges removed). In every answer a user's `from` is `null` (any address) or 1 to 1,000
   ranges, each in its one form; a list's row with no `from` key is read as `null`.
 - **A limit sent must be confirmed.** When `add` sends `from`, or `from` sends a list or `null`, the `200` answer must
   carry exactly what was sent, in its one form and order (`add`'s `from`, `from`'s `changed.from`). An answer without
@@ -944,7 +944,7 @@ held to its own grammar:
 | `url`, `psql` (`add`) | exactly the URL and the psql line the CLI builds from `user`, `password`, `host`, `port`, `database` and `sslmode`: `postgres://<user>:<password>@<host>:<port>/<database>[?sslmode=require]`, `psql '<url>'` |
 | `url` (`list`) | `null`, or `postgres://<its name>@<host>:<port>/<database>[?sslmode=require]`, with no password |
 | `role`, `roleFrom`, `readsNothing`, `roleKnown` | a role's name; `file`, `default` or `none` (a role for the first two, none for `none`); `true` or absent (only with `none`); a boolean or absent (only with `file`) |
-| `from` | `null`, or 1 to 100 address ranges, each in its one form (absent on `add`: any address) |
+| `from` | `null`, or 1 to 1,000 address ranges (`MAX_RANGES`), each in its one form (absent on `add`: any address) |
 | `attributes`, `missingAttributes` | at most 64 attribute names (`^[a-z_][a-z0-9_]{0,62}$`), each a value or a list of 1 to 100; the names alone |
 | `live`, `already` | booleans |
 | `lastUsedNote`, `urlNote` | `null` or a string, said as one line |

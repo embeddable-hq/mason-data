@@ -265,6 +265,28 @@ test("initialize, tools/list and resources: exactly the four tools with their sc
   assert.match(c.stderr, /^\[mason mcp\] warning: --url holds the user's password, which ps shows to this machine's users: put the URL in the server's environment as MASON_URL instead \(claude mcp add mason --env MASON_URL=… -- mason mcp\)\n\[mason mcp\] serving postgres:\/\/claude:\*\*\*\*@127\.0\.0\.1:\d+\/shop as claude, over MCP on stdio, until stdin closes\n$/);
 });
 
+test("initialize's serverInfo carries Mason's icon (issue 1168): a data: PNG of the size it states, under every revision, with a description and the repository", async () => {
+  for (const version of ["2025-11-25", "2025-06-18", "2025-03-26"]) {
+    const c = new Client(["--url", url]);
+    try {
+      const init = await c.request("initialize", { protocolVersion: version, capabilities: {}, clientInfo: { name: "mason test", version: "1" } });
+      const info = (init.result as { serverInfo: { name: string; title: string; description?: unknown; websiteUrl?: unknown; icons?: Array<{ src: string; mimeType?: string; sizes?: string[] }> } }).serverInfo;
+      assert.deepEqual([info.name, info.title, info.websiteUrl], ["mason", "Mason", "https://github.com/embeddable-hq/mason-data"], version);
+      assert.ok(typeof info.description === "string" && /^[^\n]{10,200}\.$/.test(info.description) && !/duck/i.test(info.description), `${version}: one plain sentence`);
+      assert.ok(Array.isArray(info.icons) && info.icons.length === 1, `${version}: one icon`);
+      const icon = info.icons[0]!;
+      assert.equal(icon.mimeType, "image/png");
+      assert.deepEqual(icon.sizes, ["128x128"]);
+      assert.ok(icon.src.startsWith("data:image/png;base64,"), icon.src.slice(0, 40));
+      const png = Buffer.from(icon.src.slice("data:image/png;base64,".length), "base64");
+      assert.equal(png.toString("base64"), icon.src.slice("data:image/png;base64,".length), "strict base64");
+      assert.deepEqual([...png.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], "a PNG");
+      assert.deepEqual([png.toString("latin1", 12, 16), png.readUInt32BE(16), png.readUInt32BE(20)], ["IHDR", 128, 128], "128x128, as sizes says");
+      assert.ok(png.length < 4096, `small: ${png.length} bytes`);
+    } finally { assert.equal(await c.close(), 0); }
+  }
+});
+
 test("JSON-RPC's edges: a parse error, an invalid request or id, a notification, a batch, a string id, a version it does not speak", async () => {
   const c = new Client(["--url", url]);
   try {

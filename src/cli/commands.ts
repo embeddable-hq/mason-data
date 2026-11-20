@@ -16,6 +16,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { asFailure, CommandFailed, endText, errorJson, failed, failureCode, jsonText, listFlag, nextBlock, noArguments, parseCommand, reportText, withEnd, type CommandSpec, type Failure, type NextStep, type Problem } from "./command.ts";
 import { err as styleErr, out as styleOut, stepRenderer, wrap, type Style } from "./style.ts";
+import { titleRow, type PageTitle } from "./ui-title.ts";
 import { alive, endRun, END_GRACE_MS, notAnswering, runState, theRun, type DevRun } from "./runs.ts";
 import { version } from "./version.ts";
 import { restartsFact, signalSupervisor, stopSupervisor, supervisorGone, type RestartsFact } from "./supervise.ts";
@@ -27,13 +28,13 @@ import type { RefusedQuery, SlowQuery } from "./run-server.ts";
 import { entriesOfLines, logLineText } from "../lib/log-buffer.ts";
 import { LogReader, logPath } from "../lib/log-read.ts";
 import { catalogTable, entryName, findEntry, tableNameProblem, type CatalogColumn, type CatalogTable, type ProjectSource } from "./sources.ts";
-import { addEntry, listTables, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type ListedTable, type PickResult, type RemoveResult } from "./source-edit.ts";
+import { addEntry, listTables, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type ListedTable, type PickResult, type ReferenceFact, type RemoveResult } from "./source-edit.ts";
 import { confirmEntries } from "./confirmed.ts";
 import { diskFitNote, type DiskFit, type DiskRoom, type DiskShortage } from "../duck/disk-fit.ts";
 import { connectSource, maskedUrl, parseSource, readSourceFacts, type SourceFacts, type SourceTable } from "./preflight.ts";
 import type { GeneratedStatus } from "../duck/generated.ts";
 import { reach } from "./state.ts";
-import { CATCHING_UP, copyingText, copyProgress, duration, generatedReadiness, msText, statementMsText, readiness, readinessWord, READY_TEXT, type Readiness, type SyncFacts, type SyncTotals } from "./readiness.ts";
+import { CATCHING_UP, copyingText, copyProgress, duration, generatedReadiness, msText, statementMsText, readiness, readinessWord, READY_TEXT, syncProgressText, type Readiness, type SyncFacts, type SyncProgress, type SyncTotals } from "./readiness.ts";
 import type { SyncEvent } from "../duck/events.ts";
 import type { Compaction, CopyProgressView, KeptCurrent, StreamStatus } from "../duck/sync.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
@@ -100,6 +101,9 @@ export interface TableState extends Omit<CatalogTable, "columns"> {
   /** the run's own sync of it running now, and since when (issue 1011): `copy` its whole read (its first sync, or read
    *  again whole), `catch-up` the one poll after it; absent otherwise (a compaction is not said) */
   rebuilding?: { kind: "copy" | "catch-up"; startedAt: string };
+  /** while a sync asked by hand of it runs (`mason sync`, the page's Sync now), how far it is (issue 1173,
+   *  src/cli/readiness.ts `SyncProgress`); absent otherwise, and from a run before it was said */
+  syncProgress?: SyncProgress;
 }
 /** which reason the run cannot write its sources file (`RunState.sourcesReadOnlyKind`) */
 export type SourcesReadOnlyKind = "deployed" | "unwritable" | "unknown";
@@ -190,6 +194,16 @@ export interface RunState {
   /** the Unix socket the page is served on too (mason serve with MASON_UI_SOCKET), or null: src/cli/run-server.ts
    *  runState; a run from before it has none */
   pageSocket?: string | null;
+  /** the web page's header label (mason serve with MASON_UI_TITLE_FILE, src/cli/ui-title.ts): the file's first line as
+   *  last read, or null and why (`problem.code`: missing, not_a_file, no_permission, not_utf8, empty, unreadable).
+   *  Absent when the setting is unset, and from a run from before it */
+  pageTitle?: PageTitle;
+  /** mason serve's MCP endpoint (MASON_MCP_URL, src/cli/mcp-http.ts): its public address, the authorization server and
+   *  — or null when it is off: src/cli/run-server.ts runState; a run from before it has none */
+  mcp?: { url: string; issuer: string } | null;
+  /** the address ranges hosted agents' companies publish for their connectors (src/cli/address-presets.ts), which the
+   *  Users page's Connects from offers: src/cli/run-server.ts runState; a run from before it has none */
+  addressPresets?: Array<{ id: string; label: string; name: string; ranges: string[] }>;
   /** the roles file (mason/roles.yml, src/cli/roles.ts) as the listener reads it now: the roles by name, and what is
    *  wrong with it (every statement of a user with a role is refused while there is); absent from a run before roles */
   roles?: { file: string | null; roles: string[]; problem: string | null; default: string | null; all?: string[];
@@ -303,6 +317,7 @@ export function paintBar(line: string, s: Style, tone?: BarTone): string {
  *  failed, copying / catching-up, unsynced, done). */
 export type BarTone = "red" | "yellow" | "green" | "cyan";
 export function barTone(t: TableState): BarTone {
+  if (byHandNow(t)) return "cyan";
   if (t.error) return "red";
   if (!t.copy || t.copy.phase === "copying" || t.sync?.state === "catching-up") return "cyan";
   const k = t.kept;
@@ -330,10 +345,17 @@ export function tableLines(s: RunState, now: number = Date.now()): string[] {
 /** `tableLines` with each line's bar colour (`barTone`): what mason status and mason wait paint by */
 export function tableRows(s: RunState, now: number = Date.now()): Array<{ line: string; tone: BarTone }> {
   const picked = s.tables.filter((t) => t.added);
-  // 0 done, 1 failed, 2 copying or in its one catch-up poll (at work: issue 834), 3 waiting for its copy
-  const rank = (t: TableState): number => t.error ? 1 : t.copy?.phase === "copying" ? 2 : !t.copy ? 3 : t.sync?.state === "catching-up" ? 2 : 0;
+  // 0 done, 1 failed, 2 copying, in its one catch-up poll (at work: issue 834) or synced by hand now (issue 1173), 3 waiting for its copy
+  const rank = (t: TableState): number => byHandNow(t) ? 2 : t.error ? 1 : t.copy?.phase === "copying" ? 2 : !t.copy ? 3 : t.sync?.state === "catching-up" ? 2 : 0;
   const rows = picked.map((t) => {
     const r = rank(t);
+    // A SYNC BY HAND OF IT RUNNING (issue 1173): its progress, never the full bar of the sync before it. A bar only where
+    // a total is known; without one its place is blank, and its words say the rows read and the time so far
+    if (byHandNow(t)) {
+      const p = t.syncProgress!;
+      const shown = p.share === null ? `${" ".repeat(BAR)}     ` : `${bar(p.share)} ${`${Math.floor(p.share * 100)}%`.padStart(4)}`;
+      return { t, r, at: t.copy?.updatedAt ?? "", line: `${shown}  ${syncProgressText(p)}` };
+    }
     let fraction: number, what: string;
     // served: its line says how it is kept (a catch-up's too, ranked at work)
     if (r === 0 || r === 2 && t.copy?.phase === "done") {
@@ -355,6 +377,9 @@ export function tableRows(s: RunState, now: number = Date.now()): Array<{ line: 
   const w = Math.max(0, ...rows.map((x) => x.t.table.length));
   return rows.map((x) => ({ line: `${x.t.table.padEnd(w)}  ${x.line}`, tone: barTone(x.t) }));
 }
+
+/** a sync asked by hand of the table runs now, its progress said (`syncProgress`): its line is that sync's */
+const byHandNow = (t: TableState): boolean => t.copy?.phase === "done" && t.syncProgress !== undefined;
 
 /** a share of a synced table's stored rows that are deleted at or past which its line says it (under it, its last
  *  compaction, if any) */
@@ -564,7 +589,7 @@ const STATUS_USAGE = `usage: mason status [--json]
     sessions: { open (the Postgres API's sessions logged in), byClient: [{ user ('' a token's), client (its
     application_name), open, running }] }, users: { active (the users mason user made, removed ones not counted) } or
     { error }, share: (null, or what mason share has open) { port, fingerprint, sessions,
-    refusedLogins, droppedConnections, shares: [{ user, from (command: mason share; page: the web page), role, reads, openedAt, via, host, port, endsAt, state }] }, shareEnded: (null, or the last share that ended) { user, from, why, at }, queries: { keptDays, day, week } (the last day's and the last 7
+    refusedLogins, droppedConnections, shares: [{ user, from (command: mason share; page: the web page), role, reads, openedAt, via, host, port, database, sslmode (require), endsAt, state }] }, shareEnded: (null, or the last share that ended) { user, from, why, at }, queries: { keptDays, day, week } (the last day's and the last 7
     days' statements, each { days, covered (the days of it the request log keeps), statements, completed, refused,
     failed, cancelled, rows, bytesSent, durationMs: { avg, p50, p95 } (the completed ones') or null }; { error }
     when it could not be read), slowQueries, refusedQueries, refusedTotal (how many in all), unsupported: [{ gap
@@ -590,7 +615,13 @@ const STATUS_USAGE = `usage: mason status [--json]
     the page's sidebar, mason serve with MASON_UI_ACCOUNT — or null), pageDeployDocs (the URL the page's Tables page
     links to for changing a deployed project: mason serve's MASON_UI_DEPLOY_DOCS_URL, else the README's section), pageCard (the path, relative to
     the page's address, its Overview reads the host's card from: mason serve with MASON_UI_OVERVIEW_CARD — or null), pageSocket (the Unix socket the
-    page is served on too: mason serve with MASON_UI_SOCKET — or null), next }.
+    page is served on too: mason serve with MASON_UI_SOCKET — or null), pageTitle (only with mason serve's
+    MASON_UI_TITLE_FILE: { label, problem }, label the file's first line the page's header box shows, as last read,
+    or null with problem: { code (missing, not_a_file, no_permission, not_utf8, empty, unreadable), message }),
+    mcp ({ url, issuer }: mason serve's MCP endpoint
+    for a hosted agent, its public address (MASON_MCP_URL) and its authorization server (MASON_MCP_ISSUER) — or null
+    when it is off), addressPresets ([{ id, label, name, ranges }]: the address ranges a hosted agent's company publishes for its
+    connectors (label: the product that calls from them, name: its short name), shipped with this release, which the web page's Connects from offers), next }.
     Each table's kept is how it is kept current now (absent for a table the sync does not hold):
     { by: poll, sync: { mode: off } or { mode: poll, every (30s), seconds } (its entry's sync:, else the file's,
     else off), syncedAt (its last whole read or poll), nextAt (when its next poll is due; null: off, or not polled
@@ -601,7 +632,13 @@ const STATUS_USAGE = `usage: mason status [--json]
     notRunning (why the stream is not running, null when it is) }; each with promisedSeconds (the age of
     its synced data past which it is behind: poll, its interval plus the larger of 60 s and twice its last poll;
     replication, 120 s; off, null) and lateWhy (what would make it late now: the pass's or its own poll's
-    time, which Mason waits four times, the stream not running); with Mason stopped: { running: false, project, source: { name,
+    time, which Mason waits four times, the stream not running). A table being synced by hand now (mason sync, the
+    page's Sync now) has syncProgress: { step (waiting: its turn not come yet; starting its read; reading: its changed rows; writing them;
+    counting its rows on the database; deleting: reading the database's keys to find the rows it deleted; read: its
+    part done), startedAt, seconds (since the sync began), changedRows (the changed rows read so far, counted as they
+    arrive), keysRead, keysTotal (the database's count of its rows, read by the sync itself), pieces: { written, of },
+    share (how much is done where a total is known: the keys read; null otherwise, and its line draws no bar) }, each
+    null where it has none; with Mason stopped: { running: false, project, source: { name,
     file, url, error (the sources file's problem, or null) }, engine, tables: [{ table }], lastRun, lastStop:
     { at, how } or null, next }; hung: the same with hung: { pid, problem, why },
     exit 1. In replication mode stream: { slot, slotWal: { walHeldBytes (the WAL the slot holds on the
@@ -632,7 +669,7 @@ export const STATUS: CommandSpec & { needs: "project" } = {
   usage: STATUS_USAGE,
   options: { json: { type: "boolean" } },
   json: ["running", "pid", "postgres", "source", "warnings", "folder", "project", "tables", "totals", "engine", "disk", "sessions", "stream", "jsonPaths", "generatedTables", "queries", "slowQueries", "refusedQueries",
-    "refusedTotal", "unsupported", "recentErrors", "readiness", "ui", "served", "sourcesReadOnly", "sourcesReadOnlyKind", "pageReadOnly", "pageReadOnlyAllow", "pageBack", "pageNav", "pageAccount", "pageDeployDocs", "pageCard", "pageSocket",
+    "refusedTotal", "unsupported", "recentErrors", "readiness", "ui", "served", "sourcesReadOnly", "sourcesReadOnlyKind", "pageReadOnly", "pageReadOnlyAllow", "pageBack", "pageNav", "pageAccount", "pageDeployDocs", "pageCard", "pageSocket", "pageTitle", "mcp", "addressPresets",
     "users", "roles", "share", "shareEnded", "lastRun", "lastStop", "hung", "next"],
 };
 
@@ -712,6 +749,10 @@ export async function status(argv: string[]): Promise<number> {
       // the web page (mason ui), without its one-time token: mason ui prints the URL that carries it, and opens it
       ...(s.ui === true ? [["Web UI", (s.served === true ? "from your machine: mason ui --ssh <user@server>" : `${run.control.url}/  (mason ui opens it)`) +
         (typeof s.pageSocket === "string" ? `; on this machine, the Unix socket ${s.pageSocket} too` : "")] as [string, string]] : []),
+      // the page's header label (MASON_UI_TITLE_FILE, src/cli/ui-title.ts): what it shows, or why it shows the database
+      ...(s.pageTitle ? [["Web UI label", s.pageTitle.label !== null ? titleRow(s.pageTitle) : st.red(titleRow(s.pageTitle))] as [string, string]] : []),
+      // mason serve's MCP endpoint for a hosted agent (src/cli/mcp-http.ts): its address and who signs a client in
+      ...(s.mcp ? [["MCP", `${s.mcp.url}  (for a hosted agent, signed in by ${s.mcp.issuer})`] as [string, string]] : []),
       // the roles file as the listener reads it now (mason user add --role): its roles, or what is wrong with it
       ...(s.roles && s.roles.file !== null
         ? [["Roles", s.roles.problem !== null ? st.red(`${s.roles.problem} (every statement of a user with a role is refused until it is fixed)`)
@@ -1348,6 +1389,10 @@ const ADD_USAGE = `usage: mason add <table>… [--columns <column>,…] [--inclu
   exclude: [password_hash], since anyone with a user's password can read every synced column. Name one with --columns
   or --include to have it.
 
+  The table's foreign keys are written on its entry as references: (customer_id: customers.id), for each table the
+  file syncs. Adding the table a foreign key points to writes it on the entry that holds it. Each foreign key it does
+  not write is said, with why: most often, the table it points to is not synced yet.
+
   With Mason running the first sync starts at once; mason wait returns when it is done and the table is served. Before
   mason start (mason init && mason add orders && mason start) the entry is written, checked against the database as
   the run checks it, and the first sync begins at mason start. Adding a table again with other columns changes its entry,
@@ -1361,7 +1406,9 @@ const ADD_USAGE = `usage: mason add <table>… [--columns <column>,…] [--inclu
     its entry was written sync: poll 5m under a file whose sync: is replication, or null), pollCost (an estimate of
     what a frequent poll of a big table costs your database, or null), disk (whether its sync fits on disk:
     { table, estimateBytes, freeBytes, reserveBytes, pendingBytes, spillSet, resync, fits }, fits false when added
-    with --yes; { table, unknown } when the free disk could not be read; null when nothing is synced whole) } or
+    with --yes; { table, unknown } when the free disk could not be read; null when nothing is synced whole),
+    referencesWritten (the references it wrote: [{ table (the one that holds it), columns, references (the table it
+    points to), targetColumns }]), referencesLeftOut (the foreign keys it did not write: the same, with reason) } or
     { table, error, disk (on code disk_short: the numbers) }],
     file (the sources file), error (when a table was not added: { code (disk_short: it likely won't fit on disk),
     message, why }), next };
@@ -1531,7 +1578,8 @@ async function addTables(way: AddWay, specs: ReadonlyArray<{ table: string; colu
     const b = r.ok;
     file = b.file;
     results.push({ table: b.table, entry: b.entry, columns: b.columns, exclude: b.exclude, key: b.key, addedKey: b.addedKey, skippedSecrets: b.skippedSecrets, already: b.already,
-      sync: b.sync, bigOff: b.bigOff, notReplicated: b.notReplicated, pollCost: b.pollCost, disk: b.disk ?? null });
+      sync: b.sync, bigOff: b.bigOff, notReplicated: b.notReplicated, pollCost: b.pollCost, disk: b.disk ?? null,
+      referencesWritten: b.referencesWritten ?? [], referencesLeftOut: b.referencesLeftOut ?? [] });
     added.push(b.table);
     if (t.added) wereAdded++;
     if (json) continue;
@@ -1587,7 +1635,25 @@ export function addedLines(b: PickResult, file: string): { line: string; notes: 
     // a secret is readable by anyone with a user's password: left out, and said, with the way to include one
     ...(s.length ? [`left out ${s.join(", ")}: ${s.length === 1 ? "it looks" : "they look"} like ${s.length === 1 ? "a secret" : "secrets"}, ` +
       `which anyone with a user's password could read (--include ${s[0]} adds it)`] : []),
+    // THE FOREIGN KEYS (issue 1143): those written as references, on each entry that holds one; each one not, with why
+    ...referencesNotes(b),
   ] };
+}
+
+/** A foreign key in SQL's words: `orders.customer_id → customers.id`, or `orders (a, b) → customers (c, d)`. */
+export const foreignKeyWords = (f: ReferenceFact): string => {
+  const side = (table: string, cols: readonly string[]): string => cols.length === 1 ? `${entryName(table)}.${cols[0]!}` : `${entryName(table)} (${cols.join(", ")})`;
+  return `${side(f.table, f.columns)} → ${side(f.references, f.targetColumns)}`;
+};
+
+/** What `mason add` says of the references it wrote, on one line, and of each foreign key it did not write. Each names
+ *  the table that holds it, whose entry it is written on. */
+function referencesNotes(b: Pick<PickResult, "referencesWritten" | "referencesLeftOut">): string[] {
+  const written = b.referencesWritten ?? [], left = b.referencesLeftOut ?? [];
+  return [
+    ...(written.length ? [`wrote the database's foreign ${written.length === 1 ? "key" : "keys"} as references: ${written.map(foreignKeyWords).join(", ")}`] : []),
+    ...left.map((f) => `foreign key ${foreignKeyWords(f)} not written as a reference: ${f.reason}`),
+  ];
 }
 
 // ------------------------------------------------------------------ mason remove
@@ -1596,7 +1662,8 @@ const REMOVE_USAGE = `usage: mason remove <table>… [--dry-run] [--json]
 
   Takes tables out of the project: each one's entry in the sources file (mason/sources/<name>.yml) is removed, the
   rest of the file as it was. With Mason running it stops syncing the table and drops its synced data at once; with Mason
-  stopped, what an earlier run synced is dropped at the next mason start. A project deployed as committed
+  stopped, what an earlier run synced is dropped at the next mason start. A reference another entry holds to a removed
+  table (references:) is taken out of that entry, and said. A project deployed as committed
   (MASON_PROJECT_READONLY=1 where Mason runs) is refused, its files left as they are: remove it where the project is
   committed, then deploy.
 
@@ -1607,7 +1674,8 @@ const REMOVE_USAGE = `usage: mason remove <table>… [--dry-run] [--json]
   --dry-run  say which entries would go, and change nothing: the file is read, never written, and neither Mason nor
              the database is asked
   --json     as data: { dryRun, removedTables (the tables, schema.table; on a dry run, the ones that would go), removed
-             (the same, kept until 1.0; not on a dry run), file (the sources file), next }
+             (the same, kept until 1.0; not on a dry run), file (the sources file), referencesRemoved (not on a dry run:
+             [{ table, columns, references, targetColumns }], the references to them taken out of other entries), next }
 `;
 
 export const REMOVE: CommandSpec & { needs: "project" } = {
@@ -1617,7 +1685,7 @@ export const REMOVE: CommandSpec & { needs: "project" } = {
   summary: "take tables out of the sources file: mason remove customers (its synced data is dropped)",
   usage: REMOVE_USAGE,
   options: { json: { type: "boolean" }, "dry-run": { type: "boolean" } },
-  json: ["dryRun", "removedTables", "removed", "file", "next"],
+  json: ["dryRun", "removedTables", "removed", "file", "referencesRemoved", "next"],
 };
 
 export async function remove(argv: string[]): Promise<number> {
@@ -1655,9 +1723,14 @@ function removedAnswer(r: Edited<RemoveResult>, names: readonly string[], runnin
   const b = r.ok;
   const next: NextStep[] = running ? [["mason status", "the tables left"]]
     : [["mason start", "Mason in the background, for this project: it syncs the tables left"], ["mason status", "the tables left"]];
-  if (json) { out(jsonText(REMOVE, { dryRun: false, removed: b.removed, removedTables: b.removed, file: b.file }, next)); return 0; }
+  const referencesRemoved = b.referencesRemoved ?? [];
+  if (json) { out(jsonText(REMOVE, { dryRun: false, removed: b.removed, removedTables: b.removed, file: b.file, referencesRemoved }, next)); return 0; }
   const rel = path.relative(process.cwd(), b.file);
-  out(reportText({ ...removedReport(b.removed, rel.startsWith("..") ? b.file : rel, { running }), next }, styleOut()));
+  const report = removedReport(b.removed, rel.startsWith("..") ? b.file : rel, { running });
+  // the references the entries that stay held to them, taken out with them (issue 1143)
+  const refs = referencesRemoved.length
+    ? [`took out the ${referencesRemoved.length === 1 ? "reference" : "references"} to ${b.removed.length === 1 ? "it" : "them"}: ${referencesRemoved.map(foreignKeyWords).join(", ")}`] : [];
+  out(reportText({ ...report, tips: [...report.tips, ...refs], next }, styleOut()));
   return 0;
 }
 
@@ -2011,7 +2084,8 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
     bytesSent, durationMs, query, queryTruncated, plan (a statement that took ${(SLOW_MS / 1000).toLocaleString("en-US")} s or more: the
     engine's plan of it, recorded once it ended — the tables and how fresh each was, the SQL sent to the engine, its
     operators with their estimated rows — or why none could be; else null), planTruncated (cut at 8 KiB), origin (an internal error, XX000:
-    where it failed in Mason, a file and a line such as src/duck/store.ts:897; else null) }], keptDays,
+    where it failed in Mason, a file and a line such as src/duck/store.ts:897; else null), waitedMs (a heavy query: how
+    long it waited for its turn, 0 when one was free; null for a light query, which never waits) }], keptDays,
     before (the position of the page before,
     or null: none older) }; with --events { events: [{ at, kind (full_sync_failed, poll_failed,
     catch_up_failed, stream_failed, source_unreachable, generated_failed, compact_failed, sync_failed (a sync asked by hand failed),
@@ -2063,6 +2137,8 @@ export function requestLine(r: LedgerRequest, st: Style): string {
 export function requestDetail(r: LedgerRequest, st: Style): string {
   const facts: Array<[string, string]> = [
     ["request", r.requestId], ["started", r.startedAt], ["ended", r.endedAt], ["took", statementMsText(r.durationMs)],
+    // a heavy query's wait for its turn, part of the time it took (src/duck/admission.ts)
+    ...(r.waitedMs !== null && r.waitedMs !== undefined ? [["waited", `${statementMsText(r.waitedMs)} for a heavy query's turn`] as [string, string]] : []),
     ["outcome", `${r.outcome}${r.sqlstate ? ` (SQLSTATE ${r.sqlstate})` : ""}`], ["method", r.method],
     ["session", r.session === null ? "-" : String(r.session)], ["client", r.applicationName || "(no application_name)"],
     ...(r.clientAddress !== null && r.clientAddress !== undefined ? [["address", r.clientAddress] as [string, string]] : []),

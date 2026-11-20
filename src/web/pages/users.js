@@ -3,7 +3,7 @@
  * POST /api/users/<name>/from, /disable and /enable, DELETE /api/users/<name>. An added user's password lives in this page's memory while its one-time dialog is open, never in
  * storage, a URL or a log line.
  */
-import { actId, badge, button, code, copyable, copyClick, duration, empty, esc, json, pop, renderFailure, ROOMS, serverHostNote, spanText, status, utcMinute, readOnlyLine, usersReadOnly, sendButton, failurePop, listTable } from "../shared.js";
+import { actId, badge, button, code, copyable, copyBlock, copyClick, createOpenSet, details, duration, empty, esc, json, pop, renderFailure, ROOMS, serverHostNote, status, utcMinute, readOnlyLine, usersReadOnly, sendButton, failurePop, listTable } from "../shared.js";
 import { VIEW_HASHES } from "../routes.js";
 
 /** The users as the page reads them: with each one's last use (`mason user list` asks the same), then every 30 s. */
@@ -44,33 +44,67 @@ export const disabledText = (disabledAt) => `Disabled ${stamp(disabledAt)} UTC`;
  *  ranges, or any address. */
 export const rangesText = (from) => from === null || from === undefined ? "any address" : from.join(", ");
 
-/** Where a user connects from, in its row: "from anywhere", or "from" its ranges (`rangesText`). */
-export const fromText = (from) => from === null || from === undefined ? "from anywhere" : `from ${rangesText(from)}`;
+/** The hosted agents' published ranges the run lists (`/api/state` `addressPresets`), none when it says none. */
+export const presetsOf = (state) => Array.isArray(state?.addressPresets) ? state.addressPresets : [];
+
+/** The company whose published ranges a user's are, exactly (`presets`: `/api/state` `addressPresets`), or undefined. */
+export const presetOf = (from, presets = []) => Array.isArray(from)
+  ? presets.find((p) => p.ranges.length === from.length && p.ranges.every((r, i) => r === from[i])) : undefined;
+
+/** Where a user connects from, in its row: "from anywhere", "from" a hosted agent's servers when its ranges are exactly
+ *  the ones its company publishes ("from claude.ai's servers (2 ranges)": a list of some 300 is a choice, never a wall of
+ *  CIDRs), or "from" its ranges (`rangesText`). */
+export const fromText = (from, presets = []) => {
+  if (from === null || from === undefined) return "from anywhere";
+  const p = presetOf(from, presets);
+  return p !== undefined ? `from ${p.name ?? p.label}'s servers (${from.length} ${from.length === 1 ? "range" : "ranges"})` : `from ${rangesText(from)}`;
+};
+
+/** The heading of the hosted agents' choices in Connects from: whose servers they are, so no one takes one for an app on
+ *  their own computer (issue 1155). */
+export const PRESETS_GROUP = "A hosted agent's servers";
+/** The line on a hosted agent's servers, seen while one is chosen under Connects from (issue 1155: a person using
+ *  Claude Code chose "Claude (Anthropic)" and was refused). */
+export const PRESET_HINT = "Only that agent's connectors connect from these, in its app or on the web. Claude Code and Cursor: choose anywhere, or your computer's address.";
 
 /**
  * THE "CONNECTS FROM" CHOICE, as `mason user add --help` says it: a dropdown, anywhere (no --from, the default: no
  * `from` is sent) or only these addresses (--from <range>, a comma list as `--from a,b` takes it), the address box
- * beside it. The box is shown only while "only these addresses" is chosen, and its place is kept while "anywhere" is
- * (the stylesheet hides it by `visibility`, never `display`), so nothing in the form moves when the choice changes.
+ * beside it; or a hosted agent's servers (`presets`: `/api/state` `addressPresets`, src/cli/address-presets.ts, under
+ * `PRESETS_GROUP`, each named for the product that calls from them), which sends
+ * the ranges it publishes for its connectors (its option's value names it, `preset:<id>`, and `rangesOf` sends its ranges:
+ * a company's list may be some 300, never written into the page twice nor into the box),
+ * chosen when a user's ranges are exactly a company's. The box is shown only while "only these addresses" is chosen, and its place is kept while "anywhere" is
+ * (the stylesheet hides it by `visibility`, never `display`), so nothing in the form moves when the choice changes. While
+ * a hosted agent's servers are chosen, a line in the address box's place says only that agent connects from them (`PRESET_HINT`), its place
+ * kept the same way while another is chosen. `hint: false`: the form says it elsewhere (the add form, under its line).
  * `id`: the form's own, so two forms on the page never share an input's id; `from`: the ranges it opens with (null:
  * anywhere). The page never judges a range: the run reads each, and its refusal is said as the run words it (one
  * grammar, the server's).
  */
-export function connectsChoice(id, from = null) {
-  const only = Array.isArray(from);
+export function connectsChoice(id, from = null, presets = [], { hint = true } = {}) {
+  const chosen = presetOf(from, presets);
+  const only = Array.isArray(from) && chosen === undefined;
   return `<span class="connects"><label for="${esc(id)}-connects">Connects from</label> ` +
-    `<select id="${esc(id)}-connects" name="connects"><option value="any"${only ? "" : " selected"}>anywhere</option><option value="only"${only ? " selected" : ""}>only these addresses</option></select>` +
+    `<select id="${esc(id)}-connects" name="connects"><option value="any"${only ? "" : " selected"}>anywhere</option><option value="only"${only ? " selected" : ""}>only these addresses</option>` +
+    (presets.length === 0 ? "" : `<optgroup label="${esc(PRESETS_GROUP)}">` +
+      presets.map((p) => `<option value="preset:${esc(p.id)}"${p === chosen ? " selected" : ""}>${esc(p.label)}</option>`).join("") + `</optgroup>`) + `</select>` +
     ` <span class="ranges"><label class="sr" for="${esc(id)}-from">Address ranges, comma-separated</label>` +
-    `<input id="${esc(id)}-from" name="from" spellcheck="false" autocapitalize="off" placeholder="e.g. 192.0.2.0/24, 2001:db8::/32" value="${esc(only ? from.join(", ") : "")}"></span></span>`;
+    `<input id="${esc(id)}-from" name="from" spellcheck="false" autocapitalize="off" placeholder="e.g. 192.0.2.0/24, 2001:db8::/32" value="${esc(only ? from.join(", ") : "")}">` +
+    (presets.length === 0 || !hint ? "" : `<span class="preset-hint">${esc(PRESET_HINT)}</span>`) + `</span></span>`;
 }
 
 /**
  * What a "Connects from" choice sends (`elements`: the form's): null for from anywhere — the add form sends no `from`
  * then, the change `{ from: null }` (mason user from --any) — else the ranges typed, split at each comma and trimmed, an
- * empty one dropped: `--from a,b`'s list. Nothing more is judged here; none typed is sent as none, for the run to refuse.
+ * empty one dropped: `--from a,b`'s list; or a company's published ranges (`preset:<id>`, from `presets`, the run's
+ * `addressPresets`: one the run no longer lists is sent as no range, for the run to refuse). Nothing more is judged
+ * here; none typed is sent as none, for the run to refuse.
  */
-export function rangesOf(elements) {
-  if ((elements?.connects?.value ?? "any") !== "only") return null;
+export function rangesOf(elements, presets = []) {
+  const choice = String(elements?.connects?.value ?? "any");
+  if (choice.startsWith("preset:")) return [...(presets.find((p) => p.id === choice.slice("preset:".length))?.ranges ?? [])];
+  if (choice !== "only") return null;
   return String(elements.from?.value ?? "").split(",").map((r) => r.trim()).filter((r) => r !== "");
 }
 
@@ -97,7 +131,7 @@ function usersTabs(show, active, removed) {
 /**
  * THE USERS from `/api/users?lastUsed=1` (`mason user list --json`'s shape), in a table in a card: a row each — its name
  * in mono with its id muted, its status as a dot and the word (Active, Disabled and when, or Removed and when), when it
- * was added, when it was last used (an age, `lastUsedText`'s UTC time in a title; or the note why it is not known), then
+ * was added, when it was last used (an age, `lastUsedText`'s UTC time in a title; or why not, its whole the title), then
  * Queries, Disable — Enable for a disabled one, in Disable's room — and Remove. Over the table, two tabs (`usersTabs`):
  * Active, the users not removed (a disabled one among them), and Removed, the removed ones, muted, without actions —
  * each with its count; `show` ("active", the default, or "removed") is the hash's (`#users?show=removed`), so Back
@@ -115,7 +149,7 @@ function usersTabs(show, active, removed) {
  * row's actions as Disable does, where it connects from (`confirming` { name, verb: "from" }) — the choice the add form
  * offers, opened at its ranges now — and sends POST /api/users/<name>/from.
  */
-export function renderUsers(list, confirming = null, now = Date.now(), refused = null, roles = null, readOnly = null, show = "active", { sending = () => false, fromSent = null } = {}) {
+export function renderUsers(list, confirming = null, now = Date.now(), refused = null, roles = null, readOnly = null, show = "active", { sending = () => false, fromSent = null, presets = [] } = {}) {
   const live = list.users.filter((u) => u.removedAt == null);
   const gone = list.users.filter((u) => u.removedAt != null);
   const why = readOnlyLine("Users are not added, changed, disabled or removed", readOnly);
@@ -134,8 +168,10 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
   return why + brokenNote + tabs + listTable("users", `<thead><tr><th scope="col">User</th><th scope="col" class="role">Role</th><th scope="col" class="status">Status</th><th scope="col" class="added">Added</th><th scope="col" class="num last">Last used</th><th scope="col" class="act"></th></tr></thead><tbody>${users.map((u) => {
     const active = u.removedAt == null;
     const last = lastUsedText(u, list.lastUsedNote, list.requestLogDays, now);
-    const lastCell = !active ? "" : u.lastUsedAt != null
-      ? `<span title="${esc(last)}">${esc(duration(Math.max(0, (now - Date.parse(u.lastUsedAt)) / 1000)))} ago</span>` : esc(last);
+    // an age, its UTC time the title; or why not, its whole the title too: "not used in the last 7 days" is wider than
+    // its column, which cuts it (the rules' "bounded")
+    const lastCell = !active ? "" : `<span title="${esc(last)}">${u.lastUsedAt != null
+      ? `${esc(duration(Math.max(0, (now - Date.parse(u.lastUsedAt)) / 1000)))} ago` : esc(last)}</span>`;
     const disabled = active && u.disabledAt != null;
     const asking = active && ask?.name === u.name ? ask.verb : null;
     const anchor = actId("users", u.name);
@@ -151,7 +187,7 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
     // Written again while it is sent, it keeps the choice the person sent (`fromSent`)
     else if (asking === "from") pops.push(pop(anchor, `<form id="user-from" class="from-form" autocomplete="off">` +
       `<p class="ask-from">Choose where ${esc(u.name)} can connect from. If you limit it, open sessions from other addresses end at their next query.</p>` +
-      connectsChoice("user-from", fromSent !== null && busy ? fromSent.from : u.from ?? null) +
+      connectsChoice("user-from", fromSent !== null && busy ? fromSent.from : u.from ?? null, presets) +
       `<p class="pop-actions">${sendButton(`Change ${u.name}`, "Changing…", {}, "primary small", { busy, submit: true })} ${cancel}</p>` +
       `<input type="hidden" name="user" value="${esc(u.name)}"></form>`, { kind: "dialog", label: `Where ${u.name} connects from` }));
     else if (refused?.name === u.name) pops.push(failurePop(anchor, refused.failure, { dismissRefused: "" }));
@@ -167,8 +203,8 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
       // address), as the user's id is under its name — so a row stays two lines, a Disable moves no row, and the table
       // keeps its width: no column of its own. Cut by the column, its whole the title; where the page may change it, the
       // line is its From…, asked in a popover beside the row's actions
-      `${!active ? "" : readOnly !== null ? `<span class="from-line" title="${esc(fromText(u.from))}">${esc(fromText(u.from))}</span>`
-        : button(fromText(u.from), asking === "from" ? {} : { from: u.name }, "from-line", { disabled: asking === "from", expanded: asking === "from", title: `${fromText(u.from)}: change where ${u.name} connects from` })}</td>` +
+      `${!active ? "" : readOnly !== null ? `<span class="from-line" title="${esc(fromText(u.from, presets))}">${esc(fromText(u.from, presets))}</span>`
+        : button(fromText(u.from, presets), asking === "from" ? {} : { from: u.name }, "from-line", { disabled: asking === "from", expanded: asking === "from", title: `${fromText(u.from, presets)}: change where ${u.name} connects from` })}</td>` +
       `<td>${!active ? status("unknown", `Removed ${stamp(u.removedAt)} UTC`) : disabled ? status("warn", disabledText(u.disabledAt)) : status("ok", "Active")}` +
       `${active && !disabled && !u.live ? ` <span class="warn">can't connect: the API key changed after it was added</span>` : ""}</td>` +
       `<td class="mono">${esc(stamp(u.addedAt))} UTC</td><td class="num">${lastCell}</td>` +
@@ -183,21 +219,102 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
  * prints): the host, port, database and sslmode — what a BI tool's form asks for, each with Copy — then the URL with
  * `<user>:<password>` as placeholders. No psql line (issue 874): the URL is the same thing, pasted after `psql`. None of it is a user's: a row carries what is (its name, its
  * state), and a user's password is copied only from the card shown once when it is added (`renderAdded`). "" when the
- * run did not say. `shareTip`: where the page may open a temporary cloud login (`shareable`), a tip pointing to it in
+ * run did not say. `shareTip`: where the page may open a cloud tunnel (`shareable`), a tip pointing to it in
  * the add box, for a tool that can't reach this machine.
  */
 export function renderUsersConnect(pg, served = false, shareTip = false) {
   if (!pg || typeof pg.shown !== "string") return "";
   const rows = [["Host", pg.host, "users-connect-host"], ["Port", String(pg.port), "users-connect-port"], ["Database", pg.database, "users-connect-database"],
     ["SSL mode", pg.sslmode ?? "disable", "users-connect-sslmode"], ["URL", pg.shown, "users-connect-url"]];
-  return `<div class="connect"><p class="connect-title">Connect</p>` +
+  return `<div class="connect"><p class="connect-title">Connect a Postgres client or BI tool</p>` +
     `<dl class="facts">${rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${copyable(id, v)}</dd>`).join("")}</dl>` +
     serverHostNote(pg, served) +
     `<p class="tip"><span>Put a user's name and password in place of ${code("<user>")} and ${code("<password>")}. The password is shown only once, when you add the user. If it's lost, remove the user and add it again.</span></p>` +
-    (shareTip ? `<p class="tip">A tool in the cloud that can't reach this machine: choose Temporary cloud login in the box above.</p>` : "") + `</div>`;
+    (shareTip ? `<p class="tip">A tool in the cloud that can't reach this machine: choose Temporary cloud tunnel in the box above.</p>` : "") + `</div>`;
 }
 
-// ------------------------------------------------------------------ Temporary cloud login (mason share, from the page)
+/** The npm package an MCP client runs `mason mcp` from, on its own computer (cli/package.json `name`). */
+export const MCP_PACKAGE = "@mason-data/cli";
+/** The Node that package needs there (cli/package.json `engines.node`, held equal by the tests). */
+export const MCP_NODE = "22.13";
+
+/** The package as npx is told it: pinned to the run's version (`/api/state` `engine.version`) where that is a release
+ *  (`0.22.0`: the npm package's, or a release image's), so the client runs the same Mason as the server and npx never
+ *  runs an older one it has cached. A checkout (`dev`) or an image built from main (`main-<sha>`) is no version npm
+ *  has, so the package is not pinned there. */
+export const mcpPackage = (version) => typeof version === "string" && /^\d+\.\d+\.\d+$/.test(version) ? `${MCP_PACKAGE}@${version}` : MCP_PACKAGE;
+
+/** What an MCP client is given to run `mason mcp` (src/cli/mcp.ts) as a user: the URL in its environment as MASON_URL,
+ *  never on its command line. `claudeCode`: the line to run; `json`: the server for a client's MCP settings. */
+export function mcpSnippets(url, version) {
+  const pkg = mcpPackage(version);
+  return {
+    claudeCode: `claude mcp add mason --env MASON_URL="${url}" -- npx -y ${pkg} mcp`,
+    json: JSON.stringify({ mcpServers: { mason: { command: "npx", args: ["-y", pkg, "mcp"], env: { MASON_URL: url } } } }, null, 2),
+  };
+}
+
+/** What a client given the MCP endpoint's address (`/api/state` `mcp.url`) is given: Claude Code's line, and the server
+ *  for Cursor's mcp.json. Each signs in in the browser, so neither carries a password. */
+export function mcpUrlSnippets(url) {
+  return {
+    claudeCode: `claude mcp add --transport http mason ${url}`,
+    cursor: JSON.stringify({ mcpServers: { mason: { url } } }, null, 2),
+  };
+}
+
+/** Where each client connects from, for a user's Connects from (issue 1155): a client on the person's computer, or its
+ *  company's servers. Claude Desktop's custom connectors are its company's: they connect from Anthropic's servers. */
+export const MCP_FROM = "Claude Code and Cursor connect from your computer. claude.ai, Claude Desktop and ChatGPT connect from their companies' servers.";
+
+/**
+ * HOW AN AI AGENT CONNECTS, the one body of the Users page's box (`renderUsersMcp`) and of New user added's section
+ * (`renderAdded`), so the two cannot drift (issue 1155). `p`: the ids' prefix (`users-mcp`, `added-mcp`); `pgUrl`: the
+ * Postgres URL `mason mcp` is given (the run's with `<user>:<password>`, or the user's own); `mcp`: mason serve's MCP
+ * endpoint (`/api/state` `mcp`, issue 1115), or null when it is off; `user`: the user just added (the dialog's), else
+ * null; `note`: the server's note on the Postgres URL; `isOpen`: the page's open details, by key; `urlRow`: false where
+ * the endpoint's address is shown already (New user added's MCP URL row).
+ * - The endpoint on: its address with Copy first, then a line per client saying where it goes, one line of sign-in, one
+ *   on where each connects from; the `mason mcp` way, with a password, under a closed "For a client that can't sign in
+ *   in a browser".
+ * - The endpoint off: the `mason mcp` way alone, and that claude.ai and ChatGPT on the web can't connect this way yet.
+ */
+function mcpBody(p, { pgUrl, version = null, mcp = null, user = null, note = "", isOpen = () => false, urlRow = true }) {
+  const once = user !== null ? badge("Shown once", "warn") : "";
+  const s = mcpSnippets(pgUrl, version);
+  const local = `<p class="mcp-for">Claude Code: run this.</p>${copyBlock(`${p}-claude-code`, s.claudeCode, once)}` +
+    (user !== null ? `<p class="tip">This line saves the password in your shell history. The JSON in a client's settings file doesn't.</p>` : "") +
+    `<p class="mcp-for">Claude Desktop, Cursor and others: add this to their MCP settings.</p>${copyBlock(`${p}-json`, s.json, once)}` +
+    note +
+    `<p class="tip"><span>${user !== null ? "" : `Put a user's name and password in place of ${code("<user>")} and ${code("<password>")}. `}Needs Node ${esc(MCP_NODE)} or later.</span></p>`;
+  if (!mcp || typeof mcp.url !== "string") return local + `<p class="tip">claude.ai and ChatGPT on the web can't connect this way yet.</p>`;
+  const u = mcpUrlSnippets(mcp.url);
+  return (urlRow ? `<p class="mcp-lead">Add this address to your agent, then sign in in your browser.</p>` +
+    `<dl class="facts"><dt>URL</dt><dd>${copyable(`${p}-url`, mcp.url)}</dd></dl>` : `<p class="mcp-lead">Add the MCP URL to your agent, then sign in in your browser.</p>`) +
+    `<ul class="mcp-clients">` +
+    `<li><b>claude.ai and Claude Desktop</b>: Customize, then Connectors, then Add custom connector.</li>` +
+    `<li><b>ChatGPT</b>: turn on Developer mode in its settings, then create an app with the address.</li>` +
+    `<li><b>Claude Code</b>: run this, then sign in from <code>/mcp</code>.${copyBlock(`${p}-claude-code-url`, u.claudeCode)}</li>` +
+    `<li><b>Cursor</b>: add this to ${code("~/.cursor/mcp.json")}.${copyBlock(`${p}-cursor`, u.cursor)}</li></ul>` +
+    `<p class="tip">Paste only the address: leave any OAuth client ID, secret, token or header fields empty. ` +
+    (user !== null ? `If the sign-in page asks for a Mason user, sign in as ${esc(user)}, with the password above.` : "Sign in as a Mason user.") + `</p>` +
+    `<p class="tip">${esc(MCP_FROM)}</p>` +
+    details(`${p}-fallback`, "For a client that can't sign in in a browser", local, isOpen(`${p}-fallback`), "mcp-fallback");
+}
+
+/**
+ * HOW AN AI AGENT CONNECTS (issues 1114, 1115, 1155), under the Postgres client or BI tool's box (renderUsersConnect),
+ * from the same facts (`/api/state` `postgres`, the URL with `<user>:<password>`, `engine.version`) and mason serve's MCP
+ * endpoint (`mcp`), in the body New user added shares (`mcpBody`). Shown where that box is, with the same note on a
+ * server. "" when the run did not say where a tool connects. `isOpen`: the page's open details, by key.
+ */
+export function renderUsersMcp(pg, served = false, version = null, mcp = null, isOpen = () => false) {
+  if (!pg || typeof pg.shown !== "string") return "";
+  return `<div class="connect connect-mcp"><p class="connect-title">Connect an AI agent</p>` +
+    mcpBody("users-mcp", { pgUrl: pg.shown, version, mcp, note: serverHostNote(pg, served), isOpen }) + `</div>`;
+}
+
+// ------------------------------------------------------------------ Temporary cloud tunnel (mason share, from the page)
 
 /** The page's share before anything was asked: what the share's renderers and the page's model start from. */
 export const NO_SHARE = Object.freeze({ phase: "none", role: null, opened: null, ended: null, failure: null, stopFailure: null });
@@ -209,18 +326,12 @@ export const pageShareOf = (s) => s?.share?.shares?.find((x) => x.from === "page
  *  (`served`: its run refuses `/api/share`) and never on a read-only page (`pageReadOnly`, whatever it still allows). */
 export const shareable = (s) => s !== undefined && s !== null && s.served !== true && (s.pageReadOnly ?? null) === null;
 
-/** How a temporary cloud login ends, beside "Live until you stop it": a free one's hour, and the page closing (its
- *  beats stop). */
-const endsLine = (endsAt, now) => (endsAt === null || endsAt === undefined ? ""
-  : ` A free one ends sooner, within about an hour, at ${new Date(endsAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} (in about ${Math.max(0, Math.round((Date.parse(endsAt) - now) / 60_000))} minutes). Then open a new one for a new address and password.`) +
-  " It also ends within two minutes of closing this page.";
-
 /** The two things the add box creates, its segments' words. */
-const KINDS = [["user", "New user"], ["share", "Temporary cloud login"]];
+const KINDS = [["user", "New user"], ["share", "Temporary cloud tunnel"]];
 
 /**
  * WHAT THE ADD BOX CREATES: two segments on the box, a segmented control as the time range's — "New user" (the add
- * form) and "Temporary cloud login" (`mason share`, from the page) — each a button, the one chosen pressed. Written only
+ * form) and "Temporary cloud tunnel" (`mason share`, from the page) — each a button, the one chosen pressed. Written only
  * where the page may open a share (`shareable`); elsewhere the box is the plain add form. The choice is the page's own
  * (`m.addKind`), never the hash: it is a form's, not a view's. The stylesheet shows the pane chosen and keeps the
  * other's place, unseen (both in one grid cell), so the box keeps the height of the taller and nothing below moves.
@@ -231,10 +342,10 @@ export function renderAddKinds(kind = "user") {
 }
 
 /**
- * THE TEMPORARY CLOUD LOGIN'S PANE in the add box (src/cli/page-share.ts; `mason share`'s, from the page): what it is
- * for, in two sentences, then a Role choice where the roles a share may read as (`choices`: the read of
- * `/api/share/choices`, undefined before it) are more than one, and "Open a cloud login" — the click is the person's
- * yes to a public address, said above it. Written the same in every phase but while one opens or is open, when the
+ * THE TEMPORARY CLOUD TUNNEL'S PANE in the add box (src/cli/page-share.ts; `mason share`'s, from the page): what it is
+ * for, in two sentences, and how long it usually takes to open (`OPENS_IN`), then a Role choice where the roles a share may read as (`choices`: the read of
+ * `/api/share/choices`, undefined before it) are more than one, and "Open a cloud tunnel" — the click is the person's
+ * yes to an address reachable online, said above it. Written the same in every phase but while one opens or is open, when the
  * button is held, disabled (one at a time); what it opened, how it ended or why it was refused is the card's
  * (`renderShareCard`), where a user just added is shown. The roles unread: the button disabled, "Reading the roles…" beside
  * it; refused (a roles file that cannot be read, no role a share may read as): the run's Failure. "" where the page may
@@ -249,22 +360,48 @@ export function renderSharePane(s, m = NO_SHARE, choices = undefined) {
   const opening = m.phase === "opening";
   const busy = opening || (pageShareOf(s) !== null && m.phase !== "ended");
   const title = list === null ? "" : opening ? "" : busy ? "One is open: stop it to open another" : "";
-  // Open a cloud login → Opening… in the room of both, while it opens (up to 30 s, said in the tip, which never changes)
-  return `<div class="share-pane"><p class="tip">For a tool in the cloud that can't reach this machine. Opens a public address with a login of its own, until you stop it. Opening one can take up to 30 s.</p>` +
-    failure + `<p class="share-ask">${role}${sendButton("Open a cloud login", "Opening…", { shareOpen: "" }, "primary", { id: "share-open", busy: opening, disabled: list === null || busy, title })}` +
+  // Open a cloud tunnel → Opening… in the room of both, while it opens (how long it usually takes is said in the tip,
+  // which never changes; the run gives up after 30 s, src/cli/page-share.ts TIMEOUT_MS, and says so)
+  return `<div class="share-pane"><p class="tip">For a tool in the cloud that can't reach this machine. Opens an address reachable online, protected by a login and password of its own, until you stop it. ${OPENS_IN}</p>` +
+    failure + `<p class="share-ask">${role}${sendButton("Open a cloud tunnel", "Opening…", { shareOpen: "" }, "primary", { id: "share-open", busy: opening, disabled: list === null || busy, title })}` +
     `${list === null && !failure ? ` <span class="dim">Reading the roles…</span>` : ""}</p></div>`;
 }
 
-/** How long a share has been public, as the role it reads as, and what it reads (`open`: as `/api/state` lists it, or
- *  the answer that opened it). */
-const publicLine = (open, now) => `<p class="added-seen">${badge("Public", "warn")} for <time data-tick datetime="${esc(open.openedAt)}">${esc(spanText((now - Date.parse(open.openedAt)) / 1000))}</time>` +
-  `${open.role !== null && open.role !== undefined ? `, as the role ${esc(open.role)}` : ""}: ${esc(open.reads)}</p>`;
+/** How long a cloud tunnel usually takes to open, in the pane's tip. Not measured on the real route yet, so it says
+ *  no number; the limit is the run's (30 s, src/cli/page-share.ts TIMEOUT_MS), said in its refusal when it is met. */
+export const OPENS_IN = "It usually opens in a few seconds.";
+
+/** What is left of a cloud tunnel, as it counts down to `endsAt` (the tunnel's end, ISO 8601): "ends in 59 min", by
+ *  `duration`; "ending now" once the end has passed and the run has not yet seen it go (it ends the share as its
+ *  tunnel's client exits, and the next read of the state says so), never a negative or a zero. */
+export const endsInText = (endsAt, now) => {
+  const left = (Date.parse(endsAt) - now) / 1000;
+  return left > 0 ? `ends in ${duration(left)}` : "ending now";
+};
+
+/** The clock time a cloud tunnel ends at, in this browser's time zone: `18:55`. */
+const clockAt = (iso) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
 /**
- * A TEMPORARY CLOUD LOGIN JUST OPENED, as the parts of the one-time dialog (`renderAdded`'s, index.html `#once`), while
- * the answer that opened it is in the page's memory (`m.opened`, until its "I have copied it"): titled "Temporary cloud
- * login", URL, Login and Password, the URL and the Password each with Copy, "Shown once" beside the password's Copy —
- * the login its own, never a user's; what it reads and for how long; and that the password is only shown once and is
+ * THAT IT IS ONLINE, AND UNTIL WHEN (issue 1117), then what it reads (`open`: as `/api/state` lists it, or the answer
+ * that opened it). With an end (a free tunnel's hour, `endsAt`): "Online · ends in 59 min, at 18:55", the time left a
+ * `<time data-tick>`, so it counts down at every write as an age counts up (src/web/app.js `TICK`: only its text is
+ * set, nothing moves). With none: "Online until you stop it", with no timer.
+ */
+const onlineLine = (open, now) => {
+  const ends = open.endsAt === null || open.endsAt === undefined ? null : open.endsAt;
+  const when = ends === null ? " until you stop it"
+    : ` · <time data-tick datetime="${esc(ends)}">${esc(endsInText(ends, now))}</time>, at ${esc(clockAt(ends))}`;
+  const reads = open.role !== null && open.role !== undefined ? `as the role ${esc(open.role)}: ${esc(open.reads)}` : esc(open.reads);
+  return `<p class="added-seen">${badge("Online", "warn")}${when} · reads ${reads}</p>`;
+};
+
+/**
+ * A TEMPORARY CLOUD TUNNEL JUST OPENED, as the parts of the one-time dialog (`renderAdded`'s, index.html `#once`), while
+ * the answer that opened it is in the page's memory (`m.opened`, until its "I have copied it"): titled "Temporary cloud tunnel",
+ * URL, Login and Password, the URL and the Password each with Copy, "Shown once" beside the password's Copy —
+ * the login its own, never a user's; that it is online and until when (`onlineLine`, counting down as the card's
+ * does), and what it reads; and that the password is only shown once and is
  * not saved. NO_ONCE otherwise, and where the page may not open one (`shareable`).
  */
 export function renderShareOnce(s, m = NO_SHARE, now = Date.now()) {
@@ -272,42 +409,46 @@ export function renderShareOnce(s, m = NO_SHARE, now = Date.now()) {
   const listed = pageShareOf(s);
   const open = listed !== null && listed.user === m.opened.user ? listed : m.opened;
   return {
-    "once-head": `<p class="once-title" id="once-title">Temporary cloud login</p>` +
+    "once-head": `<p class="once-title" id="once-title">Temporary cloud tunnel</p>` +
       onceFacts([["URL", m.opened.url, "share-url"], ["Login", m.opened.user, null], ["Password", m.opened.password, "share-password"]], "share-password"),
-    "once-status": publicLine(open, now),
+    "once-status": onlineLine(open, now),
     "once-foot": `<p class="tip">The password is only shown once and is not saved. This login is its own, and stops working when it ends.</p>`,
   };
 }
 
 /**
- * THE TEMPORARY CLOUD LOGIN, once asked: a card in the place and style "New user added" had (`.user-added`), under the
- * add box, titled "Temporary cloud login" on its top edge. While it opens: that it is opening. Open: its host, port and
- * login, and that the password was shown once (it is the one-time dialog's, `renderShareOnce`, and never this card's);
- * then what it reads and for how long, "Live until you stop it" with when a free one ends and that it ends when this
- * page closes, and Stop (`DELETE /api/share/<user>`, `#share-stop`: where the focus goes once the dialog closes).
- * Ended: how, from the run's `shareEnded` or the page's Stop; refused: the run's Failure. "" before anything was
- * asked, and where the page may not open one (`shareable`).
+ * THE TEMPORARY CLOUD TUNNEL, once asked: a card in the place and style "New user added" had (`.user-added`), under the
+ * add box, titled "Temporary cloud tunnel" on its top edge. While it opens: that it is opening. Open: what a BI tool's form asks
+ * for, in the order of the "Connect a Postgres client or BI tool" box — Host, Port, Database and SSL mode, each with
+ * Copy (`/api/state` `share.shares[]`: the share's database and `require`, issue 1117), then the Login — and that the
+ * password was shown once (it is the one-time dialog's, `renderShareOnce`, and never this card's); then that it is
+ * online and until when (`onlineLine`: counting down to a free one's end, or until you stop it) and what it reads,
+ * that it also ends when this page closes, and Stop (`DELETE /api/share/<user>`, `#share-stop`: where the focus goes
+ * once the dialog closes). Ended: how, from the run's `shareEnded` or the page's Stop; refused: the run's Failure. ""
+ * before anything was asked, and where the page may not open one (`shareable`).
  */
 export function renderShareCard(s, m = NO_SHARE, now = Date.now()) {
   if (!shareable(s)) return "";
-  const head = `<p class="added-title">Temporary cloud login</p>`;
+  const head = `<p class="added-title">Temporary cloud tunnel</p>`;
   const open = pageShareOf(s);
   if (open !== null && m.phase !== "ended") {
-    const rows = [["Host", open.host ?? "opening…", "share-host"], ["Port", open.port === null || open.port === undefined ? "…" : String(open.port), "share-port"], ["Login", open.user, null]];
+    const rows = [["Host", open.host ?? "opening…", "share-host"], ["Port", open.port === null || open.port === undefined ? "…" : String(open.port), "share-port"],
+      ["Database", open.database, "share-database"], ["SSL mode", open.sslmode, "share-sslmode"], ["Login", open.user, null]];
     return `<div class="user-added share-added" role="status">${head}` +
       `<dl class="facts">${rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${id === null ? esc(v) : copyable(id, v)}</dd>`).join("")}</dl>` +
-      publicLine(open, now) +
-      `<p class="tip">The password was shown once, when it opened, and is not saved. For a new one, press Stop, then Open a cloud login.</p>` +
-      `<p class="tip">Live until you stop it.${esc(endsLine(open.endsAt, now))}</p>` +
+      onlineLine(open, now) +
+      `<p class="tip">The password was shown once, when it opened, and is not saved. For a new one, press Stop, then Open a cloud tunnel.</p>` +
+      // the page's beats hold it (src/cli/page-share.ts BOUND_MS): the page closed, they stop
+      `<p class="tip">It also ends within two minutes of closing this page.</p>` +
       `${sendButton("Stop", "Stopping…", { shareStop: open.user }, "danger", { id: "share-stop", busy: m.stopping === true })}</div>` +
-      // A STOP REFUSED (issue 1033): said beside Stop, with what still stands — the login is open, and public — until
-      // dismissed, a Stop sent again, or the login seen ended
+      // A STOP REFUSED (issue 1033): said beside Stop, with what still stands — the tunnel is open, and online — until
+      // dismissed, a Stop sent again, or the tunnel seen ended
       (m.stopFailure ? failurePop("share-stop", m.stopFailure, { dismissShare: "" },
-        `<p class="headline">Stop failed. The temporary cloud login is still open, and its address and password still work.</p>`) : "");
+        `<p class="headline">Stop failed. The temporary cloud tunnel is still open, and its address and password still work.</p>`) : "");
   }
   // WHILE IT OPENS, ITS BUTTON SAYS SO (Opening…); A REFUSAL OR ITS END IS A POPOVER: nothing under the add box comes
   // and goes, so the Connect panel never moves
-  if (m.phase === "ended" && m.ended !== null) return pop("add-box", `<p class="headline">The temporary cloud login ended: ${esc(m.ended.why)}. Its address and password no longer work.</p>` +
+  if (m.phase === "ended" && m.ended !== null) return pop("add-box", `<p class="headline">The temporary cloud tunnel ended: ${esc(m.ended.why)}. Its address and password no longer work.</p>` +
     `<p class="pop-actions">${button("Dismiss", { dismissShare: "", popClose: "" }, "small")}</p>`);
   if (m.phase === "refused" && m.failure !== null) return failurePop("share-open", m.failure, { dismissShare: "" });
   return "";
@@ -320,8 +461,8 @@ const chosenRole = (m, list) => list.some((c) => c.role === m.role) ? m.role : l
 const BEAT_MS = 15_000;
 
 /**
- * THE PAGE'S SIDE OF A TEMPORARY CLOUD LOGIN (src/cli/page-share.ts has why each choice): open (the click on Open a
- * cloud login is the yes), BEAT while it is open — on a timer of its own, which runs while the tab is hidden (the poll
+ * THE PAGE'S SIDE OF A TEMPORARY CLOUD TUNNEL (src/cli/page-share.ts has why each choice): open (the click on Open a
+ * cloud tunnel is the yes), BEAT while it is open — on a timer of its own, which runs while the tab is hidden (the poll
  * does not: the person is in their tool's tab, pasting) —, Stop. The password is in `m.opened` alone, the page's memory, until its
  * one-time dialog is closed (`dismissOnce`), and is
  * dropped the moment the share is seen ended. `ctx.timers` is a test's clock; a browser's own otherwise.
@@ -347,7 +488,7 @@ export function createShare(ctx) {
   const roles = () => { const c = ctx.read(SHARE_CHOICES)?.body?.choices; return Array.isArray(c) ? c : null; };
   const actions = {
     shareRole(role) { if (roles()?.some((c) => c.role === role)) m.role = role; },
-    /** Open a cloud login: the click is the person's yes to a public address (the pane's sentence is what they read first; no question follows); the run opens the share (confirmed), and its one answer carries the password */
+    /** Open a cloud tunnel: the click is the person's yes to an address reachable online (the pane's sentence is what they read first; no question follows); the run opens the share (confirmed), and its one answer carries the password */
     async shareOpen() {
       const list = roles();
       if (list === null || m.phase === "opening") return;
@@ -439,9 +580,12 @@ export function renderAddUser(state, inBox = false, { busy = false, sent = null 
   // the form is the same whatever writes it; none once a user is added
   return `<form id="add-user"${inBox ? "" : ` class="formcard"`} autocomplete="off"><span class="name-field"><label for="user-name">Name</label> ` +
     `<input id="user-name" name="name" required placeholder="e.g. metabase" spellcheck="false" autocapitalize="off"${sent?.name ? ` value="${esc(sent.name)}"` : ""}></span>` +
-    roleChoice(state.roles, sent?.role ?? "") + connectsChoice("add-user", sent?.from ?? null) +
+    roleChoice(state.roles, sent?.role ?? "") + connectsChoice("add-user", sent?.from ?? null, presetsOf(state), { hint: false }) +
     // Add a user → Adding… in the room of both; its refusal a popover beside it (`renderAddUser`'s page: `action`)
-    `${sendButton("Add a user", "Adding…", {}, "primary", { id: "add-user-submit", busy, submit: true })}${ROLES_LINE}</form>`;
+    `${sendButton("Add a user", "Adding…", {}, "primary", { id: "add-user-submit", busy, submit: true })}` +
+    // under the line, the line on roles; while a hosted agent's servers are chosen, the line on them in its place (one
+    // grid cell, so the form keeps its height whatever is chosen: the box beside the choice is too narrow for it)
+    (presetsOf(state).length === 0 ? ROLES_LINE : `<div class="form-notes">${ROLES_LINE}<p class="preset-hint">${esc(PRESET_HINT)}</p></div>`) + `</form>`;
 }
 
 /** Where the README says how to write roles (its "Access control" section, on the public repository): the one site
@@ -484,9 +628,17 @@ function toggle(u, disabled, asking, busy = false) {
  *  them: its head (the title, `#once-title`, and the facts), its status line and its foot (the line over its button). */
 export const NO_ONCE = Object.freeze({ "once-head": "", "once-status": "", "once-foot": "" });
 
-/** The one-time dialog's facts: a label and its value each, a value with an id its Copy, "Shown once" beside the password's. */
-const onceFacts = (rows, passwordId) => `<dl class="facts">${rows.filter(([, v]) => v !== undefined && v !== null).map(([k, v, id]) =>
-  `<dt>${esc(k)}</dt><dd>${id === null ? esc(v) : copyable(id, v, id === passwordId ? badge("Shown once", "warn") : "")}</dd>`).join("")}</dl>`;
+/** The one-time dialog's facts: a label and its value each, a value with an id its Copy, "Shown once" beside the password's;
+ *  `under`: HTML under a row, by its label, the whole width of the rows (a `dd` of its own: New user added's MCP section). */
+const onceFacts = (rows, passwordId, under = {}) => `<dl class="facts">${rows.filter(([, v]) => v !== undefined && v !== null).map(([k, v, id]) =>
+  `<dt>${esc(k)}</dt><dd>${id === null ? esc(v) : copyable(id, v, id === passwordId ? badge("Shown once", "warn") : "")}</dd>` +
+  (under[k] ? `<dd class="under">${under[k]}</dd>` : "")).join("")}</dl>`;
+
+/** A user just added's way in for an AI agent (issues 1114, 1155): the box's own body (`mcpBody`) with this user's URL,
+ *  its password in it, so each `mason mcp` line is "Shown once" as the password is, and the sign-in names the user; a
+ *  closed section under the URL. */
+const addedMcp = (a, version, mcp, isOpen) =>
+  details("added-mcp", "Connect an AI agent", mcpBody("added-mcp", { pgUrl: a.url, version, mcp, user: a.user, isOpen, urlRow: false }), isOpen("added-mcp"), "once-mcp");
 
 /**
  * A USER JUST ADDED (`mason user add --json`'s shape), as the parts of the one-time dialog (index.html `#once`, a modal
@@ -496,14 +648,20 @@ const onceFacts = (rows, passwordId) => `<dl class="facts">${rows.filter(([, v])
  * button's height, "Shown once"; under the rows, whether it has connected (`o.connected`, `addedSeen`): Waiting for its
  * first query…, then Connected — a part of its own, so its change rewrites nothing the person is copying from; then one
  * line: the password is only shown once. No Database row: the URL already carries the database, and the Database, Host,
- * Port and SSL mode are the run's, said by Connect on the same page (renderUsersConnect); `mason user add` in a terminal
- * prints them all. No psql line: the URL is the same thing, pasted after `psql`. A field the JSON does not carry (the
- * URL while Mason does not run) is not shown. Mason keeps no copy, so it is never shown again.
+ * Port and SSL mode are the run's, said by Connect a Postgres client or BI tool on the same page (renderUsersConnect);
+ * `mason user add` in a terminal prints them all. No psql line: the URL is the same thing, pasted after `psql`. Under
+ * the URL — and, with the MCP endpoint on (`o.mcp`), an MCP URL row with Copy, the endpoint's address — a closed
+ * "Connect an AI agent" (`addedMcp`, issues 1114, 1155), its lines pinned to `o.version` and `o.mcp`:
+ * the run's version and MCP endpoint when the user was added; `o.isOpen`: the page's open details, by key. A field the JSON does not carry (the URL while Mason does not run) is not shown, nor its MCP
+ * section. Mason keeps no copy, so it is never shown again.
  */
 export function renderAdded(a, o = {}) {
+  // the MCP endpoint on as the user was added: its address a row of its own, under the Postgres URL (issue 1155)
+  const hosted = typeof o.mcp?.url === "string";
   return {
     "once-head": `<p class="once-title" id="once-title">New user added</p>` +
-      onceFacts([["URL", a.url, "added-url"], ["User", a.user, null], ["Password", a.password, "added-password"]], "added-password"),
+      onceFacts([["URL", a.url, "added-url"], ["MCP URL", hosted ? o.mcp.url : undefined, "added-mcp-url"], ["User", a.user, null], ["Password", a.password, "added-password"]], "added-password",
+        typeof a.url === "string" ? { [hosted ? "MCP URL" : "URL"]: addedMcp(a, o.version ?? null, o.mcp ?? null, o.isOpen ?? (() => false)) } : {}),
     "once-status": connectedLine(o.connected === true),
     "once-foot": `<p class="tip">The password is only shown once</p>`,
   };
@@ -535,12 +693,14 @@ export const page = {
     // show: the list's tab, the hash's (`route`: #users?show=removed)
     // addSent: what the last Add a user sent ({ name, role, from }), the form written with it while it is sent and once it
     // is refused; fromSent: what a From… sent ({ name, from }), its form written with it while it is sent
-    const m = { actionFailure: null, added: null, addedSeen: false, confirming: null, refused: null, held: null, show: "active", addKind: "user", addSent: null, fromSent: null };
-    // addKind: what the add box creates, "user" (New user) or "share" (Temporary cloud login): the box's own choice
+    const m = { actionFailure: null, added: null, addedVersion: null, addedMcp: null, addedSeen: false, confirming: null, refused: null, held: null, show: "active", addKind: "user", addSent: null, fromSent: null };
+    // addKind: what the add box creates, "user" (New user) or "share" (Temporary cloud tunnel): the box's own choice
     const users = () => ctx.read(USERS)?.body ?? null;
-    // the temporary cloud login, the add box's second kind: its own model, beats and actions
+    // the cloud tunnel, the add box's second kind: its own model, beats and actions
     const share = createShare(ctx);
     m.share = share.m;
+    // the open details of the AI agent's box and of New user added's section (the fallback, the section): a rewrite keeps them
+    const opened = createOpenSet();
     const actions = {
       /** `role`: the Role choice's, sent as mason user add --role; "" or none: no role, as with no --role. `from`: the
        *  ranges, as mason user add --from; null or none: none sent, from anywhere */
@@ -552,6 +712,10 @@ export const page = {
         const r = await ctx.send("user-add", USERS_POST, json("POST", { name, ...(role ? { role } : {}), ...(from !== null ? { from } : {}) }), { refresh: [USERS], onAnswer: (r) => {
           if ("failure" in r) { m.actionFailure = r.failure; return; }
           m.added = r.body;
+          // the run's version as the user is added, for its MCP lines: kept with the password, so a later read never
+          // rewrites the dialog the person copies from
+          m.addedVersion = ctx.read(STATE)?.body?.engine?.version ?? null;
+          m.addedMcp = ctx.read(STATE)?.body?.mcp ?? null;
           m.addedSeen = false;
           m.addSent = null;
         } });
@@ -605,7 +769,7 @@ export const page = {
         } });
         return "body" in r;
       },
-      dismissAdded() { m.added = null; m.addedSeen = false; },
+      dismissAdded() { m.added = null; m.addedVersion = null; m.addedMcp = null; m.addedSeen = false; for (const k of ["added-mcp", "added-mcp-fallback"]) opened.open.delete(k); },
       dismissRefused() { m.refused = null; },
       /** Add a user's refusal dismissed: the form keeps what was sent, for the person to change */
       dismissAddFailure() { m.actionFailure = null; },
@@ -656,28 +820,31 @@ export const page = {
         const offer = shareable(s) && renderAddUser(s) !== "";
         return {
           // the roles file's state is the run's (/api/state roles): a file that cannot be read refuses every user held to it
-          users: u ? renderUsers(u, m.confirming, h !== null ? h.now : ctx.now().getTime(), m.refused, state?.roles ?? null, usersReadOnly(state), m.show, { sending: ctx.sending, fromSent: m.fromSent }) : "",
-          // the add box: what it creates where the page may open a temporary cloud login (else the plain form), each
+          users: u ? renderUsers(u, m.confirming, h !== null ? h.now : ctx.now().getTime(), m.refused, state?.roles ?? null, usersReadOnly(state), m.show, { sending: ctx.sending, fromSent: m.fromSent, presets: presetsOf(state) }) : "",
+          // the add box: what it creates where the page may open a cloud tunnel (else the plain form), each
           // kind's pane a part of its own, so a choice of kind rewrites neither (a name being typed stays)
           "add-kinds": offer ? renderAddKinds(m.addKind) : "",
           "add-user-box": renderAddUser(s, offer, { busy: ctx.sending("user-add"), sent: m.addSent }),
           "add-share-box": offer ? renderSharePane(s, share.m, ctx.read(SHARE_CHOICES)) : "",
           "users-connect": renderUsersConnect(s?.postgres, s?.served === true, offer),
-          // a user just added, or a cloud login just opened: the one-time dialog's parts (the shell opens it while `once()` names it)
-          ...(m.added ? renderAdded(m.added, { connected: m.addedSeen }) : renderShareOnce(s, share.m, ctx.now().getTime())),
-          // what the box made, under it: a temporary cloud login
+          // how an MCP client connects, from the same facts, under it
+          "users-mcp": renderUsersMcp(s?.postgres, s?.served === true, s?.engine?.version ?? null, s?.mcp ?? null, opened.has),
+          // a user just added, or a cloud tunnel just opened: the one-time dialog's parts (the shell opens it while `once()` names it)
+          ...(m.added ? renderAdded(m.added, { connected: m.addedSeen, version: m.addedVersion, mcp: m.addedMcp, isOpen: opened.has }) : renderShareOnce(s, share.m, ctx.now().getTime())),
+          // what the box made, under it: a cloud tunnel
           added: renderShareCard(s, { ...share.m, stopping: ctx.sending("share-stop") }, ctx.now().getTime()),
           // Add a user refused: a popover beside its button, with Dismiss, which moves nothing under the form
           action: m.actionFailure ? failurePop("add-user-submit", m.actionFailure, { dismissAddFailure: "" }) : "",
         };
       },
       submit(form) {
-        if (form.id === "user-from") return actions.changeFrom(form.elements.user.value, rangesOf(form.elements));
+        if (form.id === "user-from") return actions.changeFrom(form.elements.user.value, rangesOf(form.elements, presetsOf(ctx.read(STATE)?.body)));
         if (form.id !== "add-user") return null;
         const input = form.elements.name;
-        return actions.addUser(input.value.trim(), form.elements.role?.value ?? "", rangesOf(form.elements)).then((ok) => { if (ok) input.value = ""; });
+        return actions.addUser(input.value.trim(), form.elements.role?.value ?? "", rangesOf(form.elements, presetsOf(ctx.read(STATE)?.body))).then((ok) => { if (ok) input.value = ""; });
       },
       input: (target) => share.input(target),
+      toggle: (target) => opened.toggle(target),
       click(d, button, { doc, win }) {
         if (d.addKind !== undefined) { if (d.addKind === "user" || d.addKind === "share") m.addKind = d.addKind; return true; }
         const shared = share.click(d);
@@ -693,7 +860,7 @@ export const page = {
         if (d.dismissAddFailure !== undefined) return actions.dismissAddFailure() ?? true;
         return copyClick(d, button, { doc, win });
       },
-      /** Escape with no question open: a refusal beside a user, beside Add a user, or what is said of the cloud login
+      /** Escape with no question open: a refusal beside a user, beside Add a user, or what is said of the cloud tunnel
        *  goes, as its Dismiss does (null: none is shown) */
       dismiss() {
         if (m.refused !== null) { actions.dismissRefused(); return true; }

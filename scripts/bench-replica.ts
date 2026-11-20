@@ -11,6 +11,9 @@
  * time after a warm-up; p50 / p95 are of every statement's wall time, queries/s is completed / seconds. Before a size is
  * measured, every statement's answer from Mason is held equal to Postgres's, so the two are timed on the same answers.
  *
+ * THE COLD MODE is the published run: `node scripts/bench-replica.ts --cold …` (scripts/bench-replica-cold.ts, its own
+ * options under `--cold --help`; docs/BENCHMARK.md "The cold mode"). What follows is the warm mode.
+ *
  *   node scripts/bench-replica.ts                          # its own Postgres 18 container (bench-pg), removed at the end
  *   node scripts/bench-replica.ts --postgres postgres://…  # a Postgres someone started (its user needs CREATEDB)
  *     --sizes 1M,10M,50M  --clients 1,8,32,128  --seconds 30  --warmup 5  --runs 2  --timeout 120 (a statement's limit, s)
@@ -80,9 +83,9 @@ const BYTES_PER_ROW = 700;
 // --------------------------------------------------------------------------------------------- the statements
 
 /** The data's two years start here; the windows below are literals, as a BI tool's filter sends them. */
-const DATA_START = "2024-10-01 00:00:00+00";
-const DATA_DAYS = 730;
-const TENANTS = 200;
+export const DATA_START = "2024-10-01 00:00:00+00";
+export const DATA_DAYS = 730;
+export const TENANTS = 200;
 
 export interface BenchQuery { name: string; title: string; sql: string; params?: "id" }
 export const QUERIES: BenchQuery[] = [
@@ -226,7 +229,7 @@ export function parseCount(s: string): number {
   return Math.round(Number(m[1]) * (m[2]!.toLowerCase() === "m" ? 1e6 : m[2]!.toLowerCase() === "k" ? 1e3 : 1));
 }
 /** an option the run cannot take: said by its message alone (anything else is said with its stack) */
-class Usage extends Error {}
+export class Usage extends Error {}
 function parseArgs(argv: string[]): Options {
   const o: Options = { sizes: [1e6, 1e7, 5e7], clients: [1, 8, 32, 128], seconds: 30, warmup: 5, runs: 2, postgres: null,
     out: path.join(REPO, "tests/fixtures/bench-replica.json"), label: os.hostname(), memory: null, work: os.tmpdir(), reserveGb: 60, keepPostgres: false, timeoutSeconds: null,
@@ -413,7 +416,7 @@ export const median = (xs: readonly number[]): number => {
   const s = [...xs].sort((a, b) => a - b);
   return s.length === 0 ? NaN : s.length % 2 === 1 ? s[(s.length - 1) / 2]! : (s[s.length / 2 - 1]! + s[s.length / 2]!) / 2;
 };
-const round = (x: number, d: number): number => Number.isFinite(x) ? Number(x.toFixed(d)) : x;
+export const round = (x: number, d: number): number => Number.isFinite(x) ? Number(x.toFixed(d)) : x;
 
 type Stats = RunStats & { codes: Record<string, number> };
 /** one run's statistics: the mix (every statement) and each statement */
@@ -444,12 +447,12 @@ const disagree = (runs: readonly RunStats[]): boolean => {
 
 // --------------------------------------------------------------------------------------------- Postgres
 
-function docker(args: string[]): string {
+export function docker(args: string[]): string {
   const r = spawnSync("docker", args, { encoding: "utf8" });
   if (r.status !== 0) throw new Error(`docker ${args[0]}: ${(r.stderr || r.stdout).trim()}`);
   return r.stdout.trim();
 }
-function freePort(): Promise<number> {
+export function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const s = net.createServer();
     s.on("error", reject);
@@ -497,7 +500,10 @@ async function startContainer(memoryBytes: number, cpus: number, maxClients: num
 async function adoptContainer(memoryBytes: number, log: (l: string) => void): Promise<{ url: string; id: string }> {
   const id = docker(["ps", "-a", "--filter", `name=^/${CONTAINER}$`, "--format", "{{.ID}}"]);
   if (id === "") throw new Usage(`--reuse-postgres: there is no container named ${CONTAINER} (a run with --keep-postgres leaves one)`);
-  const info = (JSON.parse(docker(["inspect", id])) as Array<{ Config: { Env: string[]; Image: string }; HostConfig: { Memory: number; PortBindings: Record<string, Array<{ HostPort: string }>> }; State: { Running: boolean } }>)[0]!;
+  const info = (JSON.parse(docker(["inspect", id])) as Array<{ Config: { Env: string[]; Image: string; Labels: Record<string, string> | null }; HostConfig: { Memory: number; PortBindings: Record<string, Array<{ HostPort: string }>> }; State: { Running: boolean } }>)[0]!;
+  // a cold run's Postgres (scripts/bench-replica-cold.ts labels it): that run may be measuring it, and this one would stop and remove it
+  const coldOwner = info.Config.Labels?.["mason-bench.owner"];
+  if (coldOwner !== undefined) throw new Usage(`--reuse-postgres: ${CONTAINER} (${id}) was made by a cold run (--cold), which may be measuring it now. The warm mode adopts only one a warm --keep-postgres run left`);
   const password = info.Config.Env.find((e) => e.startsWith("POSTGRES_PASSWORD="))?.slice("POSTGRES_PASSWORD=".length);
   const port = info.HostConfig.PortBindings["5432/tcp"]?.[0]?.HostPort;
   if (password === undefined || port === undefined) throw new Error(`${CONTAINER} (${id}) has no POSTGRES_PASSWORD or no published 5432: not a container this script made`);
@@ -527,9 +533,16 @@ async function waitReady(url: string, log: (l: string) => void): Promise<void> {
 const withDb = (url: string, db: string): string => { const u = new URL(url); u.pathname = `/${db}`; return u.toString(); };
 const whereOf = (url: string): string => { const u = new URL(url); return `${u.hostname}:${u.port || "5432"}`; };
 
-/** the database of one size: made by `dataSql`, or reused when its marker says it holds exactly this */
-async function ensureData(adminUrl: string, rows: number, log: (l: string) => void): Promise<{ url: string; generatedSeconds: number | null }> {
-  const db = `bench_replica_${rows}`;
+/** a size's data: the database it is made in, the comment on its orders that says what it holds, and the SQL that makes it */
+export interface DataShape { database: string; marker: string; sql: string[] }
+/** the warm mode's data: `dataSql` in `bench_replica_<rows>` */
+const warmShape = (rows: number): DataShape => ({ database: `bench_replica_${rows}`, marker: marker(rows), sql: dataSql(rows) });
+
+/** the database of one size: made by its shape's SQL (the warm mode's, `dataSql`, by default), or reused when its
+ *  marker says it holds exactly this */
+export async function ensureData(adminUrl: string, rows: number, log: (l: string) => void, shape: DataShape = warmShape(rows)): Promise<{ url: string; generatedSeconds: number | null }> {
+  const db = shape.database;
+  if (!/^[a-z_][a-z0-9_]*$/.test(db)) throw new Error(`a bench database's name is a plain identifier: ${JSON.stringify(db)}`);
   const url = withDb(adminUrl, db);
   const admin = new pg.Client({ connectionString: adminUrl });
   await admin.connect();
@@ -539,8 +552,8 @@ async function ensureData(adminUrl: string, rows: number, log: (l: string) => vo
       await c.connect();
       const m = ((await c.query("SELECT obj_description(to_regclass('public.orders'), 'pg_class') AS m")).rows[0]?.m ?? null) as string | null;
       await c.end();
-      if (m === marker(rows)) { log(`${db}: reused (${m})`); return { url, generatedSeconds: null }; }
-      log(`${db}: holds ${JSON.stringify(m)}, not ${JSON.stringify(marker(rows))}: made again`);
+      if (m === shape.marker) { log(`${db}: reused (${m})`); return { url, generatedSeconds: null }; }
+      log(`${db}: holds ${JSON.stringify(m)}, not ${JSON.stringify(shape.marker)}: made again`);
       await admin.query(`DROP DATABASE ${db} WITH (FORCE)`);
     }
     await admin.query(`CREATE DATABASE ${db}`);
@@ -549,7 +562,7 @@ async function ensureData(adminUrl: string, rows: number, log: (l: string) => vo
   await c.connect();
   const t0 = performance.now();
   try {
-    for (const sql of dataSql(rows)) {
+    for (const sql of shape.sql) {
       const s0 = performance.now();
       await c.query(sql);
       log(`  ${db}: ${sql.slice(0, 60).replace(/\s+/g, " ")}… ${((performance.now() - s0) / 1000).toFixed(1)} s`);
@@ -558,7 +571,7 @@ async function ensureData(adminUrl: string, rows: number, log: (l: string) => vo
   return { url, generatedSeconds: round((performance.now() - t0) / 1000, 1) };
 }
 
-async function postgresFacts(url: string): Promise<{ version: string; settings: Record<string, string> }> {
+export async function postgresFacts(url: string): Promise<{ version: string; settings: Record<string, string> }> {
   const c = new pg.Client({ connectionString: url });
   await c.connect();
   try {
@@ -781,7 +794,7 @@ async function plannedSql(conn: pg.ClientConfig, rows: number, file: string, log
 
 // --------------------------------------------------------------------------------------------- the run
 
-const fmtRows = (n: number): string => n >= 1e6 && n % 1e6 === 0 ? `${n / 1e6}M` : n >= 1e3 && n % 1e3 === 0 ? `${n / 1e3}k` : String(n);
+export const fmtRows = (n: number): string => n >= 1e6 && n % 1e6 === 0 ? `${n / 1e6}M` : n >= 1e3 && n % 1e3 === 0 ? `${n / 1e3}k` : String(n);
 const ms = (x: number): string => !Number.isFinite(x) ? "-" : x >= 1000 ? `${(x / 1000).toFixed(2)} s` : x >= 10 ? `${x.toFixed(0)} ms` : `${x.toFixed(1)} ms`;
 const secs = (x: number): string => x >= 120 ? `${(x / 60).toFixed(0)} min` : `${x.toFixed(0)} s`;
 
@@ -793,7 +806,7 @@ function writeFixture(file: string, f: Fixture): void {
 }
 
 /** Mason's commit, `+dirty` when src/ differs from it */
-function commit(): string {
+export function commit(): string {
   const r = spawnSync("git", ["rev-parse", "--short=12", "HEAD"], { cwd: REPO, encoding: "utf8" });
   if (r.status !== 0) return "unknown (not a git checkout)";
   const dirty = spawnSync("git", ["status", "--porcelain", "--untracked-files=no", "--", "src"], { cwd: REPO, encoding: "utf8" }).stdout.trim() !== "";
@@ -804,9 +817,13 @@ function commit(): string {
 interface SizeCtx { rows: number; pgConn: pg.ClientConfig; masonConn: pg.ClientConfig; mason: MasonServed; workDir: string }
 type Engine = "postgres" | "mason";
 
-async function main(): Promise<number> {
-  const o = parseArgs(process.argv.slice(2));
+/** the warm mode; `at.lockFile` is the cold mode's lock, for a test */
+export async function main(argv: string[] = process.argv.slice(2), at: { lockFile?: string } = {}): Promise<number> {
+  const o = parseArgs(argv);
   const log = (l: string): void => { process.stdout.write(`${l}\n`); };
+  // a cold run in progress: this run would load the machine it measures, and could take its Postgres's name
+  const coldRun = (await import("./bench-replica-cold.ts")).coldRunRefusal(at.lockFile);
+  if (coldRun !== null) throw new Usage(coldRun);
   const { DEFAULT_MEMORY_LIMIT, DUCKDB_VERSION, machineMemoryBytes, memoryLimitBytes } = await import("../src/duck/store.ts");
   const { COPY_PARALLEL } = await import("../src/duck/sync.ts");
   const memoryLimit = (o.memory ?? (process.env.MASON_DUCKDB_MEMORY || DEFAULT_MEMORY_LIMIT)).trim();
@@ -1115,7 +1132,12 @@ if (process.argv[2] === "--client-worker") {
       (e: unknown) => { process.stderr.write(`bench-replica client process: ${(e as Error).stack ?? String(e)}\n`); process.exitCode = 1; });
   });
 } else if (process.argv[1] !== undefined && path.resolve(process.argv[1]) === SCRIPT) {
-  main().then((code) => { process.exitCode = code; }, (e: unknown) => {
+  // --cold is a mode of its own (scripts/bench-replica-cold.ts), with its own options and --help
+  const argv = process.argv.slice(2);
+  const run = argv.includes("--cold")
+    ? import("./bench-replica-cold.ts").then((m) => m.mainCold(argv.filter((a) => a !== "--cold")))
+    : main();
+  run.then((code) => { process.exitCode = code; }, (e: unknown) => {
     process.stderr.write(`bench-replica: ${e instanceof Usage ? e.message : (e as Error).stack ?? String(e)}\n`);
     process.exitCode = e instanceof Usage ? 2 : 1;
   });

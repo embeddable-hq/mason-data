@@ -1142,6 +1142,111 @@ test("a copy is stored in the source's heap order with no index, and a time wind
   } finally { await sync.stop(); await store.close(); }
 });
 
+// EACH TEXT COLUMN COMPRESSED BY ITS OWN VALUES (issue 1140; src/duck/text-compression.ts): from a sample of the source in
+// the copy's snapshot, the dictionary for short or repeated text, zstd for long text that does not repeat; held in the
+// table's definition, so the rows a poll writes later, a checkpoint and a restart keep it. Equal to the source throughout.
+test("a copy stores each text column by a sample of its values: the dictionary for short or repeated text, zstd for long JSON; the poll's rows, a checkpoint and a restart keep it", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {
+  const db = `${tag}_tc`;
+  const url = (() => { const u = new URL(adminUrl!); u.pathname = `/${db}`; return u.toString(); })();
+  psql(adminUrl!, `CREATE DATABASE ${db}`);
+  after(() => psql(adminUrl!, `DROP DATABASE IF EXISTS ${db} WITH (FORCE)`));
+  const ROWS = 200_000;
+  const values = (from: number, to: number): string => `SELECT g, (ARRAY['shipped','pending','paid','returned'])[1 + g % 4], 'n' || g, ` +
+    `'Plan ' || (g % 40) || ': ' || repeat('priority support, unlimited seats, audit logs; ', 6), ` +
+    `(SELECT jsonb_build_object('id', g, 'events', jsonb_agg(jsonb_build_object('ref', md5((g * 31 + x)::text), 'kind', 'view'))) FROM generate_series(1, 6) x), NULL FROM generate_series(${from}, ${to}) g`;
+  psql(url, `CREATE TABLE orders (id bigint PRIMARY KEY, status text NOT NULL, note text, label text, doc jsonb, unused text); INSERT INTO orders ${values(1, ROWS)}`);
+  await rowsOlderThanEverySnapshot(url, "orders");
+  const col = (name: string, type: string, notNull = false) => ({ name, type, notNull, comment: null });
+  const ORDERS: AddedTable = { source: "public.orders", schema: "public", table: "orders", key: ["id"], bytes: 0, rows: ROWS, foreignKeys: [],
+    columns: [col("id", "bigint", true), col("status", "text", true), col("note", "text"), col("label", "text"), col("doc", "jsonb"), col("unused", "text")] };
+  const parsed = parseSource(url);
+  if ("problem" in parsed) throw new Error(parsed.problem);
+  const logged: string[] = [];
+  const file = path.join(dir, "text.db");
+  const methods = async (store: DuckStore): Promise<unknown[][]> => (await store.writer.runAndReadAll(`SELECT column_name, string_agg(DISTINCT compression, ',' ORDER BY compression) ` +
+    `FROM pragma_storage_info('public.orders') WHERE column_name IN ('status', 'note', 'label', 'doc') AND segment_type <> 'VALIDITY' GROUP BY column_name ORDER BY column_name`)).getRowsJS();
+  const definition = async (store: DuckStore): Promise<string> => String((await store.writer.runAndReadAll("SELECT sql FROM duckdb_tables() WHERE schema_name = 'public' AND table_name = 'orders'")).getRowsJS()[0]![0]);
+  const DEFINED = /^CREATE TABLE public\.orders\(id BIGINT, status VARCHAR USING COMPRESSION DICT_FSST, note VARCHAR USING COMPRESSION DICT_FSST, "label" VARCHAR USING COMPRESSION DICT_FSST, doc JSON USING COMPRESSION ZSTD, unused VARCHAR\);$/;
+  const BY_COLUMN = [["doc", "ZSTD"], ["label", "DICT_FSST"], ["note", "DICT_FSST"], ["status", "DICT_FSST"]];
+  const answer = "SELECT status, count(*), count(DISTINCT note), count(DISTINCT label), count(DISTINCT doc), count(unused) FROM orders GROUP BY status ORDER BY status";
+  const same = async (store: DuckStore, step: string): Promise<void> => {
+    const duck = ((await store.writer.runAndReadAll(answer.replace("FROM orders", "FROM public.orders"))).getRowsJS() as unknown[][]).map((r) => r.map(String).join("\t")).join("\n");
+    assert.equal(duck, psql(url, answer), `the same rows after ${step}`);
+  };
+  let store = await DuckStore.open(file, (l) => logged.push(l), { memoryLimit: "256MB" });
+  let sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 3_600_000, "poll");
+  try {
+    await sync.open();
+    void sync.setTables([ORDERS]);
+    await sync.once();
+    assert.deepEqual(sync.state().map((s) => [s.source, s.phase, s.error]), [["public.orders", "copied", null]], logged.join("\n"));
+    await store.writer.run("CHECKPOINT");
+    // the status and the note short, the label long but of 40 values: the dictionary; each JSON document long and its
+    // own: zstd; a column with no value sampled: the instance's, named nowhere
+    assert.deepEqual(await methods(store), BY_COLUMN, logged.join("\n"));
+    assert.match(await definition(store), DEFINED);
+    assert.ok(logged.some((l) => /^public\.orders: its text stored by column, from a sample of its rows: status, note, label with a dictionary \(short or repeated values\); doc with zstd \(long values\)$/.test(l)), logged.join("\n"));
+    await same(store, "the first sync");
+    // ROWS THE POLL WRITES: new ones and changed ones, then a checkpoint
+    psql(url, `INSERT INTO orders ${values(ROWS + 1, ROWS + 150_000)}; UPDATE orders SET status = 'paid', note = 'changed' WHERE id % 50 = 0`);
+    await sync.once();
+    await store.writer.run("CHECKPOINT");
+    assert.deepEqual(await methods(store), BY_COLUMN, "every row group the poll wrote keeps each column's method");
+    await same(store, "a poll");
+  } finally { await sync.stop(); await store.close(); }
+  // A RESTART: the definition is the file's, and the next poll's rows keep it
+  store = await DuckStore.open(file, (l) => logged.push(l), { memoryLimit: "256MB" });
+  sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 3_600_000, "poll");
+  try {
+    await sync.open();
+    void sync.setTables([ORDERS]);
+    psql(url, `INSERT INTO orders ${values(ROWS + 150_001, ROWS + 200_000)}`);
+    await sync.once();
+    await store.writer.run("CHECKPOINT");
+    assert.match(await definition(store), DEFINED);
+    assert.deepEqual(await methods(store), BY_COLUMN);
+    await same(store, "a restart and a poll");
+  } finally { await sync.stop(); await store.close(); }
+});
+
+// A JSON VALUE'S STORED SIZE IS NOT ITS TEXT'S (the review of PR 1141): Postgres compresses a large document, so its
+// stored size can be far under the engine's dictionary limit while its text is past it. Large documents that repeat,
+// stored compressed, keep zstd: given the dictionary, every row group of them was stored Uncompressed, 51 times larger.
+// A small jsonb, stored inline and uncompressed, still takes the dictionary.
+test("a copy keeps zstd for a jsonb of large documents Postgres stored compressed, however they repeat; a small inline jsonb takes the dictionary, and one of about 100 bytes, each its own, zstd", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {
+  const db = `${tag}_tz`;
+  const url = (() => { const u = new URL(adminUrl!); u.pathname = `/${db}`; return u.toString(); })();
+  psql(adminUrl!, `CREATE DATABASE ${db}`);
+  after(() => psql(adminUrl!, `DROP DATABASE IF EXISTS ${db} WITH (FORCE)`));
+  const ROWS = 3_000;
+  // each doc 800 keys, about 28 KB of text, one of 5 documents; Postgres stores it compressed in a few KB
+  // and each payload about 100 bytes of text, inline and uncompressed, each its own, as the cold benchmark's orders hold
+  psql(url, `CREATE TABLE cfg (id int PRIMARY KEY, doc jsonb, small jsonb, payload jsonb); INSERT INTO cfg SELECT g, ` +
+    `(SELECT jsonb_object_agg('key_' || k, 'value number ' || (g % 5) || ' of ' || k) FROM generate_series(1, 800) k), jsonb_build_object('id', g, 'kind', 'k' || (g % 7)), ` +
+    `jsonb_build_object('source', 'web', 'items', g % 9, 'ref', md5(g::text), 'campaign', 'cmp-' || (g % 40)) FROM generate_series(1, ${ROWS}) g`);
+  assert.equal(psql(url, "SELECT avg(octet_length(payload::text)) BETWEEN 64 AND 256 AND bool_and(pg_column_compression(payload) IS NULL) FROM cfg"), "t", "each payload between 64 and 256 bytes, uncompressed");
+  assert.equal(psql(url, "SELECT bool_and(octet_length(doc::text) > 16384 AND pg_column_size(doc) < 16384) FROM cfg"), "t", "each doc's text past the dictionary's limit, its stored size under it (else this proves nothing)");
+  await rowsOlderThanEverySnapshot(url, "cfg");
+  const col = (name: string, type: string, notNull = false) => ({ name, type, notNull, comment: null });
+  const CFG: AddedTable = { source: "public.cfg", schema: "public", table: "cfg", key: ["id"], bytes: 0, rows: ROWS, foreignKeys: [],
+    columns: [col("id", "integer", true), col("doc", "jsonb"), col("small", "jsonb"), col("payload", "jsonb")] };
+  const parsed = parseSource(url);
+  if ("problem" in parsed) throw new Error(parsed.problem);
+  const logged: string[] = [];
+  const store = await DuckStore.open(path.join(dir, "toasted.db"), (l) => logged.push(l), { memoryLimit: "256MB" });
+  const sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 3_600_000, "poll");
+  try {
+    await sync.open();
+    void sync.setTables([CFG]);
+    await sync.once();
+    assert.deepEqual(sync.state().map((s) => [s.source, s.phase, s.error]), [["public.cfg", "copied", null]], logged.join("\n"));
+    await store.writer.run("CHECKPOINT");
+    assert.deepEqual((await store.writer.runAndReadAll(`SELECT column_name, string_agg(DISTINCT compression, ',' ORDER BY compression) FROM pragma_storage_info('public.cfg') ` +
+      `WHERE column_name IN ('doc', 'small', 'payload') AND segment_type <> 'VALIDITY' GROUP BY column_name ORDER BY column_name`)).getRowsJS(), [["doc", "ZSTD"], ["payload", "ZSTD"], ["small", "DICT_FSST"]], logged.join("\n"));
+    assert.equal(String((await store.writer.runAndReadAll("SELECT count(DISTINCT doc) || '/' || count(*) FROM public.cfg")).getRowsJS()[0]![0]), `5/${ROWS}`);
+  } finally { await sync.stop(); await store.close(); }
+});
+
 // A COPY IN THE OLD LAYOUT (sorted by its primary key, with the key's index; `_mason.copy_state`
 // with the re-sort's `written` and `counted`) is a RETIRED LAYOUT (src/duck/sync.ts RETIRED_LAYOUT): said by name in the
 // log and in the table's state, served as it was, and copied again through the normal path — never converted. Its
@@ -1304,6 +1409,55 @@ test("a mixed project: an `off` table unchanged until mason sync, a `poll 2s` on
     // sync is stopped, so the poll it owes is refused as stopping (a project that streamed every table said "streamed")
     await assert.rejects(repl.pollNow(["public.manual", "public.slow"]), (e: Error) => e.message === "Mason is stopping");
   } finally { await repl.stop(); await other.close(); }
+});
+
+// A SYNC BY HAND SAYS HOW FAR IT IS (issue 1173: Sync now on a 17 M-row `off` table showed its old full bar and nothing
+// moving for minutes). Its poll reads the changed rows in ONE statement; each row is counted on Mason's side as it
+// arrives (src/duck/tally.ts), so the state asked WHILE the read runs says a count that grows and ends at the rows the
+// poll read; then, as the database deleted rows, its keys are read against the count the poll already took, which is
+// that read's exact total. Nothing is asked of the database for it: the poll's statements on it are its own.
+test("a sync by hand's progress: its changed rows counted as they arrive, ending at what it read, and its keys read against the database's count", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {
+  const N = 400_000;
+  const source = ownDatabase("progress", `CREATE TABLE t (id int PRIMARY KEY, v text); INSERT INTO t SELECT g, repeat('v', 40) || g FROM generate_series(1, ${N}) g`);
+  const url = `postgres://${source.user}${source.password ? `:${encodeURIComponent(source.password)}` : ""}@${source.host}:${source.port}/${source.database}`;
+  const logged: string[] = [];
+  const store = await DuckStore.open(path.join(dir, "progress.db"), (l) => logged.push(l));
+  const sync = new Sync(store, source, source.database, (l) => logged.push(l), 3_600_000, "poll");
+  await sync.open();
+  try {
+    await sync.setTables([tableOf("t", OFF)]);
+    sync.start();
+    await until("t copied and caught up", settled(sync, ["public.t"]), 120_000);
+    // every row changed, and a thousand deleted: the poll reads N - 1,000 changed rows, then the keys to find the deleted
+    psql(url, "UPDATE t SET v = v || 'x'; DELETE FROM t WHERE id <= 1000");
+    type Seen = NonNullable<ReturnType<Sync["state"]>[number]["polling"]>;
+    const seen: Seen[] = [];
+    const asked = new Date().toISOString();
+    const sample = setInterval(() => { const p = sync.state().find((s) => s.source === "public.t")?.polling; if (p !== undefined && p.startedAt >= asked) seen.push(p); }, 2);
+    let answer: Awaited<ReturnType<Sync["pollNow"]>>;
+    try { answer = await sync.pollNow(["public.t"]); } finally { clearInterval(sample); }
+    const [found] = answer.tables;
+    assert.deepEqual([found?.deleted, found?.rows], [1000, N - 1000], JSON.stringify(answer.tables));
+    const read = found!.added + found!.updated;
+    assert.ok(read >= N - 1000, `every row changed: ${read}`);
+    const last = sync.state().find((s) => s.source === "public.t")!.polling!;
+    assert.deepEqual([last.step, last.changedRows, last.keysRead, last.keysTotal], ["done", read, N - 1000, N - 1000], JSON.stringify(last));
+    // while the changed rows were read: a count that grew, from below what the read ended at, and never past it
+    const reading = seen.filter((p) => p.step === "reading").map((p) => p.changedRows ?? -1);
+    assert.ok(reading.length > 0, `sampled while reading: ${JSON.stringify(seen.slice(0, 5))}`);
+    assert.ok(reading.every((x, i) => x >= 0 && x <= read && (i === 0 || x >= reading[i - 1]!)), `a count that only grows: ${reading.join(", ")}`);
+    assert.ok(reading.some((x) => x > 0 && x < read), `a count between none and the whole read: ${reading.join(", ")}`);
+    // the keys: read against the database's count, the poll's own, never past it
+    const deleting = seen.filter((p) => p.step === "deleting");
+    assert.ok(deleting.length > 0 && deleting.every((p) => p.keysTotal === N - 1000 && p.keysRead !== null && p.keysRead <= N - 1000 && p.changedRows === read), JSON.stringify(deleting.slice(0, 3)));
+    // the steps in their order, never back: so many changed rows are written a piece at a time once the read commits
+    // (after its count and its keys), each piece said as it is written
+    const order = ["starting", "reading", "counting", "deleting", "writing", "done"];
+    const steps = seen.map((p) => order.indexOf(p.step));
+    assert.ok(steps.every((x, i) => x >= 0 && (i === 0 || x >= steps[i - 1]!)), `steps in order: ${[...new Set(seen.map((p) => p.step))].join(" → ")}`);
+    const pieces = seen.filter((p) => p.step === "writing").map((p) => p.pieces);
+    assert.ok(pieces.length > 0 && pieces.every((x, i) => x !== null && x.of === Math.ceil(read / 50_000) && x.written <= x.of && (i === 0 || x.written >= pieces[i - 1]!.written)), JSON.stringify(pieces));
+  } finally { await sync.stop(); await store.close(); }
 });
 
 // A SYNC'S TIME IS ONE VALUE, THE LEDGER'S: `poll_state.polled_at` was now() (the transaction's start) where the run

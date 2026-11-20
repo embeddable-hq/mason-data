@@ -85,7 +85,7 @@ const refusedNow = (sources: string[]): InstanceType<typeof PollRefused> | null 
 const asks: RequestQuery[] = [];
 const request: LedgerRequest = { requestId: "r1", startedAt: "2026-10-24T10:04:00.000Z", session: 3, applicationName: "Metabase", clientAddress: null, tokenName: "", user: "", role: "", attributes: null, method: "QUERY",
   outcome: "refused", status: "failed", sqlstate: "42P01", message: 'relation "nope" does not exist', detail: null, hint: null, rows: null, durationMs: 2,
-  endedAt: "2026-10-24T10:04:00.002Z", bytesSent: 120, query: "SELECT * FROM nope", queryTruncated: false, plan: null, planTruncated: false, origin: null };
+  endedAt: "2026-10-24T10:04:00.002Z", bytesSent: 120, query: "SELECT * FROM nope", queryTruncated: false, plan: null, planTruncated: false, origin: null, waitedMs: null };
 const window = (days: number) => ({ days, covered: days, statements: 3, completed: 1, refused: 1, failed: 0, cancelled: 1, rows: 20, bytesSent: 900, durationMs: { avg: 5, p50: 5, p95: 5 } });
 const summary: QuerySummary = { keptDays: 7, day: window(1), week: window(7) };
 // the listener's statements running now, and its cancel (src/api/postgres/server.ts): a session running one, another idle
@@ -263,7 +263,7 @@ test("the commands' way in: the run's token as a Bearer header, no cookie and no
   fs.writeFileSync(sourceFile, good.replace("customers: {}", "customers: { colums: [id] }"));
   const refused = await bearer("POST", "/api/pick", { table: "public.orders", picked: true });
   assert.equal(refused.status, 409);
-  assert.match(JSON.parse(refused.text).error, /^mason\/sources\/app\.yml: tables\.customers: unexpected key colums — did you mean `columns`\? — a table takes columns, exclude, key and sync — fix it first$/);
+  assert.match(JSON.parse(refused.text).error, /^mason\/sources\/app\.yml: tables\.customers: unexpected key colums — did you mean `columns`\? — a table takes columns, exclude, key, sync and references — fix it first$/);
   fs.writeFileSync(sourceFile, good);
   assert.equal((await bearer("POST", "/api/pick", { table: "public.customers", picked: false })).status, 200);
 });
@@ -495,11 +495,23 @@ test("POST /api/sync answers as the sync starts, and /api/state follows it to it
     assert.deepEqual(queued.body.failure, { code: "busy", message: queued.body.error, fix: "Mason never starts a second sync beside it.", next: [] }, "the same way out as a sync by hand's");
     queuedNow.clear();
     assert.deepEqual(asked, [["public.orders"]], "one read, however many asks");
+    // HOW FAR IT IS (issue 1173), beside it on the table: its poll not begun, its turn; then its changed rows read so far,
+    // as the sync counts them, with no share (no total is known) — mason status and the page render this, never 100%
+    const progressOf = async (): Promise<Record<string, unknown> | undefined> =>
+      ((await call("GET", "/api/state")).body.tables as Array<{ table: string; syncProgress?: Record<string, unknown> }>).find((t) => t.table === "public.orders")!.syncProgress;
+    const waiting = await progressOf();
+    assert.deepEqual([waiting?.step, waiting?.startedAt, waiting?.changedRows, waiting?.share], ["waiting", sync.startedAt, null, null], JSON.stringify(waiting));
+    copies = [{ source: "public.orders", phase: "copied", rows: 3, bytes: 1, seconds: 1, copiedAt: "2026-10-24T10:00:00.000Z", error: null,
+      polling: { startedAt: new Date(Date.parse(sync.startedAt) + 5).toISOString(), step: "reading", changedRows: 41_000, keysRead: null, keysTotal: null, pieces: null } } as CopyState];
+    const reading = await progressOf();
+    assert.deepEqual([reading?.step, reading?.changedRows, reading?.share], ["reading", 41_000, null], JSON.stringify(reading));
+    copies = [];
     end();
     await new Promise((r) => setTimeout(r, 50));
     const done = await byHand("public.orders") as { endedAt: string };
     assert.deepEqual(done, { id: sync.id, tables: ["public.orders"], state: "synced", startedAt: sync.startedAt, endedAt: done.endedAt,
       answer: { at: "2026-10-24T10:05:00.000Z", tables: [{ table: "public.orders", added: 1, updated: 1, deleted: 1, rows: 3, ms: 40 }] } }, "then what it did");
+    assert.equal(await progressOf(), undefined, "and no progress once it ended");
     assert.ok(Date.parse(done.endedAt) >= Date.parse(sync.startedAt));
     // A SYNC THAT FAILS: its reason on the state, the run's log says it once; one refused once the pass ahead ended keeps its code
     pollGate = null;

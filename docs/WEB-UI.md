@@ -78,9 +78,9 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   with no % beside it), and nothing once every table is synced.
 - **Overview**, the facts: one table, **Mason**, in the page's own words: **Source** (the database's name and host, its
   Postgres version, and whether it is your main database or a read replica), the warnings, Mason (its version and how
-  long it has been up), the restarts when there were any, the disk (free, and what the synced data uses), and the tools
-  connected. Under it, as quiet lines: that the database is on another machine, and how text sorts where it differs from
-  the database. In replication mode, a Changes table shows the stream and the WAL its slot holds.
+  long it has been up), the restarts when there were any, and the disk (free, and what the synced data uses). Who is
+  connected is on the Usage page. Under it, as quiet lines: that the database is on another machine, and how text
+  sorts where it differs from the database. In replication mode, a Changes table shows the stream and the WAL its slot holds.
 - **Overview**, the unsupported SQL: when a statement used SQL Mason does not support in the last day, one line naming
   the most refused entry of `docs/SQL-SUPPORT.md`, with **See all** (Queries).
 - **Tables** (`#tables`): the database's tables, as `mason tables` lists them, in two lists, **Added** over **Not
@@ -91,8 +91,8 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   written, then **Show 100 more** and **Show all**; the search is over every table, at once. A long name is never cut: it wraps in its cell.
 - **Tables**, an added table: its state (Synced, Syncing, Failed or Waiting) over its bar — every added table has
   one, as `mason status` draws one for each: full at 100% once synced, red when its first sync failed, amber when it is not kept
-  current, moving while it syncs, a shimmer while it waits — its rows, its last sync over how long it took, and the
-  table's size. What is said at length (the words `mason wait` prints after a bar not yet full, an error, why a table
+  current, moving while it syncs, a shimmer while it waits — its rows, its key, its columns and its sync (each a
+  button, below), its last sync over how long it took, and the table's size. What is said at length (the words `mason wait` prints after a bar not yet full, an error, why a table
   cannot be added, its stream state) is its note, a line of its own under the row, across every column — written for
   every row, empty when it says nothing, so a note that comes or goes moves no row. **View events** opens Sync events narrowed
   to that table; **Sync now** runs `mason sync` for it
@@ -114,14 +114,19 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   person scrolled in it stays put when the page is written again; and a long table name in its facts wraps rather
   than squeezing the value beside it (`placePops`, src/web/shared.js).
 - **Tables**, **the name keeps its room at every width** (issue 884: it was 2 px at 1024 px): measured against the
-  list's card, the name gets at least 200 px, and the less important columns give way first: Key below about 1350 px,
-  then Size (1250), Last sync (1140) and Rows (1040) beside the full sidebar. A column given way says its fact in the
-  row's note instead ("key id", "size 1.2 MiB", "last sync 3 h ago, took 0.2 s", "1,200 rows"). **A table's name and
+  list's card, the name gets at least 200 px, and the less important columns give way first. In Added: Key below about
+  1590 px, then Size (1490), Last sync (1370), Rows (1270), Columns (1150) and Sync (1040) beside the full sidebar.
+  Columns and Sync give way last because they are buttons, and a button is easier to find in a column than in a note.
+  Not added has no Columns or Sync column, so its other columns have more room: Key gives way below about 1350 px,
+  then Size (1250), Last sync (1130) and Rows (1030). A column
+  given way says its fact in the row's note instead ("key id", "size 1.2 MiB", "last sync 3 h ago, took 0.2 s", "1,200
+  rows"). For Columns and Sync, the note shows the button itself ("All columns", "Sync: Off"), so it can be pressed at
+  every width, a phone's too. **A table's name and
   its state are never cut with "…"** (the owner: "otherwise we can't see them"): each wraps in its cell — a name after
   its `.` and `_` where it can, anywhere where it must — and the row grows to fit. On a phone the same columns give way,
   the state is narrower and a row's actions are stacked in a column of their own, so the list fits its card and every
   name and state reads whole. The page never scrolls sideways.
-- **Tables**, an added table's **columns**, on its note beside its sync: which it syncs in a few words — "All columns",
+- **Tables**, an added table's **columns**, in its Columns column: which it syncs in a few words — "All columns",
   "5 of 12 columns" or "All but 1 column", the columns themselves its tooltip (`/api/state` `tables[].entry`,
   `addedColumns`, `columnCount`). It is a button that opens the table's **column form**, a dialog beside it that reads
   `GET /api/tables/<table>/columns` once, as it opens. It has two choices: **All columns, and any added to the table
@@ -139,9 +144,13 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   the entry says send the entry's own lists, so the run answers `already` and writes nothing. **An entry the boxes cannot
   show** — an `exclude:` written by hand, or every column with a secret-looking one kept on purpose — is described at
   the top of the form, its boxes the columns synced now, and the form says that saving replaces the entry with the
-  columns ticked. Where the page may not edit the sources file, the columns are said alone, with no button.
-- **Tables**, an added table's **sync**, first on its note (`Sync: Off`, `Sync: Every 5 minutes`, `Sync: Live
-  (replication)`, as the run keeps it now: `/api/state` `tables[].kept`): a button that opens its **Sync choice**, a
+  columns ticked. Where the page may not edit the sources file, the columns are said alone, with no button. The Not
+  added list has no Columns or Sync column, since a table not added has neither. Its own Columns… is beside its Add
+  (below). A table added from that list keeps its row there until the lists are laid out again, and its columns and
+  its sync are buttons in the line under it.
+- **Tables**, an added table's **sync**, in its Sync column (`Off`, `Every 5 minutes`, `Live (replication)`, as the run
+  keeps it now: `/api/state` `tables[].kept`; `Sync: Off` in the note, where the column gave way): a button that opens
+  its **Sync choice**, a
   dialog beside it that reads `GET /api/tables/<table>/sync` once, as it opens (never on a timer: it opens a connection
   to the database), and saves with `POST /api/pick` `{ table, picked: true, sync, keep: true }`, as `mason add <table>
   --sync …` does, writing the entry's `sync:` line alone:
@@ -173,8 +182,9 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   under Only these columns); **Name its key…** does the same for a
   table with no primary key.
 - **Users** (`#users`), in this order: the list of users, right under the title (and its read-only line), then the add
-  box (the add form; and, where it may be opened, a Temporary cloud login) with the card of what it made beside it,
-  then Connect, so a card that appears moves nothing above it. A person arriving on the page — its address opened, a
+  box (the add form; and, where it may be opened, a Temporary cloud tunnel) with the card of what it made beside it,
+  then **Connect a Postgres client or BI tool** and **Connect an AI agent**, so a card that appears moves nothing
+  above it. A person arriving on the page — its address opened, a
   link of the sidebar or another followed — starts with the cursor in the form's **Name**, once the form is written;
   never at a poll's write after that, never at a hash of the page already shown (a tab of the list, a range), never taken from what the person focused since they arrived, never on a touch
   screen (`(pointer: coarse)`, where it would open the keyboard over the page), and not on a read-only page, which has
@@ -204,45 +214,101 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   each with **Copy** and laid out the same way, the User its name as plain text (a field `mason user add --json` does
   not carry is not shown); "Shown once" in the password's row, right of its **Copy** and of the button's height
   (`--control-sm`); and one line, "The password is only shown once", over **I have copied it**. No Database row: the
-  URL already carries the database, and the database, host, port and SSL mode are Connect's on the same page (`mason
-  user add` in a terminal still prints all of them). No psql line: the URL is the same thing, pasted after `psql`. Mason
-  keeps no copy, so it is never shown again. Under the rows, a status line: "Waiting for its first query…" until Mason
+  URL already carries the database, and the database, host, port and SSL mode are Connect a Postgres client or BI
+  tool's on the same page (`mason user add` in a terminal still prints all of them). No psql line: the URL is the same
+  thing, pasted after `psql`. Mason keeps no copy, so it is never shown again. With `mason serve`'s MCP endpoint on as
+  the user is added (`/api/state` `mcp`), an **MCP URL** row under the URL, the endpoint's address with **Copy**: both
+  addresses up front (issue 1155). Under the last of them, across the rows' width, a closed section, **Connect an AI
+  agent** (issues 1114, 1155): the page's box of that name, built by the same function (`mcpBody`) with this user's URL,
+  its password in it, but for the address, which is the row's. With the endpoint on, the lines per client and the
+  sign-in, which names the user ("If the sign-in page asks for a Mason user, sign in as <name>, with the password
+  above": an operator's sign-in page may check a Mason password with `mason user check`, docs/POSTGRES-API.md), then
+  the `mason mcp` way in its own closed details; off, the `mason mcp` way alone. Its two lines — Claude Code's, then one
+  line saying it saves the password in the shell's history and that the JSON in a client's settings file doesn't, then
+  the JSON — each with **Copy** and "Shown once" under it. They live as the password does: in the page's memory while
+  the dialog is open, dropped at **I have copied it**. The package and the endpoint are the run's as the user was
+  added, so a later read never rewrites the dialog; whether a section is open is the page's (`createOpenSet`), so a
+  rewrite keeps it. A section's long line scrolls inside its own block, and
+  the section never widens the dialog. A field the JSON does not carry (no URL) leaves the section out. A temporary
+  cloud tunnel's dialog has no such section: it is for a tool in the cloud, which runs no command on a computer of its
+  own. Under the rows, a status line: "Waiting for its first query…" until Mason
   has seen the user — a session of it open (`/api/state` `sessions`), or a statement of it since it was added
   (`/api/users?lastUsed=1` `lastUsedAt`) — then "Connected", held once seen. While it waits, the state is read every
   5 s instead of 30 s.
-- **Users**, Connect: once for the run, where a tool connects — host, port, database and SSL mode, each with **Copy**,
-  and the URL with `<user>:<password>` in place, with **Copy** — as `mason status` says it, with no psql line (the URL
-  is the same thing, pasted after `psql`). No user's row carries a URL:
+- **Users**, **Connect a Postgres client or BI tool**: once for the run, where a tool connects — host, port, database
+  and SSL mode, each with **Copy**, and the URL with `<user>:<password>` in place, with **Copy** — as `mason status`
+  says it, with no psql line (the URL is the same thing, pasted after `psql`). No user's row carries a URL:
   the card shown once when a user is added is the only place its password is copied.
-- **Users**, the add box's **Temporary cloud login** (under `mason start` only: never under `mason serve`, whose run
+- **Users**, **Connect an AI agent** (issues 1114, 1115, 1155), under it, from the same facts (`/api/state`
+  `postgres.shown`, `engine.version`) and `mason serve`'s MCP endpoint (`/api/state` `mcp`), so it says nothing
+  `/api/state` cannot. The owner asked it to be easy and intuitive (2026-11-18): fewer words, no tip said twice, nothing
+  to read before the address. **With the endpoint on**, every client uses its address: one line ("Add this address to
+  your agent, then sign in in your browser."), the address (`MASON_MCP_URL`) with **Copy**, then a line per client
+  saying where it goes — **claude.ai and Claude Desktop**: Customize, then Connectors, then Add custom connector;
+  **ChatGPT**: turn on Developer mode in its settings, then create an app with the address; **Claude Code**: `claude mcp
+  add --transport http mason <url>` with **Copy**, then sign in from `/mcp`; **Cursor**: the server's `url` in
+  `~/.cursor/mcp.json`, with **Copy** — then one line of sign-in (paste only the address, leaving any OAuth client ID,
+  secret, token or header fields empty; sign in as a Mason user), and one line on where each connects from, for
+  Connects from (Claude Code and Cursor from the person's computer; claude.ai, Claude Desktop and ChatGPT from their
+  companies' servers). Under them, a closed **For a client that can't sign in in a browser**: the `mason mcp` way below.
+  **With it off**, the `mason mcp` way alone: **Claude Code**'s line to run, `claude mcp add mason --env
+  MASON_URL="<url>" -- npx -y @mason-data/cli@<version> mcp`, and the JSON for **Claude Desktop, Cursor and others**'
+  MCP settings (`npx` as the command, `MASON_URL` in `env`), pretty-printed, each in a block with **Copy**; that a user's
+  name and password go in place of `<user>` and `<password>` and that it needs Node 22.13 or later (cli/package.json
+  `engines`, held equal by a test); and that claude.ai and ChatGPT on the web can't connect this way yet. **Connects
+  from** offers, after anywhere and only these addresses, each hosted agent's published ranges under **A hosted agent's
+  servers** (an `<optgroup>`; `/api/state` `addressPresets`, src/cli/address-presets.ts), each named for the product
+  that calls from them, "claude.ai" and "ChatGPT on the web" (issue 1155: "Claude (Anthropic)" was taken for Claude
+  Code), a choice whose option names it (`preset:<id>`) and sends the ranges the run lists for it, chosen for a user
+  whose ranges are exactly a company's; the box hides behind it as behind anywhere, and a line says only
+  that agent's connectors connect from them and that Claude Code and Cursor take anywhere or the person's computer's
+  address — in From… in the address box's place, in the add form under its line in the line on roles' place (the box
+  beside the choice is too narrow there); each in one grid cell with what it replaces, unseen while another is chosen,
+  so nothing moves — and a user's row says "from ChatGPT's servers (289
+  ranges)", never a wall of CIDRs. The Postgres URL is in the client's environment, never on its command line (`mason mcp` reads
+  `MASON_URL`). The package is pinned to the run's version where it is a release npm has (`0.22.0`: the package's, or
+  a release image's), so the client runs the same Mason as the server; a checkout's `dev` or an image of main's
+  `main-<sha>` leaves it unpinned. It is shown wherever the box above is (a served run and a read-only page too), with
+  the same note on a server's page, and not where the run says no URL. A long line scrolls inside its own block, never
+  the page (`copyBlock`).
+- **Users**, the add box's **Temporary cloud tunnel** (under `mason start` only: never under `mason serve`, whose run
   refuses it, and never on a read-only page, `pageReadOnly`, whatever `MASON_UI_READ_ONLY_ALLOW` still allows; there
   the box is the plain add form, with no segments): `mason share` from the page, for a tool in the cloud that cannot
   reach this machine. It is the same flow as adding a user with another job, so it is the box's second kind: two
-  segments on top of the box, **New user** (the form above) and **Temporary cloud login**, a segmented control as the
+  segments on top of the box, **New user** (the form above) and **Temporary cloud tunnel**, a segmented control as the
   time range's, the choice the page's own (not the hash: a form's, not a view's). The two panes sit in one grid cell,
   the one not chosen unseen in its place, so the box keeps the height of the taller and a choice moves nothing on the
   page; each pane is a part of its own (`add-user-box`, `add-share-box`), so a choice rewrites neither, and a name being
-  typed stays. The pane: "For a tool in the cloud that can't reach this machine. Opens a public address with a login
-  of its own, until you stop it.", a **Role** choice where `mason/roles.yml` offers more than one role a share may
+  typed stays. The pane: "For a tool in the cloud that can't reach this machine. Opens an address reachable online,
+  protected by a login and password of its own, until you stop it. It usually opens in a few seconds." (Mason's own
+  part takes well under a second, measured over a stub tunnel; the rest is the tunnel's service. The run gives up
+  after 30 s and says so.) Then a **Role** choice where `mason/roles.yml` offers more than one role a share may
   read as (`GET /api/share/choices`, read beside the state while it is offered, as `mason share --role`; each option
-  says what it reads), and **Open a cloud login**, held disabled while one opens or is open (one at a time). The click
+  says what it reads), and **Open a cloud tunnel**, held disabled while one opens or is open (one at a time). The click
   is the person's yes, the pane's sentence what they have read before it, and no question follows: `POST /api/share` `{ from: "page", confirmed: true, role? }` opens the same share the command
   opens (src/cli/page-share.ts): the run makes the password and starts the tunnel's client. What it opened is shown
-  once in the same modal dialog as New user added, titled **Temporary cloud login**: URL, **Login** (its own, never a
+  once in the same modal dialog as New user added, titled **Temporary cloud tunnel**: URL, **Login** (its own, never a
   `mason user`, and never listed or counted among the users) and **Password**, the URL and the Password each with
-  **Copy**, "Shown once" beside the password's Copy; how long it has been public and what it reads; that the password
+  **Copy**, "Shown once" beside the password's Copy; that it is online and until when, and what it reads (the card's line,
+  below, counting down as the card's does); that the password
   is only shown once and is not saved; and **I have copied it**, its only way out, as a new user's. The password is in
   that one answer alone, kept in the page's memory until the dialog closes (or the share is seen ended, when the
-  dialog goes with it). Under the add box a card, titled **Temporary cloud login** on its top edge, shows it live: the
-  host, port and login, that the password was shown once, how long it has been public and what it reads, "Live until
-  you stop it", when a free one ends sooner (within about an hour) and that it ends when the page closes, and **Stop**
+  dialog goes with it). Under the add box a card, titled **Temporary cloud tunnel** on its top edge, shows it live: what a
+  BI tool's form asks for, in the order of Connect a Postgres client or BI tool, **Host**, **Port**, **Database** and
+  **SSL mode** (always `require`: the share's socket takes TLS alone), each with **Copy**, then the **Login**
+  (`/api/state` `share.shares[]`, which carries the database and the SSL mode); that the password was shown once; that
+  it is online and until when, and what it reads: with an end (a free tunnel's hour) "Online · ends in 59 min, at
+  18:55", the time left counting down at each write of the page as an age counts up (`<time data-tick>`: its text set
+  in place, so nothing moves), and "ending now" once the end has passed and the state has not yet seen the tunnel go;
+  with no end "Online until you stop it", with no timer; that it also ends within two minutes of closing the page;
+  and **Stop**
   (`DELETE /api/share/<user>`), which takes the focus when the dialog closes. After a reload the card is the same.
   While it opens, the card says so. The page holds it by a beat (`POST
   /api/share/<user>/beat`, every 15 s, hidden or not): two minutes without one (the tab closed, crashed or asleep) and
   it, its sessions and the tunnel's client end. How it ended (Stop, the tunnel dropped, from `/api/state`
   `shareEnded`) is said in the card's place, and a refusal there is the run's Failure; the pane is the form again.
-  Connect says, where it is offered, that a tool in the cloud that can't reach this machine uses Temporary public
-  login in the box above.
+  Connect a Postgres client or BI tool says, where it is offered, that a tool in the cloud that can't reach this machine uses Temporary cloud
+  tunnel in the box above.
 - **Users**, the list: two tabs over the table, a segmented control as the time range's, each with its count —
   **Active** (the default, `#users`: the users not removed, a disabled one among them with its Disabled status) and
   **Removed** (`#users?show=removed`: the removed ones, muted, with Queries alone). The tab is the hash's
@@ -348,7 +414,7 @@ while it waits (still under `prefers-reduced-motion`); a state's marker is a sma
 Getting-started steps are courses of a wall, an empty state is one quiet line of muted text (`empty`: no box, no
 icon, one short sentence, the same on every page), and the mark is an
 arch of bricks with its keystone, drawn inline. All of it is borders and boxes: no gradient, no image. A left sidebar
-as Vercel's and Supabase's are (Mason, the database's name, a **demo** badge when it is the demo database; the nav,
+as Vercel's and Supabase's are (Mason, the database's name alone or a server's `MASON_UI_TITLE_FILE` label, a **demo** badge when it is the demo database; the nav,
 each link an icon and its label, the one shown a pale stone row with the patina at its edge; at its foot how long ago Mason last
 answered — `Updated 3 s ago`, which keeps counting when it stops answering — and the version), the time range as a
 segmented control at the top of the Observability views, and on the Overview the run's word beside a big brick, a
@@ -575,6 +641,27 @@ listens, and every browser connection crosses that one ssh connection as frames 
   0-9, `+`, `/` and its `=` padding: no space and no %-encoding. A PNG must start as a PNG file does. An SVG must be
   UTF-8 text with an `<svg>` element. The message never repeats the value. The icon is not in `/api/state` or `mason
   status --json`: the page has it in its HTML. `mason start` refuses it, as the other `MASON_UI_*` server settings.
+- **The label in the header box: `MASON_UI_TITLE_FILE`.** The box at the top of the sidebar shows the database's name.
+  An operator who runs several deployments can name each one in their own words instead. Set the setting to a file's
+  path, and the file's first line is shown in the box. Every viewer of the page sees it.
+  - **It is read again as the page loads.** The run reads the file at its start, each time the page's document is loaded
+    (`GET /`), and each time a command asks for the whole state (`/api/state?columns=1`, which `mason status` asks).
+    The page's polls of `/api/state` answer what was read last and never touch the file. So an edit shows at the next
+    load of the page, with no restart.
+  - **It is bounded, and plain text.** The run reads at most the first 1024 bytes, and only from a regular file. A
+    folder, a pipe or a device is refused, and a pipe is opened without blocking, so it cannot hang the run. It takes
+    the first line (up to `\n`, `\r\n` or `\r`) as strict UTF-8. A control character becomes a space. An invisible
+    format character is dropped: a bidi control, a zero-width space, a BOM. The two joiners that emoji and some
+    scripts need (U+200C, U+200D) are kept. Runs of white space become one space, and the line is trimmed. A line over
+    80 characters is cut on a whole character and ends with "…". The page escapes it: it is text, never HTML.
+  - **A failure never breaks the page.** A file that is missing, a folder, a file Mason may not read, bad UTF-8 or an
+    empty first line leaves the box showing the database. `mason status` says why on its Web UI label row.
+    `mason status --json` says `pageTitle: { label, problem }`, with `problem.code` one of `missing`, `not_a_file`,
+    `no_permission`, `not_utf8`, `empty` or `unreadable`. The run's log says each reason once. Neither the state nor
+    the log names the file's path, since the page shows both.
+  - A file that does not exist yet never refuses the start. A name that is not the setting (`MASON_UI_TITLE`) does, with
+    a `did you mean`. `mason start` refuses the setting, as the other `MASON_UI_*` server settings. Unset,
+    `/api/state` and `mason status` say nothing of it (`src/cli/ui-title.ts`).
 - **In the image, Mason's user is uid 1000, gid 1000 (`node`), and stays so**: an image that changes it names it under
   "Before you upgrade" in its release notes (deploy/mason-data/README.md). A supervisor that creates the folder of the
   socket or the run file makes it owned by `1000:1000`, mode 0700, where the container mounts it (the one folder rule of
@@ -614,7 +701,7 @@ under the server's own Host it needs the run's token, which never reaches your m
 - **Connect says what its URL's host is**: the Postgres API's address as the server sees it, often `localhost`, which a
   tool elsewhere replaces with the server's own address. With `MASON_PG_PUBLIC_URL` set (the address a client reaches,
   behind a load balancer or a DNS name: docs/POSTGRES-API.md "The address clients reach"), Connect, the Users page's
-  Connect and a user's card print that address, its port and its `sslmode`, and say nothing of the host
+  Connect a Postgres client or BI tool and Connect an AI agent, and a user's card, print that address, its port and its `sslmode`, and say nothing of the host
   (`/api/state` `postgres.public`).
 
 `mason ui` on the server itself is refused, naming `--ssh`: nobody sits at a browser there. `mason status` says the same line.
@@ -798,6 +885,13 @@ reads:
   read again whole, being caught up), or null when it would run. Once the sync holds it there are
   also `kept` (how it is kept current now: `by` is `poll`, with its `sync`, or `replication` or `recopy`) and `duck`.
   A table synced by hand since the run started also has `syncByHand`, its last such sync (`POST /api/sync`, below).
+  While that sync runs the table also has `syncProgress`: `step` (`waiting` for its turn, `starting` its read, `reading` its changed rows,
+  `writing` them, `counting` its rows on the database, `deleting` while it reads the database's keys to find the rows
+  deleted there, `read` once its part is done), `startedAt` and `seconds` (since the sync began), `changedRows` (the
+  changed rows read so far, counted as they arrive), `keysRead` and `keysTotal` (the database's count of its rows, which
+  the sync reads anyway), `pieces` (`{ written, of }` for a large set of changes written a piece at a time), and `share`.
+  Each is null where it has none. `share` is how much is done where a total is known, the keys read, and null
+  otherwise: the page then draws no bar, and never the table's full bar from the sync before.
   While the run's own sync of a table runs, the table has `rebuilding`: `kind` is `copy` (its first sync, or the table
   read again whole) or `catch-up` (the one sync of what changed meanwhile that follows it), and `startedAt` is when it
   began.
@@ -856,8 +950,10 @@ left out), `already` (the file said so already, and nothing was written), `sync`
 (why a table under a replication default is polled, or null), `pollCost` (what a frequent poll of a big table costs the
 database, or null), `disk` (whether its sync fits on disk: `{ table, estimateBytes, freeBytes, reserveBytes,
 pendingBytes, spillSet, resync, fits }`, `fits` false when added with `yes`; `{ table, unknown }` when the free disk
-could not be read; null when nothing is synced whole), and `state`, the lean state after the edit. The table's first
-sync starts at once.
+could not be read; null when nothing is synced whole), `referencesWritten` (the foreign keys it wrote as `references:`,
+each `{ table, columns, references, targetColumns }`, on the entry of the table that holds it), `referencesLeftOut`
+(the foreign keys it did not write, the same with `reason`), and `state`, the lean state after the edit. The table's
+first sync starts at once.
 
 | Status | `code` | When |
 |---|---|---|
@@ -869,8 +965,9 @@ sync starts at once.
 ### Remove tables: `POST /api/remove`
 
 `{ "tables": ["orders", "billing.invoices"] }`, each as the file names it or as `schema.table`. The answer is `200`
-with `removed` (the tables whose entries were cut, as `schema.table`), `file` (the sources file, absolute) and
-`state`, the lean state after the edit. The tables' synced data is dropped at once.
+with `removed` (the tables whose entries were cut, as `schema.table`), `file` (the sources file, absolute),
+`referencesRemoved` (the references other entries held to them, taken out: `{ table, columns, references, targetColumns }`)
+and `state`, the lean state after the edit. The tables' synced data is dropped at once.
 
 | Status | `code` | When |
 |---|---|---|

@@ -153,7 +153,7 @@ test("the browser is the platform's: open on macOS, start on Windows, xdg-open e
   assert.deepEqual(openCommand!("freebsd", u), ["xdg-open", [u]]);
 });
 
-// ------------------------------------------------------------------ Temporary cloud login: the page's share endpoint
+// ------------------------------------------------------------------ Temporary cloud tunnel: the page's share endpoint
 
 const { RunShares } = await import("../src/cli/share-run.ts");
 const { PageShares } = await import("../src/cli/page-share.ts" as string).catch(() => ({})) as typeof import("../src/cli/page-share.ts");
@@ -218,6 +218,9 @@ test("the page's share opened: its password in the one answer and no log line; a
     assert.deepEqual([r.host, r.port, r.sslmode, r.beatMs, r.boundMs], ["relay.example", 41234, "require", 15_000, 120_000]);
     assert.ok(!s.logged.join("\n").includes(r.password), "no log line carries it");
     assert.ok(!JSON.stringify(s.shares.state()).includes(r.password));
+    // the share as /api/state `share` lists it (RunShares.state): the database and SSL mode a tool's form asks for, beside
+    // its host and port (issue 1117)
+    assert.deepEqual(s.shares.state()?.shares.map((x) => [x.user, x.host, x.port, x.database, x.sslmode]), [[r.user, "relay.example", 41234, "shop", "require"]]);
     const second = await s.ask("POST", "/api/share", { body: OPEN });
     assert.equal(second.status, 409);
     assert.match(JSON.parse(second.text).failure.message, new RegExp(`a share is open already: ${r.user}, opened by the web page at relay.example:41234`));

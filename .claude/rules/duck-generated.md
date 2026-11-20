@@ -162,7 +162,10 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   with it, since `mason wait` exits 1 on it; a child that fails is taken out of its parent's run, which goes on without it. Detector: the chain tests
   of tests/duck-generated-chains.test.ts and tests/duck-generated-chain-lag.test.ts, and the itest's children held to Postgres over the parent's view.
 - **A cycle is refused by name, with the tables in it**: from the SQL's names when the folder is read (`readsByName`,
-  `findCycles`), else from what the plan reads at the check (`cycleOf`). A refused table keeps serving what it was built
+  `findCycles`), else from what the plan reads at the check (`cycleOf`). The names follow Postgres's scoping of WITH
+  names, read by src/duck/cte-names.ts `cteReads` alone: a WITH query's own body reads the table of its name, unless
+  it is RECURSIVE. Its own rule missed that, and two tables reading each other that way waited for each other for ever
+  (issue 1096). A refused table keeps serving what it was built
   from, as any refusal does.
 - **A file's name is its table.** A name a synced table holds is refused, and the synced table wins the catalog
   (`served`, `names`) and the table: what was deployed under that name is let go with its ledger row (`release`), and

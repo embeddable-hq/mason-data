@@ -301,7 +301,8 @@ describe("mason init demo, then the run as a person drives it", { timeout: 300_0
   test("mason add order_items while the run is up, then mason wait: the fourth table lands in the sources file and is copied", async () => {
     const a = await mason(["add", "order_items"]);
     assert.equal(a.code, 0, said(a));
-    assert.match(fs.readFileSync(path.join(root, "mason", "sources", "demo.yml"), "utf8"), /^ {2}order_items: \{\}$/m);
+    // its foreign keys to orders and products, which the demo syncs, written as references (issue 1143)
+    assert.match(fs.readFileSync(path.join(root, "mason", "sources", "demo.yml"), "utf8"), /^ {2}order_items:\n {4}references:\n {6}order_id: orders\.id\n {6}product_id: products\.id$/m);
     const w = await mason(["wait", "--timeout", "60"]);
     assert.equal(w.code, 0, said(w));
     assert.match(w.stdout, /^Ready: every added table is synced and served\.$/m);

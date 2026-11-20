@@ -1,13 +1,18 @@
 ---
 paths:
+  - "src/duck/bucket-column.ts"
   - "src/duck/extensions.ts"
   - "src/duck/sync.ts"
+  - "src/duck/text-compression.ts"
+  - "tests/duck-bucket-zones.test.ts"
   - "tests/duck-copy-disk.test.ts"
   - "tests/duck-copy-order.test.ts"
   - "tests/duck-copy-retry.test.ts"
   - "tests/duck-extensions.test.ts"
+  - "tests/duck-text-compression.test.ts"
   - "tests/integration/duck-poll.itest.ts"
   - "tests/integration/duck-rewrite.itest.ts"
+  - "tests/integration/duck-time-bucket.itest.ts"
 ---
 
 <!-- Loaded only when a matching file is read or edited (the paths above). CLAUDE.md lists every rules file. -->
@@ -61,6 +66,12 @@ paths:
   checkpoint never merges the small row groups a copy of large values leaves (`max_vacuum_tasks` 0, read back at every
   open, `instanceSettingsProblem`): such a merge that did not fit invalidated the whole database (issue 371; docs/DESIGN.md
   "No checkpoint merges row groups"). `duck-poll.itest.ts` holds both shapes and the two out-of-memory paths (docs/DESIGN.md "Large values out of line").
+- **Whether a chunk that failed committed is its ledger row's to say, never the error's** (issue 1152; `committedRow`):
+  a COMMIT can answer out of memory after its chunk committed, and its ROLLBACK then says "no transaction is active".
+  Read as rolled back, its range was given back and read again into `copy_chunks`' key, and the first sync failed with
+  `Duplicate key … first_page`. So after any failure a chunk's row is read on its connection: there, the chunk is the
+  copy's (an out of memory still makes it one reader, halved); not there, it is given back; unreadable, the copy fails
+  and its retry continues from the ledger. `tests/demo-source.test.ts` holds both errors.
 - **A copy's progress is rendered between commits** (`CopyLive`, `copyProgressNow`, `CopyState.progress`): the chunks
   done and about how many in all, the ones reading and how long the oldest has, the readers' measured rate and the time
   the pages left take at it, and the rows the chunks in flight have read by now at that rate, each held under 90 % of
@@ -152,6 +163,32 @@ paths:
   never listed (the copy's view of its visible columns, stored JSON paths on or off), and the rewrite reads it only to
   print (`scaleOf`): keys, filters and aggregates stay the engine's DECIMAL. A copy without it is read again once
   (`SCALE_LAYOUT`). Why: Postgres prints `12.5` beside `12.49`, and one DECIMAL scale printed `12.50`.
+- **A reference's hidden integer keys are a column a side table gets before its swap** (src/duck/reference-keys.ts
+  `fillSide`, issue 1144): added to the side table and numbered from the dictionary, read only, on the rebuilds'
+  connection, in chunks the stop can interrupt. Never listed, like the scale column. A key the dictionary lacks stays
+  NULL until the writer numbers it.
+- **A timestamptz's 15-minute bucket is a hidden column every write computes** (`src/duck/bucket-column.ts`, issue
+  1146). Beside each `timestamptz` column the copy holds an INTEGER, the value's 15 minutes of UTC (`bucketSql`). It is
+  NULL for a NULL, and `BUCKET_NONE` (-1) for a value no bucket decides: before 1980, from year 10000, ±infinity. The
+  column's own statistics are then what says a table holds no such row, so nothing is recorded beside it, and a write
+  that adds one says so in its own transaction. The copy's chunks, the poll's `writeStaged`, the
+  stream's `writeByKey` and `updateCarried` each compute it from the value, and a compaction keeps it. A new write path
+  into a copy names it too, or a GROUP BY of a unit groups that table's rows by a stale bucket. It is never listed. A
+  copy an older Mason made has none, and serves with today's plan until it is synced again whole. A `timestamp` has
+  none: its truncation never reads the session's zone, so grouping by its unit is already the engine's arithmetic.
+  Why: a GROUP BY of a month in a zone other than UTC worked the calendar out once a row; grouped by the bucket first,
+  it works it out once a bucket (duck-rewrite.md "A time's unit grouped by its bucket").
+- **Each text column is compressed by its own values** (`src/duck/text-compression.ts`, issue 1140): `beginCopy` reads
+  one sample of the source in the copy's snapshot (`sourceLengthsSql`, then `sourceDistinctSql`: about 100 pages by
+  `TABLESAMPLE SYSTEM`, at most 10,000 rows, one row of aggregates back each), and gives each VARCHAR or JSON column
+  `USING COMPRESSION` in the side table's definition (`textStorage`): the dictionary (`dict_fsst`) for values under 64
+  bytes or repeated, ZSTD for long values that do not repeat or a column whose text could reach 16 KiB. A json's or
+  jsonb's sample is its size as stored, so it gets the dictionary only when every value is uncompressed and under 2,000
+  bytes (`dictionaryHolds`). Why: a jsonb stored compressed at 3 KB was 52 KB of text, and the dictionary stored it
+  Uncompressed, 51 times ZSTD's size. A compaction decides again from the table's own rows (`rewrite`,
+  `syncedLengthsSql`). Why: the instance's forced ZSTD stored a six-value status 16 times larger than the dictionary, and
+  a count by it read cold took 4.03 s against 0.17 s. The definition carries the choice, so a new path that makes a
+  synced table must give its text columns a clause, or they fall back to the instance's ZSTD.
 - **What heap order gives up**, said as such: a wide uuid-keyed table's click takes seconds, a point lookup by a random
   uuid is a scan, and uniqueness is the write path's (the oracle holds every copy to the source), not the engine's. The
   later step is a sort by a declared time column once the sources file names one.

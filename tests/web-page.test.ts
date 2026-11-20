@@ -254,10 +254,10 @@ test("each added table's line is mason status's: the table, its percent and what
   }
 });
 
-test("the Overview's facts card: Source, Mason, Disk and Connected tools in the page's words — no Sources file, Changes or Web page row (issue 877; the owner kept it, 2026-11-13; Source, issue 935)", () => {
+test("the Overview's facts card: Source, Mason and Disk in the page's words — no Sources file, Changes, Web page or Connected tools row (issue 877; the owner kept it, 2026-11-13; Source, issue 935; issue 1111)", () => {
   const factRows = fn<[unknown, number], Array<[string, string, boolean]>>("factRows");
   const rows = factRows(RUNNING, NOW);
-  assert.deepEqual(rows.map(([k]) => k), ["Source", "Mason", "Disk", "Connected tools"]);
+  assert.deepEqual(rows.map(([k]) => k), ["Source", "Mason", "Disk"]);
   // the database's name and host, the version's number alone (no build in brackets), and what kind of server it is
   const standby = (version: string, on: boolean) => factRows({ ...RUNNING, source: { ...RUNNING.source, version, standby: on } }, NOW)[0];
   assert.deepEqual(standby("16.15 (Ubuntu 16.15-1.pgdg20.04+1)", true), ["Source", "shop on db.example.com · Postgres 16.15 · a read replica", false]);
@@ -277,11 +277,11 @@ test("the Overview's facts card: Source, Mason, Disk and Connected tools in the 
     ["Disk", "1.0 GiB free · the synced data uses 1.0 MiB · the first syncs running need about 2.0 GiB more. That is more than is free: the sync stops before the disk fills", true]);
   assert.deepEqual(disk({ path: "/x", freeBytes: null, copyBytes: null, projectedBytes: null, error: "the free space where the synced data is could not be read: EACCES" }),
     ["Disk", "the free space where the synced data is could not be read: EACCES", true]);
-  // the sessions, as the tools connected
-  const tools = (sessions: unknown) => factRows({ ...RUNNING, sessions }, NOW).find(([k]) => k === "Connected tools");
-  assert.deepEqual(tools({ open: 0, byClient: [] }), ["Connected tools", "none", false]);
-  assert.deepEqual(tools({ open: 5, byClient: [{ user: "metabase", client: "Metabase", open: 3, running: 1 }, { user: "", client: "psql", open: 2, running: 0 }] }), ["Connected tools", "2 connected", false]);
-  assert.deepEqual(tools({ error: "the listener did not answer" }), ["Connected tools", "unknown: the listener did not answer", false]);
+  // who is connected is the Usage page's, never a row here, whatever the sessions say (issue 1111)
+  for (const sessions of [{ open: 0, byClient: [] }, { open: 5, byClient: [{ user: "metabase", client: "Metabase", open: 3, running: 1 }, { user: "", client: "psql", open: 2, running: 0 }] }, { error: "the listener did not answer" }]) {
+    assert.deepEqual(factRows({ ...RUNNING, sessions }, NOW).map(([k]) => k), ["Source", "Mason", "Disk"], JSON.stringify(sessions));
+    assert.doesNotMatch(textOf(fn<[unknown, number], string>("renderFacts")({ ...RUNNING, sessions }, NOW)), /Connected|connected|listener/, JSON.stringify(sessions));
+  }
   // restarts only when there were some, without a command
   const restarted = factRows({ ...RUNNING, engine: { ...RUNNING.engine, restarts: { count: 2, last: { at: new Date(NOW - 300_000).toISOString(), why: "it ran out of memory", upSeconds: 120 } } } }, NOW);
   assert.deepEqual(restarted.find(([k]) => k === "Restarts"), ["Restarts", "2, the last 5 min ago: it ran out of memory, after 120 s up", true]);
@@ -595,7 +595,8 @@ test("no table added: the commands' sentence, and what adds one", () => {
   assert.match(textOf(fn<[unknown, unknown?], string>("renderStatus")(NONE)), /^Getting started 2 of 3 done ✓ Mason is running \(done\) ○ Sync a table \(to do\) Add a table ✓ Create a user \(done\)$/);
   // where Getting started cannot tell (the users unreadable): the commands' sentence, and the facts card
   const html = fn<[unknown, unknown?], string>("renderStatus")({ ...NONE, users: { error: "users.json cannot be read" } });
-  assert.match(textOf(html), /^No table added yet\. Your database has 4\. Add one on the Tables page\. Mason Source .* Connected tools none Your database is on another machine\. Mason will sync the tables you choose to this machine\.$/, "no box: the facts card says the Source, then where it is, as information");
+  assert.match(textOf(html), /^No table added yet\. Your database has 4\. Add one on the Tables page\. Mason Source .* Your database is on another machine\. Mason will sync the tables you choose to this machine\.$/, "no box: the facts card says the Source, then where it is, as information");
+  assert.doesNotMatch(textOf(html), /Connected tools/, "who is connected is the Usage page's (issue 1111)");
   assert.match(html, /Add one on the <a href="#tables">Tables<\/a> page\./, "the way to add one is the page's own");
 });
 
@@ -606,18 +607,18 @@ test("the tables: each of the database's, added, not added or cannot be added wi
   const text = textOf(html);
   // TWO tables, Added over Not added: an added table shows its sync columns, one not added its rows and key; seven short
   // columns, whatever is long (a reason, an error, a copy's words, a Remove's question) a line of its own under the row
-  assert.match(text, /^Added \(3\) Table State Rows Key Last sync Size public\.customers /);
+  assert.match(text, /^Added \(3\) Table State Rows Key Columns Sync Last sync Size public\.customers /);
   assert.equal([...html.matchAll(/<table /g)].length, 2, "two tables: Added, then Not added");
   const listed = [...html.matchAll(/<th scope="row" class="name"><code class="name" title="([^"]*)">/g)].map((m) => m[1]);
   assert.equal(new Set(listed).size, 7, "each table listed once");
-  assert.match(text, /public\.customers Synced 100% 1,200 key id View events Sync now Remove Sync… All columns public\.orders /, "every added table has its bar: 100% once copied");
+  assert.match(text, /public\.customers Synced 100% 1,200 key id All columns Choose… View events Sync now Remove All columns Sync… public\.orders /, "every added table has its bar: 100% once copied");
   assert.equal([...html.matchAll(/<span class="indicator (\w+)"><span class="dot" aria-hidden="true"><\/span>([^<]*)<\/span>/g)].map((m) => `${m[1]} ${m[2]}`).join(", "),
     "ok Synced, ok Synced, ok Synced, unknown Not added, unknown Not added, unknown Not added, unknown Not added", "a state is a dot AND the CLI's word");
   assert.match(html, /^<h3 class="list-h">Added <span class="dim">\(3\)<\/span><\/h3><div class="list"><table class="catalog">/, "Added: its heading and count over its card");
-  assert.match(html, /<\/table><\/div><h3 class="list-h">Not added <span class="dim">\(4\)<\/span><\/h3><div class="list"><table class="catalog">/, "Not added under it, a card of its own");
+  assert.match(html, /<\/table><\/div><h3 class="list-h">Not added <span class="dim">\(4\)<\/span><\/h3><div class="list"><table class="catalog not-added">/, "Not added under it, a card of its own");
   assert.match(text, /public\.audit Not added ~50 rows key id Add Columns… public\.accounts /);
   assert.match(text, /public\.event_log Not added ~900 rows no key Name its key… cannot be added as it is: no primary key: name the columns that tell its rows apart, mason add event_log --key tenant_id,id \(its unique index event_log_tenant_id_id_key\) public\.staging /);
-  assert.match(html, /<\/tr><tr class="under note"><td colspan="7"><div class="under-body">(?:<span class="fold[^"]*" data-fold="[^"]*"><\/span>)*<span class="dim">cannot be added as it is: no primary key/, "the reason on a line of its own under its row, across every column");
+  assert.match(html, /<\/tr><tr class="under note"><td colspan="7"><div class="under-body">(?:<span class="fold[^"]*" data-fold="[^"]*"><\/span>)*<span class="dim">cannot be added as it is: no primary key/, "the reason on a line of its own under its row, across every column of Not added (seven: no Columns, no Sync)");
   assert.match(text, /public\.staging Not added rows unknown key id Add Columns… A synced table's size/);
   assert.match(html, /<button type="button" class="small" data-sync-table="public\.customers" data-room="Syncing…">Sync now<\/button>/);
   assert.ok(!/data-sync-table="public\.(audit|event_log)"/.test(html), "no Sync for a table not added");
@@ -730,6 +731,8 @@ test("the users: a row each under two tabs, Active (with its Remove) and Removed
   assert.equal(renderUsers(list, null, NOW_U, null, null, null, "nonsense"), html, "a tab the page does not know is Active");
   // the last use is an age with its UTC time in a title (mason user list's words); status is a dot and a word
   assert.match(html, /<td class="num"><span title="2026-10-28 08:15 UTC">60 min ago<\/span><\/td>/);
+  // and why not, its whole the title: wider than its column, which cuts it
+  assert.match(html, /<td class="num"><span title="not used in the last 7 days">not used in the last 7 days<\/span><\/td>/);
   assert.deepEqual([...html.matchAll(/<span class="indicator (\w+)"><span class="dot" aria-hidden="true"><\/span>([^<]*)<\/span>/g)].map((m) => `${m[1]} ${m[2]}`),
     ["ok Active", "ok Active"]);
   assert.match(removedTab, /<span class="indicator unknown"><span class="dot" aria-hidden="true"><\/span>Removed 2026-10-02 10:00 UTC<\/span>/);
@@ -770,6 +773,9 @@ test("the users while the roles file cannot be read: mason user list's tip, word
   assert.doesNotMatch(textOf(renderUsers(list, null, NOW_R, null, null)), /cannot be read/);
 });
 
+/** New user added's MCP section (issue 1114): closed, under the URL, across the rows' width. */
+const MCP_UNDER = /<dd class="under"><details class="once-mcp" data-open="added-mcp"><summary>Connect an AI agent<\/summary>[^]*?<\/details><\/dd>/;
+
 test("a user just added: the one-time dialog's parts, titled New user added; URL, User and Password alone, in that order, held equal to mason user add's rows — the URL and the Password each with a Copy that copies it, the User as plain text; Shown once right of the password's Copy; one line that it is only shown once — no Database, Host, Port or SSL mode (Connect's), no psql line", async () => {
   const password = "mason_0123456789abcdef_" + "a".repeat(32);
   const url = `postgres://metabase:${password}@127.0.0.1:5433/shop`;
@@ -777,7 +783,10 @@ test("a user just added: the one-time dialog's parts, titled New user added; URL
     database: "shop", url, psql: psqlLine(url), host: "127.0.0.1", port: 5433, sslmode: "require", roleFrom: "none" as const };
   const parts = fn<[unknown], Record<string, string>>("renderAdded")(added);
   assert.deepEqual(Object.keys(parts), ["once-head", "once-status", "once-foot"], "the dialog's three parts");
-  const html = onceHtml(parts);
+  // under the URL, a closed section of its own (issue 1114, held by the test of it): the rows are what is around it
+  const full = onceHtml(parts);
+  assert.match(full, new RegExp(`<dt>URL</dt><dd><span class="copyrow">[^]*?</dd>${MCP_UNDER.source}<dt>User</dt>`), "Connect an AI agent right under the URL");
+  const html = full.replace(MCP_UNDER, "");
   const text = textOf(html);
   // the title, then the user's own three fields, in one layout: each a label and its value, a Copy on all but the name
   // (issues 839, 876); Shown once beside the password's Copy; the status line, then one line (the button is the dialog's)
@@ -990,7 +999,7 @@ test("a read-only page (pageReadOnly): no page writes a control that sends a cha
 test("a read-only page: no add, create or write link anywhere — Queries' empty log's Create a user included; the Overview and Usage say why; unset, all as before", async () => {
   const why = "the web page is read-only here (MASON_UI_READ_ONLY=1)";
   // what leads to adding or creating something: a button-styled link to the page that does it, or its words
-  const LEADS = [/Create a user/, /Add a table/, /Add a user/, /Temporary cloud login/, /<a class="btn[^"]*" href="#users"/, /<a class="btn[^"]*" href="#tables[^"]*"/, /Cancel stops one/];
+  const LEADS = [/Create a user/, /Add a table/, /Add a user/, /Temporary cloud tunnel/, /<a class="btn[^"]*" href="#users"/, /<a class="btn[^"]*" href="#tables[^"]*"/, /Cancel stops one/];
   const open = await pageByPage(CATALOG_STATE);
   const shown = await pageByPage({ ...CATALOG_STATE, pageReadOnly: why });
   for (const lead of LEADS) assert.ok(!lead.test(shown.all), `read-only: ${lead}`);
@@ -1028,8 +1037,8 @@ test("a read-only page: each renderer alone writes no control that changes anyth
   const renderRunning = fn<[unknown, unknown, unknown, number, unknown], string>("renderRunning");
   assert.ok(!renderRunning(running, null, null, Date.now(), why).includes("data-ask-cancel"));
   assert.ok(renderRunning(running, null, null, Date.now(), null).includes("data-ask-cancel"));
-  assert.equal(fn<[unknown], string>("renderSharePane")(ro), "", "Temporary cloud login: absent on a read-only page");
-  assert.match(fn<[unknown], string>("renderSharePane")(CATALOG_STATE), /data-share-open/, "unset: Open a cloud login is there");
+  assert.equal(fn<[unknown], string>("renderSharePane")(ro), "", "Temporary cloud tunnel: absent on a read-only page");
+  assert.match(fn<[unknown], string>("renderSharePane")(CATALOG_STATE), /data-share-open/, "unset: Open a cloud tunnel is there");
   const { renderChecklist: checklist } = await import(path.join(WEB, "pages", "status.js") as string) as { renderChecklist: (s: unknown, u: unknown) => string };
   const nobody = { queries: { week: { completed: 0 } } };
   const fresh = { ...NONE, pageReadOnly: why };
@@ -1523,6 +1532,46 @@ function fakeRun(): { fetch: (p: string, init?: { method?: string; body?: string
   };
 }
 
+/** The header box's text (what it shows) and its title (what a hover shows), from `renderWhere`'s one span. */
+const whereParts = (html: string): { text: string; title: string } => {
+  const m = /^<span title="([^"]*)">([^<]*)<\/span>$/.exec(html);
+  assert.ok(m, `one span, its title an attribute and its text text: ${html}`);
+  return { title: m[1]!, text: m[2]! };
+};
+
+test("the header box (renderWhere): MASON_UI_TITLE_FILE's label, escaped as text; without one the database's name alone, never its source's (issue 1181)", () => {
+  const where = (s: unknown): string => whereParts(fn<[unknown], string>("renderWhere")(s)).text;
+  const source = { database: "shop", name: "billing" };
+  assert.equal(where({ source }), "shop", "no label: the database alone, the sources file's name not said");
+  assert.equal(where({ source: { database: "shop", name: "shop" } }), "shop");
+  assert.equal(where({ source, pageTitle: { label: null, problem: { code: "missing", message: "the file does not exist" } } }), "shop", "a file that gave no label: as without it");
+  assert.equal(where({ source, pageTitle: { label: "", problem: null } }), "shop");
+  assert.equal(where({ source, pageTitle: { label: "Production analytics (EU)", problem: null } }), "Production analytics (EU)");
+  assert.equal(where({ source, pageTitle: { label: `<img src=x onerror="alert('x')"> & co`, problem: null } }),
+    "&lt;img src=x onerror=&quot;alert(&#39;x&#39;)&quot;&gt; &amp; co", "markup and quotes are text, never HTML");
+  assert.equal(where({ source: { database: "<b>db</b>", name: null } }), "&lt;b&gt;db&lt;/b&gt;");
+});
+
+test("the header box's whole text is its title, for a hover where the box cuts it: the same text, escaped for the attribute, nothing more", () => {
+  const render = fn<[unknown], string>("renderWhere");
+  const source = { database: "analytics_warehouse_eu", name: "billing" };
+  const states = [
+    { source },
+    { source, pageTitle: { label: null, problem: { code: "missing", message: "the file does not exist" } } },
+    { source, pageTitle: { label: "Production analytics (EU)", problem: null } },
+    { source, pageTitle: { label: `A "quoted" <b>label</b> & 'more'`, problem: null } },
+  ];
+  for (const s of states) {
+    const { text, title } = whereParts(render(s));
+    assert.equal(title, text, "the title says what the box says, cleaned as the run cleaned it, with no path or reason added");
+  }
+  assert.deepEqual(whereParts(render(states[0])), { text: "analytics_warehouse_eu", title: "analytics_warehouse_eu" }, "no label: the database's name");
+  assert.equal(whereParts(render(states[2])).title, "Production analytics (EU)");
+  // quotes, < and & are entities in the attribute: the title cannot be closed, nor markup opened
+  assert.equal(whereParts(render(states[3])).title, "A &quot;quoted&quot; &lt;b&gt;label&lt;/b&gt; &amp; &#39;more&#39;");
+  assert.deepEqual(whereParts(render(states[1])), { text: "analytics_warehouse_eu", title: "analytics_warehouse_eu" }, "a problem never reaches the box or its title");
+});
+
 test("the app: a poll writes the shown page and when, reading only its endpoints; a poll that fails keeps what it knew and says what to do", async () => {
   const run = fakeRun();
   let clock = new Date(2026, 9, 27, 14, 3, 5).getTime();
@@ -1531,7 +1580,7 @@ test("the app: a poll writes the shown page and when, reading only its endpoints
   assert.match(app.view().status!, /<span class="skeleton/, "being asked: the words over grey bars");
   await app.poll();
   let v = app.view();
-  assert.equal(v.where, "shop", "the database; its source's name only when it is another");
+  assert.equal(v.where, `<span title="shop">shop</span>`, "the database alone, its whole the title");
   assert.equal(v.badge, "", "a database of the person's own: no badge");
   assert.equal(v.updated, "Updated 1 s ago");
   clock += 4000;
@@ -1784,7 +1833,7 @@ const ADDED = (user: string) => {
 };
 test("the New user added dialog: under its rows a status line, Waiting for its first query… until the user is seen, then Connected; no tool's guide, psql line or cloud line", () => {
   const renderAdded = (a: unknown, o?: unknown) => onceHtml(fn<[unknown, unknown?], Record<string, string>>("renderAdded")(a, o));
-  const between = (html: string) => textOf(html).replace(/^.*? Copy Shown once /, "").replace(/ ?The password is only shown once$/, "");
+  const between = (html: string) => textOf(html.replace(MCP_UNDER, "")).replace(/^.*? Copy Shown once /, "").replace(/ ?The password is only shown once$/, "");
   const waiting = renderAdded(ADDED("metabase"));
   assert.equal(between(waiting), "Waiting for its first query…");
   assert.equal(between(renderAdded(ADDED("metabase"), { connected: true })), "Connected");
@@ -1862,7 +1911,8 @@ test("the users' add form: a Role choice where the roles file names roles, its d
   assert.equal(renderAddUser({ ...state, pageReadOnly: "the web page is read-only here (MASON_UI_READ_ONLY=1)" }), "", "read-only: no form, no choice");
   // one line on roles under the form, with roles or without: the file and the command that explains it
   // the link opens in the same tab: a host's CSP sandbox with no allow-popups silently drops a target="_blank" one
-  for (const html of [form, plain]) assert.match(html, /<\/button><p class="dim roles-line">Roles can limit a user to some tables, columns and rows\. Configure them via <code>mason\/roles\.yml<\/code>\. <a href="https:\/\/github\.com\/embeddable-hq\/mason-data#access-control" rel="noreferrer">The README<\/a> describes how\.<\/p><\/form>$/);
+  // (where hosted agents' servers are offered, in one cell with the line on them: issue 1155)
+  for (const html of [form, plain]) assert.match(html, /<\/button>(?:<div class="form-notes">)?<p class="dim roles-line">Roles can limit a user to some tables, columns and rows\. Configure them via <code>mason\/roles\.yml<\/code>\. <a href="https:\/\/github\.com\/embeddable-hq\/mason-data#access-control" rel="noreferrer">The README<\/a> describes how\.<\/p>(?:<p class="preset-hint">[^<]*<\/p><\/div>)?<\/form>$/);
   // the README's section the link names is there: its heading's anchor
   assert.ok(/^### Access control$/m.test(fs.readFileSync(path.join(WEB, "..", "..", "README.md"), "utf8")), "README.md has the Access control section the link names");
   // no --set: attributes stay the command's
@@ -2083,13 +2133,14 @@ test("the users: From… asks where the user connects from in a popover beside i
 test("the add form: Connects from, a dropdown in mason user add's words — anywhere (the default, no from sent) or only these addresses, the box beside it, a comma list as --from takes it, the run judging each", async () => {
   const renderAddUser = fn<[unknown], string>("renderAddUser");
   const form = renderAddUser(CATALOG_STATE);
-  assert.match(textOf(form), /Name Connects from anywhere only these addresses Address ranges, comma-separated Add a user Roles can limit/);
-  assert.match(form, /<span class="connects"><label for="add-user-connects">Connects from<\/label> <select id="add-user-connects" name="connects"><option value="any" selected>anywhere<\/option><option value="only">only these addresses<\/option><\/select> <span class="ranges">/,
+  // the run's state carries the hosted agents' published ranges (issue 1115): each a choice after these two
+  assert.match(textOf(form), /Name Connects from anywhere only these addresses claude\.ai ChatGPT on the web Address ranges, comma-separated Add a user Roles can limit[^]* Only that agent's connectors connect from these, in its app or on the web\. Claude Code and Cursor: choose anywhere, or your computer's address\.$/);
+  assert.match(form, /<span class="connects"><label for="add-user-connects">Connects from<\/label> <select id="add-user-connects" name="connects"><option value="any" selected>anywhere<\/option><option value="only">only these addresses<\/option><optgroup label="A hosted agent&#39;s servers"><option value="preset:claude">claude\.ai<\/option><option value="preset:openai">ChatGPT on the web<\/option><\/optgroup><\/select> <span class="ranges">/,
     "a dropdown, its label; anywhere the default, as mason user add with no --from; the box beside it");
   assert.doesNotMatch(form, /type="radio"|<fieldset/, "no radios");
   // the box keeps its place while anywhere is chosen (visibility, never display): nothing in the form moves when the choice changes
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
-  assert.match(css, /\.connects:has\(option\[value="any"\]:checked\) \.ranges \{ visibility: hidden; \}/);
+  assert.match(css, /\.connects:has\(option\[value="any"\]:checked\) \.ranges > input, \.connects:has\(option\[value\^="preset:"\]:checked\) \.ranges > input \{ visibility: hidden; \}/);
   assert.doesNotMatch(css, /fieldset\.connects|\.connects[^{]*input\[type="radio"\]/, "the radios' rules are gone");
   assert.match(form, /<input id="add-user-from" name="from" spellcheck="false" autocapitalize="off" placeholder="e\.g\. 192\.0\.2\.0\/24, 2001:db8::\/32" value="">/);
   assert.ok(!/pattern=/.test(form), "never validated in the page");
@@ -2108,7 +2159,7 @@ test("the add form on one line where its card is wide enough: each field a label
   const children = [...form.replace(/^<form[^>]*>|<\/form>$/g, "").matchAll(/<(span|button)\b[^>]*? class="([^"]*)"/g)];
   assert.match(form, /^<form id="add-user" class="formcard" autocomplete="off"><span class="name-field"><label for="user-name">Name<\/label> <input id="user-name"[^>]*><\/span> <span class="role-field">/);
   assert.ok(["name-field", "role-field", "connects", "primary"].every((c) => children.some((m) => m[2] === c)), "the four fields");
-  assert.match(textOf(renderAddUser(CATALOG_STATE)), /^Name Connects from anywhere only these addresses Address ranges, comma-separated Add a user Roles can limit a user to some tables, columns and rows\. Configure them via mason\/roles\.yml \. The README describes how\.$/);
+  assert.match(textOf(renderAddUser(CATALOG_STATE)), /^Name Connects from anywhere only these addresses claude\.ai ChatGPT on the web Address ranges, comma-separated Add a user Roles can limit a user to some tables, columns and rows\. Configure them via mason\/roles\.yml \. The README describes how\. Only that agent's connectors connect from these, in its app or on the web\. Claude Code and Cursor: choose anywhere, or your computer's address\.$/);
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
   assert.match(css, /#add-user \.roles-line \{ flex: 0 0 100%;/, "the line on roles is the form's own last row, under the fields");
   const rule = (sel: string) => css.match(new RegExp(`(?:^|\\})\\s*${sel.replace(/[.#[\]="]/g, "\\$&")}\\s*\\{([^}]*)\\}`))?.[1] ?? "";
@@ -2119,7 +2170,7 @@ test("the add form on one line where its card is wide enough: each field a label
   assert.match(rule("#add-user .connects .ranges"), /min-width: 0;/, "the address box shrinks inside its field, never over Add a user");
   assert.match(rule("#add-user .connects .ranges input"), /width: 100%; min-width: 0;/);
   // the box's place is kept while anywhere is chosen: the choice changes no width, so nothing moves
-  assert.match(css, /\.connects:has\(option\[value="any"\]:checked\) \.ranges \{ visibility: hidden; \}/);
+  assert.match(css, /\.connects:has\(option\[value="any"\]:checked\) \.ranges > input, \.connects:has\(option\[value\^="preset:"\]:checked\) \.ranges > input \{ visibility: hidden; \}/);
   assert.doesNotMatch(css, /\.ranges\s*\{[^}]*display: none/);
 });
 
@@ -2224,13 +2275,13 @@ test("a read-only page that still manages its users (pageReadOnlyAllow: [users])
   assert.equal(renderAddUser({ ...CATALOG_STATE, pageReadOnlyAllow: ["users"] }), renderAddUser(CATALOG_STATE));
 });
 
-test("a read-only page that still changes its tables and its users (pageReadOnlyAllow: [tables, users]): both pages' controls; the Overview says nothing is refused; Cancel and Temporary cloud login still absent (issue 813)", async () => {
+test("a read-only page that still changes its tables and its users (pageReadOnlyAllow: [tables, users]): both pages' controls; the Overview says nothing is refused; Cancel and Temporary cloud tunnel still absent (issue 813)", async () => {
   const why = "the web page is read-only here (MASON_UI_READ_ONLY=1)";
   const shown = await pageByPage({ ...CATALOG_STATE, pageReadOnly: why, pageReadOnlyAllow: ["tables", "users"] });
   for (const control of ["data-add-table", "data-sync-table", "data-remove-table", 'id="add-user"', "data-from=", "data-disable="]) assert.ok(shown.all.includes(control), control);
   // the run refuses /api/share on any read-only page, whatever it still allows: no Share box
   for (const control of ["data-ask-cancel", "data-share-open"]) assert.ok(!shown.all.includes(control), control);
-  assert.ok(!/Temporary cloud login|data-add-kind/.test(shown.all), "no temporary cloud login, no segments");
+  assert.ok(!/Temporary cloud tunnel|data-add-kind/.test(shown.all), "no temporary cloud tunnel, no segments");
   assert.ok(!textOf(shown.overview).includes("from this page"), "the Overview refuses nothing it offers");
   assert.ok(textOf(shown.byPage.get("usage")!).includes(`Queries are not cancelled from this page: ${why}.`));
   assert.ok(!/are not added/.test(textOf(shown.all)), "Tables and Users say nothing is refused");
@@ -2260,7 +2311,7 @@ test("the app: Add sends POST api/pick, says what was added beside its table's a
   assert.deepEqual(run.asked, [`POST api/pick ${JSON.stringify({ table: "public.accounts", picked: true })}`, "GET api/state"],
     "every column, as mason add accounts asks; then the state again (the page's own read: nothing else)");
   const v = app.view();
-  assert.match(textOf(v.tables!), /public\.accounts Waiting ~300 rows key id View events Sync now Remove Sync… All but 1 column waiting for its first sync to start public\.event_log/);
+  assert.match(textOf(v.tables!), /public\.accounts Waiting ~300 rows key id View events Sync now Remove All but 1 column Sync… waiting for its first sync to start public\.event_log/);
   assert.match(textOf(popOf(v.tables!, "act-tables-public.accounts")), /^Added public\.accounts: every column but password_hash\. Its sync is Off: .* Left out password_hash: it looks like a secret/);
   assert.match(textOf(v.status!), /public\.accounts waiting for its first sync to start/, "the Overview shows the copy starting");
   app.dismissOutcome();
@@ -2550,7 +2601,7 @@ function fakeBrowser(run: ReturnType<typeof fakeRun>, hash = "", winExtra: Recor
     setInterval: (f: () => void) => { tick = f; return 1; }, setTimeout: (f: () => void, ms: number) => setTimeout(f, ms), ...winExtra });
   /** the reader follows a link of the nav: the hash changes, and the browser says so */
   const go = (to: string) => { location.hash = to; onWin.get("hashchange")!(); };
-  return { el, on, doc, go, replaced, tick: () => tick!(), settle: () => new Promise((r) => setTimeout(r, 20)) };
+  return { el, els, on, doc, go, replaced, tick: () => tick!(), settle: () => new Promise((r) => setTimeout(r, 20)) };
 }
 
 test("arriving on the Users page puts the cursor in the add form's Name — at the start and by a link followed; never at a poll's write, nor from what the person focused since, nor on a touch screen or read-only (issue 887)", async () => {
@@ -2601,7 +2652,7 @@ test("after Add a user, New user added is a modal dialog: its Copy focused; a po
   run.answers.set("GET api/state", answer(CATALOG_STATE));
   run.answers.set("POST api/users", () => new Response(JSON.stringify({ user: "grafana", id: "0123456789abcdef", addedAt: "2026-10-27T09:11:00.000Z", password, database: "shop",
     url: `postgres://grafana:${password}@127.0.0.1:5433/shop` }), { status: 200 }));
-  const { el, on, doc, go, tick, settle } = fakeBrowser(run, "#users");
+  const { el, els, on, doc, go, replaced, tick, settle } = fakeBrowser(run, "#users");
   await settle();
   const d = doc as unknown as { focused: string };
   const once = el("once");
@@ -2614,6 +2665,11 @@ test("after Add a user, New user added is a modal dialog: its Copy focused; a po
   assert.deepEqual([once.open, once.shown], [true, 1], "opened as a modal, once");
   assert.match(el("once-head").html, /^<p class="once-title" id="once-title">New user added<\/p><dl class="facts"><dt>URL<\/dt>[^]*<dt>User<\/dt><dd>grafana<\/dd>[^]*Shown once/);
   assert.ok(el("once-head").html.includes(password));
+  // its MCP section (issue 1114): closed, under the URL, the user's own URL in both lines, as the run's version pins them
+  const userUrl = `postgres://grafana:${password}@127.0.0.1:5433/shop`;
+  assert.match(el("once-head").html, /<dd class="under"><details class="once-mcp" data-open="added-mcp"><summary>Connect an AI agent<\/summary>/);
+  assert.ok(textOf(el("once-head").html).includes(`claude mcp add mason --env MASON_URL="${userUrl}" -- npx -y @mason-data/cli@${CATALOG_STATE.engine.version} mcp`));
+  assert.ok(textOf(el("once-head").html).includes(`"MASON_URL": "${userUrl}"`));
   assert.match(textOf(el("once-status").html), /^Waiting for its first query…$/);
   assert.equal(textOf(el("once-foot").html), "The password is only shown once");
   assert.equal(d.focused, "once [data-copy]", "the focus on its first Copy");
@@ -2643,7 +2699,8 @@ test("after Add a user, New user added is a modal dialog: its Copy focused; a po
   assert.equal(once.open, true, "a hash followed leaves it open");
   go("#users"); await settle();
   // the user connects: its status line alone is written again
-  run.answers.set("GET api/state", answer({ ...CATALOG_STATE, sessions: { open: 1, byClient: [{ user: "grafana", client: "Grafana", open: 1, running: 0 }] } }));
+  // (the run's version moving under it too: the MCP lines keep the one the user was added under)
+  run.answers.set("GET api/state", answer({ ...CATALOG_STATE, engine: { ...CATALOG_STATE.engine, version: "9.9.9" }, sessions: { open: 1, byClient: [{ user: "grafana", client: "Grafana", open: 1, running: 0 }] } }));
   const head = el("once-head").writes;
   go("#users"); await settle();
   assert.match(textOf(el("once-status").html), /^Connected$/);
@@ -2655,6 +2712,9 @@ test("after Add a user, New user added is a modal dialog: its Copy focused; a po
   assert.equal(d.focused, "user-name", "the focus back on Name");
   assert.deepEqual([el("once-head").html, el("once-status").html, el("once-foot").html], ["", "", ""]);
   assert.ok([...["users", "added", "action", "once-head", "once-status", "once-foot"]].every((id) => !el(id).html.includes(password)), "the password nowhere on the page");
+  // nor its MCP lines, in any part of the document, nor in an address the page went to
+  assert.deepEqual([...els.values()].filter((e) => e.html.includes(password) || e.html.includes("MASON_URL") && e.html.includes("grafana")).map((e) => e.id), [], "the password and the user's MCP lines nowhere in the document");
+  assert.ok(replaced.every((u) => !u.includes(password)), "never in an address");
   tick(); await settle();
   assert.equal(once.shown, 2, "and never again");
   // a read-only page adds no user: never a dialog
@@ -2782,7 +2842,7 @@ test("in the browser: the tables are written when they change, never at every po
   const { el, on, tick, settle } = fakeBrowser(run, "#tables");
   await settle();
   const tables = el("tables");
-  assert.match(textOf(tables.html), /public\.orders Syncing 15% 280,000 key id View events Sync now Remove Sync… All columns syncing /);
+  assert.match(textOf(tables.html), /public\.orders Syncing 15% 280,000 key id All columns Choose… View events Sync now Remove All columns Sync… syncing /);
   await on.get("click")!({ target: { closest: () => ({ dataset: { removeTable: "public.orders" } }) } });
   assert.match(textOf(tables.html), /Remove orders\? Mason will stop syncing it and delete its synced data\. Remove orders Cancel/);
   let writes = tables.writes;
@@ -2794,7 +2854,7 @@ test("in the browser: the tables are written when they change, never at every po
   run.answers.set("GET api/state", rowsOf(350));
   tick(); await settle();
   assert.equal(tables.writes, writes, "rows that moved while a Remove asks do not write the tables again: the confirm stays the one clicked");
-  assert.match(textOf(tables.html), /public\.orders Syncing 15% 280,000 key id View events Sync now Remove Sync… All columns syncing .* public\.audit Not added ~50 rows key id Add Columns… /);
+  assert.match(textOf(tables.html), /public\.orders Syncing 15% 280,000 key id All columns Choose… View events Sync now Remove All columns Sync… syncing .* public\.audit Not added ~50 rows key id Add Columns… /);
   assert.match(textOf(popOf(tables.html, "act-tables-public.orders")), /^Remove orders\? /, "the confirm, beside the row it asks about");
   await on.get("click")!({ target: { closest: () => ({ dataset: { cancelRemoveTable: "" } }) } });
   assert.match(textOf(tables.html), /public\.audit Not added ~350 rows key id/, "Cancel writes the rows as they are now");
@@ -3104,7 +3164,8 @@ test("the Overview: the word and its line, the cards (tables synced N of M, rows
     assert.match(html, /<a class="card warn link" href="#observability\/queries\?status=refused-or-failed&amp;range=24h"><p class="card-label">Query errors, last day<\/p><p class="card-value">3<\/p><p class="card-sub">30 refused<\/p>/);
     // the Source in the box, under its line (mason status's row, issue 935); the facts in main's card, "Mason"
     assert.match(html, /<dl class="health-facts"><div><dt>Source<\/dt><dd>postgres:.*?<\/dd><\/div><\/dl><\/div>/);
-    assert.match(text, / Mason Source shop on db\.example\.com · Postgres 16\.4 · your main database Mason \S+ · up .* Disk .* Connected tools none Your database is on another machine\. Mason will sync the tables you choose to this machine\.$/, "main's facts card, then where the database is, as information");
+    assert.match(text, / Mason Source shop on db\.example\.com · Postgres 16\.4 · your main database Mason \S+ · up .* Disk .* Your database is on another machine\. Mason will sync the tables you choose to this machine\.$/, "main's facts card, then where the database is, as information");
+    assert.doesNotMatch(text, /Connected tools/, "who is connected is the Usage page's (issue 1111)");
     assert.doesNotMatch(html, /\/app\//, "never an absolute path");
     assert.match(html, /<caption>Mason<\/caption><tbody><tr><th scope="row">Source<\/th>/, "ONE table of the other facts, each a row headed by its name");
     const facts = html.slice(html.indexOf("<caption>Mason</caption>"));
@@ -3193,11 +3254,11 @@ test("Tables: each added table's state, rows, last sync and its age, how long it
   const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
   const html = renderTables(SYNCED, { sizes: USAGE });
   const text = textOf(html);
-  assert.match(text, /^Added \(3\) Table State Rows Key Last sync Size /);
-  assert.match(text, /public\.customers Synced 100% 1,200 key id 30 s ago took 0\.4 s 512\.0 KiB View events Sync now Remove /);
-  assert.match(text, /public\.orders Failed 100% ~2,000,000 rows key id 65 min ago took 63 s View events Sync now Remove Sync… All columns poll: connection reset the whole error poll: connection reset the sync tries it again in 5 s /);
+  assert.match(text, /^Added \(3\) Table State Rows Key Columns Sync Last sync Size /);
+  assert.match(text, /public\.customers Synced 100% 1,200 key id All columns Choose… 30 s ago took 0\.4 s 512\.0 KiB View events Sync now Remove /);
+  assert.match(text, /public\.orders Failed 100% ~2,000,000 rows key id All columns Choose… 65 min ago took 63 s View events Sync now Remove All columns Sync… poll: connection reset the whole error poll: connection reset the sync tries it again in 5 s /);
   // a copy served but not kept current: its amber bar, and the words mason status prints after it, under the row
-  assert.match(text, /public\.events Synced 100% 30,000,000 key id 2 min ago took 13 min 3\.0 GiB View events Sync now Remove Sync: Off All columns Not added \(1\) Table State Rows Key Last sync Size public\.audit /, "a table whose sync is off is synced, its age its Last sync");
+  assert.match(text, /public\.events Synced 100% 30,000,000 key id All columns Off 2 min ago took 13 min 3\.0 GiB View events Sync now Remove All columns Sync: Off Not added \(1\) Table State Rows Key Last sync Size public\.audit /, "a table whose sync is off is synced, its age its Last sync");
   assert.match(text, /public\.audit Not added ~50 rows key id Add Columns… /, "a table not added has no sync, and is in the Not added list");
   assert.equal([...html.matchAll(/<table /g)].length, 2);
   // the last sync is an age, its UTC time in a title; rows, age, span and size are mono and right-aligned
@@ -3300,7 +3361,7 @@ test("Tables: what a sync did is said as mason sync says it, beside its Sync; a 
   run.answers.set("GET api/state", answer(withSync({ ...started, state: "synced", endedAt: "2026-10-27T09:05:31.000Z", answer: answered })));
   await app.poll();
   // the button says it in its own room, and what the sync did is said beside it, as mason sync prints it
-  assert.match(textOf(app.view().tables!), /public\.events Synced .* Synced ✓ Remove Sync: Off All columns Not added \(1\) Table State Rows Key Last sync Size public\.audit /);
+  assert.match(textOf(app.view().tables!), /public\.events Synced .* Synced ✓ Remove All columns Sync: Off Not added \(1\) Table State Rows Key Last sync Size public\.audit /);
   assert.match(app.view().tables!, /<button type="button" class="small" data-sync-table="public\.events" data-room="Syncing…">Synced ✓<\/button>/);
   assert.equal(textOf(popOf(app.view().tables!, "act-tables-public.events")), "Synced public.events: 34 added, ~1,200 updated, 5 deleted. public.events 34 added, ~1,200 updated, 5 deleted, 30,001,229 rows now · 8.5 s public.events's sync is off, so it stays as it is now until you press Sync now again. Dismiss");
   app.dismissSynced();
@@ -3397,7 +3458,7 @@ test("Tables: while the page's Sync now of a table runs, its State says Syncing 
 
 test("Tables: the search box narrows both lists and Failed only lists the failed tables alone, kept across polls; a form open keeps its table and its list still", async () => {
   const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
-  assert.match(textOf(renderTables(CATALOG_STATE, { filter: "ORD" })), /^1 with “ORD” in the name Added \(1\) Table State Rows Key Last sync Size public\.orders Synced 100% 2,000,000 key id View events Sync now Remove .* Not added \(0\) No table that is not added has “ORD” in its name\./);
+  assert.match(textOf(renderTables(CATALOG_STATE, { filter: "ORD" })), /^1 with “ORD” in the name Added \(1\) Table State Rows Key Columns Sync Last sync Size public\.orders Synced 100% 2,000,000 key id All columns Choose… View events Sync now Remove .* Not added \(0\) No table that is not added has “ORD” in its name\./);
   assert.equal(renderTables(CATALOG_STATE, { filter: "" }), renderTables(CATALOG_STATE), "nothing typed: every table, as before");
   assert.match(textOf(renderTables(CATALOG_STATE, { filter: "zzz", choosing: "public.audit", columns: columnsOf("public.audit") })), /^1 with “zzz” in the name .* public\.audit Not added ~50 rows key id Add Columns… The columns to sync/, "the table whose form is open stays");
   assert.match(textOf(renderTables(SYNCED, { filter: "nope" })), /Added \(0\) No added table's name has “nope”\. Not added \(0\) No table that is not added has “nope” in its name\./);
@@ -4423,7 +4484,7 @@ test("Tables: in replication mode each added table's stream state is a column, i
   const html = renderTables(st, { now: NOW });
   const text = textOf(html);
   // the stream state is a line under each added table's row, never a column: what it says is long
-  assert.match(text, /^Added \(\d+\) Table State Rows Key Last sync Size public\.customers /);
+  assert.match(text, /^Added \(\d+\) Table State Rows Key Columns Sync Last sync Size public\.customers /);
   const { tables } = fn<[unknown, number], { tables: Array<[string, string]> }>("streamRows")(STREAM, NOW);
   for (const [t, words] of tables.filter(([t]) => ["public.customers", "public.orders", "public.events"].includes(t))) assert.ok(text.includes(words), `${t}: ${words}`);
   assert.match(text, /public\.customers Synced .* streamed · 1,000 added, 200 updated, 4 deleted this run /);
@@ -4447,11 +4508,11 @@ test("Tables and Users: the sections are a page head, the cards' part and a tool
   assert.doesNotMatch(tables, /tables-show/, "no Show select");
   assert.match(users, /<div class="page-head"><h2 id="users-h">Users<\/h2><p class="desc">Create and manage users that you can connect to tools and services\.<\/p><\/div>/, "the Users page's intro, in the owner's words");
   // the form is the page's own once the state is read (renderAddUser: none on a read-only page), in its place
-  assert.match(fn<[unknown], string>("renderAddUser")(CATALOG_STATE), /^<form id="add-user" class="formcard"[^>]*>[\s\S]*<button type="submit" id="add-user-submit" class="primary" data-room="Add a user" data-room2="Adding…">Add a user<\/button><p class="dim roles-line">[\s\S]*<\/p><\/form>$/);
+  assert.match(fn<[unknown], string>("renderAddUser")(CATALOG_STATE), /^<form id="add-user" class="formcard"[^>]*>[\s\S]*<button type="submit" id="add-user-submit" class="primary" data-room="Add a user" data-room2="Adding…">Add a user<\/button>(?:<div class="form-notes">)?<p class="dim roles-line">[\s\S]*<\/p>(?:<\/div>)?<\/form>$/);
   // the users first, right under the title (their read-only line is renderUsers' own); then the form, the password just
   // shown beside it, Connect: a card that appears moves nothing above it
-  const order = ["users-h", "users", "add-box", "add-kinds", "add-user-box", "add-share-box", "action", "added", "users-connect"].map((id) => users.indexOf(`id="${id}"`));
-  assert.ok(order.every((i, n) => i >= 0 && (n === 0 || i > order[n - 1]!)), "the title, the users, the box (its segments, the form, the temporary cloud login), its failure, the card, Connect");
+  const order = ["users-h", "users", "add-box", "add-kinds", "add-user-box", "add-share-box", "action", "added", "users-connect", "users-mcp"].map((id) => users.indexOf(`id="${id}"`));
+  assert.ok(order.every((i, n) => i >= 0 && (n === 0 || i > order[n - 1]!)), "the title, the users, the box (its segments, the form, the temporary cloud tunnel), its failure, the card, Connect a Postgres client or BI tool, then Connect an AI agent");
   assert.match(users, /<\/div>\s*<div id="users"><\/div>\s*<!--[^>]*-->\s*<div id="add-box" class="add-box"><div id="add-kinds"><\/div><div class="add-panes"><div id="add-user-box"><\/div><div id="add-share-box"><\/div><\/div><\/div>/, "the users list right under the page's head, then the box");
 });
 
@@ -4499,7 +4560,7 @@ test("Users: the add form's password is the one-time dialog, marked shown once; 
     database: "shop", url: "postgres://metabase@127.0.0.1:5433/shop" }));
   assert.match(added, /^<p class="once-title" id="once-title">New user added<\/p>/);
   assert.match(added, /<span class="badge warn">Shown once<\/span>/);
-  assert.equal([...added.matchAll(/data-copy="/g)].length, 2, "the URL and the password each have a Copy; the name is plain, the database is Connect's");
+  assert.equal([...added.replace(MCP_UNDER, "").matchAll(/data-copy="/g)].length, 2, "the URL and the password each have a Copy; the name is plain, the database is Connect's (the MCP section has its own)");
   const run = fakeRun();
   let t = Date.UTC(2026, 9, 28, 9, 0, 0);
   run.answers.set("GET api/users?lastUsed=1", answer({ users: [{ name: "old", id: "aaaaaaaaaaaaaaaa", addedAt: "2026-10-01T10:00:00.000Z", removedAt: "2026-10-02T10:00:00.000Z", live: false, lastUsedAt: null, url: null },
@@ -5605,7 +5666,7 @@ test("the Overview: the last day's unsupported SQL is one line at its foot, with
   const app = fn<[unknown], App>("createApp")(run.fetch);
   await app.poll();
   assert.ok(run.asked.includes("GET api/unsupported?limit=100"), "the Overview reads the last day's, the endpoint's default");
-  assert.match(textOf(app.view().status!), /Connected tools .* Unsupported SQL, last day: a window frame in GROUPS mode: 12 statements as ana, metabase from Metabase \(and 1 other\) See all$/);
+  assert.match(textOf(app.view().status!), / Disk .* Unsupported SQL, last day: a window frame in GROUPS mode: 12 statements as ana, metabase from Metabase \(and 1 other\) See all$/);
 });
 
 // ------------------------------------------------------------------ a table just added shows its copy at once
@@ -5647,7 +5708,7 @@ test("Add: the row says Adding… from the click, then waiting for its copy, the
   assert.equal(await adding, true);
   // answered: the state is read again and the row shows the copy waiting to start, an indeterminate bar
   row = accountsRow(app.view().tables!);
-  assert.match(textOf(row), /public\.accounts Waiting ~300 rows key id View events Sync now Remove Sync… All but 1 column waiting for its first sync to start/);
+  assert.match(textOf(row), /public\.accounts Waiting ~300 rows key id View events Sync now Remove All but 1 column Sync… waiting for its first sync to start/);
   assert.match(row, /<span class="copybar indeterminate" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-label="public\.accounts: its first sync" aria-valuetext="waiting for its first sync to start"><span class="track" aria-hidden="true"><span class="fill"[^>]*><\/span><\/span><\/span>/);
   assert.ok(!/aria-valuenow/.test(row), "waiting: no value, an indeterminate bar");
   // syncing 37%: the bar's value, the aria, and the words mason wait prints (copyingText, held equal)
@@ -5835,7 +5896,7 @@ test("Users: ONE Connect panel for the run — host, port, database, sslmode and
   assert.equal(typeof renderUsersConnect, "function", "src/web/pages/users.js exports renderUsersConnect");
   const pg = { url: "postgresql://127.0.0.1:5433/shop", host: "127.0.0.1", port: 5433, database: "shop", shown: "postgresql://<user>:<password>@127.0.0.1:5433/shop", psql: "psql 'postgresql://<user>:<password>@127.0.0.1:5433/shop'" };
   const html = renderUsersConnect!(pg);
-  assert.equal(textOf(html), "Connect Host 127.0.0.1 Copy Port 5433 Copy Database shop Copy SSL mode disable Copy URL postgresql://<user>:<password>@127.0.0.1:5433/shop Copy " +
+  assert.equal(textOf(html), "Connect a Postgres client or BI tool Host 127.0.0.1 Copy Port 5433 Copy Database shop Copy SSL mode disable Copy URL postgresql://<user>:<password>@127.0.0.1:5433/shop Copy " +
     "Put a user's name and password in place of <user> and <password> . The password is shown only once, when you add the user. If it's lost, remove the user and add it again.");
   for (const id of ["host", "port", "database", "sslmode", "url"]) {
     assert.match(html, new RegExp(`<code id="users-connect-${id}">`), id);
@@ -5849,7 +5910,342 @@ test("Users: ONE Connect panel for the run — host, port, database, sslmode and
   const rows = fn<[unknown, string | null, number], string>("renderUsers")({ users: [{ name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", removedAt: null, live: true, lastUsedAt: null,
     url: "postgresql://metabase@127.0.0.1:5433/shop" }], lastUsedNote: null, urlNote: null, requestLogDays: 7 }, null, NOW);
   assert.ok(!/postgresql:\/\/|data-copy|>URL</.test(rows), "no URL, and no Copy, in a user's row");
-  assert.match(fs.readFileSync(path.join(WEB, "index.html"), "utf8"), /<div id="users"><\/div>[\s\S]*<div id="users-connect"><\/div>\s*<\/section>/, "the list first, the panel last");
+  assert.match(fs.readFileSync(path.join(WEB, "index.html"), "utf8"), /<div id="users"><\/div>[\s\S]*<div id="users-connect"><\/div>\s*<div id="users-mcp"><\/div>\s*<\/section>/, "the list first, the Postgres client or BI tool's box, then the MCP client's last");
+});
+
+test("Users: Connect an AI agent with the MCP endpoint off (issues 1114, 1155) — the mason mcp way alone: Claude Code's line and the JSON for other clients, each with Copy, from the run's URL and version; the Node they need; not claude.ai or ChatGPT on the web", async () => {
+  const usersPage = await import(path.join(WEB, "pages", "users.js") as string) as Record<string, unknown>;
+  const renderUsersMcp = usersPage.renderUsersMcp as ((pg: unknown, served?: boolean, version?: unknown) => string) | undefined;
+  assert.equal(typeof renderUsersMcp, "function", "src/web/pages/users.js exports renderUsersMcp");
+  // the code a block holds, as its Copy copies it (its text, the lines kept)
+  const codeOf = (html: string, id: string): string => (new RegExp(`<code id="${id}">([\\s\\S]*?)</code>`).exec(html)?.[1] ?? "")
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"").replace(/&#39;/g, "'").replace(/&amp;/g, "&");
+  const shown = "postgres://<user>:<password>@127.0.0.1:5433/shop";
+  const pg = { url: "postgresql://127.0.0.1:5433/shop", host: "127.0.0.1", port: 5433, database: "shop", shown, psql: `psql '${shown}'` };
+  const html = renderUsersMcp!(pg, false, "0.22.0");
+  // the line to run, with the URL in the server's environment (MASON_URL, src/cli/mcp.ts), never on its command line
+  assert.equal(codeOf(html, "users-mcp-claude-code"), `claude mcp add mason --env MASON_URL="${shown}" -- npx -y @mason-data/cli@0.22.0 mcp`);
+  // the JSON a client's MCP settings take, pretty-printed
+  const json = codeOf(html, "users-mcp-json");
+  assert.deepEqual(JSON.parse(json), { mcpServers: { mason: { command: "npx", args: ["-y", "@mason-data/cli@0.22.0", "mcp"], env: { MASON_URL: shown } } } });
+  assert.equal(json, JSON.stringify(JSON.parse(json), null, 2), "pretty-printed");
+  for (const id of ["claude-code", "json"]) assert.match(html, new RegExp(`<pre><code id="users-mcp-${id}">[\\s\\S]*?</code></pre><span class="copyblock-side"><button type="button" class="small" data-copy="users-mcp-${id}" data-room="Press ⌘C">Copy</button></span></div>`), `${id}: a block with its Copy`);
+  assert.equal(textOf(html).replace(/<code[\s\S]*$/, ""), "Connect an AI agent Claude Code: run this. claude mcp add mason --env MASON_URL=\"postgres://<user>:<password>@127.0.0.1:5433/shop\" -- npx -y @mason-data/cli@0.22.0 mcp Copy " +
+    "Claude Desktop, Cursor and others: add this to their MCP settings. { \"mcpServers\": { \"mason\": { \"command\": \"npx\", \"args\": [ \"-y\", \"@mason-data/cli@0.22.0\", \"mcp\" ], \"env\": { \"MASON_URL\": \"postgres://<user>:<password>@127.0.0.1:5433/shop\" } } } } Copy " +
+    "Put a user's name and password in place of <user> and <password> . Needs Node 22.13 or later. " +
+    "claude.ai and ChatGPT on the web can't connect this way yet.");
+  // off: no address, no line per client, no sign-in, no fallback to open — the mason mcp way is all there is
+  assert.doesNotMatch(html, /users-mcp-url|mcp-clients|mcp-fallback|<details|Customize|Developer mode|sign in/i);
+  // the Node it names is the package's own (cli/package.json engines)
+  const pkg = JSON.parse(fs.readFileSync(path.join(WEB, "..", "..", "cli", "package.json"), "utf8")) as { name: string; engines: { node: string } };
+  assert.equal(`>=${usersPage.MCP_NODE as string}`, pkg.engines.node, "the Node the page names is cli/package.json's engines");
+  assert.equal(usersPage.MCP_PACKAGE, pkg.name, "the package npx runs is the CLI's");
+  // pinned only to a release npm has: a checkout ("dev"), an image of main or a version not said runs the package unpinned
+  for (const v of ["dev", "main-0123abc", "0.23.0-rc.1", null, undefined, 22]) {
+    const h = renderUsersMcp!(pg, false, v);
+    assert.equal(codeOf(h, "users-mcp-claude-code"), `claude mcp add mason --env MASON_URL="${shown}" -- npx -y @mason-data/cli mcp`, String(v));
+    assert.deepEqual((JSON.parse(codeOf(h, "users-mcp-json")) as { mcpServers: { mason: { args: string[] } } }).mcpServers.mason.args, ["-y", "@mason-data/cli", "mcp"], String(v));
+  }
+  // a run that did not say where a tool connects: no box, as the Postgres client's
+  assert.equal(renderUsersMcp!(undefined), "");
+  assert.equal(renderUsersMcp!({ host: "127.0.0.1" }), "");
+  // on a server the URL's host is the server's own view of itself: the same note as the Postgres client or BI tool's box; none where
+  // the URL is the address a client reaches (MASON_PG_PUBLIC_URL), whose sslmode the client's URL keeps
+  const note = /A tool on another machine uses the server's own address in place of 127\.0\.0\.1/;
+  assert.match(textOf(renderUsersMcp!(pg, true, "0.22.0")), note);
+  assert.doesNotMatch(textOf(html), note);
+  const pub = { url: "postgresql://db.example.com:6432/shop?sslmode=verify-full", host: "db.example.com", port: 6432, database: "shop", sslmode: "verify-full", public: true,
+    shown: "postgres://<user>:<password>@db.example.com:6432/shop?sslmode=verify-full" };
+  const ph = renderUsersMcp!(pub, true, "0.22.0");
+  assert.doesNotMatch(textOf(ph), note);
+  assert.equal(codeOf(ph, "users-mcp-claude-code"), `claude mcp add mason --env MASON_URL="${pub.shown}" -- npx -y @mason-data/cli@0.22.0 mcp`);
+});
+
+test("Users: Connect an AI agent with the MCP endpoint on (issues 1115, 1155) — its address first with Copy, a line per client saying where it goes, one sign-in line, one on where each connects from; the mason mcp way, password and all, under a closed details", async () => {
+  const usersPage = await import(path.join(WEB, "pages", "users.js") as string) as Record<string, unknown>;
+  const renderUsersMcp = usersPage.renderUsersMcp as (pg: unknown, served?: boolean, version?: unknown, mcp?: unknown, isOpen?: (k: string) => boolean) => string;
+  const codeOf = (html: string, id: string): string => (new RegExp(`<code id="${id}">([\\s\\S]*?)</code>`).exec(html)?.[1] ?? "")
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"").replace(/&#39;/g, "'").replace(/&amp;/g, "&");
+  const shown = "postgres://<user>:<password>@127.0.0.1:5433/shop";
+  const pg = { url: "postgresql://127.0.0.1:5433/shop", host: "127.0.0.1", port: 5433, database: "shop", shown };
+  const mcp = { url: "https://mason.example.test/mcp", issuer: "https://auth.example.test" };
+  const html = renderUsersMcp(pg, true, "0.22.0", mcp);
+  // the address first, before anything a person must read past
+  assert.match(html, /^<div class="connect connect-mcp"><p class="connect-title">Connect an AI agent<\/p><p class="mcp-lead">Add this address to your agent, then sign in in your browser\.<\/p><dl class="facts"><dt>URL<\/dt><dd><span class="copyrow"><code id="users-mcp-url">https:\/\/mason\.example\.test\/mcp<\/code> <button[^>]*data-copy="users-mcp-url"/);
+  // Claude Code's line and Cursor's mcp.json carry the address alone: each signs in in the browser, no password
+  assert.equal(codeOf(html, "users-mcp-claude-code-url"), "claude mcp add --transport http mason https://mason.example.test/mcp");
+  assert.deepEqual(JSON.parse(codeOf(html, "users-mcp-cursor")), { mcpServers: { mason: { url: "https://mason.example.test/mcp" } } });
+  for (const id of ["claude-code-url", "cursor"]) assert.match(html, new RegExp(`data-copy="users-mcp-${id}"`), id);
+  const [open, fallback] = [html.replace(/<details[^]*<\/details>/, ""), /<details class="mcp-fallback" data-open="users-mcp-fallback"><summary>For a client that can&#39;t sign in in a browser<\/summary>([^]*)<\/details>/.exec(html)?.[1] ?? ""];
+  assert.equal(textOf(open).replace(/\s+/g, " ").trim(), "Connect an AI agent Add this address to your agent, then sign in in your browser. URL https://mason.example.test/mcp Copy " +
+    "claude.ai and Claude Desktop : Customize, then Connectors, then Add custom connector. " +
+    "ChatGPT : turn on Developer mode in its settings, then create an app with the address. " +
+    "Claude Code : run this, then sign in from /mcp . claude mcp add --transport http mason https://mason.example.test/mcp Copy " +
+    `Cursor : add this to ~/.cursor/mcp.json . ${codeOf(html, "users-mcp-cursor").replace(/\s+/g, " ")} Copy ` +
+    "Paste only the address: leave any OAuth client ID, secret, token or header fields empty. Sign in as a Mason user. " +
+    "Claude Code and Cursor connect from your computer. claude.ai, Claude Desktop and ChatGPT connect from their companies' servers.");
+  // the mason mcp way, with a password, closed under the rest: its two snippets, the placeholders' line, the Node line,
+  // the server's note; never the "can't connect yet" line, which is the endpoint off's
+  assert.doesNotMatch(html, /<details[^>]* open/, "closed at first");
+  assert.equal(codeOf(fallback, "users-mcp-claude-code"), `claude mcp add mason --env MASON_URL="${shown}" -- npx -y @mason-data/cli@0.22.0 mcp`);
+  assert.deepEqual(JSON.parse(codeOf(fallback, "users-mcp-json")), { mcpServers: { mason: { command: "npx", args: ["-y", "@mason-data/cli@0.22.0", "mcp"], env: { MASON_URL: shown } } } });
+  assert.ok(textOf(fallback).includes("Put a user's name and password in place of <user> and <password> . Needs Node 22.13 or later."), textOf(fallback));
+  assert.match(textOf(fallback), /A tool on another machine uses the server's own address/);
+  assert.doesNotMatch(open, /users-mcp-claude-code"|users-mcp-json|<password>|Node 22/, "nothing of the mason mcp way outside its details");
+  assert.doesNotMatch(html, /can't connect this way yet/);
+  // a person's open details stays open across a rewrite (the page's open set, by key)
+  assert.match(renderUsersMcp(pg, true, "0.22.0", mcp, (k) => k === "users-mcp-fallback"), /<details class="mcp-fallback" data-open="users-mcp-fallback" open>/);
+  // the lines per client are the endpoint's alone: off, none
+  const off = renderUsersMcp(pg, true, "0.22.0", null);
+  assert.doesNotMatch(off, /mcp-clients|Customize|Developer mode|~\/\.cursor|--transport http/);
+  assert.match(textOf(off), /can't connect this way yet/);
+});
+
+test("Users: Connects from offers each hosted agent's published ranges (issue 1115) — a choice that sends them, chosen for a user whose ranges are exactly a company's; none offered when the run says none; under A hosted agent's servers, each named for the product that calls from them (issue 1155)", async () => {
+  const usersPage = await import(path.join(WEB, "pages", "users.js") as string) as Record<string, unknown>;
+  const connectsChoice = usersPage.connectsChoice as (id: string, from?: string[] | null, presets?: unknown[]) => string;
+  const rangesOf = usersPage.rangesOf as (e: unknown, presets?: unknown[]) => string[] | null;
+  const { presetsForPage, ADDRESS_PRESETS } = await import("../src/cli/address-presets.ts");
+  const presets = presetsForPage();
+  // the run's list, what /api/state carries: the company's label and its ranges, never its source
+  assert.deepEqual(presets[0], { id: "claude", label: "claude.ai", name: "claude.ai", ranges: ["160.79.104.0/21", "153.61.208.0/20"] });
+  // named for the product that calls from those servers, never the company alone, which a person using its desktop app
+  // took for theirs (issue 1155); the ids stay
+  assert.deepEqual(presets.map((p) => [p.id, p.label, p.name]), [["claude", "claude.ai", "claude.ai"], ["openai", "ChatGPT on the web", "ChatGPT"]]);
+  assert.ok(ADDRESS_PRESETS.every((p) => p.source.startsWith("https://")), "each list cites where it is published");
+  // every range is one mason user from takes
+  const { userRanges } = await import("../src/duck/users.ts");
+  for (const p of presets) assert.ok(!("problem" in userRanges(p.ranges)), p.id);
+  const html = connectsChoice("add-user", null, presets.slice(0, 1));
+  // the agents' servers under a heading of their own, apart from anywhere and only these addresses
+  assert.match(html, /<option value="any" selected>anywhere<\/option><option value="only">only these addresses<\/option><optgroup label="A hosted agent&#39;s servers"><option value="preset:claude">claude\.ai<\/option><\/optgroup><\/select>/);
+  // chosen, it sends its ranges, whatever the box holds
+  assert.deepEqual(rangesOf({ connects: { value: "preset:claude" }, from: { value: "192.0.2.0/24" } }, presets), ["160.79.104.0/21", "153.61.208.0/20"]);
+  // a company the run no longer lists: no range sent, for the run to refuse — never the box nor anywhere
+  assert.deepEqual(rangesOf({ connects: { value: "preset:gone" }, from: { value: "192.0.2.0/24" } }, presets), []);
+  // a user whose ranges are exactly a company's opens on it; any other list is its own
+  assert.match(connectsChoice("user-from", ["160.79.104.0/21", "153.61.208.0/20"], presets), /<option value="preset:[^"]+" selected>claude\.ai<\/option>/);
+  assert.match(connectsChoice("user-from", ["160.79.104.0/21"], presets), /<option value="only" selected>/);
+  // no list from the run: the two choices of before
+  assert.doesNotMatch(connectsChoice("add-user", null), /preset:|optgroup|preset-hint/);
+  // the box hides behind a company's choice as behind anywhere: nothing in the form moves
+  const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
+  assert.match(css, /\.connects:has\(option\[value\^="preset:"\]:checked\) \.ranges > input/);
+  // a hosted agent's servers chosen: one line under the choice says who connects from them and what a desktop client
+  // chooses instead (issue 1155: a person using Claude Code chose Anthropic's servers and was refused); written in every
+  // form that offers them, shown only while one is chosen, its place kept (visibility), so nothing moves
+  assert.equal(usersPage.PRESET_HINT, "Only that agent's connectors connect from these, in its app or on the web. Claude Code and Cursor: choose anywhere, or your computer's address.");
+  for (const from of [null, ["192.0.2.0/24"], ["160.79.104.0/21", "153.61.208.0/20"]]) {
+    const h = connectsChoice("user-from", from, presets);
+    // in the address box's place: one grid cell with it (app.css), so the form keeps its height whatever is chosen
+    assert.match(h, /<\/select> <span class="ranges"><label class="sr"[^]*?<\/label><input [^>]*><span class="preset-hint">Only that agent&#39;s connectors connect from these, in its app or on the web\. Claude Code and Cursor: choose anywhere, or your computer&#39;s address\.<\/span><\/span><\/span>$/, String(from));
+  }
+  assert.match(css, /\.connects:not\(:has\(option\[value\^="preset:"\]:checked\)\) \.preset-hint \{ visibility: hidden; \}/);
+  assert.match(css, /\.connects \.ranges > input, \.connects \.ranges > \.preset-hint \{ grid-area: 1 \/ 1; \}/, "the hint in the address box's cell");
+  // the add form says it under its line instead, in the line on roles' place (the box beside the choice is too narrow
+  // there), the two in one cell: the hint once, never in the choice too
+  const renderAddUser = usersPage.renderAddUser as (s: unknown) => string;
+  const form = renderAddUser(CATALOG_STATE);
+  assert.equal(form.split("preset-hint").length - 1, 1, "the hint once in the add form");
+  assert.match(form, /<div class="form-notes"><p class="dim roles-line">[^]*?<\/p><p class="preset-hint">Only that agent&#39;s connectors[^<]*<\/p><\/div><\/form>$/);
+  assert.match(css, /#add-user:has\(option\[value\^="preset:"\]:checked\) \.form-notes \.roles-line,\n#add-user:not\(:has\(option\[value\^="preset:"\]:checked\)\) \.form-notes \.preset-hint \{ visibility: hidden; \}/);
+  assert.match(css, /#add-user \.form-notes > \* \{ grid-area: 1 \/ 1;/);
+  assert.doesNotMatch(css.match(/\.connects[^{]*\.preset-hint[^{]*\{[^}]*\}/g)!.join(" "), /display:\s*none/, "its place kept, never display: none");
+});
+
+test("Users: ChatGPT on the web's published list (issue 1115) — OpenAI's JSON file of some 300 ranges, as a user's ranges are kept, that mason user from takes whole; a choice, never a wall of CIDRs in the box or the row", async () => {
+  const usersPage = await import(path.join(WEB, "pages", "users.js") as string) as Record<string, unknown>;
+  const connectsChoice = usersPage.connectsChoice as (id: string, from?: string[] | null, presets?: unknown[]) => string;
+  const fromText = usersPage.fromText as (from: string[] | null, presets?: unknown[]) => string;
+  const rangesOf = usersPage.rangesOf as (e: unknown, presets?: unknown[]) => string[] | null;
+  const { presetsForPage, ADDRESS_PRESETS } = await import("../src/cli/address-presets.ts");
+  const { userRanges, MAX_RANGES } = await import("../src/duck/users.ts");
+  const openai = ADDRESS_PRESETS.find((p) => p.id === "openai");
+  assert.ok(openai !== undefined, "the ChatGPT on the web preset");
+  // its source: OpenAI's page of IP egress ranges, and the JSON file it names for ChatGPT's connectors
+  assert.equal(openai.label, "ChatGPT on the web");
+  assert.equal(openai.source, "https://developers.openai.com/api/docs/guides/ip-addresses");
+  assert.deepEqual(openai.read, { kind: "json", url: "https://openai.com/chatgpt-connectors.json" });
+  // some 300 ranges, each written as a user's ranges are kept (an address without its /32), once, within a user's bound
+  assert.ok(openai.ranges.length >= 200 && openai.ranges.length <= MAX_RANGES, String(openai.ranges.length));
+  const kept = userRanges(openai.ranges);
+  assert.ok(!("problem" in kept), "problem" in kept ? kept.problem : "");
+  assert.deepEqual(kept.from, [...openai.ranges], "already in the form mason user from keeps: a user given them is shown as OpenAI's");
+  assert.ok(openai.ranges.every((r) => !r.endsWith("/32")));
+  const presets = presetsForPage();
+  const p = presets.find((x) => x.id === "openai")!;
+  // the box stays empty and hidden behind the choice; the choice sends the whole list
+  const html = connectsChoice("add-user", null, presets);
+  assert.match(html, /<option value="preset:[^"]+">ChatGPT on the web<\/option>/);
+  assert.match(html, /<input id="add-user-from" name="from"[^>]* value="">/);
+  assert.deepEqual(rangesOf({ connects: { value: "preset:openai" }, from: { value: "" } }, presets), p.ranges);
+  // the page carries the list once (the run's state), never in the form: the option names the company
+  assert.ok(html.length < 4_000, `the add form is ${html.length} characters`);
+  assert.ok(!html.includes(p.ranges[0]!), "no range of the list written into the form");
+  // a user given the list opens on it, and its row names the company and the count, not the ranges
+  const opened = connectsChoice("user-from", [...p.ranges], presets);
+  assert.match(opened, /<option value="preset:[^"]+" selected>ChatGPT on the web<\/option>/);
+  assert.match(opened, /<input id="user-from-from" name="from"[^>]* value="">/, "no wall of CIDRs in the box");
+  assert.equal(fromText([...p.ranges], presets), `from ChatGPT's servers (${p.ranges.length} ranges)`);
+  // the row names whose servers, never the company's name alone (issue 1155)
+  assert.equal(fromText(["160.79.104.0/21", "153.61.208.0/20"], presets), "from claude.ai's servers (2 ranges)");
+  assert.equal(fromText(["192.0.2.0/24"], presets), "from 192.0.2.0/24");
+  assert.equal(fromText(null, presets), "from anywhere");
+});
+
+test("scripts/connector-ranges.ts reads a JSON list of prefixes (OpenAI's shape): IPv4 and IPv6, in the form a user's ranges are kept; another shape is could-not-read, never an empty list; --write's text replaces the preset's ranges alone", async () => {
+  const { rangesOfPrefixes, keptForm, withRanges, rangesLiteral } = await import("../scripts/connector-ranges.ts");
+  // synthetic addresses, in the file's shape
+  const file = JSON.stringify({ creationTime: "2026-11-06T18:26:55.215535", prefixes: [{ ipv4Prefix: "198.51.100.7/32" }, { ipv4Prefix: "203.0.113.0/28" }, { ipv6Prefix: "2001:db8:5::/48" }, { ipv6Prefix: "2001:db8::1/128" }] });
+  const read = rangesOfPrefixes(file);
+  assert.deepEqual(read, ["198.51.100.7/32", "203.0.113.0/28", "2001:db8:5::/48", "2001:db8::1/128"]);
+  assert.deepEqual(keptForm(read as string[]), ["198.51.100.7", "203.0.113.0/28", "2001:db8:5::/48", "2001:db8::1"]);
+  // couldn't tell is said, never read as no ranges
+  for (const [text, said] of [["not json", /not JSON/], ["{}", /no prefixes/], [JSON.stringify({ prefixes: [] }), /no prefix/],
+    [JSON.stringify({ prefixes: [{ ipv4Prefix: "198.51.100.0/24" }, { cidr: "203.0.113.0/24" }] }), /prefix 2 has no ipv4Prefix or ipv6Prefix/]] as const) {
+    const r = rangesOfPrefixes(text);
+    assert.equal(typeof r, "string", text);
+    assert.match(r as string, said);
+  }
+  assert.match(keptForm(["198.51.100.0/24", "relay.example.test"]) as string, /cannot/);
+  // --write: the preset's ranges replaced, every other byte kept
+  const source = `export const ADDRESS_PRESETS = [\n  {\n    id: "a",\n    ranges: ["192.0.2.0/24"],\n  },\n  {\n    id: "b",\n    ranges: [\n      "198.51.100.1",\n    ],\n  },\n];\n`;
+  const ten = Array.from({ length: 10 }, (_, i) => `198.51.100.${i}`);
+  const written = withRanges(source, "b", ten);
+  assert.equal(written, source.replace(`ranges: [\n      "198.51.100.1",\n    ]`, rangesLiteral(ten)));
+  assert.ok(written!.includes(`ranges: ["192.0.2.0/24"]`), "the other preset kept");
+  assert.equal(withRanges(source, "c", ten), null, "a preset not found: said, never written elsewhere");
+  assert.equal(withRanges(withRanges(source, "a", ["203.0.113.0/24"])!, "a", ["192.0.2.0/24"]), source);
+});
+
+test("scripts/connector-ranges.ts reads a company's list under its heading and up to the next, and nothing else on the page", async () => {
+  const { pageText, rangesUnder } = await import("../scripts/connector-ranges.ts");
+  // a page shaped as the company's: the inbound list, the outbound one, then the phased-out one (synthetic addresses)
+  const html = `<h2>Inbound IP addresses</h2><p>IPv4</p><code>192.0.2.0/24</code>` +
+    `<h2>Outbound IP addresses</h2><p>These are the stable IP addresses used for outbound requests.</p><code>198.51.100.0/24</code><code>203.0.113.0/25</code>` +
+    `<h2>Phased out IP addresses</h2><code>203.0.113.200/32</code><nav>Outbound IP addresses</nav>`;
+  assert.deepEqual(rangesUnder(pageText(html), "Outbound IP addresses", "Phased out IP addresses"), ["198.51.100.0/24", "203.0.113.0/25"]);
+  const plain = "Inbound IP addresses 192.0.2.0/24 Outbound IP addresses These are the stable IP addresses 198.51.100.0/24 2001:db8:5::/48 Phased out IP addresses 203.0.113.200/32";
+  assert.deepEqual(rangesUnder(plain, "Outbound IP addresses", "Phased out IP addresses"), ["198.51.100.0/24", "2001:db8:5::/48"]);
+  assert.equal(rangesUnder(plain, "Egress IP addresses", "Phased out IP addresses"), null, "a heading gone: could not tell");
+  assert.equal(rangesUnder("Outbound IP addresses 198.51.100.0/24", "Outbound IP addresses", "Phased out IP addresses"), null, "no end: could not tell");
+});
+
+test("New user added: a closed Connect an AI agent under the URL, the box's own body (issues 1114, 1155) — endpoint off, the mason mcp lines with the user's own URL, each Shown once, and why the JSON keeps the password out of the shell's history", async () => {
+  const usersPage = await import(path.join(WEB, "pages", "users.js") as string) as Record<string, unknown>;
+  const renderUsersMcp = usersPage.renderUsersMcp as (pg: unknown, served?: boolean, version?: unknown) => string;
+  const renderAdded = (a: unknown, o?: unknown) => onceHtml(fn<[unknown, unknown?], Record<string, string>>("renderAdded")(a, o));
+  const codeOf = (html: string, id: string): string => (new RegExp(`<code id="${id}">([\\s\\S]*?)</code>`).exec(html)?.[1] ?? "")
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"").replace(/&#39;/g, "'").replace(/&amp;/g, "&");
+  const a = ADDED("claude");
+  const html = renderAdded(a, { version: "0.22.0" });
+  const section = MCP_UNDER.exec(html)?.[0] ?? "";
+  assert.notEqual(section, "", "a section of its own, under the URL");
+  assert.doesNotMatch(section, /<details[^>]* open/, "closed at first");
+  // the box's own lines (one builder, mcpSnippets): the box's with the user's URL in place of the placeholders' one
+  const shown = "postgres://<user>:<password>@127.0.0.1:5433/shop";
+  const box = renderUsersMcp({ host: "127.0.0.1", port: 5433, database: "shop", shown }, false, "0.22.0");
+  for (const id of ["claude-code", "json"]) assert.equal(codeOf(section, `added-mcp-${id}`), codeOf(box, `users-mcp-${id}`).replaceAll(shown, a.url), `${id}: the box's, with this user's URL`);
+  assert.equal(codeOf(section, "added-mcp-claude-code"), `claude mcp add mason --env MASON_URL="${a.url}" -- npx -y @mason-data/cli@0.22.0 mcp`);
+  assert.deepEqual(JSON.parse(codeOf(section, "added-mcp-json")), { mcpServers: { mason: { command: "npx", args: ["-y", "@mason-data/cli@0.22.0", "mcp"], env: { MASON_URL: a.url } } } });
+  assert.ok(section.includes(a.password), "the password in both, as the URL carries it");
+  // each line with its Copy, Shown once under it as the password's is beside its own
+  for (const id of ["claude-code", "json"]) {
+    assert.match(section, new RegExp(`<pre><code id="added-mcp-${id}">[^]*?</code></pre><span class="copyblock-side"><button type="button" class="small" data-copy="added-mcp-${id}" data-room="Press ⌘C">Copy</button><span class="badge warn">Shown once</span></span></div>`), id);
+  }
+  assert.equal(textOf(section), `Connect an AI agent Claude Code: run this. ${codeOf(section, "added-mcp-claude-code")} Copy Shown once ` +
+    "This line saves the password in your shell history. The JSON in a client's settings file doesn't. " +
+    `Claude Desktop, Cursor and others: add this to their MCP settings. ${codeOf(section, "added-mcp-json").replace(/\s+/g, " ")} Copy Shown once ` +
+    "Needs Node 22.13 or later. claude.ai and ChatGPT on the web can't connect this way yet.");
+  // a release pins the package; the run's version not said or no release: unpinned, as the box
+  assert.match(codeOf(renderAdded(a), "added-mcp-claude-code"), / npx -y @mason-data\/cli mcp$/);
+  assert.match(codeOf(renderAdded(a, { version: "dev" }), "added-mcp-claude-code"), / npx -y @mason-data\/cli mcp$/);
+  // no URL (Mason not running when it was added): no section, as no URL row
+  const { url: _url, ...noUrl } = a;
+  assert.doesNotMatch(renderAdded(noUrl, { version: "0.22.0" }), /MCP|once-mcp/);
+  // it never widens the dialog, and a long line scrolls inside its own block
+  const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
+  assert.match(css, /\.once \.facts dd\.under \{ grid-column: 1 \/ -1; min-width: 0; contain: inline-size; \}/);
+  assert.match(css, /\.copyblock pre \{ flex: 1 1 auto; min-width: 0; margin: 0; overflow-x: auto; white-space: pre;/);
+});
+
+test("New user added with the MCP endpoint on (issue 1155): both addresses up front, the Postgres URL and the MCP URL, each with Copy; the instructions closed under them — the box's lines per client, sign in as this user with the password above, and the mason mcp lines, Shown once, with the shell-history tip in a closed fallback; the password only where it was", async () => {
+  const usersPage = await import(path.join(WEB, "pages", "users.js") as string) as Record<string, unknown>;
+  const renderUsersMcp = usersPage.renderUsersMcp as (pg: unknown, served?: boolean, version?: unknown, mcp?: unknown) => string;
+  const renderAdded = (a: unknown, o?: unknown) => onceHtml(fn<[unknown, unknown?], Record<string, string>>("renderAdded")(a, o));
+  const a = ADDED("claude");
+  const mcp = { url: "https://mason.example.test/mcp", issuer: "https://auth.example.test" };
+  const html = renderAdded(a, { version: "0.22.0", mcp });
+  // the two addresses, up front: the Postgres URL (the password in it), then the MCP URL, then the instructions, closed
+  assert.match(html, new RegExp(`<dt>URL</dt><dd><span class="copyrow"><code id="added-url">[^<]*</code>[^]*?</dd><dt>MCP URL</dt><dd><span class="copyrow"><code id="added-mcp-url">https://mason\\.example\\.test/mcp</code> <button[^>]*data-copy="added-mcp-url"[^]*?</dd>${MCP_UNDER.source}<dt>User</dt>`));
+  const section = MCP_UNDER.exec(html)?.[0] ?? "";
+  assert.notEqual(section, "", "a section of its own, under the URLs");
+  assert.doesNotMatch(section, /<details class="once-mcp"[^>]* open/, "closed at first");
+  assert.doesNotMatch(section, /<dt>URL<\/dt>|id="added-mcp-url"/, "the address is the row's, never said twice");
+  const fallback = /<details class="mcp-fallback" data-open="added-mcp-fallback"><summary>For a client that can&#39;t sign in in a browser<\/summary>([^]*?)<\/details>/.exec(section)?.[1] ?? "";
+  assert.notEqual(fallback, "", "the mason mcp way, in a closed details of its own");
+  const outside = section.replace(/<details class="mcp-fallback"[^]*?<\/details>/, "");
+  // the user named at sign-in, the password the one above
+  assert.match(outside, /<p class="mcp-lead">Add the MCP URL to your agent, then sign in in your browser\.<\/p><ul class="mcp-clients">/);
+  assert.ok(textOf(outside).includes("Paste only the address: leave any OAuth client ID, secret, token or header fields empty. If the sign-in page asks for a Mason user, sign in as claude, with the password above."), textOf(outside));
+  // the box's lines per client, in the same words (one body): the box's, its ids the dialog's
+  const box = renderUsersMcp({ host: "127.0.0.1", port: 5433, database: "shop", shown: "postgres://<user>:<password>@127.0.0.1:5433/shop" }, false, "0.22.0", mcp);
+  const clients = (h: string) => /<ul class="mcp-clients">[^]*?<\/ul>/.exec(h)?.[0] ?? "";
+  assert.equal(clients(outside).replaceAll("added-mcp-", "users-mcp-"), clients(box));
+  // the password only where it was: the URL, the Password row and the mason mcp lines — never the MCP URL or the lines per client
+  assert.ok(!outside.includes(a.password), "the password only in the fallback's lines");
+  assert.equal(html.split(a.password).length - 1, 4, "the URL, the Password row, Claude Code's mason mcp line and the JSON");
+  assert.equal(renderAdded(a, { version: "0.22.0" }).split(a.password).length - 1, 4, "as with the endpoint off");
+  // off: the Postgres URL alone, no MCP URL row
+  assert.doesNotMatch(renderAdded(a, { version: "0.22.0" }), /MCP URL|added-mcp-url/);
+  assert.ok(fallback.includes(a.password));
+  assert.equal([...fallback.matchAll(/<span class="badge warn">Shown once<\/span>/g)].length, 2, "each mason mcp line Shown once");
+  assert.ok(textOf(fallback).includes("This line saves the password in your shell history."), "the shell-history tip with Claude Code's line");
+  assert.doesNotMatch(outside, /Shown once|shell history/);
+  assert.doesNotMatch(section, /can't connect this way yet/);
+  // a person's open section and fallback stay open across a rewrite (the page's open set)
+  const opened = renderAdded(a, { version: "0.22.0", mcp, isOpen: () => true });
+  assert.match(opened, /<details class="once-mcp" data-open="added-mcp" open>/);
+  assert.match(opened, /<details class="mcp-fallback" data-open="added-mcp-fallback" open>/);
+});
+
+test("the Users page over a fake run: Connect an AI agent under Connect a Postgres client or BI tool, from /api/state's postgres and version — on a served run and a read-only page too; the endpoint's address when the state says it, and New user added's section with it", async () => {
+  for (const [what, state] of [["mason start", RUNNING], ["mason serve", { ...RUNNING, served: true }],
+    ["read-only", { ...RUNNING, pageReadOnly: "the web page is read-only here (MASON_UI_READ_ONLY=1)" }]] as const) {
+    const run = fakeRun();
+    run.answers.set("GET api/state", answer(state));
+    run.answers.set("GET api/share/choices", answer(TWO_ROLES.body));
+    const app = fn<[unknown], App>("createApp")(run.fetch);
+    app.show("users");
+    await app.poll();
+    const v = app.view();
+    assert.match(v["users-connect"]!, /^<div class="connect"><p class="connect-title">Connect a Postgres client or BI tool<\/p>/, what);
+    assert.match(v["users-mcp"]!, /^<div class="connect connect-mcp"><p class="connect-title">Connect an AI agent<\/p>/, what);
+    assert.ok(textOf(v["users-mcp"]!).includes(`MASON_URL="${state.postgres!.shown}" -- npx -y @mason-data/cli@${state.engine.version} mcp`), `${what}: the run's URL and version`);
+    assert.equal(/server's own address/.test(v["users-mcp"]!), /server's own address/.test(v["users-connect"]!), `${what}: the server's note where the Postgres client or BI tool's box has it`);
+  }
+  // the endpoint on (/api/state mcp): its address in the box, and in New user added's section, its sign-in naming the user
+  {
+    const run = fakeRun();
+    const mcp = { url: "https://mason.example.test/mcp", issuer: "https://auth.example.test" };
+    run.answers.set("GET api/state", answer({ ...RUNNING, served: true, mcp }));
+    run.answers.set("POST api/users", answer({ ...ADDED("agent"), url: "postgres://agent:secret@127.0.0.1:5433/shop", password: "secret" }));
+    const app = fn<[unknown], App>("createApp")(run.fetch);
+    app.show("users");
+    await app.poll();
+    assert.match(app.view()["users-mcp"]!, /<code id="users-mcp-url">https:\/\/mason\.example\.test\/mcp<\/code>/);
+    assert.equal(await app.addUser("agent"), true);
+    const head = app.view()["once-head"]!;
+    assert.match(head, /<dt>MCP URL<\/dt><dd><span class="copyrow"><code id="added-mcp-url">https:\/\/mason\.example\.test\/mcp<\/code>/);
+    assert.ok(textOf(head).includes("sign in as agent, with the password above"), textOf(head));
+  }
+  // a stopped run's state, with no postgres: neither box
+  const run = fakeRun();
+  run.answers.set("GET api/state", answer({ ...RUNNING, postgres: undefined }));
+  const app = fn<[unknown], App>("createApp")(run.fetch);
+  app.show("users");
+  await app.poll();
+  assert.deepEqual([app.view()["users-connect"], app.view()["users-mcp"]], ["", ""]);
 });
 
 test("the Overview's first-run checklist: Mason is running, Sync a table, Create a user — the same words done or not, each ○ with its one action; done while a table is synced and a user exists, whatever was queried (the owner, 2026-11-13)", async () => {
@@ -5940,7 +6336,7 @@ test("Tables: a synced table with no size says why — under the log's size, Mea
   const html = renderTables(state, { sizes, now: NOW });
   const sizeCell = (t: string): string => {
     const row = new RegExp(`<tr class="c-added[^"]*"><th scope="row" class="name"><code class="name" title="${t.replace(".", "\\.")}">.*?</tr>`).exec(html)?.[0] ?? assert.fail(`no row for ${t}`);
-    return [...row.matchAll(/<td[^>]*>.*?<\/td>/g)].map((m) => m[0])[4]!;
+    return [...row.matchAll(/<td[^>]*>.*?<\/td>/g)].map((m) => m[0])[6]!;
   };
   assert.equal(sizeCell("public.customers"), `<td class="num size">512.0 KiB</td>`, "measured: its size, no tooltip");
   assert.equal(sizeCell("public.orders"), `<td class="num size" title="Under 3 MiB. Its rows aren&#39;t in the main file yet, so it can&#39;t be measured exactly.">&lt; 3 MiB</td>`,
@@ -6083,6 +6479,125 @@ test("Tables: a table added or removed keeps its row in its list, its state chan
 
 const queriesPage = await import(path.join(WEB, "pages", "queries.js") as string).catch(() => ({})) as Record<string, (...a: never[]) => unknown>;
 
+// AN ADDED TABLE'S COLUMNS AND ITS SYNC ARE COLUMNS OF THE LIST (issue 1110), not the note under its row: each a button
+// that opens its form, in a cell of its own under its header. Where the column gives way (app.css), the same control is
+// in the note, with an id of its own, and its popover is anchored to whichever of the two is shown
+test("Tables: an added table's columns and its sync are columns of the list, Columns and Sync, each the button that opens its form; the note keeps the long words, and the same controls only where their columns gave way (issue 1110)", () => {
+  const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
+  const html = renderTables(CATALOG_STATE);
+  const heads = [...html.matchAll(/<th scope="col"( class="([^"]+)")?>([^<]*)<\/th>/g)].slice(0, 9).map((m) => `${m[3]}:${m[2]}`);
+  const headsOf = (table: string) => [...table.matchAll(/<th scope="col"( class="([^"]+)")?>([^<]*)<\/th>/g)].map((m) => `${m[3]}:${m[2]}`);
+  const [addedTable, notAddedTable] = [...html.matchAll(/<table class="([^"]*)">.*?<\/table>/gs)].map((m) => m[0]);
+  assert.deepEqual(headsOf(addedTable!), ["Table:name", "State:state", "Rows:num rows", "Key:key", "Columns:cols", "Sync:sync", "Last sync:num last", "Size:num size", ":act"], "Added: Columns and Sync have a header each, between Key and Last sync");
+  assert.equal(heads.length, 9);
+  // NOT ADDED HAS NEITHER (the owner: always empty there), so its table is main's seven columns, its own class
+  assert.match(notAddedTable!, /^<table class="catalog not-added">/);
+  assert.deepEqual(headsOf(notAddedTable!), ["Table:name", "State:state", "Rows:num rows", "Key:key", "Last sync:num last", "Size:num size", ":act"], "Not added: no Columns, no Sync");
+  const rowOf = (h: string, t: string) => new RegExp(`<tr class="[^"]*"><th scope="row" class="name"><code class="name" title="${t.replace(".", "\\.")}">.*?</tr><tr class="under note">.*?</tr>`).exec(withoutPops(h))?.[0] ?? assert.fail(`no row for ${t}`);
+  const cellOf = (row: string, cls: string) => new RegExp(`<td class="${cls}">(.*?)</td>`).exec(row)?.[1] ?? assert.fail(`no ${cls} cell`);
+  const noteOf = (row: string, span = 9) => new RegExp(`<tr class="under note"><td colspan="${span}"><div class="under-body">(.*)</div></td></tr>$`).exec(row)?.[1] ?? assert.fail(`no note across ${span} columns`);
+  // an added table: its two buttons in their cells, with the ids their popovers are anchored to; in the column the
+  // header says Sync, so its words alone
+  const customers = rowOf(html, "public.customers");
+  assert.equal(cellOf(customers, "cols"), `<button type="button" class="small link syncnow" id="columns-tables-public.customers" data-choose="public.customers" title="Every column, and any column added to the table later that does not look like a secret. Choose which columns Mason syncs">All columns</button>`);
+  assert.equal(cellOf(customers, "sync"), `<button type="button" class="small link syncnow" id="sync-tables-public.customers" data-choose-sync="public.customers" title="Choose how Mason keeps customers current">Choose…</button>`);
+  // its note: the same two controls, each in its fold (shown only while its column gave way), with ids of their own,
+  // in the columns' order; nothing else of them in the note
+  const note = noteOf(customers);
+  assert.match(note, /<span class="fold f-cols"><button type="button" class="small link syncnow" id="columns-note-tables-public\.customers" data-choose="public\.customers"[^>]*>All columns<\/button><\/span><span class="fold f-sync"><button type="button" class="small link syncnow" id="sync-note-tables-public\.customers" data-choose-sync="public\.customers"[^>]*>Sync…<\/button><\/span>/);
+  assert.equal([...note.replace(/<span class="fold f-(cols|sync)">.*?<\/span>/g, "").matchAll(/syncnow/g)].length, 0, "no control in the note but in a fold");
+  assert.deepEqual([...note.matchAll(/class="fold f-(\w+)"/g)].map((m) => m[1]), ["rows", "key", "cols", "sync"], "the folds in the columns' order");
+  // a sync the run keeps: its words in the column ("Off"), "Sync: Off" in the note, where no header says Sync
+  const off = (CATALOG_STATE.tables as unknown as Array<Record<string, unknown>>).map((t) => t.table === "public.customers" ? { ...t, kept: { by: "poll", sync: { mode: "off" }, syncedAt: null, nextAt: null } } : t);
+  const offRow = rowOf(renderTables({ ...CATALOG_STATE, tables: off }), "public.customers");
+  assert.match(cellOf(offRow, "sync"), />Off<\/button>$/);
+  assert.match(noteOf(offRow), /id="sync-note-tables-public\.customers"[^>]*>Sync: Off<\/button>/);
+  // the note keeps the long words: the progress, the error, the stream (held by the tests of each); a row whose note then
+  // says nothing but its folds is still written
+  assert.ok(!/what-copy|class="err"|class="stream/.test(note), "customers is synced: nothing long to say");
+  // a table not added: no Columns or Sync cell (its list has neither), its note across its seven columns, its own
+  // actions (Add, Columns…) where they were
+  const audit = rowOf(html, "public.audit");
+  assert.ok(!/<td class="(cols|sync)">/.test(audit), "no Columns or Sync cell");
+  assert.equal([...audit.split('<tr class="under')[0]!.matchAll(/<td/g)].length, 6, "six cells beside its name");
+  assert.ok(!/f-cols|f-sync/.test(noteOf(audit, 7)), "no fold of them in its note");
+  // a table added from Not added keeps its row there until the lists are laid out again: its two buttons are in its note
+  // (always shown there, app.css), with the note's ids, and their popovers anchor to them
+  const order = { added: ["public.customers", "public.orders", "public.events"], other: ["public.audit", "public.accounts", "public.event_log", "public.staging"] };
+  const justAdded = (CATALOG_STATE.tables as unknown as Array<Record<string, unknown>>).map((t) => t.table === "public.audit"
+    ? { ...(CATALOG_STATE.tables as unknown as Array<Record<string, unknown>>).find((x) => x.table === "public.customers"), table: "public.audit" } : t);
+  const kept = renderTables({ ...CATALOG_STATE, tables: justAdded }, { order, syncOpen: "public.audit" });
+  const keptRow = rowOf(kept, "public.audit");
+  assert.ok(!/<td class="(cols|sync)">/.test(keptRow), "still no Columns or Sync cell in Not added");
+  assert.match(noteOf(keptRow, 7), /<span class="fold f-cols"><button [^>]*id="columns-note-tables-public\.audit"[^>]*>All columns<\/button><\/span><span class="fold f-sync"><button [^>]*id="sync-note-tables-public\.audit"/);
+  assert.match(popOf(kept, "sync-tables-public.audit"), /data-or-anchor="sync-note-tables-public\.audit"/, "its Sync choice beside the button in its note");
+  assert.match(audit, /<td class="act" id="act-tables-public\.audit">.*data-add-table="public\.audit".*data-choose="public\.audit".*<\/td>/);
+  // read-only: the same words, dim, with no button, in the cells and the folds alike; a sync the run does not say is
+  // not shown (there is no button to label)
+  const why = "This server's sources file can't be changed from here.";
+  const ro = rowOf(renderTables({ ...CATALOG_STATE, sourcesReadOnly: why, sourcesReadOnlyKind: "deployed" }), "public.customers");
+  assert.equal(cellOf(ro, "cols"), `<span class="syncnow dim" title="Every column, and any column added to the table later that does not look like a secret">All columns</span>`);
+  assert.equal(cellOf(ro, "sync"), "");
+  assert.ok(!/<button[^>]*(data-choose|data-choose-sync)=/.test(ro), "no button");
+  assert.match(noteOf(ro), /<span class="fold f-cols"><span class="syncnow dim"[^>]*>All columns<\/span><\/span>/);
+  assert.ok(!noteOf(ro).includes("f-sync"), "nothing of a sync the run does not say");
+  const roOff = rowOf(renderTables({ ...CATALOG_STATE, tables: off, sourcesReadOnly: why, sourcesReadOnlyKind: "deployed" }), "public.customers");
+  assert.equal(cellOf(roOff, "sync"), `<span class="syncnow dim" title="This server&#39;s sources file can&#39;t be changed from here.">Off</span>`);
+  assert.match(noteOf(roOff), /<span class="fold f-sync"><span class="syncnow dim"[^>]*>Sync: Off<\/span><\/span>/);
+  // ITS SYNC CHOICE AND ITS COLUMN FORM, OPENED: a popover anchored to the control in the column, or to the one in the
+  // note where the column gave way; no row, no cell added
+  const rowsOf = (h: string) => [...withoutPops(h).matchAll(/<tr\b[^>]*>/g)].length;
+  const cellsOf = (h: string) => [...withoutPops(h).matchAll(/<t[hd]\b[^>]*>/g)].length;
+  for (const [what, opened, anchor, or] of [
+    ["the Sync choice", renderTables(CATALOG_STATE, { syncOpen: "public.customers" }), "sync-tables-public.customers", "sync-note-tables-public.customers"],
+    ["the column form", renderTables(CATALOG_STATE, { choosing: "public.customers", columns: columnsOf("public.customers") }), "columns-tables-public.customers", "columns-note-tables-public.customers"],
+  ] as const) {
+    const pops = popsOf(opened);
+    assert.equal(pops.length, 1, `${what}: one popover`);
+    assert.equal(pops[0]!.anchor, anchor, `${what}: anchored to the control in its column`);
+    assert.match(pops[0]!.html, new RegExp(`^<div class="pop ask" data-anchor="${anchor.replace(/\./g, "\\.")}" role="dialog" aria-label="[^"]+" data-or-anchor="${or.replace(/\./g, "\\.")}">`), `${what}: or to the one in the note`);
+    assert.equal(rowsOf(opened), rowsOf(html), `${what}: no row inserted`);
+    assert.equal(cellsOf(opened), cellsOf(html), `${what}: no cell added`);
+  }
+  // THE STYLESHEET: each column its width; Columns and Sync give way last (after Key, Size, Last sync, Rows), each
+  // folding its control into the note and hiding the one in its cell, so one of each is shown to press
+  const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  // each list its own: Added's scoped to it (`:not(.not-added)`), Not added's to it (`.not-added`)
+  const givesOf = (scope: string) => [...css.matchAll(/@container catalog \(max-width: (\d+)px\) \{ table\.catalog(\S*) :is\(th, td\)\.(\w+) \{ width: 0; padding: 0; visibility: hidden; \}(.*)\}/g)]
+    .filter((m) => m[2] === scope).map((m) => ({ at: Number(m[1]), col: m[3]!, rest: m[4]! })).sort((a, b) => b.at - a.at);
+  const px = (c: string) => Number(new RegExp(`table\\.catalog th\\.${c} \\{ width: (\\d+)px; \\}`).exec(css)![1]);
+  const least = Number(/table\.catalog \{ table-layout: fixed; width: 100%; --least: (\d+)px; \}/.exec(css)![1]);
+  for (const [list, scope, cols, order] of [
+    ["Added", ":not(.not-added)", ["state", "rows", "key", "cols", "sync", "last", "size", "act"], ["key", "size", "last", "rows", "cols", "sync"]],
+    ["Not added", ".not-added", ["state", "rows", "key", "last", "size", "act"], ["key", "size", "last", "rows"]],
+  ] as const) {
+    const gives = givesOf(scope);
+    assert.deepEqual(gives.map((g) => g.col), order, `${list}: the order its columns give way in`);
+    // each width the sum of the columns shown and 200 px for the name, less 1: the name never under 200 px
+    let shown = cols.reduce((n, c) => n + px(c), 0) + 200;
+    for (const g of gives) { assert.equal(g.at, shown - 1, `${list}: ${g.col} gives way under ${shown} px`); shown -= px(g.col); }
+    assert.equal(least, shown, `${list}: the least width is the name, the state and the actions`);
+  }
+  for (const c of ["cols", "sync"]) {
+    const g = givesOf(":not(.not-added)").find((x) => x.col === c)!;
+    assert.match(g.rest, new RegExp(`table\\.catalog:not\\(\\.not-added\\) td\\.${c} \\.syncnow \\{ display: none; \\} table\\.catalog:not\\(\\.not-added\\) \\.fold\\.f-${c} \\{ display: flex; \\}`), `${c}: its control folds into the note (a flex box, so the note is as tall as without it: the review of PR 1113), the cell's not shown`);
+  }
+  assert.match(css, /table\.catalog\.not-added \.fold:is\(\.f-cols, \.f-sync\) \{ display: flex; \}/, "in Not added, a table added from it has its buttons in its note");
+});
+
+/** placePops with a popover's `data-or-anchor` (issue 1110): its anchor when that is shown, else the other. */
+test("a popover anchored to a control written twice is placed beside the one shown (issue 1110)", () => {
+  const placePops = fn<[unknown, unknown], unknown[]>("placePops");
+  const el = (left: number, shown: boolean) => ({ getBoundingClientRect: () => ({ left, top: 100, right: left + 100, bottom: 120, width: 100, height: 20 }), getClientRects: () => shown ? [{}] : [] });
+  const pop = () => ({ dataset: { anchor: "cell", orAnchor: "note" }, offsetWidth: 300, offsetHeight: 120, hidden: false, style: {} as Record<string, string> });
+  for (const [cell, note, left] of [[true, false, "700px"], [false, true, "100px"], [true, true, "700px"]] as const) {
+    const p = pop();
+    const ids: Record<string, unknown> = { cell: el(900, cell), note: el(300, note) };
+    placePops({ querySelectorAll: () => [p], getElementById: (id: string) => ids[id] ?? null }, { innerWidth: 1280, innerHeight: 900 });
+    assert.equal(p.style.left, left, `the cell's control ${cell ? "shown" : "hidden"}, the note's ${note ? "shown" : "hidden"}`);
+  }
+});
+
 test("layout guard: a click moves no row and no column — a question, a form and an answer are popovers beside the button, never a row; a changing label keeps its room; fixed columns; the actions never wrap; a table's card scrolls, never the page", () => {
   const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
   const renderUsers = fn<[unknown, unknown, number?, unknown?], string>("renderUsers");
@@ -6137,7 +6652,10 @@ test("layout guard: a click moves no row and no column — a question, a form an
   // each list's header row left out: a table's rows alone
   const trs = rowsOf(html).filter((tr) => tr !== "<tr>");
   trs.forEach((tr, i) => assert.equal(tr.startsWith('<tr class="under note"'), i % 2 === 1, `row ${i}: a table's row, then its note line: ${tr}`));
-  for (const row of html.split("<tr").filter((r) => r.includes('<th scope="row" class="name">'))) assert.equal([...row.matchAll(/<td/g)].length, 6, `six cells beside the name: ${row.slice(0, 120)}`);
+  const [addedHtml, notAddedHtml] = html.split('<table class="catalog not-added">');
+  for (const [cells, part] of [[8, addedHtml!], [6, notAddedHtml!]] as const) {
+    for (const row of part.split("<tr").filter((r) => r.includes('<th scope="row" class="name">'))) assert.equal([...row.matchAll(/<td/g)].length, cells, `${cells} cells beside the name: ${row.slice(0, 120)}`);
+  }
   assert.ok(!/class="what"/.test(html), "no Note column");
   // a table not added keeps its bar's line, empty, so Add → its bar moves no row
   assert.match(html, /Not added<\/span><span class="copyline none" aria-hidden="true"><\/span><\/td>/);
@@ -6184,8 +6702,9 @@ test("layout guard: a click moves no row and no column — a question, a form an
   assert.ok(css.includes("  table.users { display: table; }") && phone.indexOf("table.users { display: table; }") < phone.indexOf("\n}"), "on a phone the card scrolls, so the actions pin");
   assert.match(rule('table.users th[scope="row"]'), /overflow: hidden/);
   const heads = [...html.matchAll(/<th scope="col" class="([^"]+)">/g)].map((m) => m[1]!.split(" ").pop()!);
-  const COLUMNS = ["name", "state", "rows", "key", "last", "size", "act"];
-  assert.deepEqual(heads, [...COLUMNS, ...COLUMNS], "Added and Not added: the same columns, so they line up one over the other");
+  const COLUMNS = ["name", "state", "rows", "key", "cols", "sync", "last", "size", "act"];
+  // Not added has no Columns and no Sync, always empty there (the owner, issue 1110)
+  assert.deepEqual(heads, [...COLUMNS, ...COLUMNS.filter((c) => c !== "cols" && c !== "sync")], "Added, then Not added without Columns and Sync");
   for (const c of heads.filter((x) => x !== "name")) assert.match(rule(`table.catalog th.${c}`), /width: \d+px/, `the ${c} column has its width`);
   assert.match(rule("td.act"), /white-space: nowrap/, "a row's actions never wrap");
   assert.match(rule(".list"), /overflow-x: auto/, "a list in its card scrolls inside it (issue 1049)");
@@ -6522,13 +7041,16 @@ test("only the clock moved: the ages are set where they are, the part not writte
   assert.equal(shown[0]!.innerHTML, "7s ago", "the age moved where it is");
 });
 
-// ------------------------------------------------------------------ Temporary cloud login (the page's mason share, the add box's second kind)
+// ------------------------------------------------------------------ Temporary cloud tunnel (the page's mason share, the add box's second kind)
 
 const SHARE_AT = "2026-11-01T10:00:00.000Z";
 const SHARE_NOW = Date.parse("2026-11-01T10:05:00.000Z");
 const PASSWORD = `mason_share_${"ab".repeat(24)}`;
 const SHARE_URL = `postgres://share_a1b2c3:${PASSWORD}@relay.example:41234/shop?sslmode=require`;
-const listed = { user: "share_a1b2c3", from: "page", role: null, reads: "every synced table", openedAt: SHARE_AT, via: "pinggy", host: "relay.example", port: 41234, endsAt: "2026-11-01T11:00:00.000Z", state: "up" };
+const listed = { user: "share_a1b2c3", from: "page", role: null, reads: "every synced table", openedAt: SHARE_AT, via: "pinggy", host: "relay.example", port: 41234, database: "shop", sslmode: "require", endsAt: "2026-11-01T11:00:00.000Z", state: "up" };
+/** A clock time as the page says when a tunnel ends: this machine's own time zone and locale, as the browser's. */
+const clockAt = (iso: string): string => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+const ENDS = `Online · ends in 55 min , at ${clockAt("2026-11-01T11:00:00.000Z")}`;
 const sharing = (shares: unknown[], o: Record<string, unknown> = {}) => ({ ...RUNNING, share: shares.length ? { port: 40001, fingerprint: "AA", sessions: 0, refusedLogins: 0, droppedConnections: 0, shares } : null, shareEnded: null, ...o });
 const shareModel = (o: Record<string, unknown> = {}) => ({ phase: "none", role: null, opened: null, ended: null, failure: null, ...o });
 const ONE_ANSWER = { body: { choices: [], role: null, reads: "every synced table" }, failure: null };
@@ -6537,24 +7059,24 @@ const TWO_ROLES = { body: { choices: [{ role: "sales", reads: "1 synced table: o
 const sharePane = (s: unknown, m: unknown, choices: unknown = ONE_ANSWER) => fn<[unknown, unknown, unknown], string>("renderSharePane")(s, m, choices);
 const shareCard = (s: unknown, m: unknown) => fn<[unknown, unknown, number], string>("renderShareCard")(s, m, SHARE_NOW);
 const shareOnce = (s: unknown, m: unknown) => fn<[unknown, unknown, number], Record<string, string>>("renderShareOnce")(s, m, SHARE_NOW);
-const PANE_WORDS = "For a tool in the cloud that can't reach this machine. Opens a public address with a login of its own, until you stop it. Opening one can take up to 30 s.";
+const PANE_WORDS = "For a tool in the cloud that can't reach this machine. Opens an address reachable online, protected by a login and password of its own, until you stop it. It usually opens in a few seconds.";
 
-test("Temporary cloud login: the add box's segments, its pane in each state, its one-time dialog once opened and its card in each — none, opening, open, open after a reload, ended, refused, served, read-only — as they WROTE them", () => {
-  // the segments: New user and Temporary cloud login, the one chosen pressed
+test("Temporary cloud tunnel: the add box's segments, its pane in each state, its one-time dialog once opened and its card in each — none, opening, open, open after a reload, ended, refused, served, read-only — as they WROTE them", () => {
+  // the segments: New user and Temporary cloud tunnel, the one chosen pressed
   const kinds = fn<[string], string>("renderAddKinds");
-  assert.equal(kinds("user"), `<div class="range add-kinds" role="group" aria-label="What to create"><button type="button" data-add-kind="user" aria-pressed="true">New user</button><button type="button" data-add-kind="share" aria-pressed="false">Temporary cloud login</button></div>`);
+  assert.equal(kinds("user"), `<div class="range add-kinds" role="group" aria-label="What to create"><button type="button" data-add-kind="user" aria-pressed="true">New user</button><button type="button" data-add-kind="share" aria-pressed="false">Temporary cloud tunnel</button></div>`);
   assert.match(kinds("share"), /data-add-kind="user" aria-pressed="false">New user<\/button><button type="button" data-add-kind="share" aria-pressed="true">/);
-  // the pane: two sentences, then Open a cloud login; a Role only where more than one is offered
+  // the pane: two sentences, then Open a cloud tunnel; a Role only where more than one is offered
   const none = sharePane(sharing([]), shareModel());
-  assert.equal(textOf(none), `${PANE_WORDS} Open a cloud login`);
-  assert.match(none, /<button type="button" id="share-open" class="primary" data-share-open="" data-room="Open a cloud login" data-room2="Opening…">Open a cloud login<\/button>/, "enabled, in the room of Opening… too");
+  assert.equal(textOf(none), `${PANE_WORDS} Open a cloud tunnel`);
+  assert.match(none, /<button type="button" id="share-open" class="primary" data-share-open="" data-room="Open a cloud tunnel" data-room2="Opening…">Open a cloud tunnel<\/button>/, "enabled, in the room of Opening… too");
   assert.doesNotMatch(none + sharePane(sharing([]), shareModel(), ONE_ROLE), /<select/, "none or one role: no role to choose");
   const two = sharePane(sharing([]), shareModel(), TWO_ROLES);
   assert.match(two, /<label for="share-role">Role<\/label> <select id="share-role"><option value="sales" selected>sales: 1 synced table: orders \(default\)<\/option><option value="ops">ops: every synced table<\/option><\/select><\/span> <button[^>]*data-share-open/, "the roles beside the button, the file's default first chosen");
   assert.match(sharePane(sharing([]), shareModel({ role: "ops" }), TWO_ROLES), /<option value="ops" selected>/, "the role chosen stays chosen across a rewrite");
   const unread = sharePane(sharing([]), shareModel(), null);
-  assert.equal(textOf(unread), `${PANE_WORDS} Open a cloud login Reading the roles…`);
-  assert.match(unread, /data-share-open="" data-room="Open a cloud login" data-room2="Opening…" disabled>Open a cloud login/, "no button before the roles are read");
+  assert.equal(textOf(unread), `${PANE_WORDS} Open a cloud tunnel Reading the roles…`);
+  assert.match(unread, /data-share-open="" data-room="Open a cloud tunnel" data-room2="Opening…" disabled>Open a cloud tunnel/, "no button before the roles are read");
   const rolesFailure = { code: "refused", message: "no role of mason/roles.yml can be shared: the rows of each depend on an attribute, and a share's login has no attributes" };
   const noRole = sharePane(sharing([]), shareModel(), { body: undefined, failure: rolesFailure });
   assert.ok(noRole.includes(fn<[unknown], string>("renderFailure")(rolesFailure)), "the roles refused: the run's Failure");
@@ -6563,57 +7085,64 @@ test("Temporary cloud login: the add box's segments, its pane in each state, its
   // words the same
   const opening = sharePane(sharing([]), shareModel({ phase: "opening" }));
   assert.equal(textOf(opening), `${PANE_WORDS} Opening…`);
-  assert.match(opening, /data-room="Open a cloud login" data-room2="Opening…" aria-busy="true" disabled>Opening…<\/button>/);
+  assert.match(opening, /data-room="Open a cloud tunnel" data-room2="Opening…" aria-busy="true" disabled>Opening…<\/button>/);
   const held = sharePane(sharing([listed]), shareModel({ phase: "open" }));
-  assert.equal(textOf(held), `${PANE_WORDS} Open a cloud login`);
-  assert.match(held, /title="One is open: stop it to open another" disabled>Open a cloud login/);
+  assert.equal(textOf(held), `${PANE_WORDS} Open a cloud tunnel`);
+  assert.match(held, /title="One is open: stop it to open another" disabled>Open a cloud tunnel/);
   // nothing before anything was asked, nor while it opens (its button says so): nothing under the box comes and goes
   assert.equal(shareCard(sharing([]), shareModel()), "");
   assert.equal(shareCard(sharing([]), shareModel({ phase: "opening" })), "");
 
-  // just opened: the one-time dialog's parts, titled Temporary cloud login — URL, Login and Password, what it reads, one line
-  const opened = { url: SHARE_URL, user: "share_a1b2c3", password: PASSWORD, database: "shop", host: "relay.example", port: 41234, role: null, reads: "every synced table", openedAt: SHARE_AT };
+  // just opened: the one-time dialog's parts, titled Temporary cloud tunnel — URL, Login and Password, what it reads, one line
+  const opened = { url: SHARE_URL, user: "share_a1b2c3", password: PASSWORD, database: "shop", sslmode: "require", host: "relay.example", port: 41234, role: null, reads: "every synced table", openedAt: SHARE_AT, endsAt: listed.endsAt };
   const parts = shareOnce(sharing([listed]), shareModel({ phase: "open", opened }));
   assert.deepEqual(Object.keys(parts), ["once-head", "once-status", "once-foot"]);
   const once = onceHtml(parts);
-  assert.match(once, /^<p class="once-title" id="once-title">Temporary cloud login<\/p><dl class="facts">/);
+  assert.match(once, /^<p class="once-title" id="once-title">Temporary cloud tunnel<\/p><dl class="facts">/);
   for (const [id, v] of [["share-url", SHARE_URL], ["share-password", PASSWORD]]) {
     assert.ok(once.includes(`<code id="${id}">${v}</code> <button type="button" class="small" data-copy="${id}"`), `${id} with its Copy`);
   }
   assert.match(once, /<dt>Login<\/dt><dd>share_a1b2c3<\/dd>/, "the login its name, as a new user's User is");
   assert.match(once, /data-copy="share-password"[^>]*>Copy<\/button> <span class="badge warn">Shown once<\/span><\/span><\/dd>/, "Shown once beside the password's Copy");
-  assert.equal(textOf(once), `Temporary cloud login URL ${SHARE_URL} Copy Login share_a1b2c3 Password ${PASSWORD} Copy Shown once Public for 5 min : every synced table ` +
+  assert.equal(textOf(once), `Temporary cloud tunnel URL ${SHARE_URL} Copy Login share_a1b2c3 Password ${PASSWORD} Copy Shown once ${ENDS} · reads every synced table ` +
     "The password is only shown once and is not saved. This login is its own, and stops working when it ends.");
-  assert.match(textOf(onceHtml(shareOnce(sharing([{ ...listed, role: "sales", reads: "1 synced table: orders" }]), shareModel({ phase: "open", opened })))), /Public for 5 min , as the role sales: 1 synced table: orders/);
-  assert.match(textOf(onceHtml(shareOnce(sharing([]), shareModel({ phase: "open", opened })))), /Public for 5 min : every synced table/, "before the state lists it: from the answer that opened it");
+  assert.match(textOf(onceHtml(shareOnce(sharing([{ ...listed, role: "sales", reads: "1 synced table: orders" }]), shareModel({ phase: "open", opened })))), / · reads as the role sales: 1 synced table: orders The password/);
+  assert.ok(textOf(onceHtml(shareOnce(sharing([]), shareModel({ phase: "open", opened })))).includes(`${ENDS} · reads every synced table`), "before the state lists it: from the answer that opened it");
+  assert.ok(textOf(onceHtml(shareOnce(sharing([]), shareModel({ phase: "open", opened: { ...opened, endsAt: null } })))).includes("Online until you stop it · reads every synced table"), "no end: until stopped, in the dialog too");
   // none: before anything was asked, while it opens, after a reload (no answer), once ended or refused
   for (const m of [shareModel(), shareModel({ phase: "opening" }), shareModel({ phase: "open" }), shareModel({ phase: "ended", ended: { user: "share_a1b2c3", why: "x" } }), shareModel({ phase: "refused", failure: { code: "x", message: "y" } })]) {
     assert.equal(onceHtml(shareOnce(sharing([listed]), m)), "", `no dialog in phase ${m.phase}`);
   }
 
-  // open: the card, its password never in it (the dialog's alone) — its host, port and login, what it reads, Stop
+  // open: the card, its password never in it (the dialog's alone) — Host, Port, Database, SSL mode (in the Connect box's
+  // order, each with Copy) and Login; that it is online and until when, what it reads, Stop (issue 1117)
   for (const m of [shareModel({ phase: "open", opened }), shareModel()]) {
     const card = shareCard(sharing([listed]), m);
-    assert.match(card, /^<div class="user-added share-added" role="status"><p class="added-title">Temporary cloud login<\/p><dl class="facts">/);
+    assert.match(card, /^<div class="user-added share-added" role="status"><p class="added-title">Temporary cloud tunnel<\/p><dl class="facts">/);
     assert.ok(!card.includes(PASSWORD) && !card.includes("share-password") && !card.includes("share-url"), "the password is nowhere in the card, the dialog open or not, after a reload too");
-    assert.equal(textOf(card).replace(/ at .+? \(in /, " at HH:MM (in "), "Temporary cloud login Host relay.example Copy Port 41234 Copy Login share_a1b2c3 Public for 5 min : every synced table " +
-      "The password was shown once, when it opened, and is not saved. For a new one, press Stop, then Open a cloud login. " +
-      "Live until you stop it. A free one ends sooner, within about an hour, at HH:MM (in about 55 minutes). Then open a new one for a new address and password. It also ends within two minutes of closing this page. Stop");
+    assert.equal(textOf(card), "Temporary cloud tunnel Host relay.example Copy Port 41234 Copy Database shop Copy SSL mode require Copy Login share_a1b2c3 " +
+      `${ENDS} · reads every synced table ` +
+      "The password was shown once, when it opened, and is not saved. For a new one, press Stop, then Open a cloud tunnel. " +
+      "It also ends within two minutes of closing this page. Stop");
+    assert.match(card, /<dl class="facts"><dt>Host<\/dt><dd><span class="copyrow"><code id="share-host">relay\.example<\/code> [^]*<dt>Port<\/dt><dd><span class="copyrow"><code id="share-port">41234<\/code> [^]*<dt>Database<\/dt><dd><span class="copyrow"><code id="share-database">shop<\/code> <button type="button" class="small" data-copy="share-database"[^]*<dt>SSL mode<\/dt><dd><span class="copyrow"><code id="share-sslmode">require<\/code> <button type="button" class="small" data-copy="share-sslmode"[^]*<dt>Login<\/dt><dd>share_a1b2c3<\/dd><\/dl>/, "the rows in the Connect box's order, the database and SSL mode each with Copy");
+    assert.match(card, /<span class="badge warn">Online<\/span> · <time data-tick datetime="2026-11-01T11:00:00\.000Z">ends in 55 min<\/time>, at /, "the time left a ticking time, beside the Online badge");
     assert.match(card, /<button type="button" id="share-stop" class="danger" data-share-stop="share_a1b2c3" data-room="Stop" data-room2="Stopping…">Stop<\/button><\/div>$/, "Stop, where the focus goes once the dialog closes");
   }
-  assert.match(textOf(shareCard(sharing([{ ...listed, endsAt: null }]), shareModel({ phase: "open", opened }))), /Live until you stop it\. It also ends within two minutes of closing this page\./, "one with no end: until stopped");
-  assert.match(textOf(shareCard(sharing([{ ...listed, role: "sales", reads: "1 synced table: orders" }]), shareModel({ phase: "open" }))), /Public for 5 min , as the role sales: 1 synced table: orders/);
+  const endless = shareCard(sharing([{ ...listed, endsAt: null }]), shareModel({ phase: "open", opened }));
+  assert.match(textOf(endless), / Login share_a1b2c3 Online until you stop it · reads every synced table The password was shown once, .* It also ends within two minutes of closing this page\. Stop$/, "one with no end: until stopped");
+  assert.doesNotMatch(endless, /<time/, "no end: no timer");
+  assert.match(textOf(shareCard(sharing([{ ...listed, role: "sales", reads: "1 synced table: orders" }]), shareModel({ phase: "open" }))), /Online · ends in 55 min , at .+ · reads as the role sales: 1 synced table: orders The password/);
 
-  // ended and refused: popovers, with Dismiss — how it ended beside the add box, a refusal beside Open a cloud login —
+  // ended and refused: popovers, with Dismiss — how it ended beside the add box, a refusal beside Open a cloud tunnel —
   // so nothing under the box comes and goes (issue 1033)
   const ended = shareCard(sharing([]), shareModel({ phase: "ended", ended: { user: "share_a1b2c3", why: "its tunnel closed (ssh exited 255)" } }));
   assert.match(ended, /^<div class="pop said" data-anchor="add-box" role="status">/);
-  assert.equal(textOf(ended), "The temporary cloud login ended: its tunnel closed (ssh exited 255). Its address and password no longer work. Dismiss");
+  assert.equal(textOf(ended), "The temporary cloud tunnel ended: its tunnel closed (ssh exited 255). Its address and password no longer work. Dismiss");
   assert.equal(textOf(shareCard(sharing([]), shareModel({ phase: "ended", ended: { user: "share_a1b2c3", why: "you stopped it on this page" } }))),
-    "The temporary cloud login ended: you stopped it on this page. Its address and password no longer work. Dismiss");
+    "The temporary cloud tunnel ended: you stopped it on this page. Its address and password no longer work. Dismiss");
   const failure = { code: "not_found", message: "ssh is not on this machine", fix: "install the OpenSSH client", next: [{ command: "mason doctor", what: "checks this machine" }] };
   const refused = shareCard(sharing([]), shareModel({ phase: "refused", failure }));
-  assert.match(refused, /^<div class="pop said" data-anchor="share-open" role="status">/, "a refusal beside Open a cloud login");
+  assert.match(refused, /^<div class="pop said" data-anchor="share-open" role="status">/, "a refusal beside Open a cloud tunnel");
   assert.ok(refused.includes(fn<[unknown], string>("renderFailure")(failure)), "the CLI's Failure, rendered by renderFailure");
 
   for (const m of [shareModel(), shareModel({ phase: "open", opened })]) {
@@ -6625,7 +7154,57 @@ test("Temporary cloud login: the add box's segments, its pane in each state, its
   for (const html of [none, two, once, shareCard(sharing([listed]), shareModel()), refused]) assert.doesNotMatch(textOf(html), /pinggy|bore\b|duck|\buser\b|Share over the internet/i);
 });
 
-test("Temporary cloud login over a fake run: Open a cloud login opens it confirmed with the role chosen, beaten on a timer of its own, its end said and its password dropped; Stop", async () => {
+test("Temporary cloud tunnel: it counts down to its end, in the card and the dialog alike, clamped at its end; with no end it says until you stop it, with no timer (issue 1117)", () => {
+  const END = Date.parse(listed.endsAt);
+  const opened = { url: SHARE_URL, user: "share_a1b2c3", password: PASSWORD, database: "shop", sslmode: "require", host: "relay.example", port: 41234, role: null, reads: "every synced table", openedAt: SHARE_AT, endsAt: listed.endsAt };
+  const card = (now: number, s: unknown = sharing([listed])) => fn<[unknown, unknown, number], string>("renderShareCard")(s, shareModel({ phase: "open" }), now);
+  const dialog = (now: number, o: unknown = opened) => fn<[unknown, unknown, number], Record<string, string>>("renderShareOnce")(sharing([]), shareModel({ phase: "open", opened: o }), now)["once-status"]!;
+  const left = (html: string) => /<time data-tick datetime="2026-11-01T11:00:00\.000Z">([^<]*)<\/time>/.exec(html)?.[1];
+  // the time left, as the commands say a span (`duration`): minutes, then seconds under a minute and a half; once the end
+  // has passed and the state has not yet seen the tunnel go, "ending now", never a zero or a negative
+  for (const [now, says] of [[END - 60 * 60_000, "ends in 60 min"], [END - 55 * 60_000, "ends in 55 min"], [END - 2 * 60_000, "ends in 2 min"], [END - 61_000, "ends in 61 s"],
+    [END - 400, "ends in 1 s"], [END, "ending now"], [END + 45_000, "ending now"]] as const) {
+    assert.equal(left(card(now)), says, `the card at ${new Date(now).toISOString()}`);
+    assert.equal(left(dialog(now)), says, `the dialog at ${new Date(now).toISOString()}`);
+  }
+  assert.equal(textOf(dialog(END + 45_000)), `Online · ending now , at ${clockAt(listed.endsAt)} · reads every synced table`);
+  // only the time left moves with the clock: the shell sets its text in place (app.js TICK), so no row moves
+  const steady = (h: string) => h.replace(/(<time data-tick[^>]*>)[^<]*(<\/time>)/g, "$1$2");
+  for (const at of [END - 61_000, END, END + 45_000]) {
+    assert.equal(steady(card(at)), steady(card(SHARE_NOW)), "the card: only the time left changed");
+    assert.equal(steady(dialog(at)), steady(dialog(SHARE_NOW)), "the dialog: only the time left changed");
+  }
+  // no end (a tunnel whose client says none): until you stop it, no timer, the same at every time
+  const endless = sharing([{ ...listed, endsAt: null }]);
+  assert.equal(textOf(card(SHARE_NOW, endless)).match(/Online[^·]*· reads every synced table/)?.[0], "Online until you stop it · reads every synced table");
+  assert.equal(card(SHARE_NOW + 3_600_000, endless), card(SHARE_NOW, endless), "nothing in it moves with the clock");
+  assert.equal(textOf(dialog(SHARE_NOW, { ...opened, endsAt: null })), "Online until you stop it · reads every synced table");
+});
+
+test("in the browser: the Temporary cloud tunnel's time left ticks where it is, the card not written again, and ends at ending now (issue 1117)", async (t) => {
+  // the page's clock is the global Date (`new Date()` in `start`), held by the test; the beats' timer held too
+  t.mock.timers.enable({ apis: ["Date", "setInterval"], now: SHARE_NOW });
+  const run = fakeRun();
+  run.answers.set("GET api/state", answer(sharing([listed])));
+  run.answers.set("GET api/share/choices", answer(ONE_ANSWER.body));
+  run.answers.set("POST api/share/share_a1b2c3/beat", answer({ ok: true }));
+  const { el, tick, settle } = fakeBrowser(run, "#users");
+  await settle();
+  const added = el("added") as unknown as { writes: number; html: string; querySelectorAll?: (s: string) => { innerHTML: string }[] };
+  assert.match(textOf(added.html), new RegExp(`^Temporary cloud tunnel Host relay\\.example Copy Port 41234 Copy Database shop Copy SSL mode require Copy Login share_a1b2c3 Online · ends in 55 min , at ${clockAt(listed.endsAt)} · reads every synced table `));
+  const shown = [{ innerHTML: /<time data-tick [^>]*>([^<]*)</.exec(added.html)![1]! }];
+  added.querySelectorAll = (sel: string) => sel === "time[data-tick]" ? shown : [];
+  const writes = added.writes;
+  const END = Date.parse(listed.endsAt);
+  for (const [at, says] of [[END - 30 * 60_000, "ends in 30 min"], [END - 30_000, "ends in 30 s"], [END + 2_000, "ending now"]] as const) {
+    t.mock.timers.setTime(at);
+    tick(); await settle();
+    assert.equal(shown[0]!.innerHTML, says, `the time left at ${new Date(at).toISOString()}`);
+    assert.equal(added.writes, writes, "the card not written again: nothing in it moved");
+  }
+});
+
+test("Temporary cloud tunnel over a fake run: Open a cloud tunnel opens it confirmed with the role chosen, beaten on a timer of its own, its end said and its password dropped; Stop", async () => {
   const asked: Array<[string, string | undefined, unknown]> = [];
   let state: unknown = sharing([]);
   const answers: Record<string, unknown> = {
@@ -6709,7 +7288,7 @@ test("Temporary cloud login over a fake run: Open a cloud login opens it confirm
   assert.deepEqual([fifth.once(), fifth.m.phase], [null, "ended"]);
 });
 
-test("in the browser: Open a cloud login opens the one-time dialog (its Copy focused, Escape refused, polls leaving it as it is); I have copied it closes it, the live card left with Stop focused and no password on the page", async () => {
+test("in the browser: Open a cloud tunnel opens the one-time dialog (its Copy focused, Escape refused, polls leaving it as it is); I have copied it closes it, the live card left with Stop focused and no password on the page", async () => {
   const run = fakeRun();
   let state: unknown = sharing([]);
   run.answers.set("GET api/state", () => new Response(JSON.stringify(state), { status: 200 }));
@@ -6725,9 +7304,9 @@ test("in the browser: Open a cloud login opens the one-time dialog (its Copy foc
   await click({ shareOpen: "" });
   const once = el("once");
   assert.deepEqual([once.open, once.shown], [true, 1], "opened as a modal");
-  assert.match(el("once-head").html, /^<p class="once-title" id="once-title">Temporary cloud login<\/p>/);
+  assert.match(el("once-head").html, /^<p class="once-title" id="once-title">Temporary cloud tunnel<\/p>/);
   assert.ok(el("once-head").html.includes(PASSWORD));
-  assert.match(textOf(el("once-status").html), /^Public for .* : every synced table$/);
+  assert.match(textOf(el("once-status").html), /^Online · .* · reads every synced table$/);
   assert.match(textOf(el("once-foot").html), /^The password is only shown once and is not saved\./);
   assert.equal(d.focused, "once [data-copy]");
   assert.ok(!el("added").html.includes(PASSWORD), "the card under the box never holds it");
@@ -6739,11 +7318,11 @@ test("in the browser: Open a cloud login opens the one-time dialog (its Copy foc
   await click({ dismissOnce: "" });
   assert.equal(once.open, false, "closed by its button");
   assert.equal(d.focused, "share-stop", "the focus on the live card's Stop");
-  assert.match(textOf(el("added").html), /^Temporary cloud login Host relay\.example Copy Port 41234 Copy Login share_a1b2c3 .* The password was shown once, when it opened, and is not saved\..* Stop$/);
+  assert.match(textOf(el("added").html), /^Temporary cloud tunnel Host relay\.example Copy Port 41234 Copy Database shop Copy SSL mode require Copy Login share_a1b2c3 .* The password was shown once, when it opened, and is not saved\..* Stop$/);
   assert.ok(["added", "once-head", "once-status", "once-foot", "add-share-box"].every((id) => !el(id).html.includes(PASSWORD)), "the password nowhere on the page");
 });
 
-test("the Users page over a fake run: the add box offers New user and Temporary cloud login, a choice rewriting neither pane; its card where New user added is; never in the users list; Connect points to it; a served run has the plain form", async () => {
+test("the Users page over a fake run: the add box offers New user and Temporary cloud tunnel, a choice rewriting neither pane; its card where New user added is; never in the users list; Connect points to it; a served run has the plain form", async () => {
   const run = fakeRun();
   let state: unknown = RUNNING;
   run.answers.set("GET api/state", () => new Response(JSON.stringify(state), { status: 200 }));
@@ -6755,8 +7334,8 @@ test("the Users page over a fake run: the add box offers New user and Temporary 
   const before = app.view();
   assert.match(before["add-kinds"]!, /data-add-kind="user" aria-pressed="true">New user/);
   assert.match(before["add-user-box"]!, /^<form id="add-user" autocomplete="off">/, "in the box, the form is no card of its own");
-  assert.match(textOf(before["add-share-box"]!), /^For a tool in the cloud .* Role sales: 1 synced table: orders \(default\) ops: every synced table Open a cloud login$/);
-  assert.match(textOf(before["users-connect"]!), /A tool in the cloud that can't reach this machine: choose Temporary cloud login in the box above\.$/);
+  assert.match(textOf(before["add-share-box"]!), /^For a tool in the cloud .* Role sales: 1 synced table: orders \(default\) ops: every synced table Open a cloud tunnel$/);
+  assert.match(textOf(before["users-connect"]!), /A tool in the cloud that can't reach this machine: choose Temporary cloud tunnel in the box above\.$/);
   assert.doesNotMatch(before["users-connect"]!, /data-share/, "no box in Connect");
   const page = app.pages.get("users")!;
   assert.equal(page.arrive(), "user-name");
@@ -6776,12 +7355,14 @@ test("the Users page over a fake run: the add box offers New user and Temporary 
   state = sharing([{ ...listed, role: "ops" }]);
   app.markStale(); await app.poll();
   const open = app.view();
-  assert.match(open["once-head"]!, /<p class="once-title" id="once-title">Temporary cloud login<\/p>/);
+  assert.match(open["once-head"]!, /<p class="once-title" id="once-title">Temporary cloud tunnel<\/p>/);
   assert.ok(open["once-head"]!.includes(PASSWORD));
-  assert.match(open.added!, /<p class="added-title">Temporary cloud login<\/p>/);
+  // no MCP section: it is for a tool in the cloud, which runs no command on a computer of its own (issue 1114)
+  assert.doesNotMatch(onceHtml(open), /MCP|MASON_URL|once-mcp/);
+  assert.match(open.added!, /<p class="added-title">Temporary cloud tunnel<\/p>/);
   assert.ok(!open.added!.includes(PASSWORD), "never in the card");
   assert.ok(!open.users!.includes("share_a1b2c3"), "not a user");
-  assert.match(open["add-share-box"]!, /disabled>Open a cloud login/, "one at a time");
+  assert.match(open["add-share-box"]!, /disabled>Open a cloud tunnel/, "one at a time");
   const served = fakeRun();
   served.answers.set("GET api/state", answer({ ...RUNNING, served: true }));
   const sapp = fn<[unknown], App>("createApp")(served.fetch);
@@ -6792,7 +7373,7 @@ test("the Users page over a fake run: the add box offers New user and Temporary 
   assert.equal(sv["add-kinds"], "", "no segments");
   assert.equal(sv["add-share-box"], "");
   assert.match(sv["add-user-box"]!, /^<form id="add-user" class="formcard"/, "the plain add form, its own card");
-  assert.doesNotMatch(Object.values(sv).join(""), /Temporary cloud login|data-share/);
+  assert.doesNotMatch(Object.values(sv).join(""), /Temporary cloud tunnel|data-share/);
 });
 
 // ------------------------------------------------------------------ the host's views and card (issue 814)
@@ -7292,4 +7873,49 @@ test("the page says a poll's updated count as an estimate (~N updated) by the co
   assert.equal(r.headline, "Synced public.orders: 60,000 added, ~64,383 updated, 0 deleted.");
   assert.deepEqual(r.details, [["public.orders", "60,000 added, ~64,383 updated, 0 deleted, 60,000 rows now · 900 ms"]]);
   assert.equal(fn<[unknown], string>("countsText")({ inserts: 1, updates: 64_383, deletes: 0, truncates: 0 }), "1 added, 64,383 updated, 0 deleted");
+});
+
+// ISSUE 1173: Sync now on a 17 M-row `off` table showed "Syncing" beside its old full bar, "100%", nothing moving for the
+// minutes the sync ran. While a sync by hand runs, the row says how far it is — mason status's words (`syncProgressText`,
+// held equal) — and draws a bar only against a known total: never the full bar of the sync before it.
+test("Tables: a sync by hand shows how far it is, the rows read so far and the time, a bar only against a known total, never the old 100% (issue 1173)", async () => {
+  const pageText = fn<[unknown], string>("syncProgressText");
+  const readinessOf = await import("../src/cli/readiness.ts") as unknown as Record<string, (...a: never[]) => unknown>;
+  assert.equal(typeof readinessOf.syncProgressOf, "function", "the server computes a sync by hand's progress once");
+  const progressOf = readinessOf.syncProgressOf as unknown as (startedAt: string, p: unknown, now: number) => Record<string, unknown> & { share: number | null };
+  const cliText = readinessOf.syncProgressText as unknown as (p: unknown) => string;
+  const startedAt = "2026-10-27T09:05:22.000Z", now = Date.parse("2026-10-27T09:07:30.000Z");
+  const poll = (o: Record<string, unknown>) => ({ startedAt: "2026-10-27T09:05:23.000Z", step: "reading", changedRows: 0, keysRead: null, keysTotal: null, pieces: null, ...o });
+  const cases = [progressOf(startedAt, undefined, now), progressOf(startedAt, poll({ changedRows: 1_234_567 }), now), progressOf(startedAt, poll({ step: "starting", changedRows: null }), now), progressOf(startedAt, poll({ changedRows: null }), now),
+    progressOf(startedAt, poll({ step: "writing", changedRows: 1, pieces: { written: 2, of: 9 } }), now), progressOf(startedAt, poll({ step: "writing", changedRows: 40 }), now),
+    progressOf(startedAt, poll({ step: "counting", changedRows: 40 }), now), progressOf(startedAt, poll({ step: "deleting", changedRows: 40, keysRead: 7_500_000, keysTotal: 30_000_000 }), now),
+    progressOf(startedAt, poll({ step: "done", changedRows: 40 }), now)];
+  for (const p of cases) assert.equal(pageText(p), cliText(p), JSON.stringify(p));
+
+  const running = { id: 9, tables: ["public.events"], state: "syncing", startedAt, endedAt: null };
+  const withProgress = (p: unknown) => ({ ...SYNCED, tables: SYNCED.tables.map((t) => t.table === "public.events" ? { ...t, syncByHand: running, syncProgress: p } : t) });
+  const run = fakeRun();
+  run.answers.set("GET api/state", answer(withProgress(cases[1])));
+  const app = fn<[unknown], App>("createApp")(run.fetch);
+  app.show("tables");
+  await app.poll();
+  const rowOf = (h: string) => new RegExp(`<tr class="[^"]*"><th scope="row" class="name"><code class="name" title="public\\.events">.*?</tr><tr class="under note">.*?</tr>`).exec(withoutPops(h))?.[0] ?? assert.fail("no row for public.events");
+  // reading its changed rows: Syncing, the count so far and the time in its note, and NO bar (no total is known)
+  let row = rowOf(app.view().tables!);
+  assert.match(textOf(row), /public\.events Syncing /);
+  assert.ok(textOf(row).includes("syncing by hand: reading its changed rows from the database, 1,234,567 so far (2 min)"), textOf(row));
+  assert.doesNotMatch(row, /role="progressbar"|100%/, "never the full bar of the sync before it");
+  assert.match(row, /<span class="copyline none" aria-hidden="true"><\/span>/, "its bar's line kept, empty, so the row is as tall");
+  // finding the rows deleted: the keys read against the database's count, a bar at that share
+  run.answers.set("GET api/state", answer(withProgress(cases[7])));
+  await app.poll();
+  row = rowOf(app.view().tables!);
+  assert.match(row, /<span class="copyline t-syncing"><span class="copybar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="25" aria-label="public\.events: its sync by hand"/);
+  assert.match(textOf(row), / 25% .*syncing by hand: 40 changed rows read, finding the rows deleted on the database, 7,500,000 of 30,000,000 keys read \(2 min\)/);
+  // ended: its own line again, synced, its full bar
+  run.answers.set("GET api/state", answer({ ...SYNCED, tables: SYNCED.tables.map((t) => t.table === "public.events" ? { ...t, syncByHand: { ...running, state: "synced", endedAt: "2026-10-27T09:07:31.000Z", answer: { at: startedAt, tables: [] } } } : t) }));
+  await app.poll();
+  row = rowOf(app.view().tables!);
+  assert.doesNotMatch(textOf(row), /syncing by hand/);
+  assert.match(row, /aria-valuenow="100"/, "served: its full bar again");
 });

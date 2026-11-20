@@ -7,10 +7,10 @@
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { arrayText, floatNumericText, initcap, jsonArrayLength, jsonBuild, jsonbContains, jsonbExists, jsonElements, jsonGet, jsonMembers, jsonValue, pgCase, stringToArray } from "../src/duck/functions.ts";
-import { strftimeTemplate, toCharNumber, toCharTime } from "../src/duck/to-char.ts";
+import { nativeTemplate, toCharNumber, toCharTime } from "../src/duck/to-char.ts";
 import { DuckDBInstance } from "@duckdb/node-api";
 import { caseMappingOf, type CaseMapping } from "../src/duck/collation.ts";
-import { giveTurns, masonCalls, similarToRe2 } from "../src/duck/rewrite.ts";
+import { giveTurns, masonCalls, nativeText, similarToRe2, treeDifference } from "../src/duck/rewrite.ts";
 import { parseSql, stopParser } from "../src/api/postgres/parser.ts";
 import { deparseSync } from "pgsql-deparser";
 import { padDecimals } from "../src/duck/types.ts";
@@ -382,36 +382,57 @@ test("SIMILAR TO's pattern as RE2's: % and _, the escape, . ^ $ themselves", () 
   assert.equal(similarToRe2("[a-c]%", "\\"), "[a-c].*");
 });
 
-// issue 464: the strftime format a template is sent as (src/duck/rewrite.ts `toChar`) writes what the function writes,
-// for every template strftime takes, over times at their edges (an ISO year that is not the calendar's, a leap day,
-// midnight and noon, a fraction, a year under 1000 and the last day of 9999); every other template is the function's
-test("issue 464: a to_char template DuckDB's strftime takes writes the function's text, and the rest are the function's", async () => {
+// issue 464: the native text a template is sent as (src/duck/to-char.ts `nativeTemplate`, src/duck/rewrite.ts
+// `nativeText`) writes what the function writes, for every template the pieces take, over times at their edges (an ISO
+// year that is not the calendar's, a leap day, midnight and noon, a fraction, each ordinal's last two digits, a year
+// under 1000, the first day the pieces write and the last); every other template is the function's
+test("issue 464: a to_char template the engine writes natively writes the function's text, and the rest are the function's", async () => {
   const times = ["2026-09-15 10:04:05", "2026-01-01 00:00:00", "2020-12-31 23:59:59.999999", "2021-01-03 08:30:00.5", "2024-02-29 13:07:09.012345",
-    "2026-12-28 00:00:01", "0005-03-01 01:02:03.000001", "0999-12-31 23:59:59", "9999-12-28 12:00:00"];
+    "2026-12-28 00:00:01", "0005-03-01 01:02:03.000001", "0999-12-31 23:59:59", "9999-12-28 12:00:00", "0001-01-03 00:00:00", "9999-12-28 23:59:59.999999",
+    "2026-04-11 12:00:00", "2026-05-12 11:59:59", "2026-06-13 00:59:00", "2026-08-21 21:21:21", "2026-10-22 22:22:22", "2026-11-23 23:23:23.4",
+    "1900-01-01 00:00:00", "2000-02-29 12:30:00", "2100-03-01 06:00:00", "2026-12-31 18:00:00", "1999-01-01 09:09:09.090909"];
   const taken = ["YYYY-MM", "YYYY-MM-DD", "Mon YYYY", "FMMonth YYYY", "Dy DD Mon", "FMDay, DDD", "FMMon/FMDy", "YYYY-MM-DD HH24:MI:SS", 'YYYY-MM-DD"T"HH24:MI:SS.US',
-    "HH24:MI:SS.MS", "IYYY-IW", "YYYYMMDD", 'YYYY "100%" MM', "MM/DD/YYYY", "DD.MM.YYYY HH24:MI", '"week" IW "of" IYYY', "YYYY %m"];
-  const refused = ['YYYY-"Q"Q', "Month YYYY", "Day", "FMDD", "DDth", "yyyy-mm", "MON YYYY", "mon", "TMMonth", "FXYYYY", "HH12:MI AM", "WW", "YYYY\\MM", 'YYYY"\\"MM',
-    "IDDD", "J", "Y,YYY", "YY", "CC", "SSSS", "FF3", "RM", "D", "TZ", "OF", "FMYYYY"];
-  for (const f of refused) assert.equal(strftimeTemplate(f, false), null, f);
+    "HH24:MI:SS.MS", "IYYY-IW", "YYYYMMDD", 'YYYY "100%" MM', "MM/DD/YYYY", "DD.MM.YYYY HH24:MI", '"week" IW "of" IYYY', "YYYY %m",
+    // the quarter, a padded name and the rest (issue 464's second shape)
+    'YYYY-"Q"Q', 'YYYY "Q"Q', "Month YYYY", "Day", "MONTH|month|FMMONTH|FMmonth", "DAY|day|FMDAY|FMday|Dy|DY|dy|Mon|MON|mon|FMMON", "Q|FMQ|Qth|QTH",
+    "FMDD", "DDth|DDTH|FMDDth|ddth|FMddTH", "yyyy-mm-dd hh24:mi:ss", "MON YYYY", "mon", "HH12:MI AM", "HH:MI PM|hh12 am|FMHH12 a.m.|HH P.M.|hh p.m.",
+    "WW|FMWW|W|IW|FMIW|iw", "IDDD|FMIDDD|ID|D|d|id", "J|FMJ|Jth", "Y,YYY|y,yyy", "YYY|YY|Y|FMYY|FMYYY|yyy|yy|y", "IYY|IY|I|FMIYYY|iyyy|FMIY", "CC|FMCC|CCth",
+    "SSSS|SSSSS|FMSSSS|SSSSth", "FF1|FF2|FF3|FF4|FF5|FF6|MS|US|ff2|ms|us", "RM|rm|FMRM|FMrm", "D", "FMYYYY", "FMYYYYth", "AD|ad|BC|bc|A.D.|a.d.|B.C.|b.c.",
+    "FMHH24:FMMI:FMSS|FMHH:FMMI", "HH24th MIth SSth", "FMDDDth DDD", "YYYYMMDDHH24MISS", '"Q"Q "100%" %Y', "Y,YYYth|y,yyyTH", "FMMS|FMUS|FMFF3|FMFF1|FMff5"];
+  const refused = ["TMMonth", "FXYYYY", "YYYY\\MM", 'YYYY"\\"MM', "TZ", "tz", "OF", "TZH", "TZM", "MonthTH", "Monthth", "MSth",
+    "USth", "FF2th", "DDsp", "DDSP", "FMx", 'FM"x"', "AMth", "RMth", "ADth", "DayTH"];
+  for (const f of refused) assert.equal(nativeTemplate(f, false), null, f);
   // a template that writes nothing is the function's: DuckDB refuses an empty strftime format as it binds (the review
   // of PR 955); and the function reads ONE prefix an item, as Postgres 18 does
-  for (const f of ["", "FM", '""', "FMFM", "fmFMDD", "FMTMMonth", "FXFMDD", "FMFXDD"]) assert.equal(strftimeTemplate(f, false), null, f);
+  for (const f of ["", "FM", '""', "FMFM", "fmFMDD", "FMTMMonth", "FXFMDD", "FMFXDD"]) assert.equal(nativeTemplate(f, false), null, f);
   assert.equal(toCharTime("2026-03-05 10:00:00", ""), null);
   for (const [f, want] of [["FM", ""], ['""', ""], ["FMFM", "FM"], ["FMTMMonth", "T03onth"], ["TMFMMonth", "F03onth"], ["FXFMDD", "5"], ["FMFXDD", "05"], ["fmFMDD", "FM05"], ["FMYYYYFM", "2026"], ["fxDD", "05"], ["FMx", "x"]] as const) {
     assert.equal(toCharTime("2026-03-05 10:00:00", f), want, f);
   }
   // a date's: no pattern of the time of day
-  assert.equal(strftimeTemplate("YYYY-MM-DD HH24:MI", true), null);
-  assert.equal(strftimeTemplate("YYYY-MM-DD", true), "%Y-%m-%d");
+  for (const f of ["YYYY-MM-DD HH24:MI", "HH12", "AM", "a.m.", "MS", "US", "FF1", "SSSS", "MI", "SS"]) assert.equal(nativeTemplate(f, true), null, f);
+  const dated = ["YYYY-MM-DD", 'YYYY-"Q"Q', "Month YYYY", "FMDay DDth", "IYYY-IW IDDD", "J CC RM W WW D Y,YYY AD", "MON dy"];
   const db = await DuckDBInstance.create(":memory:");
   const c = await db.connect();
   try {
-    for (const f of taken) {
-      const spec = strftimeTemplate(f, false);
-      assert.notEqual(spec, null, f);
-      for (const t of times) {
-        const got = (await c.runAndReadAll(`SELECT strftime(TIMESTAMP '${t}', '${spec!.replace(/'/g, "''")}')`)).getRows()[0]![0];
-        assert.equal(got, toCharTime(t, f), `${f} of ${t}: strftime ${spec}`);
+    // the pieces' SQL as the rewrite sends it: printed, read back unchanged, run over the value
+    const sqlOf = async (f: string, date: boolean): Promise<string> => {
+      const pieces = nativeTemplate(f, date);
+      assert.notEqual(pieces, null, f);
+      const tree = (await parseSql("SELECT 1 FROM t")).stmts?.[0]?.stmt as { SelectStmt: { targetList: Array<{ ResTarget: { val: unknown } }> } };
+      tree.SelectStmt.targetList[0]!.ResTarget.val = nativeText(pieces!, () => ({ ColumnRef: { fields: [{ String: { sval: "v" } }] } }));
+      const sql = deparseSync(tree as never, { pretty: false });
+      assert.equal(treeDifference((await parseSql(sql)).stmts?.[0]?.stmt, tree), null, `${f}: ${sql} is not read back as sent`);
+      return sql;
+    };
+    for (const [list, date] of [[taken, false], [dated, true]] as const) {
+      for (const f of list) {
+        const sql = await sqlOf(f, date);
+        for (const t of times) {
+          const value = date ? t.slice(0, 10) : t;
+          const got = (await c.runAndReadAll(sql.replace(/ FROM t$/, ` FROM (SELECT ${date ? "DATE" : "TIMESTAMP"} '${value}' AS v) t`))).getRows()[0]![0];
+          assert.equal(got, toCharTime(value, f), `${f} of ${value}: ${sql}`);
+        }
       }
     }
   } finally { c.closeSync(); db.closeSync(); }
@@ -424,6 +445,9 @@ test("to_char: Postgres's time patterns and number templates, read from Postgres
   assert.equal(toCharTime("2026-09-15 10:04:05", "Dy DD Mon"), "Tue 15 Sep");
   assert.equal(toCharTime("2026-09-15 10:04:05", "Month|"), "September|");
   assert.equal(toCharTime("2026-09-01 00:00:00", "FMDDth HH12:MI AM"), "1st 12:00 AM");
+  // a fraction of the second is zero-padded under FM too, and Y,YYY's ordinal is the whole year's (issue 464: the
+  // function wrote `12` and `2,026`)
+  assert.equal(toCharTime("2026-09-01 10:04:05.0123", "FMMS|FMUS|FMFF2|Y,YYYth|y,yyyTH"), "012|012300|01|2,026th|2,026TH");
   assert.equal(toCharTime("infinity", "YYYY"), null);
   assert.equal(toCharNumber("89655199.68", "FM999,999,990.00"), "89,655,199.68");
   assert.equal(toCharNumber("0.5", "9.99"), "  .50");

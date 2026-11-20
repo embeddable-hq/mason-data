@@ -59,9 +59,12 @@
  */
 import type { ExactColumn } from "../../duck/rewrite.ts";
 import type { PlannedSql } from "../../duck/plan.ts";
+import { heldUntilFirstRows, LIGHT, type Admitted, type Turn } from "../../duck/admission.ts";
 import { copyFacts, type CopyFacts } from "../../duck/explain.ts";
 import { utf8Fatal } from "../../duck/text.ts";
 import { scaledKey } from "../../duck/scale-column.ts";
+import { bucketKey } from "../../duck/bucket-column.ts";
+import { numberedKey } from "../../duck/reference-keys.ts";
 import type { CopyState } from "../../duck/sync.ts";
 import { explainedText, explainOptions, type ExplainOptions } from "./explain.ts";
 import * as crypto from "node:crypto";
@@ -95,7 +98,7 @@ import {
 } from "./protocol.ts";
 import { madeTypeName, typeNameParts, type PgApiType, type PgSchema } from "./schema.ts";
 import { Unsupported, duckTranslate, endsFailedBlock, type Translation } from "./translate.ts";
-import { clientAddress, PROXY_HEADER_MS, PROXY_SETTING, proxyNames, readProxyHeader, startsProxyHeader, type ProxyFrom } from "./proxy.ts";
+import { clientAddress, parseProxyFrom, PROXY_HEADER_MS, PROXY_SETTING, proxyNames, readProxyHeader, startsProxyHeader, type ProxyFrom } from "./proxy.ts";
 import type { Node } from "libpg-query";
 
 /** what a statement is: one the session or the catalog Postgres answers (translate.ts), one DuckDB answers, or an
@@ -189,6 +192,10 @@ export interface DuckRunner {
     how: ExplainHow): Promise<string[]>;
   /** closes the connection once its answers are released: never under the executor (src/duck/store.ts) */
   close(): Promise<void>;
+  /** THE STATEMENT'S TURN, asked before `run` (and an EXPLAIN ANALYZE's `explain`): a heavy statement waits for one of
+   *  the engine's few turns, a light one takes none (src/duck/admission.ts). Never throws for the statement: a cancel or
+   *  a timeout while it waited is its `failure`. Absent: no statement waits */
+  admit?(sql: PlannedSql, params: readonly (string | null)[], session: DuckSession, signal: AbortSignal): Promise<Admitted>;
 }
 /** what an EXPLAIN is run with beside its plan: its options, the plan's columns and exact numerics, its planning times,
  *  and the sync's facts of every copy (`DuckOptions.copies`), which say how each copy it reads is kept current */
@@ -379,11 +386,31 @@ export interface ShareSocket {
   close(): Promise<void>;
 }
 
+/**
+ * A SOCKET FOR THIS PROCESS'S OWN CLIENTS (`mason serve`'s MCP endpoint, src/cli/mcp-http.ts): on loopback, plain, and
+ * every connection must begin with a PROXY v2 header naming the client it is made for (from loopback alone), so the
+ * session's address — what a user's ranges are judged on, and the request log's `client_addr` — is that client's.
+ * Who logs in is `authenticate`'s alone: it holds a secret only the process that opened the door knows, so no other
+ * process on the machine logs in here, whatever header it sends. A refused login here writes no row of the request log
+ * (a header there is anyone's claim until the login succeeds); the endpoint says its own refusals.
+ */
+export interface LocalDoor {
+  authenticate(password: string, user: string, clientAddr: string | null): PgToken | Promise<PgToken>;
+  /** asked before every statement, as `PgApiOptions.recheck` is */
+  recheck(token: PgToken, clientAddr: string | null): Promise<PgToken | void>;
+  /** what the session's login is, in the log's connected line */
+  who: string;
+  /** what a refused login is told */
+  loginHint: string;
+}
+
 export interface PgApiServer {
   readonly port: number;
   close(): Promise<void>;
   /** opens a second socket (`ShareDoor`); closed by its own `close`, or with the server's */
   openShare(door: ShareDoor): Promise<ShareSocket>;
+  /** opens a socket for this process's own clients (`LocalDoor`); closed by its own `close`, or with the server's */
+  openLocal(door: LocalDoor): Promise<ShareSocket>;
   /** what a generated table's SQL is asked of (src/duck/generated-plan.ts `Planner`): a statement planned as a session with
    *  no role, in UTC under `public`, by this listener's catalog as of now */
   planner(): Planner;
@@ -747,11 +774,15 @@ interface DuckCursor { answer: DuckAnswer; formats: readonly number[]; controlle
  *  rows sent so far while it runs */
 interface Asked { sql: string; method: string; startedAt: number; sentAt: number; carried?: number; jsonReads?: readonly string[]; rows?: number;
   /** set once the statement reached the engine: what its plan is recorded from, should it prove slow (`Ran`) */
-  ran?: Ran }
+  ran?: Ran;
+  /** a heavy statement's wait for its turn, ms (src/duck/admission.ts), set however the wait ended: its row's
+   *  `waited_ms` where it never ran (cancelled or timed out while it waited) */
+  waitedMs?: number }
 
 /** A STATEMENT THE ENGINE RAN, as a slow one's plan is recorded from it (src/api/postgres/slow-plan.ts): the plan it ran
- *  (never planned again), the values it was bound with (its parameters' and the clock's) and the session it ran under */
-interface Ran { plan: DuckPlan; values: readonly (string | null)[]; session: DuckSession }
+ *  (never planned again), the values it was bound with (its parameters' and the clock's) and the session it ran under;
+ *  `waitedMs`, a heavy statement's wait for its turn (its row's `waited_ms`, however many Executes page its rows) */
+interface Ran { plan: DuckPlan; values: readonly (string | null)[]; session: DuckSession; waitedMs?: number }
 
 // ---------------------------------------------------------------------------------------------------------------------
 // one connection
@@ -1594,6 +1625,8 @@ class Session {
     const durationMs = Date.now() - startedAt;
     const plan = this.slowPlan(answer, asked?.ran, durationMs);
     const origin = answer instanceof PgError ? originOfAnswer(answer) : undefined;
+    // a heavy statement's wait for its turn: the run's, however many Executes paged it, else the wait that ended it
+    const waitedMs = asked?.ran?.waitedMs ?? asked?.waitedMs;
     this.server.options.record({
       requestId: crypto.randomUUID(), at: new Date(startedAt), method: asked?.method ?? "QUERY", durationMs,
       client: `postgres:${this.vars.applicationName || "unnamed"}`, session: this.id, payload: stored.text, payloadTruncated: stored.truncated,
@@ -1603,6 +1636,7 @@ class Session {
       ...(role !== undefined ? { role } : {}),
       ...(this.token?.attributes !== undefined && Object.keys(this.token.attributes).length > 0 ? { attributes: this.token.attributes } : {}),
       ...(asked?.jsonReads !== undefined && asked.jsonReads.length > 0 ? { jsonReads: asked.jsonReads } : {}),
+      ...(waitedMs !== undefined ? { waitedMs } : {}),
       ...(answer instanceof PgError
         ? { status: answer.status, sqlstate: answer.fields.code, error: answer.fields.message,
             ...(answer.fields.detail ? { detail: answer.fields.detail } : {}), ...(answer.fields.hint ? { hint: answer.fields.hint } : {}),
@@ -2082,10 +2116,16 @@ class Session {
     this.running = controller;
     try {
       const values = filtered.length > 0 ? [] : await this.duckValues(e.plan, params, clock, bound.own);
-      const lines = await runner.explain(e.plan.sql, values, await this.duckSession(), controller.signal,
-        { options: e.options, fields: e.plan.fields, exact: e.plan.exact ?? [], planning: e.plan.timing ?? { analysisMs: 0, rewriteMs: 0 },
-          // how each copy is kept current, as the sync says it to mason status, read now (src/duck/sync.ts KeptCurrent)
-          copies: copyFacts(this.server.options.duck.copies?.() ?? []), ...(filtered.length > 0 ? { rowFilters: filtered, reads: (e.plan.reads ?? []).map((r) => r.table) } : {}) });
+      const session = await this.duckSession();
+      // ANALYZE RUNS IT: a heavy one waits for its turn as its run would (src/duck/admission.ts), and holds it to the end
+      const turn = e.options.analyze ? await this.turnOf(runner, e.plan.sql, values, session, controller.signal) : LIGHT;
+      let lines: string[];
+      try {
+        lines = await runner.explain(e.plan.sql, values, session, controller.signal,
+          { options: e.options, fields: e.plan.fields, exact: e.plan.exact ?? [], planning: e.plan.timing ?? { analysisMs: 0, rewriteMs: 0 },
+            // how each copy is kept current, as the sync says it to mason status, read now (src/duck/sync.ts KeptCurrent)
+            copies: copyFacts(this.server.options.duck.copies?.() ?? []), ...(filtered.length > 0 ? { rowFilters: filtered, reads: (e.plan.reads ?? []).map((r) => r.table) } : {}) });
+      } finally { turn.release(); }
       return { field: explainField(e.options, formatAt(resultFormats, 0)), rows: lines.map((l) => dataRow([Buffer.from(l)])) };
     } finally { this.settled(); }
   }
@@ -2147,9 +2187,15 @@ class Session {
     try {
       const values = await this.duckValues(plan, params, clock, read);
       const session = await this.duckSession();
-      const a = await runner.run(plan.sql, values, session, controller.signal, plan.fields, plan.exact ?? []);
+      // A HEAVY STATEMENT WAITS FOR ITS TURN (src/duck/admission.ts), under this statement's signal: its cancel and its
+      // timeout end the wait as they end a run. The turn is held until its first rows, never while it waits on the client
+      const turn = await this.turnOf(runner, plan.sql, values, session, controller.signal);
+      let a: DuckAnswer;
+      try { a = await runner.run(plan.sql, values, session, controller.signal, plan.fields, plan.exact ?? []); }
+      catch (e) { turn.release(); throw e; }
+      if (turn.heavy) a = heldUntilFirstRows(a, turn.release);
       // it reached the engine: its plan can be recorded should it prove slow, answered or failed (recordRequest)
-      const ran: Ran = { plan, values, session };
+      const ran: Ran = { plan, values, session, ...(turn.heavy ? { waitedMs: turn.waitedMs } : {}) };
       if (this.asked !== null) this.asked.ran = ran;
       // a SELECT's analysis always has its RowDescription; without one, DuckDB's own columns are said as they are
       const fields = plan.fields !== null
@@ -2157,6 +2203,16 @@ class Session {
         : a.columns.map((c, i) => ({ name: c.name, typeOid: c.oid, typeSize: c.size, typeModifier: -1, format: formatAt(resultFormats, i) }));
       return { fields, cursor: { answer: a, formats: resultFormats, controller, pending: [], sent: 0, done: false, startedAt: this.asked?.startedAt ?? Date.now(), ran } };
     } finally { this.settled(); }
+  }
+
+  /** THE STATEMENT'S TURN (DuckRunner.admit): a light one's at once; a heavy one's once it is given, its wait set on the
+   *  statement being asked (its row's `waited_ms`); a cancel or a timeout while it waited thrown as its failure */
+  private async turnOf(runner: DuckRunner, sql: PlannedSql, values: readonly (string | null)[], session: DuckSession, signal: AbortSignal): Promise<Turn> {
+    if (runner.admit === undefined) return LIGHT;
+    const t: Admitted = await runner.admit(sql, values, session, signal);
+    if (t.waitedMs !== undefined && ("failure" in t || t.heavy) && this.asked !== null) this.asked.waitedMs = t.waitedMs;
+    if ("failure" in t) throw t.failure;
+    return t;
   }
 
   /**
@@ -3125,7 +3181,11 @@ class Server {
       if (t.rowTypeOid !== undefined) out.set(`rowtype:${t.schema ?? "public"}.${t.name}`, t.rowTypeOid);
       // a plain numeric whose own scales the copy holds (src/duck/scale-column.ts), by schema, table and column
       for (const c of t.columns) if (c.scaled !== undefined) out.set(scaledKey(t.schema ?? "public", t.name, c.name, c.scaled), 1);
+      // a timestamptz whose 15-minute buckets the copy holds (src/duck/bucket-column.ts), by schema, table and column
+      for (const c of t.columns) if (c.bucket !== undefined) out.set(bucketKey(t.schema ?? "public", t.name, c.name, c.bucket), 1);
     }
+    // a reference whose keys the synced data numbers (src/duck/reference-keys.ts): a join on its columns reads the numbers
+    for (const r of this.options.schema().references ?? []) out.set(numberedKey(r), 1);
     for (const t of this.options.schema().tables) for (const c of t.columns) {
       if (c.typeOid === undefined || c.spelled === undefined) continue;
       // the type's name as pg_type holds it (`other.level` is `level`, `"My Mood"` is `My Mood`)
@@ -3435,6 +3495,29 @@ export async function startPostgresApi(options: PgApiOptions): Promise<PgApiServ
           if (!shares.delete(share.listener)) return;
           for (const s of sessionsOf(door)) s.end("the share ended");
           await closeListener(share.listener);
+        },
+      };
+    },
+    async openLocal(o) {
+      const loopback = parseProxyFrom("127.0.0.1,::1");
+      if (loopback === null || "problem" in loopback) throw new Error("loopback's addresses could not be read as a PROXY header's source (Mason bug: report it)");
+      const door: Door = { tls: null, authenticate: (password, user, from) => o.authenticate(password, user, from ?? null),
+        recheck: (token, from) => o.recheck(token, from ?? null), recheckMs: 0, who: o.who, loginHint: o.loginHint, public: false, logins: null,
+        refused: () => false, proxyFrom: loopback };
+      const local = await listenOn(server, door, 0, "127.0.0.1");
+      shares.add(local.listener);
+      return {
+        port: local.port,
+        get sessions() { return sessionsOf(door).filter((s) => s.phase === "ready").length; },
+        endSessions: (jti, why) => {
+          const ended = sessionsOf(door).filter((s) => s.token?.jti === jti);
+          for (const s of ended) s.end(why);
+          return ended.length;
+        },
+        async close() {
+          if (!shares.delete(local.listener)) return;
+          for (const s of sessionsOf(door)) s.end("the endpoint closed");
+          await closeListener(local.listener);
         },
       };
     },

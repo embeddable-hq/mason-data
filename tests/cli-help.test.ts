@@ -180,7 +180,7 @@ test("mason <cmd> --help --json, mason help <cmd> --json and mason help --json: 
     assert.deepEqual(spec.json, c.json ? [...c.json] : null, `${c.name}: its --json keys`);
     assert.deepEqual(spec.needs, c.needs ?? null);
     const codes = (spec.exitCodes as Array<{ code: number }>).map((e) => e.code);
-    assert.deepEqual(codes, ["wait", "share", "ui", "login", "replica", "deploy"].includes(c.name) ? [0, 1, 2, 124] : [0, 1, 2], `${c.name}: its exit codes (${TIMEOUT_COMMANDS})`);
+    assert.deepEqual(codes, ["wait", "share", "ui", "login", "replica", "deploy"].includes(c.name) ? [0, 1, 2, 124] : c.name === "user" ? [0, 1, 2, 3, 4, 5] : [0, 1, 2], `${c.name}: its exit codes (${TIMEOUT_COMMANDS}; mason user check's answers)`);
     // the same from its own --help --json and mason help <name> --json: { command, next }
     for (const args of [[c.name, "--help", "--json"], ["help", c.name, "--json"]]) {
       const r = mason(...args);
@@ -395,7 +395,7 @@ test("the --json shapes of the commands that change what is copied name the sour
   const keys = (name: string): readonly string[] | undefined => COMMANDS.find((c) => c.name === name)?.json;
   assert.deepEqual(keys("tables"), ["database", "source", "tables", "next"], "the source file the tables are read against");
   assert.deepEqual(keys("add"), ["added", "file", "error", "next"], "the sources file it wrote");
-  assert.deepEqual(keys("remove"), ["dryRun", "removedTables", "removed", "file", "next"], "the sources file it wrote");
+  assert.deepEqual(keys("remove"), ["dryRun", "removedTables", "removed", "file", "referencesRemoved", "next"], "the sources file it wrote");
   assert.deepEqual(keys("init"), ["name", "root", "folder", "config", "demo", "source", "roles", "generated", "database", "warnings", "notes", "next"], "the source file, the roles file and the demo's generated table it wrote");
   assert.ok(keys("status")?.includes("source") && !keys("status")?.includes("sources"), "status names its source, the database, with the sources file in it");
   assert.deepEqual(COMMANDS.filter((c) => c.json?.some((k) => /model/i.test(k))).map((c) => c.name), [], "no command answers with a model");

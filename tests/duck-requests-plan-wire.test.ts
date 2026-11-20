@@ -95,26 +95,32 @@ after(async () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test("a statement that took SLOW_MS or more has its plan on its row: the tables, the SQL sent to the engine, the operators with their estimates; a fast one has none", { skip: "quarantined: #848" }, async () => {
+test("a statement that took SLOW_MS or more has its plan on its row: the tables, the SQL sent to the engine, the operators with their estimates; a fast one has none", async () => {
   const api = await listener();
   // the catalog Postgres starts at a run's first statement, which is then slow: started first
   const warm = await client(api);
   try { await warm.query("SELECT id FROM orders LIMIT 1"); } finally { await warm.end(); }
   const n = await count();
   const c = await client(api);
-  // SLOW BY CONSTRUCTION: a condition the engine can join by no key, so every pair of BIG_ROWS² is computed (about 2 s on
-  // 4 cores), and on a machine where that is under SLOW_MS, the same times 3, then 9: the slow one is the last asked
-  const slowOnes = ["", ", orders c", ", orders c, orders d"].map((more) => `SELECT count(*) AS n FROM big a, big b${more} WHERE (a.v * 31 + b.v) % 100003 = 7`);
+  // SLOW BY CONSTRUCTION: a condition the engine can join by no key, so every pair of BIG_ROWS² is computed (about 1.3 s
+  // on 4 cores), and on a machine where that is under SLOW_MS, the same times 3, then 9. The extra tables are IN the
+  // condition: had it named only a and b, the engine would filter the pairs once and multiply the few left by orders,
+  // and every step would take as long as the first (issue 848: all three about 1 s on a faster runner).
+  const slowOnes = [["", ""], [", orders c", " + c.id"], [", orders c, orders d", " + c.id + d.id"]]
+    .map(([more, terms]) => `SELECT count(*) AS n FROM big a, big b${more} WHERE (a.v * 31 + b.v${terms}) % 100003 = 7`);
   const asked: string[] = [];
   try {
     assert.equal((await c.query("SELECT count(*)::int AS n FROM orders")).rows[0].n, 3);
     for (const sql of slowOnes) {
-      const t0 = Date.now();
       await c.query(sql);
       asked.push(sql);
       // its plan recorded before the next is asked: one at a time
       await ledger.flush();
-      if (Date.now() - t0 >= SLOW_MS * 1.5) break;
+      // SLOW BY THE LISTENER'S CLOCK, the one that decides the plan: the row's own time, never the client's wait, which
+      // also counts the flush and the client (issue 848: the client waited 1.5 s for a row of 984 ms)
+      const row = (await ledger.recent({ limit: 1 }))[0];
+      assert.ok(row !== undefined && row.query === sql, `the row of ${sql}`);
+      if (row.durationMs >= SLOW_MS) break;
     }
   } finally { await c.end(); }
   const rows = await since(n);

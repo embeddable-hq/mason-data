@@ -24,6 +24,7 @@ mason user from looker 198.51.100.0/24 2001:db8::/32   # its address ranges repl
 mason user disable metabase                         # kept: its logins refused (28000) until mason user enable metabase
 mason user enable metabase                          # it connects again, with the same password
 mason user remove metabase                          # its next connection is refused; its sessions end at their next statement
+mason user check metabase --json < password.txt     # is that metabase's password? ok, wrong, disabled or removed, with its id
 docker compose exec mason mason user add grafana    # beside mason serve, in its data folder
 ```
 
@@ -70,6 +71,26 @@ to connect with; `mason user list` says the users (name, id, when added); `mason
 - **Rotating the API key removes every user at once** (`apiKey` in `.mason/config.json`, `MASON_API_KEY` under
   `mason serve`): no password verifies under the new key, the refusal says the key was rotated, and `mason user list`
   marks each as not connecting. Remove and add each again for new passwords.
+- **A user's id is stable**: 16 hex digits made at `mason user add`, kept in `.mason/users.json`, and shown by `mason
+  user list` (and `--json`). It is the user's for as long as it lives: disabling and enabling keep it, and a name removed
+  and added again gets a new one, so a name that still has the same id is the same user. It is no secret (the password's
+  secret part is its MAC).
+- **`mason user check <name>` says whether a password is the user's**, for an operator's own sign-in page in front of
+  Mason (`--json`: `{ user, answer, id }`): `ok` (its password; the live user's id), `wrong` (no id), `disabled` (its
+  password, the user disabled; its id) or `removed` (the password of a user of that name that was removed — an old one
+  of a user removed and added again included —, with that removed user's id); exit 0, 3, 4 and 5. It judges the password
+  as the listener does (the MAC compared in constant time) but never the address. The password is read from stdin (at a
+  terminal, asked for and not shown), never from the command line — a word there with a password's shape is refused
+  without being repeated — and is never printed or logged. **A sign-in page in front of it must limit attempts**:
+  `check` answers `wrong` as often as it is asked, so the page counts failures by the browser's address, by the replica
+  and by the user name, and slows or refuses past a few (a user's password is 128 random bits, but a page that lets
+  anyone ask without a limit is a free oracle for whatever a person typed). **The page signs in on `ok` alone**:
+  `disabled` and `removed` carry an id too, of a user that may not connect. Its line is untrusted (the name is what a
+  person typed): it takes `--json`, `--` and one word, refuses any other option as a wrong line (exit 2: `--help` is
+  never the help's exit 0, which is `ok`), and repeats no word of the line unless it is a user's name — a word that is no
+  user's is answered `wrong` with `user` null. **The page's process holds the project's API key**: `check` reads it from
+  `.mason/config.json` (`MASON_API_KEY` under `mason serve`), and that key makes every user's password, so the page runs
+  where Mason's own files are kept, as Mason's user.
 - **A name is one user**: adding an existing name is refused, with the way out (remove it, then add it: a new
   password; or add another name and remove the old one once the tool uses it). The password is never kept, so it
   cannot be printed again: a lost one is a remove and an add.
@@ -477,6 +498,93 @@ names the agent. Its tools say over this wire what a bare SQL tool would leave a
   out), the fields this listener's ErrorResponse carries;
 - `explain` is this API's EXPLAIN, as text.
 
+### From a hosted agent: MCP over HTTPS
+
+`mason serve` serves the same tools to a hosted agent (claude.ai, ChatGPT, a team's agent platform) that cannot start
+a process: MCP's Streamable HTTP (revision 2025-11-25 with a session, and 2026-07-28 as its published text says: no
+session, `server/discover`, each request's version and client in its `_meta`, a cancel by closing the request) at
+`/mcp` on its health port
+(`MASON_HEALTH_PORT`), signed in by an OAuth authorization server the operator runs or rents. Mason issues no token and
+runs no sign-in page; it checks each bearer token against that server's published keys (docs/DESIGN.md "An MCP server
+over HTTPS").
+
+```bash
+MASON_MCP_URL=https://mason.example.com/mcp          # the address a client reaches, through the relay in front
+MASON_MCP_ISSUER=https://auth.example.com            # the authorization server, as the tokens' iss names it
+MASON_MCP_JWKS_URL=https://auth.example.com/.well-known/jwks.json   # its signing keys
+MASON_MCP_USER_CLAIM=mason_user                       # the claim that names the mason user (default mason_user)
+MASON_MCP_USER_ID_CLAIM=mason_user_id                 # the claim that holds its id (default mason_user_id)
+MASON_MCP_PROXY_FROM=10.0.0.0/16                      # the relay's own addresses: its X-Forwarded-For is believed
+MASON_MCP_PLAIN=1                                     # TLS is terminated in front (required off loopback)
+MASON_MCP_ORIGINS=https://app.example.test            # browser origins a page may use it from (default: none)
+MASON_MCP_ICON=https://mason.example.com/icon.png     # the icon a client shows (default: Mason's logo)
+```
+
+- **The server's icon**: `serverInfo` (in `initialize`, `mason mcp` on stdio too, and under 2026-07-28 in
+  `server/discover`) carries `icons`, a `description` and `websiteUrl`, as MCP 2025-11-25's `Implementation` has them.
+  Every other 2026-07-28 result's `_meta` serverInfo names the server without `icons` (optional there): the icon is
+  sent once, not in every answer. The icon is Mason's logo, a 128x128 PNG as a `data:` URI, unless `MASON_MCP_ICON` names
+  another: a PNG as a `data:image/png;base64,…` URL (a whole PNG file, at most 4096 bytes and 1024 pixels a side), or
+  an `https://` address on `MASON_MCP_URL`'s own origin, which the spec asks a client to hold an icon to. **Never an
+  SVG**, in either form: an SVG can carry script and fetch other addresses, and each client decides how it renders one,
+  while every client that renders icons must read a PNG (`MASON_UI_ICON`, the browser tab's icon, still takes one).
+  Any other value, a control character or white space at either end included, refuses the start. A client decides what it shows: users report that claude.ai's custom connectors show the favicon of the
+  endpoint's domain rather than `serverInfo.icons` (anthropics/claude-ai-mcp#152), and ChatGPT's apps take a logo the
+  person sets in its settings. In both, the icon comes from the site in front of the endpoint or the client's own
+  settings, not from Mason.
+
+- **The authorization server** issues signed JWT access tokens (RS256, PS256, ES256, EdDSA, …) whose `iss` is
+  `MASON_MCP_ISSUER`, whose `aud` is `MASON_MCP_URL` exactly — the resource a client asks for (RFC 8707) — and that carry
+  the mason user's name and id. Its sign-in page may ask Mason whether a person's Mason password is right with `mason
+  user check <name> --json` (the password on stdin), which answers the id to sign in. An agent finds the server from
+  `/.well-known/oauth-protected-resource` (also under `/mcp`), which a 401's `WWW-Authenticate` names.
+- **A person adds it by pasting ONLY the URL**: in claude.ai and Claude Desktop as a custom connector (Customize, then
+  Connectors, then Add custom connector), in ChatGPT as an app in Developer mode, in Claude Code with `claude mcp add
+  --transport http mason <url>` (then `/mcp` to sign in), in Cursor as a server's `url` in `~/.cursor/mcp.json`; the
+  Users page shows each with Copy. They leave empty any OAuth client ID or client secret field, and any bearer-token or
+  header field a client shows: sign-in happens in their browser, at the authorization server.
+- **Where a client connects from**: Claude Code and Cursor reach `/mcp` from the person's own computer, never from a
+  company's published addresses, so a user held to the "claude.ai" or "ChatGPT on the web" ranges is refused there: give
+  such a user that computer's address, or anywhere. claude.ai's and Claude Desktop's custom connectors, and ChatGPT's
+  apps, connect from their company's servers (Anthropic: "Claude connects to your remote MCP server from Anthropic's
+  cloud infrastructure, rather than from your local device").
+- **`MASON_MCP_URL` is the public address, never what Mason sees.** Behind a relay or proxy, set it to the address the
+  agent is given; the relay forwards `/mcp` and `/.well-known/oauth-protected-resource…` to the health port.
+- **Each request runs as the mapped user, looked up every time**: its role, row filters and limits, and the request log
+  names it with `application_name` `mason-mcp/<client>` and the client's address. A user that does not exist, is disabled
+  or was removed is refused (403) at its very next request, with the command that fixes it; so is a token for a user
+  removed and added again under the same name, whose id is new.
+- **A user's "connects from" ranges apply, judged on the real client.** Without `MASON_MCP_PROXY_FROM` every request's
+  address is its peer's. With it, a request from one of the named addresses is judged on the **last entry of its
+  `X-Forwarded-For`** — the one the relay appended; the relay must append the client's address to every request (nginx:
+  `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for`), and a request it sends without one is refused. The entry
+  may carry a port (`203.0.113.7:51234`, `[2001:db8::1]:443`) or be v4-mapped (`::ffff:203.0.113.7`, a dual-stack
+  listener): it is read as the one address it names. Entries before the last came from the client and are never
+  believed, and a header from any other peer is ignored. A hosted agent's requests come from its company's servers: the
+  Users page's Connects from offers each company's published ranges, under "A hosted agent's servers" ("claude.ai", from
+  https://platform.claude.com/docs/en/api/ip-addresses; "ChatGPT on the web", the file
+  https://openai.com/chatgpt-connectors.json that https://developers.openai.com/api/docs/guides/ip-addresses names for
+  ChatGPT's connectors), so a user held to them connects from that agent alone. The lists ship with each release.
+- **TLS**: the health port is plain HTTP. Off loopback the start is refused unless `MASON_MCP_PLAIN=1` says TLS is
+  terminated in front of it, so a bearer token never crosses a network in clear.
+- **`Origin`**: a request that carries an `Origin` header is a browser's, and is refused 403 (`origin_not_allowed`,
+  naming the setting) unless `MASON_MCP_ORIGINS` names that origin exactly: comma-separated, each written as a browser
+  sends it (`https://app.example.test`, `http://localhost:5173`: the scheme and host in lower case, no default port, no
+  path). `Origin: null` is refused. It is checked first, before the token, under every revision. A request with no
+  `Origin` is not judged by it: a hosted agent calls from its own servers and a desktop app from its own process
+  (Node's `fetch`, which MCP's TypeScript SDK uses, sends none), so neither needs the setting. An entry that is not an
+  origin refuses the start.
+- **Bounds**: the authorization server's keys are kept at most 5 minutes (less under its `Cache-Control: max-age`), so a
+  key it removes is refused within 5 minutes, and fetched at most once a minute, backing off to 10 minutes while the
+  fetch fails (every token 503 meanwhile). **If the keys cannot be fetched for longer than their 5 minutes, every
+  request is 503** ("the token could not be checked"), by design: Mason fails closed. mason serve's log says why
+  (`[mcp] the authorization server's keys could not be read…`); check that `MASON_MCP_JWKS_URL` is reachable from the
+  replica, and requests are answered again at the next fetch. A user holds at most 32 sessions and the endpoint 1,000 (a new one past that is
+  503 with `Retry-After`, never made by ending a session in use). The health port takes a request's headers within 10 s
+  and its body within 30 s, closes an idle connection after 5 s, holds at most 1,024 connections and runs at most 256 MCP
+  requests at once, each request of a JSON-RPC batch counted (a batch is taken under MCP 2025-03-26 alone, the one
+  revision that has them, of at most 32 messages; a body is at most 1 MiB); a tool call's own time is not limited by these (docs/DESIGN.md "An MCP server over HTTPS").
+
 ## What a tool sees
 
 - **Each synced table**, in the schema it has in the source (`public.orders` stays `public.orders`), with the columns
@@ -687,6 +795,7 @@ whatever the session runs at that moment is stopped, as a `CancelRequest` stops 
 | `MASON_PG_PLAIN` | unset | `1`: a plain listener off loopback is on a private network; without it (or TLS) such a listener refuses to start |
 | `MASON_PG_CATALOG_TIMEOUT_MS` | 10000 | how long a catalog statement may take before the embedded Postgres is discarded and the statement refused |
 | `MASON_STATEMENT_TIMEOUT` | 5min | the longest one statement may run (Postgres's units; 0 for none); a session's `statement_timeout` may only shorten it |
+| `MASON_HEAVY_QUERIES` | one for each GiB of the engine's memory, at most one for each CPU, at least one | how many heavy queries run at once: a join, a group by or a sort whose plan keeps many rows in memory. The rest wait their turn, and their cancel and `statement_timeout` work while they wait. A light query (a lookup, a filter, a group by into a few groups) never waits. The request log's `waited_ms` says how long a heavy one waited |
 | `MASON_HISTORY_DAYS` | 7 | how many days of the request log (and the sync's events, the usage samples and the synced tables' sizes) are kept |
 | `MASON_STORE_JSON_PATHS` | on | `off`: never store the JSON paths statements keep reading as columns of the synced table (`payload ->> 'customer_id'` read by 3 statements, or by one taking 1 s, is stored, and read from there; `mason status` lists them), and drop those stored, at that start |
 | `MASON_PG_TRACE` | unset | `1`: log every statement text a session receives |

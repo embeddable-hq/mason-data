@@ -120,6 +120,14 @@ const APARAMS = "(1, 1, 10, 'a', '00000000-0000-0000-0000-000000000001', 1.5, tr
   "(4, NULL, NULL, 'NULL', NULL, NULL, true, NULL, NULL, NULL), " +
   "(5, 5, 50, 'he said \"hi\"', '00000000-0000-0000-0000-000000000005', 3.0001, false, '2026-02-01', '2026-02-01 00:00:00+00', 1e-10), " +
   "(6, 6, 60, 'x\\y', '00000000-0000-0000-0000-000000000006', 3.00010000000000000002, true, '2026-02-02', '2026-02-02 00:00:00+00', 6)";
+/** issue 1006's rows, the same literals on both sides: fractions of a second, a second's end, 24:00, zones off UTC by
+ *  half hours and a quarter hour, a negative interval, the ends of an ISO year, the edges of a Julian day's decimals (865
+ *  microseconds, 8.65 seconds), and a NULL in every column */
+const PARTS = "(1, '2026-03-08 01:02:05.123456', '2026-03-08 01:02:05.123456+00', '2026-03-08', '13:45:07.5', '13:45:07.250001+05:30', '1 year 2 months 3 days 04:05:06.789012'), " +
+  "(2, '2000-12-31 23:59:59.999999', '1999-12-31 23:59:59.999999-08', '2024-12-30', '24:00:00', '23:59:59.999999-03', '-1 year -1 months -15 days -04:05:06.789012'), " +
+  "(3, '1970-01-01 00:00:00.000864', '2026-07-04 12:30:00.000865+02', '1970-01-01', '00:00:00', '00:00:00+00', '-00:00:00.5'), " +
+  "(4, '2026-01-01 00:00:08.65', '2021-01-03 00:00:08.649999+00', '2021-01-03', '23:59:59.999999', '12:00:00-12:15', '100 years 25 hours 61 minutes 7.000001 seconds'), " +
+  "(5, NULL, NULL, NULL, NULL, NULL, NULL)";
 /** issue 983's second round, rows of the same table, with no column of their own (the store's fixture sits at the 40
  *  MB of "a statement past what may spill"; a timestamp column against wider arrays is the oracle's and the sweep's):
  *  instants either side of a day's end in zones off UTC by half hours, and either side of a change of daylight saving
@@ -238,6 +246,9 @@ const DDL = [
   // a NOT NULL the catalog still holds, which the source dropped since: rows of a NULL n are synced
   "CREATE TABLE public.nx_c (n INTEGER, id INTEGER PRIMARY KEY, v VARCHAR)",
   "INSERT INTO public.nx_c VALUES (NULL, 1, 'c1'), (30, 3, NULL), (NULL, 4, 'c4')",
+  // issue 1006, after the others: a column of each type extract and date_part read
+  "CREATE TABLE public.parts (id INTEGER PRIMARY KEY, ts TIMESTAMP, tz TIMESTAMPTZ, d DATE, t TIME, ttz TIMETZ, iv INTERVAL)",
+  `INSERT INTO public.parts VALUES ${PARTS}`,
 ];
 // the same rows in Postgres, typed as the source would type them
 const PG_DDL = [
@@ -334,6 +345,8 @@ const PG_DDL = [
   "INSERT INTO public.nx_b VALUES (1, 1, 'b1', 1.50), (2, 2, NULL, NULL), (3, 9, 'far', 2.00)",
   "CREATE TABLE public.nx_c (n integer, id integer PRIMARY KEY, v text)",
   "INSERT INTO public.nx_c VALUES (NULL, 1, 'c1'), (30, 3, NULL), (NULL, 4, 'c4')",
+  "CREATE TABLE public.parts (id integer PRIMARY KEY, ts timestamp, tz timestamptz, d date, t time, ttz timetz, iv interval)",
+  `INSERT INTO public.parts VALUES ${PARTS}`,
 ];
 const schema: PgSchema = {
   database: "app",
@@ -411,6 +424,9 @@ const schema: PgSchema = {
     // its n NOT NULL as the catalog read it before the source dropped it (the review of PR 1100)
     { name: "nx_c", primaryKey: ["id"], joins: [], rowTypeOid: 99103,
       columns: [{ name: "n", type: "int4", notNull: true }, { name: "id", type: "int4" }, { name: "v", type: "text" }] },
+    { name: "parts", primaryKey: ["id"], joins: [],
+      columns: [{ name: "id", type: "int4" }, { name: "ts", type: "timestamptz", spelled: "timestamp without time zone" }, { name: "tz", type: "timestamptz" }, { name: "d", type: "date" },
+        { name: "t", type: "text", spelled: "time without time zone" }, { name: "ttz", type: "text", spelled: "time with time zone" }, { name: "iv", type: "text", spelled: "interval" }] },
   ],
   // as the source prints them under a search_path of pg_catalog alone (src/cli/preflight.ts VIEWS_SQL); `lost` reads a
   // table Mason has not copied, so the catalog leaves it out
@@ -631,7 +647,7 @@ test("what reads no table is the catalog Postgres's; a schema'd table is in the 
     // machine as Postgres names it
     assert.match(String((await answer(c, "SELECT version()")).rows[0]![0]), /^PostgreSQL 18\.6 \(mason-data 0\.6\.1\) on (aarch64|x86_64)-(linux|darwin)$/);
     const tables = await answer(c, "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ('public', 'sales') ORDER BY 1, 2");
-    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "aparams"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "bins"], ["public", "chars"], ["public", "clock_times"], ["public", "deep_t"], ["public", "ga"], ["public", "instants"], ["public", "invoices"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnat"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "nx_a"], ["public", "nx_b"], ["public", "nx_c"], ["public", "orders"], ["public", "paid_orders"], ["public", "pnum"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "timetz_runs"], ["public", "timetz_runs3"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["public", "wides"], ["sales", "accounts"], ["sales", "invoices"]]);
+    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "aparams"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "bins"], ["public", "chars"], ["public", "clock_times"], ["public", "deep_t"], ["public", "ga"], ["public", "instants"], ["public", "invoices"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnat"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "nx_a"], ["public", "nx_b"], ["public", "nx_c"], ["public", "orders"], ["public", "paid_orders"], ["public", "parts"], ["public", "pnum"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "timetz_runs"], ["public", "timetz_runs3"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["public", "wides"], ["sales", "accounts"], ["sales", "invoices"]]);
     const cols = await answer(c, "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = 'sales' AND table_name = 'invoices' ORDER BY ordinal_position");
     assert.deepEqual(cols.rows, [["id", "integer"], ["total", "numeric"]]);
   } finally { await c.end(); }
@@ -1022,6 +1038,189 @@ test("the rerun over BIRD and TPC-DS: quotients alike, a NULL date, a BETWEEN be
     await alike("SELECT a FROM ratios INTERSECT SELECT b FROM ratios EXCEPT SELECT 0.1 FROM ratios ORDER BY 1");
     // a date where Postgres chose a timestamptz's function, grouped by the same expression: widened once in each place
     await alike("SELECT date_trunc('week', d) AS w, sum(n) FROM ratios GROUP BY date_trunc('week', d) ORDER BY 1");
+  } finally { await c.end(); }
+});
+
+// issue 1006: Postgres takes other names for a field of extract and date_part (its datetime.c's deltatktbl and
+// datetktbl, the first ten characters compared), and each must be that field: `sec` dropped the fraction of a second
+// (DuckDB read it as a whole second), and `sec` of an interval was refused. A name a type does not answer is
+// Postgres's error, at a row: 22023 "not recognized", 0A000 "not supported". Written out here from Postgres's tables,
+// never from the module that reads them
+const SPELLINGS: Record<string, string[]> = {
+  microseconds: ["microseconds", "microsecond", "microsecon", "us", "usec", "usecs", "usecond", "useconds", "MicroSecondsXyz"],
+  milliseconds: ["milliseconds", "millisecond", "millisecon", "ms", "msec", "msecs", "msecond", "mseconds", "MS"],
+  second: ["second", "seconds", "s", "sec", "secs", "SEC"], minute: ["minute", "minutes", "m", "min", "mins", "mm"],
+  hour: ["hour", "hours", "h", "hr", "hrs"], day: ["day", "days", "d"], week: ["week", "weeks", "w"], month: ["month", "months", "mon", "mons"],
+  quarter: ["quarter", "qtr"], year: ["year", "years", "y", "yr", "yrs"], decade: ["decade", "decades", "dec", "decs"],
+  century: ["century", "centuries", "c", "cent"], millennium: ["millennium", "millennia", "mil", "mils"], julian: ["julian", "j", "jd"],
+  isoyear: ["isoyear"], dow: ["dow"], isodow: ["isodow"], doy: ["doy"], timezone: ["timezone"], timezone_hour: ["timezone_hour", "timezone_h"],
+  timezone_minute: ["timezone_minute", "timezone_m"], epoch: ["epoch"],
+};
+const TIME_OF_DAY = ["microseconds", "milliseconds", "second", "minute", "hour"];
+const OF_A_DATE = ["day", "week", "month", "quarter", "year", "decade", "century", "millennium", "julian", "isoyear", "dow", "isodow", "doy"];
+const ZONE = ["timezone", "timezone_hour", "timezone_minute"];
+/** what each type's extract answers (its part function's switch), by column of `parts` */
+const ANSWERED: Record<string, string[]> = {
+  ts: [...TIME_OF_DAY, ...OF_A_DATE, "epoch"], tz: [...TIME_OF_DAY, ...OF_A_DATE, ...ZONE, "epoch"], d: [...OF_A_DATE, "epoch"],
+  t: [...TIME_OF_DAY, "epoch"], ttz: [...TIME_OF_DAY, ...ZONE, "epoch"],
+  iv: [...TIME_OF_DAY, "day", "week", "month", "quarter", "year", "decade", "century", "millennium", "epoch"],
+};
+test("issue 1006: every name Postgres takes for a field of extract and date_part is that field, of every type, and every other its error", async () => {
+  const c = await client();
+  try {
+    const q = (s: string): string => `'${s}'`;
+    const alike = async (sql: string): Promise<void> => assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+    const refused = async (sql: string): Promise<void> => {
+      const said = async (run: Promise<unknown>): Promise<[string, string] | null> => run.then(() => null, (e: { code?: string; message: string }) => [e.code ?? "", e.message]);
+      const [m, p] = [await said(c.query(sql)), await said(truth.query(sql))];
+      assert.notEqual(p, null, `${sql}: Postgres answered`);
+      assert.deepEqual(m, p, sql);
+    };
+    for (const [column, fields] of Object.entries(ANSWERED)) {
+      for (const field of fields) {
+        const names = SPELLINGS[field]!;
+        // (an extract that grows with time of an infinite value is refused by name, infinite-extract: none here)
+        await alike(`SELECT id, ${names.map((n) => `extract(${q(n)} FROM ${column})`).join(", ")}, ${names.map((n) => `date_part(${q(n)}, ${column})`).join(", ")} FROM parts ORDER BY id`);
+      }
+      // date_part(text, date) is Postgres's SQL function over the date as a timestamp: a timestamp's fields and errors
+      const partFields = column === "d" ? ANSWERED.ts! : fields;
+      if (column === "d") for (const field of TIME_OF_DAY) await alike(`SELECT id, ${SPELLINGS[field]!.map((n) => `date_part(${q(n)}, d)`).join(", ")} FROM parts ORDER BY id`);
+      // a field the type does not answer, a name no table has, a reserved word, a token of another kind (a month, a
+      // day of the week), a name with a space, and one past 63 bytes of two-byte letters: Postgres's words for each
+      const others = (answered: string[]): string[] => Object.keys(SPELLINGS).filter((f) => !answered.includes(f)).map((f) => SPELLINGS[f]!.at(-1)!);
+      const unknown = ["foo", "now", "allballs", "jan", "monday", "ago", "minutes ", "", "é".repeat(40)];
+      for (const name of [...others(fields), ...unknown]) await refused(`SELECT id, extract(${q(name)} FROM ${column}) FROM parts ORDER BY id`);
+      for (const name of [...others(partFields), ...unknown]) await refused(`SELECT id, date_part(${q(name)}, ${column}) FROM parts ORDER BY id`);
+    }
+    // the issue's statement, a seconds' sum, and the fields of an interval it refused
+    await alike("SELECT sum(extract(sec FROM ts)), sum(extract(seconds FROM tz)), sum(extract(secs FROM t)), sum(extract(sec FROM iv)), sum(extract(ms FROM iv)) FROM parts");
+    await alike("SELECT extract(sec FROM ts) AS s, count(*) FROM parts GROUP BY 1 ORDER BY 1 NULLS FIRST");
+    await refused("SELECT id, date_part('timezone', ts) FROM parts ORDER BY id");
+    // a timestamp's Julian day at its row's scale (numeric_div's: 28, 24 or 20 decimals), as its text, a difference and a sum
+    await alike("SELECT id, extract(jd FROM ts)::text, extract(julian FROM tz) - extract(julian FROM d), (extract(j FROM ts) * 2)::text FROM parts ORDER BY id");
+    await alike("SELECT sum(extract(julian FROM ts)), sum(extract(jd FROM tz)) FROM parts");
+    // in a zone off UTC by a half hour, a timestamptz's wall clock
+    await c.query("SET TimeZone = 'Asia/Kolkata'");
+    await truth.query("SET TimeZone = 'Asia/Kolkata'");
+    try {
+      await alike(`SELECT id, extract(hrs FROM tz), extract(mins FROM tz), extract(timezone_m FROM tz), extract(doy FROM tz), date_part('jd', tz) FROM parts ORDER BY id`);
+      await alike(`SELECT id, extract(jd FROM tz), extract(julian FROM tz)::text FROM parts ORDER BY id`);
+    } finally {
+      await c.query("SET TimeZone = 'UTC'");
+      await truth.query("SET TimeZone = 'UTC'");
+    }
+  } finally { await c.end(); }
+});
+
+// the review of PR 1106: a timestamp's Julian day (Postgres's text at 28, 24 or 20 decimals, its row's) was written
+// at the engine's 28 in every reader but its print and its cast; a quotient's, the engine holds as a double too, at
+// its double's digits in concat, format and to_json
+test("issue 1006: a timestamp's Julian day, and a quotient, are Postgres's text in every reader that writes one", async () => {
+  const c = await client();
+  try {
+    const alike = async (sql: string): Promise<void> => assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+  // its text in every reader that writes it (the review of PR 1106: each wrote the engine's 28 decimals), and a
+  // quotient's in the same readers (they wrote its double's digits)
+  await alike("SELECT id FROM parts WHERE extract(julian FROM ts)::text LIKE '%0' ORDER BY id");
+  await alike("SELECT id, length(extract(julian FROM ts)::text), extract(julian FROM ts)::text || '', concat(extract(jd FROM tz)), format('%s', extract(j FROM ts)), " +
+    "to_json(extract(julian FROM ts)), json_build_object('j', extract(jd FROM tz)), extract(julian FROM ts) || 'x', concat(extract(julian FROM ts) * 2) FROM parts ORDER BY id");
+  await alike("SELECT string_agg(extract(julian FROM ts)::text, ',' ORDER BY id), string_agg(concat(extract(jd FROM tz)), ';' ORDER BY id) FROM parts");
+  await alike("WITH q AS (SELECT id, extract(jd FROM ts) AS x FROM parts) SELECT id, x, x::text, concat(x), to_json(x) FROM q ORDER BY id");
+  await alike("SELECT id, concat(extract(epoch FROM ts) / 86400), to_json(extract(epoch FROM ts) / 86400), format('%s', extract(epoch FROM ts) / 7) FROM parts ORDER BY id");
+  } finally { await c.end(); }
+});
+
+// the review of PR 1106: a sum and an avg of a Julian day held as a DECIMAL(38,28) overflowed past about 4,000 rows
+test("issue 1006: a sum and an avg of a timestamp's Julian day over 78,125 rows, and its infinity refused by name", async () => {
+  const c = await client();
+  try {
+    const alike = async (sql: string): Promise<void> => assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+  // a sum and an avg of it over 78,125 rows, whole and grouped (the review of PR 1106: a DECIMAL(38,28) overflowed past
+  // about 4,000 rows)
+  const many = "FROM parts a, parts b, parts c, parts d, parts e, parts f, parts g";
+  const at = "a.ts + b.id * interval '1 hour 0.000001 seconds' + c.id * interval '1 day 0.123457 seconds' + d.id * interval '1 month' + e.id * interval '7 minutes' + f.id * interval '1 year' + g.id * interval '0.5 seconds'";
+  await alike(`SELECT avg(extract(jd FROM ${at})), sum(extract(julian FROM ${at})), min(extract(j FROM ${at})), max(extract(julian FROM ${at})), count(*) ${many}`);
+  await alike(`SELECT g.id, avg(extract(jd FROM ${at})), sum(extract(julian FROM ${at})) ${many} GROUP BY g.id ORDER BY g.id`);
+  // of an infinity, refused by name (infinite-extract), never the engine's error of its time
+  await assert.rejects(c.query("SELECT id, extract(julian FROM CASE WHEN id = 1 THEN 'infinity'::timestamp ELSE ts END) FROM parts ORDER BY id"),
+    (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap infinite-extract/.test(e.message + (e.detail ?? "")));
+  } finally { await c.end(); }
+});
+
+// PR 1106's gaps that main still had once PR 1170 read each unit by its spellings, each a test of its own, none
+// reading a timestamp's Julian day
+test("PR 1106: a timetz's epoch counts its offset, and date_part of a timetz is answered", async () => {
+  const c = await client();
+  try {
+    const alike = async (sql: string): Promise<void> => assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+    // (it was the time of day alone: 12:00:00-12:15 answered 43200 where Postgres answers 87300)
+    await alike("SELECT id, extract(epoch FROM ttz), sum(extract(epoch FROM ttz)) OVER () FROM parts ORDER BY id");
+    // (date_part(text, timetz) was refused as a function the oracle had not verified)
+    await alike("SELECT id, date_part('epoch', ttz), date_part('hour', ttz), date_part('timezone_m', ttz), date_part('secs', ttz) FROM parts ORDER BY id");
+  } finally { await c.end(); }
+});
+
+test("PR 1106: a numeric division or average is Postgres's text in concat, format, ||, to_json and json_build_object", async () => {
+  const c = await client();
+  try {
+    const alike = async (sql: string): Promise<void> => assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+    // (each wrote the engine's double: 333.3333333333333 where Postgres writes 333.3333333333333333)
+    await alike("SELECT id, concat(extract(epoch FROM ts) / 86400), to_json(extract(epoch FROM ts) / 86400), format('%s', extract(epoch FROM ts) / 7), " +
+      "json_build_object('q', extract(epoch FROM tz) / 3), (extract(epoch FROM ts) / 3) || '' FROM parts ORDER BY id");
+    await alike("SELECT concat(avg(extract(epoch FROM ts))), format('%s', avg(extract(second FROM tz))), to_json(avg(extract(epoch FROM t))) FROM parts");
+  } finally { await c.end(); }
+});
+
+// the re-check of PR 1177: where Postgres's planner folds a call whose unit its type has not, it refuses before a row is
+// read. A refusal only at a row answered these over no rows (or wrote 42601), where main refused them, as Postgres does.
+// Mason refuses a unit its type has not as it plans the query, wherever the call is
+test("PR 1177: a unit a type has not is refused as Postgres's planner refuses it, over no rows too", async () => {
+  const c = await client();
+  try {
+    const said = async (run: Promise<unknown>): Promise<unknown> =>
+      run.then(() => "answered", (e: { code?: string; message: string; detail?: string; hint?: string }) => [e.code, e.message, e.detail ?? null, e.hint ?? null]);
+    const refusedAlike = async (sql: string, values?: unknown[]): Promise<void> => {
+      const [m, p] = [await said(c.query(sql, values)), await said(truth.query(sql, values))];
+      assert.notEqual(p, "answered", `${sql}: Postgres answered`);
+      assert.deepEqual(m, p, `${sql} ${JSON.stringify(values ?? [])}`);
+    };
+    // a CASE, greatest or nullif over constants
+    await refusedAlike("SELECT extract('foo' FROM CASE WHEN true THEN timestamp '2020-01-01' END) FROM parts WHERE id < 0");
+    await refusedAlike("SELECT extract('foo' FROM greatest(timestamp '2020-01-01', timestamp '2021-01-01')) FROM parts WHERE id < 0");
+    await refusedAlike("SELECT extract('foo' FROM nullif(timestamp '2020-01-01', timestamp '2021-01-01')) FROM parts WHERE id < 0");
+    // a constant column from a subquery, a WITH query, VALUES or LATERAL, joined to no rows
+    await refusedAlike("SELECT extract('foo' FROM s.c) FROM parts p, (SELECT timestamp '2020-01-01' AS c) s WHERE p.id < 0");
+    await refusedAlike("WITH w AS (SELECT timestamp '2020-01-01' AS c) SELECT extract('foo' FROM w.c) FROM parts p, w WHERE p.id < 0");
+    await refusedAlike("SELECT extract('foo' FROM v.c) FROM parts p, (VALUES (timestamp '2020-01-01')) AS v(c) WHERE p.id < 0");
+    await refusedAlike("SELECT extract('foo' FROM l.c) FROM parts p CROSS JOIN LATERAL (SELECT timestamp '2020-01-01' AS c) l WHERE p.id < 0");
+    // a bound parameter in a COALESCE or a CASE's condition
+    await refusedAlike("SELECT extract('foo' FROM coalesce($1::timestamp, ts)) FROM parts WHERE id < 0", ["2020-01-01"]);
+    await refusedAlike("SELECT extract('foo' FROM CASE WHEN $1::bool THEN timestamp '2020-01-01' END) FROM parts WHERE id < 0", [true]);
+    // a condition run once, under a NOT
+    await refusedAlike("SELECT count(*) FROM parts WHERE id < 0 AND NOT (id <= 0 OR extract('foo' FROM now()) IS NULL)");
+    // a call of an array's element, over rows that hold values (it wrote 42601)
+    await refusedAlike("SELECT id, extract('foo' FROM (ARRAY[ts])[1]) FROM parts ORDER BY id");
+    await refusedAlike("SELECT id, date_part('foo', (ARRAY[tz])[1]) FROM parts ORDER BY id");
+  } finally { await c.end(); }
+});
+
+test("PR 1177: an error the engine raises in Postgres's words arrives as Postgres sends it, with no DETAIL of the engine's", async () => {
+  const c = await client();
+  try {
+    const said = async (run: Promise<unknown>): Promise<unknown> =>
+      run.then(() => "answered", (e: { code?: string; message: string; detail?: string; hint?: string }) => [e.code, e.message, e.detail ?? null, e.hint ?? null]);
+    const refusedAlike = async (sql: string): Promise<void> => {
+      const [m, p] = [await said(c.query(sql)), await said(truth.query(sql))];
+      assert.notEqual(p, "answered", `${sql}: Postgres answered`);
+      assert.deepEqual(m, p, sql);
+    };
+    // (each arrived with `DETAIL: the engine: mason[…]: …`, which Postgres does not send)
+    await refusedAlike("SELECT id, current_setting(CASE WHEN id > 0 THEN 'mason_no_such_setting' END) FROM parts ORDER BY id");
+    await refusedAlike("SELECT id FROM parts ORDER BY id OFFSET (SELECT -1) ROWS FETCH FIRST 2 ROWS WITH TIES");
+    // the engine's own error keeps it
+    const [code, , detail] = await said(c.query("SELECT id, 1 / (id - id) FROM parts ORDER BY id")) as [string, string, string | null];
+    assert.equal(code, "22012");
+    assert.match(detail ?? "", /^the engine: /);
   } finally { await c.end(); }
 });
 
@@ -4537,18 +4736,22 @@ wholeBeside("a whole numeric's own arithmetic is Postgres's", [
   "SELECT div(i, 2) AS q, count(*) FROM bins GROUP BY 1 ORDER BY 1 NULLS FIRST",
   "SELECT 2.5e2 * 2.5e2 AS w, 1e37 + 1 AS x, extract(epoch FROM date '2024-01-02') AS e"]);
 
-// issue 464: to_char of a time in a format DuckDB's strftime writes as Postgres does is DuckDB's own strftime, never the
-// function a row (a grouped month was x8-18 of Postgres over 4.5 M rows), and Postgres's text in every zone: a NULL, a
-// microsecond, before 1970, a zone's local mean time, each side of a clock change; ±infinity and every other format
-// stay the function's (src/duck/to-char.ts `strftimeTemplate`, src/duck/rewrite.ts `toChar`)
-test("issue 464: to_char of a time in a format strftime writes is the engine's own, Postgres's text in every zone and type", async () => {
+// issue 464: to_char of a time in a template the engine writes as Postgres does is the engine's own strftime and
+// date_part, never the function a row (a grouped month was x8-18 of Postgres over 4.5 M rows, a quarter or a padded
+// month's name x8 over a million), and Postgres's text in every zone: a NULL, a microsecond, before 1970, a zone's local
+// mean time, each side of a clock change; ±infinity and every other template stay the function's (src/duck/to-char.ts
+// `nativeTemplate`, src/duck/rewrite.ts `toChar`, `nativeText`)
+test("issue 464: to_char of a time in a template the engine writes is the engine's own, Postgres's text in every zone and type", async () => {
   const c = await client();
   const called = async (): Promise<number> => (await store.functionRows()).get("__mason_to_char_time") ?? 0;
   const native = ["YYYY-MM", "YYYY-MM-DD", "Mon YYYY", "FMMonth YYYY", "Dy DD Mon", "FMDay, DDD", "YYYY-MM-DD HH24:MI:SS", 'YYYY-MM-DD"T"HH24:MI:SS.US', "HH24:MI:SS.MS",
-    "IYYY-IW", "YYYYMMDD", 'YYYY "100%" MM', "FMMon/FMDy"];
-  // a pattern strftime does not write as Postgres does: a quarter, a padded name, FM on a number, an ordinal, another
-  // case, a translated name
-  const kept = ['YYYY-"Q"Q', "Month YYYY", "FMDD", "DDth", "yyyy-mm", "MON YYYY", "TMMonth", "Day", "HH12:MI AM", "WW",
+    "IYYY-IW", "YYYYMMDD", 'YYYY "100%" MM', "FMMon/FMDy",
+    // a quarter, a padded name, FM on a number, an ordinal, another case, a meridiem, an era, a Roman month, a fraction
+    'YYYY-"Q"Q', "Month YYYY", "FMDD", "DDth", "yyyy-mm", "MON YYYY", "Day", "HH12:MI AM", "WW",
+    "MONTH|month|DAY|day|DY|dy|mon|FMMONTH", "Q|Qth|FMDDth|ddTH|J|W|IDDD|ID|D|CC|RM|rm|FMRM|Y,YYY|YYY|YY|Y|IYY|IY|I", "hh p.m.|a.m.|PM|SSSS|FF1|FF5|ad|B.C.|FMHH24",
+    "FMMS|FMUS|Y,YYYth"];
+  // a template the engine does not write: a translated name, an ordinal of a name, FM before a literal
+  const kept = ["TMMonth", "MonthTH", "FMx",
     // a template that writes nothing, or nothing but its prefix (the review of PR 955: an empty strftime format is
     // DuckDB's bind error), the empty one (NULL), and one prefix an item (`FMFM` writes `FM`)
     "FM", '""', "", "FMFM", "FMTMMonth", "fmFMDD", "FXFMDD", "FMFXDD"];
@@ -4558,7 +4761,8 @@ test("issue 464: to_char of a time in a format strftime writes is the engine's o
       await truth.exec(`SET TimeZone = '${zone}'`);
       try {
         for (const fmt of [...native, ...kept]) {
-          const time = /HH|MI|SS|MS|US/.test(fmt);
+          // a pattern of the time of day: a date's is the function's (a zone's midnight)
+          const time = /HH|hh|MI|SS|MS|US|AM|PM|a\.m\.|p\.m\.|FF/.test(fmt);
           for (const [sql, finite] of [[`SELECT id, to_char("at", '${fmt}') AS v FROM instants ORDER BY id`, false], [`SELECT id, to_char(ts, '${fmt}') AS v FROM nullish ORDER BY id`, true],
             [`SELECT id, to_char(d, '${fmt}') AS v FROM ratios ORDER BY id`, !time]] as const) {
             const before = await called();
@@ -4574,7 +4778,12 @@ test("issue 464: to_char of a time in a format strftime writes is the engine's o
           "SELECT to_char(created_at, 'Mon YYYY') AS m, sum(amount) FROM orders GROUP BY to_char(created_at, 'Mon YYYY') ORDER BY to_char(created_at, 'Mon YYYY') DESC",
           "SELECT s.m, count(*) FROM (SELECT to_char(\"at\", 'YYYY-MM-DD') AS m FROM instants) s GROUP BY s.m ORDER BY s.m NULLS FIRST",
           "SELECT id, CASE WHEN id > 1 THEN to_char(created_at, 'YYYY') ELSE 'x' END FROM orders ORDER BY id",
-          "SELECT to_char(created_at, 'YYYY-MM') FROM orders UNION ALL SELECT to_char(ts, 'YYYY-MM') FROM nullish ORDER BY 1 NULLS FIRST"]) {
+          "SELECT to_char(created_at, 'YYYY-MM') FROM orders UNION ALL SELECT to_char(ts, 'YYYY-MM') FROM nullish ORDER BY 1 NULLS FIRST",
+          // a quarter and a padded name grouped, by number, by name and by the expression, and through a derived table
+          "SELECT to_char(o.created_at, 'YYYY \"Q\"Q') AS q, count(*) FROM orders o GROUP BY 1 ORDER BY 1",
+          "SELECT to_char(created_at, 'Month YYYY') AS m, sum(amount) FROM orders GROUP BY m ORDER BY m DESC",
+          "SELECT to_char(created_at, 'Day') AS d, count(*) FROM orders GROUP BY to_char(created_at, 'Day') ORDER BY to_char(created_at, 'Day')",
+          "SELECT s.q, count(*) FROM (SELECT to_char(\"at\", 'YYYY-\"Q\"Q') AS q FROM instants) s GROUP BY s.q ORDER BY s.q NULLS FIRST"]) {
           const before = await called();
           assert.deepEqual(await answer(c, sql), await postgres(sql), `${sql} in ${zone}`);
           if (!/instants/.test(sql)) assert.equal(await called() - before, 0, `${sql} in ${zone}: rows handed to the function`);
@@ -4592,6 +4801,18 @@ test("issue 464: to_char of a time in a format strftime writes is the engine's o
     // a format bound as a parameter is read where it runs: the function's, as before
     const sql = "SELECT id, to_char(created_at, $1) FROM orders ORDER BY id";
     assert.deepEqual(await answer(c, sql, ["YYYY-MM"]), await postgres(sql, ["YYYY-MM"]));
+    // a statement prepared in one zone and executed after a later SET reads the value in the zone it runs in
+    const prepared = { name: "issue464_zoned", text: "SELECT id, to_char(\"at\", 'YYYY \"Q\"Q Month DDth HH12 a.m. J IDDD') AS v FROM instants WHERE id > $1 ORDER BY id", values: [0], rowMode: "array", types: raw };
+    await c.query(prepared as pg.QueryConfig);
+    for (const zone of ["Asia/Kathmandu", "America/New_York"]) {
+      await c.query(`SET TimeZone = '${zone}'`);
+      await truth.exec(`SET TimeZone = '${zone}'`);
+      try {
+        const before = await called();
+        assert.deepEqual((await c.query(prepared as pg.QueryConfig)).rows, (await postgres(prepared.text, [0])).rows, `the prepared statement in ${zone}`);
+        assert.ok(await called() - before <= 2, `the prepared statement in ${zone}: rows handed to the function beside ±infinity`);
+      } finally { await truth.exec("SET TimeZone = 'UTC'"); }
+    }
   } finally { await c.query("SET TimeZone = 'UTC'"); await c.end(); }
 });
 
@@ -4748,7 +4969,9 @@ test("issue 214: a numeric parameter beside a value the engine holds exactly is 
     for (const [sql, values] of [["SELECT count(*) FROM big WHERE id < $1::numeric", ["100"]], ["SELECT count(*) FROM big WHERE id::numeric = $1", ["99999"]],
       [`${x} b.x = $1 ORDER BY 1`, ["2.5"]], [`${x} b.x BETWEEN $1 AND $2 ORDER BY 1`, ["1", "2.5"]]] as Array<[string, string[]]>) {
       const called = await calledFor(sql, values);
-      assert.ok(called.some(([k]) => k === "__mason_numeric_fits") && called.every(([, n]) => n <= values.length), `${sql}: ${JSON.stringify(called)}`);
+      // folded once as its plan is run, and once more as its plan is weighed when it may keep rows (an ORDER BY:
+      // src/duck/admission.ts): a few calls, never one a vector
+      assert.ok(called.some(([k]) => k === "__mason_numeric_fits") && called.every(([, n]) => n <= 2 * values.length), `${sql}: ${JSON.stringify(called)}`);
     }
     const keyed = await calledFor("SELECT count(*) FROM big WHERE id < $1::numeric", ["100.5"]);
     assert.ok(keyed.some(([k, n]) => k === "__mason_numeric_order" && n > 10), `a value an integer does not hold is keyed row by row: ${JSON.stringify(keyed)}`);
@@ -8929,7 +9152,8 @@ test("libc top N: a top N and an ungrouped min / max are bounded natively, the d
       ["WITH __mason_values1 AS (SELECT id, d FROM colls), __mason_keys1 AS (SELECT 1 AS one) SELECT id FROM __mason_values1 ORDER BY d, id LIMIT 3", "SELECT id FROM colls ORDER BY d, id LIMIT 3"],
     ] as const) {
       assert.deepEqual((await answer(c, own)).rows, (await answer(c, plain)).rows, own);
-      assert.match(await sent(own), /__mason_values\d* AS MATERIALIZED \(SELECT __mason_v\d*, /, own);
+      // (a statement that holds a `__mason_` name has its own prefix, issue 1024: src/duck/own-names.ts)
+      assert.match(await sent(own), /__mason\d*_values\d* AS MATERIALIZED \(SELECT __mason\d*_v\d*, /, own);
     }
     // a parameter in the WHERE the threshold reads too: bound once, read in both, and again after the session moved
     const bound = "SELECT id FROM colls WHERE id > $1 ORDER BY d, id LIMIT 3";
@@ -8938,8 +9162,9 @@ test("libc top N: a top N and an ungrouped min / max are bounded natively, the d
     await c.query("SET TimeZone = 'Asia/Kolkata'");
     assert.deepEqual((await answer(c, bound, [4])).rows, after, `${bound}, after SET TimeZone`);
     await c.query("RESET TimeZone");
-    for (const sql of ["SELECT d FROM colls GROUP BY d ORDER BY d LIMIT 3", "SELECT DISTINCT d FROM colls ORDER BY 1 LIMIT 3", "SELECT id, d FROM colls ORDER BY d FETCH FIRST 2 ROWS WITH TIES",
-      "SELECT id % 2, min(d) FROM colls GROUP BY 1", "SELECT min(d) FILTER (WHERE id > 3) FROM colls", "SELECT id, d FROM colls WHERE random() < 2 ORDER BY d LIMIT 3",
+    // (a grouped min / max and a SELECT DISTINCT sorted are keyed once a distinct value too: the test after this one)
+    for (const sql of ["SELECT d FROM colls GROUP BY d ORDER BY d LIMIT 3", "SELECT id, d FROM colls ORDER BY d FETCH FIRST 2 ROWS WITH TIES",
+      "SELECT min(d) FILTER (WHERE id > 3) FROM colls", "SELECT id, d FROM colls WHERE random() < 2 ORDER BY d LIMIT 3",
       "SELECT a.id FROM colls a JOIN colls b ON b.id = a.id ORDER BY a.d LIMIT 3", "SELECT id FROM colls ORDER BY d", "SELECT id FROM colls ORDER BY c LIMIT 3",
       "SELECT max(d) OVER () FROM colls LIMIT 1", "SELECT id FROM colls ORDER BY d LIMIT 3 + 0", "SELECT d FROM colls UNION ALL SELECT d FROM colls ORDER BY 1 LIMIT 3",
       "SELECT count(*) FROM (SELECT id FROM colls ORDER BY d LIMIT 3) s", "SELECT min(d) FROM (SELECT d FROM colls LIMIT 5) s"]) {
@@ -9000,6 +9225,128 @@ test("libc top N: a top N and an ungrouped min / max are bounded natively, the d
       }
     } finally { await store.writer.run("DELETE FROM public.colls WHERE id >= 200"); }
   } finally { await c.end(); await a.close(); }
+});
+
+// ISSUE 666, THE THIRD ROUND: a GROUPED min / max under a libc order keys each group's candidate values alone (the
+// bounds of each DISTINCT (group, value) pair, src/duck/libc-bound.ts `pickGrouped`), and a SELECT DISTINCT sorted by
+// the order sorts its distinct rows (`distinctSorted`), never the key a row: 5 to 28 s against Postgres's 0.1 to 0.5 s
+// over 0.9 to 4.5 M rows. Each group below holds values whose bytes order otherwise than the order does (`b` before `B`,
+// `é` between `e` and `f`, a space and `-` ignored at the first level), NULLs, and a group of NULLs alone
+test("libc grouped: a grouped min / max and a SELECT DISTINCT sorted are keyed once a distinct candidate, each answer the order's", async () => {
+  const letters = handLibcOrder(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...lettersOf({ e: "é" })], [" ", "-\u0001\u0002\u007f"], { collate: "en_US.utf8" });
+  const { api: a, c } = await collsApi(await store.listener({ provider: "c", collate: "en_US.utf8", locale: null }, undefined, letters, () => copies, undefined, { collations: PG_COLLATIONS }));
+  const pool = ["beta", "Beta", "alpha", "é", "e", "", " alpha", "-x", "10", "b", "f", "B", null];
+  // (the group is the ICU column's: a digit, or NULL; group 9 holds NULLs alone)
+  const rows: Array<[number, string | null, string | null]> = Array.from({ length: 1200 }, (_, n) => [7000 + n, pool[(n * 7) % pool.length]!, n % 11 === 0 ? null : String(n % 4)]);
+  for (let n = 0; n < 5; n++) rows.push([8500 + n, null, "9"]);
+  await store.writer.run(`INSERT INTO public.colls SELECT id, x, x, g FROM (VALUES ${rows.map(([i, x, g]) => `(${i}, ${x === null ? "NULL" : `'${x}'`}, ${g === null ? "NULL" : `'${g}'`})`).join(", ")}) AS s(id, x, g)`);
+  const cmp = (x: string, y: string): number => { const [k, l] = [libcKey(letters, x), libcKey(letters, y)]; return k !== l ? (k < l ? -1 : 1) : Buffer.compare(Buffer.from(x), Buffer.from(y)); };
+  const least = (xs: Array<string | null>, desc = false): string | null => xs.filter((x): x is string => x !== null).sort((x, y) => desc ? cmp(y, x) : cmp(x, y))[0] ?? null;
+  const groupsOf = <K,>(key: (r: [number, string | null, string | null]) => K, where: (r: [number, string | null, string | null]) => boolean = () => true): Map<K, Array<string | null>> => {
+    const out = new Map<K, Array<string | null>>();
+    for (const r of rows.filter(where)) out.set(key(r), [...out.get(key(r)) ?? [], r[1]]);
+    return out;
+  };
+  // the groups by the ICU column, NULL first, then its digits
+  const byI = [...groupsOf((r) => r[2])].sort(([x], [y]) => x === null ? -1 : y === null ? 1 : x < y ? -1 : 1);
+  const distinct = (desc: boolean, nullsFirst: boolean, where: (r: [number, string | null, string | null]) => boolean = () => true): Array<string | null> => {
+    const values = [...new Set(rows.filter(where).map((r) => r[1]))];
+    const sorted = values.filter((x): x is string => x !== null).sort((x, y) => desc ? cmp(y, x) : cmp(x, y));
+    return values.includes(null) ? (nullsFirst ? [null, ...sorted] : [...sorted, null]) : sorted;
+  };
+  try {
+    const sent = async (sql: string): Promise<string> => String((await answer(c, `EXPLAIN ${sql}`)).rows.map((r) => String(r[0])).find((l) => l.includes("Sent to the engine")) ?? "");
+    const keyRows = async (): Promise<number> => { const f = await store.functionRows(); return ["__mason_libc_key", "__mason_libc_key_or_null"].reduce((n, k) => n + (f.get(k) ?? 0), 0); };
+    const w = "id >= 7000";
+    const mod3 = [...groupsOf((r) => r[0] % 3)].sort(([x], [y]) => x - y);
+    const grouped: Array<[string, unknown[][]]> = [
+      [`SELECT i, min(d), max(d) FROM colls WHERE ${w} GROUP BY i ORDER BY i NULLS FIRST`, byI.map(([g, xs]) => [g, least(xs), least(xs, true)])],
+      [`SELECT id % 3 AS g, max(d), count(*) FROM colls WHERE ${w} GROUP BY 1 ORDER BY 1`, mod3.map(([g, xs]) => [String(g), least(xs, true), String(xs.length)])],
+      [`SELECT id % 3, min(d) FROM colls WHERE ${w} GROUP BY id % 3 HAVING min(d) IS NOT NULL ORDER BY max(d) DESC, 1`,
+        mod3.filter(([, xs]) => least(xs) !== null).sort(([g, xs], [h, ys]) => cmp(least(ys, true)!, least(xs, true)!) || g - h).map(([g, xs]) => [String(g), least(xs)])],
+      [`SELECT i, id % 2 AS p, min(d), max(d::varchar(3)) FROM colls WHERE ${w} AND i IS NOT NULL GROUP BY 1, 2 ORDER BY 1, 2`,
+        [...groupsOf((r) => `${r[2]}|${r[0] % 2}`, (r) => r[2] !== null)].sort(([x], [y]) => x < y ? -1 : 1)
+          .map(([k, xs]) => [...k.split("|"), least(xs), least(xs.map((x) => x === null ? null : x.slice(0, 3)), true)])],
+      [`SELECT i, min(d) FROM colls WHERE ${w} AND id % 5 = 1 GROUP BY i HAVING i <> '1' ORDER BY i NULLS LAST LIMIT 3`,
+        [...groupsOf((r) => r[2], (r) => r[0] % 5 === 1)].filter(([g]) => g !== "1").sort(([x], [y]) => x === null ? 1 : y === null ? -1 : x < y ? -1 : 1).slice(0, 3).map(([g, xs]) => [g, least(xs)])],
+      [`SELECT i, min(d) FROM colls WHERE ${w} AND id < 0 GROUP BY i`, []],
+    ];
+    for (const [sql, want] of grouped) {
+      assert.match(await sent(sql), /__mason_groups\d* AS MATERIALIZED .*arg_m(in|ax)\(.*CASE WHEN \(SELECT (\()?__mason_few\)? FROM __mason_probe\) THEN CASE WHEN .* = __mason_group\d*\.__mason_m(in|ax) THEN ROW\(CASE WHEN __mason_group\d*\.__mason_m(in|ax)_unkeyed THEN error\('mason\[0A000\]: /, sql);
+      const before = await keyRows();
+      assert.deepEqual((await answer(c, sql)).rows, want, sql);
+      // (each group's candidates: a few of the thirteen values a group, never its hundreds of rows)
+      const keyed = await keyRows() - before;
+      assert.ok(keyed <= 2 * 6 * pool.length, `${sql}: the libc key was handed ${keyed} rows of ${rows.length}: per row, not per candidate`);
+    }
+    // GROUPS MANY BESIDE THE ROWS (the second review of PR 1104: 3.9 M groups over 4.5 M rows spilled past the ceiling
+    // where the key a row answered): a group a row, keyed a row as written, the groups' WITH queries reading no row
+    const byId = rows.filter((r) => r[0] < 7008).map((r) => [String(r[0]), r[1], r[1]]);
+    for (const sql of [`SELECT id, min(d), max(d) FROM colls WHERE ${w} AND id < 7008 GROUP BY id ORDER BY id`]) {
+      assert.match(await sent(sql), /__mason_probe\d* AS MATERIALIZED .*approx_count_distinct\(.*arg_min\(d, CASE WHEN NOT \(d IS NULL\) THEN CASE WHEN \(SELECT (\()?__mason_few\)? FROM __mason_probe\) THEN .* ELSE ROW\(__mason_libc_key\(/, sql);
+      assert.deepEqual((await answer(c, sql)).rows, byId, sql);
+    }
+    const sorted: Array<[string, unknown[][]]> = [
+      [`SELECT DISTINCT d FROM colls WHERE ${w} ORDER BY d`, distinct(false, false).map((x) => [x])],
+      [`SELECT DISTINCT d FROM colls WHERE ${w} ORDER BY d DESC`, distinct(true, true).map((x) => [x])],
+      [`SELECT DISTINCT d FROM colls WHERE ${w} ORDER BY 1 NULLS FIRST`, distinct(false, true).map((x) => [x])],
+      [`SELECT DISTINCT d AS v, i FROM colls WHERE ${w} AND i = '2' ORDER BY v DESC NULLS LAST, i`, distinct(true, false, (r) => r[2] === "2").map((x) => [x, "2"])],
+      [`SELECT DISTINCT d FROM colls WHERE ${w} ORDER BY 1 LIMIT 3`, distinct(false, false).slice(0, 3).map((x) => [x])],
+      // (no É: the hand order has none)
+      [`SELECT DISTINCT upper(d) AS u FROM colls WHERE ${w} AND d NOT IN ('', 'é') ORDER BY u LIMIT 4 OFFSET 1`,
+        [...new Set(rows.filter((r) => r[1] !== null && r[1] !== "" && r[1] !== "é").map((r) => r[1]!.toUpperCase()))].sort(cmp).slice(1, 5).map((x) => [x])],
+    ];
+    for (const [sql, want] of sorted) {
+      // (the distinct rows sorted by their key; under a LIMIT, the top N of them keyed for its candidates alone)
+      assert.match(await sent(sql), /FROM \( SELECT DISTINCT .* AS __mason_d\d*.* \) AS __mason_sorted\d* (ORDER BY .*__mason_libc_key\(|LEFT JOIN \( SELECT __mason_v, __mason_libc_key\()/, sql);
+      const before = await keyRows();
+      assert.deepEqual((await answer(c, sql)).rows, want, sql);
+      const keyed = await keyRows() - before;
+      assert.ok(keyed <= 4 * pool.length, `${sql}: the libc key was handed ${keyed} rows of ${rows.length}: per row, not once a distinct value`);
+    }
+    // a byte order, ICU's and a FILTER stay as they were: the engine's own min, ICU's key, the key a row
+    for (const [sql, pattern] of [[`SELECT i, min(c) FROM colls WHERE ${w} GROUP BY i`, /arg_min|min\(c\)/], [`SELECT id % 2, max(d COLLATE "und-x-icu") FROM colls WHERE ${w} GROUP BY 1`, /arg_max\(d, CASE WHEN .* COLLATE /],
+      [`SELECT i, min(d) FILTER (WHERE id > 7500) FROM colls WHERE ${w} GROUP BY i`, /arg_min\(d, CASE WHEN .*__mason_libc_key\(/], [`SELECT DISTINCT c FROM colls WHERE ${w} ORDER BY c`, /ORDER BY c$/]] as const) {
+      const text = await sent(sql);
+      assert.match(text, pattern, sql);
+      assert.ok(!text.includes("__mason_groups") && !text.includes("__mason_sorted"), `${sql}: ${text}`);
+    }
+  } finally { await store.writer.run("DELETE FROM public.colls WHERE id >= 7000"); await c.end(); await a.close(); }
+});
+
+// ISSUE 666, THE THIRD ROUND: a value the order cannot key (`libc-uncovered`: the hand order lists no `€`) refuses a
+// grouped min / max only where it is a candidate of a group the statement reads (it always is: its run is empty), never
+// for a group a HAVING or an outer query's WHERE drops, where the key a row refused every row read
+test("libc grouped: a value the order cannot key refuses a grouped min / max only in a group the statement reads", async () => {
+  const letters = handLibcOrder(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...lettersOf({ e: "é" })], [" ", "-\u0001\u0002\u007f"], { collate: "en_US.utf8" });
+  const { api: a, c } = await collsApi(await store.listener({ provider: "c", collate: "en_US.utf8", locale: null }, undefined, letters, () => copies, undefined, { collations: PG_COLLATIONS }));
+  const rows: Array<[number, string, string]> = [];
+  for (const [g, xs] of [["0", ["B", "b", "a", "c"]], ["1", ["é", "f", "e", "E"]], ["3", ["€", "z", "y"]], ["4", ["x€", "w"]], ["5", ["a", "b", "x€"]]] as Array<[string, string[]]>) {
+    // (twenty rows a value: the groups few beside the rows, so the groups' WITH queries answer)
+    for (const x of xs) for (let n = 0; n < 20; n++) rows.push([9000 + rows.length, x, g]);
+  }
+  await store.writer.run(`INSERT INTO public.colls SELECT id, x, x, g FROM (VALUES ${rows.map(([i, x, g]) => `(${i}, '${x}', '${g}')`).join(", ")}) AS s(id, x, g)`);
+  try {
+    const wrong: string[] = [];
+    for (const [sql, want] of [
+      ["SELECT i, min(d), max(d) FROM colls WHERE id >= 9000 GROUP BY i HAVING i IN ('0', '1') ORDER BY i", [["0", "a", "c"], ["1", "e", "f"]]],
+      ["SELECT * FROM (SELECT i AS g, min(d) AS lo, max(d) AS hi FROM colls WHERE id >= 9000 GROUP BY 1) q WHERE q.g = '1'", [["1", "e", "f"]]],
+      ["WITH q AS (SELECT i AS g, max(d) AS m FROM colls WHERE id >= 9000 GROUP BY 1) SELECT m FROM q WHERE g = '0'", [["c"]]],
+      ["SELECT i, max(d) FROM colls WHERE id >= 9000 AND d NOT LIKE '%€%' GROUP BY i ORDER BY i", [["0", "c"], ["1", "f"], ["3", "z"], ["4", "w"], ["5", "b"]]],
+      // group 5: `x€` is a candidate of its greatest (its run, `x`, is above every other value's) and of no least
+      ["SELECT i, min(d) FROM colls WHERE id >= 9000 GROUP BY i HAVING i = '5'", [["5", "a"]]],
+    ] as Array<[string, unknown[][]]>) {
+      const got = await answer(c, sql).then((r) => JSON.stringify(r.rows), (e: Error) => `refused: ${e.message}`);
+      if (got !== JSON.stringify(want)) wrong.push(`${sql}\n  ${got}`);
+    }
+    assert.deepEqual(wrong, [], wrong.join("\n"));
+    // a group the statement reads holding `€`: the key would decide, refused by name as the key a row refused
+    for (const sql of ["SELECT i, min(d) FROM colls WHERE id >= 9000 GROUP BY i ORDER BY i", "SELECT i, max(d) FROM colls WHERE id >= 9000 GROUP BY i HAVING i = '4'",
+      "SELECT i, max(d) FROM colls WHERE id >= 9000 GROUP BY i HAVING i = '5'",
+      "SELECT i, min(d) FROM colls WHERE id >= 9000 GROUP BY i HAVING min(d) = 'a'"]) {
+      await assert.rejects(answer(c, sql), (e: pg.DatabaseError) => e.code === "0A000" && /holds a character Mason cannot order .*libc-uncovered/.test(e.message), sql);
+    }
+  } finally { await store.writer.run("DELETE FROM public.colls WHERE id >= 9000"); await c.end(); await a.close(); }
 });
 
 // ISSUE 464: mode() of a text under a libc order keys each DISTINCT value once (src/duck/rewrite.ts `modeKeyedOnce`):
@@ -9167,6 +9514,38 @@ test("issue 1008: a whole row an outer join leaves unmatched is NULL in every re
       await assert.rejects(answer(c, sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap null-extended-row/.test(e.detail ?? "") && /json_build_object/.test(e.hint ?? ""), sql);
     }
   } finally { await c.end(); }
+});
+
+// THE REVIEW OF PR 1104: a grouped min / max keyed one value under two libc orders in one statement from ONE WITH query,
+// cached by the value alone (src/duck/libc-bound.ts `pickGrouped`, and the ungrouped `of`), so `min(d), min(d COLLATE
+// zh)` answered the first's for both, and a min of one order beside a max of the other read one query. Each pick is held
+// to its own order here: the database's weighs é as e, the second (whose ASCII is the database's, so both have bounds)
+// as a letter after z. Every form keys its WITH queries by the value AND the order
+test("libc grouped: a value under two libc orders in one statement, each min and max by its own order", async () => {
+  const database = handLibcOrder(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...lettersOf({ e: "é" })], [" ", "-"], { collate: "en_US.utf8" });
+  const after = handLibcOrder(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...lettersOf({}), "é"], [" ", "-"], { collate: "xx_XX.utf8" });
+  const xx = { schema: "public", name: "mason_xx", provider: "c", collate: "xx_XX.utf8", locale: null, deterministic: true };
+  const { api: a, c } = await collsApi(await store.listener({ provider: "c", collate: "en_US.utf8", locale: null }, undefined, database, () => copies, undefined,
+    { collations: [...PG_COLLATIONS, xx], readLibc: async () => after }), [xx]);
+  // three groups (the ICU column's digit), each value twenty times: é is the first of group 1 under the database's order
+  // and the last under the second's
+  const groups: Array<[string, string[]]> = [["1", ["é", "f", "g"]], ["2", ["b", "c"]], ["3", ["y", "é", "q"]]];
+  const rows = groups.flatMap(([g, xs]) => xs.flatMap((x) => Array.from({ length: 20 }, () => [g, x] as const))).map(([g, x], i) => [9500 + i, g, x] as const);
+  await store.writer.run(`INSERT INTO public.colls SELECT id, x, x, g FROM (VALUES ${rows.map(([i, g, x]) => `(${i}, '${x}', '${g}')`).join(", ")}) AS s(id, x, g)`);
+  const least = (o: typeof database, xs: string[], desc = false): string => [...xs].sort((x, y) => (libcKey(o, x) < libcKey(o, y) ? -1 : 1) * (desc ? -1 : 1))[0]!;
+  try {
+    const w = "WHERE id >= 9500";
+    for (const [sql, want] of [
+      [`SELECT i, min(d), min(d COLLATE mason_xx) FROM colls ${w} GROUP BY i ORDER BY i`, groups.map(([g, xs]) => [g, least(database, xs), least(after, xs)])],
+      [`SELECT i, min(d COLLATE mason_xx), min(d) FROM colls ${w} GROUP BY i ORDER BY i`, groups.map(([g, xs]) => [g, least(after, xs), least(database, xs)])],
+      [`SELECT i, max(d), max(d COLLATE mason_xx) FROM colls ${w} GROUP BY i ORDER BY i`, groups.map(([g, xs]) => [g, least(database, xs, true), least(after, xs, true)])],
+      [`SELECT i, min(d COLLATE mason_xx), max(d) FROM colls ${w} GROUP BY i ORDER BY i`, groups.map(([g, xs]) => [g, least(after, xs), least(database, xs, true)])],
+      [`SELECT min(d), min(d COLLATE mason_xx), max(d COLLATE mason_xx), max(d) FROM colls ${w}`,
+        [[least(database, groups.flatMap(([, xs]) => xs)), least(after, groups.flatMap(([, xs]) => xs)), least(after, groups.flatMap(([, xs]) => xs), true), least(database, groups.flatMap(([, xs]) => xs), true)]]],
+    ] as Array<[string, unknown[][]]>) assert.deepEqual((await answer(c, sql)).rows, want, sql);
+    // (the data tells the orders apart)
+    assert.deepEqual([least(database, ["é", "f", "g"]), least(after, ["é", "f", "g"]), least(database, ["é", "f", "g"], true), least(after, ["é", "f", "g"], true)], ["é", "f", "g", "é"]);
+  } finally { await store.writer.run("DELETE FROM public.colls WHERE id >= 9500"); await c.end(); await a.close(); }
 });
 
 // ISSUE 982: TABLESAMPLE was refused only because the allowlist lacked its node, so wherever the allowlist was off (the

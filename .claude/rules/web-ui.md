@@ -53,8 +53,9 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   Where the CLI's line names a command or a file, the page says it in its own words, held by a test of those
   words: what an add or a remove did (`addedLines`, `removedReport`), what follows a sync (`syncedReport`'s tips), a
   table whose sync is off (`keptAge`), a Disable (`disableEffect`), and the Overview's facts card (`factRows`,
-  `factNotes`: the Source, Mason, the disk and the tools connected; `mason status` keeps its fuller rows; the owner,
-  2026-11-13, kept main's card over a table of the CLI's rows). A line the
+  `factNotes`: the Source, Mason and the disk; `mason status` keeps its fuller rows; the owner, 2026-11-13, kept
+  main's card over a table of the CLI's rows; who is connected is the Usage page's, not the card's: the owner, issue
+  1111). A line the
   page splits into a table's cells is held equal cell by cell: its cells, read in order, are the CLI's line (spaces aside).
 - **Nothing on the page that `mason status --json` (or the command whose `--json` it renders) cannot also say.** A page
   that needs a fact gets it by adding it to the JSON first, computed ONCE on the server (`readiness` is the run's, in
@@ -128,9 +129,12 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   and a failed poll keeps the last state
   and says, as a Failure, what to do (the run stopped: `mason start`, then `mason ui`; a cookie of an earlier run:
   `mason ui`).
-- **A password is shown once and kept nowhere**: an added user's password, and a temporary cloud login's, lives in the
+- **A password is shown once and kept nowhere**: an added user's password, and a temporary cloud tunnel's, lives in the
   page's memory only while its one-time dialog is open (index.html's `<dialog id="once">`), dropped at its "I have copied
   it", the one thing that closes it; never in storage, a URL or a log line (the server logs `user <name> added`, never the password).
+  So are the dialog's `mason mcp` lines, which carry it (issues 1114, 1155: its closed "Connect an AI agent", under the
+  URLs, each line "Shown once"). The section's body is the Users page's "Connect an AI agent" box's own (`mcpBody`), the
+  box's with `<user>:<password>` and the dialog's with the user's URL, so the two cannot drift.
 - **Tests assert on what a page WROTE, never geometry**: the renderers are pure functions of the JSON returning HTML
   (`renderStatus`, `renderTables`, `renderUsers`, `renderFailure`, `renderNav`; `renderAdded` and `renderShareOnce`
   the one-time dialog's parts, HTML each), the app runs over a fake
@@ -179,7 +183,8 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   chart's mark (`--chart-mark`, checked against both themes' surfaces). The shadow is the quiet stone step alone:
   the reader's eye goes to what changed state, not to decoration.
 - **A component is a helper of src/web/shared.js, not markup copied into a page** (`status`, `card`/`cards`, `badge`,
-  `button`, `panel`, `listTable`, `empty`, `skeleton`, `details`): one place to change how a thing looks, and the tests
+  `button`, `panel`, `listTable`, `empty`, `skeleton`, `details`, `copyable`, `copyBlock`: a block of code that
+  scrolls inside its own box): one place to change how a thing looks, and the tests
   assert on what the helper wrote. A section's heading is index.html's own (it reads before the script runs).
 - **A number is text first; a chart is an addition** (src/web/charts.js over the vendored uPlot): every value a chart
   draws is also in a card or a table, a holder is hidden until it is drawn, and when uPlot cannot load the page reads
@@ -221,7 +226,14 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   some could be sent twice. The Tables list's columns are FIXED widths (`table-layout: fixed`,
   a width per header class, the name the column that gives, never under 200 px: the less important give way first,
   their facts in the note), every row at least two lines (a table not added keeps its bar's line) and its note under it
-  written for every row, empty or not. **A table's name and state are never cut** (issue 884, the owner: "otherwise
+  written for every row, empty or not. The note holds only what is long: the progress words, an error, the stream.
+  **An added table's columns and its sync are columns of the Added list**, Columns and Sync, each the button that
+  opens its form (issue 1110, the owner). They give way last. Where one has, the same button is in the note (`.fold`)
+  with an id of its own, the cell's is not displayed, and its popovers are anchored to the one shown (`pop`'s
+  `orAnchor`). Why: a control must stay pressable at every width, and one element can sit in one place only. **The Not
+  added list has neither column** (`table.catalog.not-added`), since they are always empty there and took room from the
+  name. It keeps its own give-way widths. A table added from it keeps its row there until the lists are laid out
+  again, with its two buttons in its note. Detector: tests/web-tables-layout.test.ts, both lists. **A table's name and state are never cut** (issue 884, the owner: "otherwise
   we can't see them"): each wraps in its cell, the row growing to fit (detector: tests/web-tables-layout.test.ts). Only an expander the reader opens (a request's
   details, a copy's whole error) pushes rows down — and never widens a column (`.detail-body`). A row's actions never
   wrap (`td.act`) but on a phone, where the Tables and Users lists stack them in a column of their own (a pinned column

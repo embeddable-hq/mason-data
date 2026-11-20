@@ -65,6 +65,11 @@ export const BI_SHAPES: Array<{ name: string; sql: string }> = [
   { name: "issue 981: a WITH query named as its table, its top rows", sql: "WITH orders AS (SELECT * FROM orders WHERE status = 'paid') SELECT o.id, o.amount, c.name FROM orders o LEFT JOIN customers c ON c.id = o.customer_id ORDER BY o.id DESC LIMIT 5" },
   { name: "issue 981: a later WITH query reads an earlier one named as a table", sql: "WITH orders AS (SELECT * FROM orders WHERE status = 'paid'), customers AS (SELECT * FROM orders WHERE amount > 100) SELECT (SELECT count(*) FROM customers) AS big, (SELECT count(*) FROM orders) AS paid" },
   { name: "issue 981: WITH RECURSIVE sees itself, beside the table by its schema", sql: "WITH RECURSIVE orders AS (SELECT 1 AS id UNION ALL SELECT id + 1 FROM orders WHERE id < 5) SELECT (SELECT count(*) FROM public.orders) AS whole, count(*), sum(id) FROM orders" },
+  // issue 1024: a name of the statement's named like one Mason invents is the statement's (src/duck/own-names.ts)
+  { name: "issue 1024: an alias named like the kept rows of a top N over a join", sql: "SELECT __mason_late.id, c.name FROM orders AS __mason_late LEFT JOIN customers c ON c.id = __mason_late.customer_id ORDER BY __mason_late.amount DESC, 1 LIMIT 5" },
+  { name: "issue 1024: a subquery's column named like the row number, its top rows over a join", sql: "SELECT s.*, c.name FROM (SELECT o.id, o.amount AS __mason_rid, o.customer_id FROM orders o) s LEFT JOIN customers c ON c.id = s.customer_id ORDER BY s.id DESC LIMIT 5" },
+  { name: "issue 1024: a subquery's columns of one name in two cases, beside a third named like their rename", sql: "SELECT s.t__mason_2, s.t, s.\"T\" FROM (SELECT o.tenant_id AS \"T\", o.customer_id AS t, o.id AS t__mason_2 FROM orders o) s ORDER BY 1 LIMIT 5" },
+  { name: "issue 1024: mode() of a quotient whose column is named like the lambda's parameter", sql: "SELECT mode() WITHIN GROUP (ORDER BY __mason_e / 3) FROM (SELECT amount AS __mason_e FROM orders) s" },
   { name: "issue 981: a WITH query named as its table inside a subquery and a set operation's arm", sql: "SELECT (SELECT count(*) FROM orders) AS whole, (WITH orders AS (SELECT * FROM orders WHERE status = 'paid') SELECT count(*) FROM orders) AS paid UNION ALL (WITH orders AS (SELECT * FROM public.orders WHERE status = 'pending') SELECT count(*), count(*) FROM orders) ORDER BY 1, 2" },
   { name: "subquery: NOT EXISTS (correlated)", sql: "SELECT c.id FROM customers c WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id AND o.status = 'refunded') ORDER BY c.id" },
   { name: "subquery: IN (subquery) correlated / scalar in WHERE correlated", sql: "SELECT o.id FROM orders o WHERE o.amount > (SELECT avg(o2.amount) FROM orders o2 WHERE o2.tenant_id = o.tenant_id) AND o.customer_id IN (SELECT c.id FROM customers c WHERE c.tenant_id = o.tenant_id) ORDER BY o.id" },
@@ -301,10 +306,21 @@ export const BI_SHAPES: Array<{ name: string; sql: string }> = [
   // grouped by the engine's integer, and a DISTINCT ON returning every group's latest row, its ties broken by the key
   { name: "issue 464: to_char of a month grouped", sql: "SELECT to_char(o.created_at, 'YYYY-MM') AS m, count(*) FROM orders o GROUP BY 1 ORDER BY 1" },
   { name: "issue 464: to_char of a day and a month's name grouped, ordered by the count", sql: "SELECT to_char(o.created_at, 'YYYY-MM-DD') AS d, to_char(o.created_at, 'FMMonth YYYY') AS m, count(*) AS n FROM orders o GROUP BY 1, 2 ORDER BY 3 DESC, 1 LIMIT 10" },
+  // issue 464: a quarter and a month's name padded to nine grouped by their to_char text (DuckDB's strftime, date_part
+  // and rpad, never the function a row: x8-9 of Postgres over a million orders)
+  { name: "issue 464: to_char of a quarter grouped", sql: "SELECT to_char(o.created_at, 'YYYY \"Q\"Q') AS q, count(*) FROM orders o GROUP BY 1 ORDER BY 1" },
+  { name: "issue 464: to_char of a padded month's name grouped", sql: "SELECT to_char(o.created_at, 'Month YYYY') AS m, count(*) FROM orders o GROUP BY 1 ORDER BY 1" },
   // issue 464: mode() of a text under the database's libc order, each distinct value keyed once: a status by customer
   // (many small groups, many ties the order decides), the notes by tenant descending, beside another aggregate
   { name: "issue 464: mode() of a status by customer, its ties decided by the order", sql: "SELECT o.customer_id, mode() WITHIN GROUP (ORDER BY o.status) AS top_status, count(*) AS n FROM orders o GROUP BY 1 ORDER BY 1 NULLS FIRST" },
   { name: "issue 464: mode() of the notes by tenant, descending, beside percentile_disc", sql: "SELECT o.tenant_id, mode() WITHIN GROUP (ORDER BY o.notes DESC) AS m, percentile_disc(0.5) WITHIN GROUP (ORDER BY o.amount) AS p FROM orders o GROUP BY 1 ORDER BY 1" },
+  // issue 666, the third round: a grouped min / max and a SELECT DISTINCT sorted under the database's libc order, each
+  // group's candidates keyed once (src/duck/libc-bound.ts `pickGrouped`, `distinctSorted`): the statuses and notes by
+  // customer (many small groups, NULL a group and a value), by tenant beside a count, and a field's values listed
+  { name: "issue 666: min and max of a status and the notes by customer", sql: "SELECT o.customer_id, min(o.status) AS lo, max(o.status) AS hi, max(o.notes) AS note FROM orders o GROUP BY 1 ORDER BY 1 NULLS FIRST" },
+  { name: "issue 666: min and max of the notes by tenant, ordered by the max, beside a count", sql: "SELECT o.tenant_id, min(o.notes), max(o.notes), count(*) AS n FROM orders o GROUP BY 1 HAVING count(*) > 0 ORDER BY max(o.notes) DESC, 1" },
+  { name: "issue 666: a field's distinct values, sorted", sql: "SELECT DISTINCT o.status FROM orders o ORDER BY o.status NULLS FIRST" },
+  { name: "issue 666: a page of a field's distinct values, descending", sql: "SELECT DISTINCT o.notes FROM orders o WHERE o.notes IS NOT NULL ORDER BY 1 DESC LIMIT 20 OFFSET 5" },
   { name: "issue 464: DISTINCT ON each customer's latest order, every row, ties by the key", sql: "SELECT DISTINCT ON (o.customer_id) o.customer_id, o.id, o.created_at, o.amount FROM orders o ORDER BY o.customer_id NULLS FIRST, o.created_at DESC, o.id" },
   { name: "issue 464: DISTINCT ON a tied key, every row", sql: "SELECT DISTINCT ON (o.status, o.tenant_id) o.status, o.tenant_id, o.created_at, o.id FROM orders o ORDER BY o.status NULLS FIRST, o.tenant_id, o.amount, o.id DESC" },
   { name: "issue 665: Metabase's numeric auto-bin", sql: "SELECT (floor(((o.amount - 0.0) / 12.5)) * 12.5 + 0.0) AS amount, count(*) AS count FROM orders o GROUP BY (floor(((o.amount - 0.0) / 12.5)) * 12.5 + 0.0) ORDER BY (floor(((o.amount - 0.0) / 12.5)) * 12.5 + 0.0) ASC" },

@@ -1,6 +1,8 @@
 ---
 paths:
   - "src/cli/mason.cjs"
+  - "src/duck/admission.ts"
+  - "tests/duck-admission.test.ts"
   - "src/cli/pool-size.cjs"
   - "src/duck/cancel.ts"
   - "src/duck/executor-worker.ts"
@@ -113,8 +115,20 @@ paths:
   `process.env` never reaches libuv: the operator's shell sets it.
   DETECTOR: `tests/cli-pool-size.test.ts` (a real pool counted, a fake limit, every entry named),
   `tests/integration/duck-pool.itest.ts` (a real run's threads). RESPONSE: a start around the entry fails them, and a
-  limit lowers the size or refuses. Past the pool's size a statement still waits: nothing admits a fixed number of
-  statements. ("The pool")
+  limit lowers the size or refuses. Past the pool's size a statement still waits. ("The pool")
+- **A heavy statement waits for one of a few turns; a light one never waits** (issue 1132: ten joins at once spilled
+  48.7 GB and took 659 s where four at a time took 40.7 s). Heavy is the engine's own plan, read before the statement
+  runs (`keptRows`, src/duck/admission.ts, from `SessionRunner.weigh`'s plain EXPLAIN): rows a join's build side, a
+  group by, a sort, a window or a materialized CTE keeps, at or past `heavyRowsFor` (more than its share of the memory if
+  `LIGHT_AT_ONCE`, 32, statements kept as much). A statement whose tree has none of those is light without asking
+  (`PlannedSql.keepsNone`, `mayKeepRows`): the EXPLAIN costs about 0.5 ms. The turns are `heavyTurns` (one a GiB of
+  `store.memoryLimitBytes`, at most one a thread of the engine, at least one; `MASON_HEAVY_QUERIES`), one `Admission`
+  per instance. The wait is on the listener's thread (`RemoteRunner.admit`), never the worker's, under the statement's
+  own signal: its cancel and its timeout end it with 57014, it holds no libuv thread, and its row of the request log
+  has the wait (`waited_ms`). A turn is held until the answer's first rows (`heldUntilFirstRows`: its first fetch
+  returned, or it closed), never while it waits on its client: a portal suspended and left idle must hold no turn, or
+  another session's heavy statement waits without end. A weight that cannot be read is logged and counted heavy, never refused.
+  DETECTOR: `tests/duck-admission.test.ts`. ("Heavy statements take a turn")
 - **Nothing ends the worker's JavaScript while DuckDB has work in flight on it** (a test file under load aborted at
   exit, `libc++abi: … Napi::Error`: its close outlasted the grace and the executor terminated the worker under a
   Mason function call; a 1 ms grace reproduced it 6 times in 6). A worker given up on (the grace, the silence) is asked
@@ -140,6 +154,13 @@ paths:
   releases it through `cleanUp`, its answer is drained once handed back), and `SessionRunner.close` closes an answer a
   statement opened while the close waited. `tests/duck-executor.test.ts` "a session closed while its function-calling
   statement starts" holds both, by the order the worker's port keeps (answered, then released).
+- **A statement that joins on hidden integer keys runs in a transaction of its own** (`numbersHold`, issue 1144): BEGIN,
+  then a check that no row of the tables whose numbers it reads is unnumbered, then the statement, in the same snapshot.
+  A row not numbered, or a check that fails, runs the plan without numbers instead (`PlannedSql.numbers.plain`). The
+  check is never a condition inside the statement: a WHERE is evaluated only on rows that reach it, and a join that
+  finds no pair meets none (an inner join over an unnumbered row answered no row, measured). Every way a statement ends
+  ends its transaction (`endHeld`: ROLLBACK, in `releasing`, so the session's next statement waits for it).
+  tests/duck-reference-keys.test.ts "fails or is cancelled" holds it.
 
 ## What review probes
 

@@ -11,8 +11,14 @@ import { PLAIN } from "../src/cli/style.ts";
 import type { Failure } from "../src/cli/command.ts";
 import * as assert from "node:assert/strict";
 import { generatedReadiness } from "../src/cli/readiness.ts";
+import * as readinessModule from "../src/cli/readiness.ts";
+import type { SyncProgress } from "../src/cli/readiness.ts";
+import type { PollProgress } from "../src/duck/sync.ts";
+// read from the module, not imported by name: the file loads at a commit without it (scripts/fails-without.ts)
+const syncProgressOf = (startedAt: string, p: PollProgress | undefined, now: number): SyncProgress =>
+  (readinessModule as unknown as { syncProgressOf: (a: string, p: PollProgress | undefined, n: number) => SyncProgress }).syncProgressOf(startedAt, p, now);
 import type { GeneratedStatus } from "../src/duck/generated.ts";
-import { addSpecs, addSteps, copyProgress, duration, findTable, paintBar, readiness, SAY_AGAIN_MS, sayAgain, STATUS, tableLines, WAIT, type RunState, type TableState } from "../src/cli/commands.ts";
+import { addSpecs, addSteps, copyProgress, duration, findTable, paintBar, readiness, SAY_AGAIN_MS, sayAgain, STATUS, tableLines, tableRows, WAIT, type RunState, type TableState } from "../src/cli/commands.ts";
 import * as commands from "../src/cli/commands.ts";
 import { jsonText } from "../src/cli/command.ts";
 import type { CopyProgressView, KeptCurrent, StreamStatus } from "../src/duck/sync.ts";
@@ -210,6 +216,41 @@ test("mason wait: every added table on its line — the finished first in the or
   assert.match(paintBar(lines[0]!, st), /<g>█{20}<\/g>/);
   assert.match(paintBar(lines[2]!, st), /<r>█{20}<\/r>/);
   assert.match(paintBar(lines[3]!, st), /<c>█{5}<\/c>/);
+});
+
+// ISSUE 1173: Sync now on a 17 M-row `off` table showed its old full bar, "100%", for the minutes its sync ran. While a
+// sync by hand runs, its line is that sync's: the rows read so far and the time, a bar only where a total is known.
+test("mason status: a table synced by hand says how far that sync is, never the full bar of the sync before it, and draws a bar only against a known total", () => {
+  const done = { phase: "done" as const, rowsCopied: 17_000_000, updatedAt: at(2) };
+  const startedAt = "2026-10-27T09:00:00.000Z", now = Date.parse("2026-10-27T09:02:05.000Z");
+  const poll = (o: Partial<PollProgress>): PollProgress => ({ startedAt: "2026-10-27T09:00:01.000Z", step: "reading", changedRows: 0, keysRead: null, keysTotal: null, pieces: null, ...o });
+  const line = (p: SyncProgress): string => tableLines(state({ tables: [t({ table: "public.events", added: true, copy: done, syncProgress: p })] }))[0]!;
+  const blank = " ".repeat(25);
+  // asked, its poll not begun (the pass ahead of it runs): nothing read yet, no bar
+  assert.equal(line(syncProgressOf(startedAt, undefined, now)), `public.events  ${blank}  syncing by hand: waiting for its turn (2 min)`);
+  // a poll that began before the sync was asked is another's: still its turn to come
+  assert.equal(syncProgressOf(startedAt, poll({ startedAt: "2026-10-27T08:59:59.000Z", changedRows: 40 }), now).step, "waiting");
+  // its read begun: the database attached, its columns checked, its snapshot taken
+  assert.equal(line(syncProgressOf(startedAt, poll({ step: "starting", changedRows: null }), now)), `public.events  ${blank}  syncing by hand: starting to read it from the database (2 min)`);
+  // reading its changed rows: the count so far, and no bar (the database says how many only once it has sent them all)
+  const reading = syncProgressOf(startedAt, poll({ changedRows: 1_234_567 }), now);
+  assert.deepEqual([reading.step, reading.share, reading.seconds], ["reading", null, 125]);
+  assert.equal(line(reading), `public.events  ${blank}  syncing by hand: reading its changed rows from the database, 1,234,567 so far (2 min)`);
+  assert.doesNotMatch(line(reading), /100%|█/, "never the full bar of the sync before it");
+  assert.equal(line(syncProgressOf(startedAt, poll({ step: "counting", changedRows: 1_234_567 }), now)), `public.events  ${blank}  syncing by hand: 1,234,567 changed rows read, counting its rows on the database (2 min)`);
+  // finding the rows deleted: the keys read against the database's count, the poll's own — a bar, held under 100%
+  const keys = syncProgressOf(startedAt, poll({ step: "deleting", changedRows: 1, keysRead: 4_250_000, keysTotal: 17_000_000 }), now);
+  assert.equal(keys.share, 0.25);
+  assert.equal(line(keys), "public.events  █████░░░░░░░░░░░░░░░  25%  syncing by hand: 1 changed row read, finding the rows deleted on the database, 4,250,000 of 17,000,000 keys read (2 min)");
+  assert.equal(syncProgressOf(startedAt, poll({ step: "deleting", keysRead: 17_000_000, keysTotal: 17_000_000 }), now).share, 0.99, "all keys read is not the sync done");
+  assert.equal(line(syncProgressOf(startedAt, poll({ step: "writing", changedRows: 400_000, pieces: { written: 3, of: 8 } }), now)), `public.events  ${blank}  syncing by hand: 400,000 changed rows read, writing them (3 of 8 pieces written) (2 min)`);
+  assert.equal(line(syncProgressOf(startedAt, poll({ step: "done", changedRows: 12 }), now)), `public.events  ${blank}  syncing by hand: 12 changed rows read, finishing the sync (2 min)`);
+  // at work on a terminal: cyan, whatever the table's error from before
+  const st = { ...PLAIN, red: (x: string) => `<r>${x}</r>`, cyan: (x: string) => `<c>${x}</c>` };
+  const rows = tableRows(state({ tables: [t({ table: "public.events", added: true, copy: done, error: "poll: connection reset", syncProgress: keys })] }));
+  assert.deepEqual([rows[0]!.tone, paintBar(rows[0]!.line, st, rows[0]!.tone).includes("<c>█████</c>")], ["cyan", true]);
+  // the sync ended: its line is the table's own again
+  assert.equal(tableLines(state({ tables: [t({ table: "public.events", added: true, copy: done })] }))[0], "public.events  ████████████████████ 100%  17,000,000 rows · synced");
 });
 
 test("mason status and wait: each copied table says how it is kept current and how old its copy is — its sync: off with the command that syncs it, or its poll's interval and last poll", () => {
@@ -442,7 +483,7 @@ test("statementMsText: a statement's time is always whole milliseconds with thou
 
 test("mason logs --requests: a request a line, newest last — when, the outcome and SQLSTATE, the time, the rows, who, the statement and the error", () => {
   const { requestLine } = commands;
-  const base = { requestId: "r", session: 1, method: "QUERY", clientAddress: null, detail: null, hint: null, queryTruncated: false, user: "", role: "", attributes: null, endedAt: "2026-10-26T14:02:12.357Z", bytesSent: 100, plan: null, planTruncated: false, origin: null };
+  const base = { requestId: "r", session: 1, method: "QUERY", clientAddress: null, detail: null, hint: null, queryTruncated: false, user: "", role: "", attributes: null, endedAt: "2026-10-26T14:02:12.357Z", bytesSent: 100, plan: null, planTruncated: false, origin: null, waitedMs: null };
   assert.equal(requestLine({ ...base, startedAt: "2026-10-26T14:02:11.123Z", applicationName: "Metabase", tokenName: "", outcome: "ok", status: "completed", sqlstate: null, message: null,
     rows: 20, durationMs: 1234, query: "SELECT id\n FROM public.orders LIMIT 20" }, PLAIN),
     "2026-10-26 14:02:11  ok                1,234 ms      20 rows  Metabase  SELECT id FROM public.orders LIMIT 20");
@@ -595,7 +636,10 @@ test("mason add and mason remove with Mason stopped: the entry written and cut a
   assert.deepEqual([d.table, d.fits, d.resync, typeof d.estimateBytes, d.freeBytes > 0], ["public.orders", true, false, "number", true]);
   delete addAnswer.added[0]!.disk;
   assert.deepEqual(addAnswer, { added: [{ table: "public.orders", entry: "orders", columns: null, exclude: [], key: null, addedKey: [], skippedSecrets: [], already: false,
-    sync: { value: "off", from: "default" }, bigOff: false, pollCost: null, notReplicated: null }],
+    sync: { value: "off", from: "default" }, bigOff: false, pollCost: null, notReplicated: null,
+    // its foreign key to a table the file does not sync: not written, and said why (issue 1143)
+    referencesWritten: [], referencesLeftOut: [{ table: "public.orders", columns: ["customer_id"], references: "public.customers", targetColumns: ["id"],
+      reason: "customers is not in the sources file: mason add customers syncs it and writes this reference" }] }],
     file: s.file, next: [{ command: "mason start", what: "Mason in the background, for this project: the first sync of every added table begins" },
       { command: "mason wait", what: "then, until every added table is synced and served" }] });
   assert.equal(fs.readFileSync(s.file, "utf8"), `kind: postgres\nurl: ${s.url}\ntables:\n  orders: {}\n`, "the entry, every other byte as it was");
@@ -604,7 +648,9 @@ test("mason add and mason remove with Mason stopped: the entry written and cut a
   assert.equal(person.code, 0, person.stdout + person.stderr);
   assert.match(person.stdout, /✓ Added public\.customers to mason\/sources\/shop\.yml: id, name\n {4}sync: off \(the default\): after its first sync it is read again only by mason sync customers — mason add customers --sync "poll 5m" polls it every 5 minutes\n {4}key added: id \(a synced table always has its key\)\n/);
   assert.match(person.stdout, /Next:\n {2}mason start +Mason in the background, for this project: the first sync of every added table begins\n/);
-  assert.equal(fs.readFileSync(s.file, "utf8"), `kind: postgres\nurl: ${s.url}\ntables:\n  orders: {}\n  customers:\n    columns: [id, name]\n`);
+  // the table a foreign key points to, added: the reference written on the entry that holds it (issue 1143)
+  assert.match(person.stdout, /\n {4}wrote the database's foreign key as references: orders\.customer_id → customers\.id\n/);
+  assert.equal(fs.readFileSync(s.file, "utf8"), `kind: postgres\nurl: ${s.url}\ntables:\n  orders:\n    references:\n      customer_id: customers.id\n  customers:\n    columns: [id, name]\n`);
   // remove --dry-run: the entries that would go, the file not written (and neither the run nor the database asked)
   const fileBefore = fs.readFileSync(s.file, "utf8");
   const dry = await run(["remove", "customers", "orders", "--dry-run", "--json"]);
@@ -622,6 +668,9 @@ test("mason add and mason remove with Mason stopped: the entry written and cut a
   const rm = await run(["remove", "customers", "--json"]);
   assert.equal(rm.code, 0, rm.stdout + rm.stderr);
   assert.deepEqual(JSON.parse(rm.stdout).removed, ["public.customers"]);
+  // the reference orders held to it, taken out with it: the file never names a table it does not sync
+  assert.deepEqual(JSON.parse(rm.stdout).referencesRemoved, [{ table: "public.orders", columns: ["customer_id"], references: "public.customers", targetColumns: ["id"] }]);
+  assert.equal(fs.readFileSync(s.file, "utf8"), `kind: postgres\nurl: ${s.url}\ntables:\n  orders: {}\n`);
   assert.deepEqual(JSON.parse(rm.stdout).removedTables, ["public.customers"], "removedTables, the clearer name, beside removed until 1.0");
   assert.equal(JSON.parse(rm.stdout).dryRun, false);
   assert.deepEqual(nextOf(rm.stdout), ["mason start", "mason status"]);
@@ -739,6 +788,72 @@ test("mason add leaves out a camelCase secret too: passwordHash and apiKey are e
   }
 });
 
+// ISSUE 1143: THE FOREIGN KEYS A REAL POSTGRES DECLARES, read from its catalog (src/cli/preflight.ts TABLES_SQL) and
+// written by mason add as references: — one column and several, its columns paired in the key's order (not the table's),
+// and one to a partitioned table named once, never once more for each partition Postgres made it on.
+test("mason add writes the foreign keys Postgres declares as references:, one column and several, a partitioned table's once; mason tables --json shows them", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mason-references-")));
+  const source = await DemoSource.open({ dir: path.join(root, "db"), port: 0, log: () => {} });
+  try {
+    const c = new pg.Client({ connectionString: source.url });
+    await c.connect();
+    try {
+      await c.query(`CREATE TABLE tenants (id bigint PRIMARY KEY);
+        CREATE TABLE accounts (id bigint NOT NULL, tenant_id bigint NOT NULL REFERENCES tenants, name text, PRIMARY KEY (tenant_id, id));
+        CREATE TABLE invoices (id bigint PRIMARY KEY, account_id bigint, tenant_id bigint, total numeric,
+          CONSTRAINT invoices_account FOREIGN KEY (tenant_id, account_id) REFERENCES accounts (tenant_id, id));
+        CREATE TABLE visits (id bigint NOT NULL, day date NOT NULL, PRIMARY KEY (id, day)) PARTITION BY RANGE (day);
+        CREATE TABLE visits_2026 PARTITION OF visits FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
+        CREATE TABLE visits_2027 PARTITION OF visits FOR VALUES FROM ('2027-01-01') TO ('2028-01-01');
+        CREATE TABLE visit_notes (id bigint PRIMARY KEY, visit_id bigint, day date, FOREIGN KEY (visit_id, day) REFERENCES visits (id, day))`);
+    } finally { await c.end(); }
+    const app = path.join(root, "app");
+    const file = path.join(app, "mason", "sources", "shop.yml");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.mkdirSync(path.join(app, ".mason"), { mode: 0o700 });
+    writeRunning(root, null);
+    const head = `kind: postgres\nurl: ${source.url}\n`;
+    fs.writeFileSync(file, `${head}tables: {}\n`);
+    type Added = { referencesWritten: unknown[]; referencesLeftOut: Array<{ references: string; reason: string }> };
+    const add = async (...args: string[]): Promise<Added> => {
+      const r = await runMason(app, ["add", ...args, "--json"], matrixEnv());
+      assert.equal(r.code, 0, r.stdout + r.stderr);
+      return (JSON.parse(r.stdout) as { added: Added[] }).added[0]!;
+    };
+    // a partitioned table's foreign key named once: its partitions are no tables Mason lists
+    const notes = await add("visit_notes");
+    assert.deepEqual(notes.referencesLeftOut, [{ table: "public.visit_notes", columns: ["visit_id", "day"], references: "public.visits", targetColumns: ["id", "day"],
+      reason: "visits is not in the sources file: mason add visits syncs it and writes this reference" }]);
+    await add("visits");
+    // the key's columns in the key's order, not the table's (account_id comes first in invoices)
+    const inv = await add("invoices");
+    assert.deepEqual(inv.referencesLeftOut.map((x) => x.references), ["public.accounts"]);
+    await add("accounts");
+    assert.equal(fs.readFileSync(file, "utf8"), `${head}tables:
+  visit_notes:
+    references:
+      (visit_id, day): visits (id, day)
+  visits: {}
+  invoices:
+    references:
+      (tenant_id, account_id): accounts (tenant_id, id)
+  accounts: {}
+`);
+    // mason tables --json: an added table's entry as the file says it, one not added as mason add would write it
+    const listed = await runMason(app, ["tables", "invoices", "tenants", "--json"], matrixEnv());
+    assert.equal(listed.code, 0, listed.stdout + listed.stderr);
+    assert.deepEqual((JSON.parse(listed.stdout) as { tables: Array<{ entry: unknown }> }).tables.map((t) => t.entry),
+      [{ invoices: { references: { "(tenant_id, account_id)": "accounts (tenant_id, id)" } } }, { tenants: {} }]);
+    // the table accounts points to, added last: the reference written on accounts' entry
+    const tenants = await add("tenants");
+    assert.deepEqual(tenants.referencesWritten, [{ table: "public.accounts", columns: ["tenant_id"], references: "public.tenants", targetColumns: ["id"] }]);
+    assert.match(fs.readFileSync(file, "utf8"), /\n {2}accounts:\n {4}references:\n {6}tenant_id: tenants\.id\n {2}tenants: \{\}\n$/);
+  } finally {
+    await source.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // ISSUE 794, ITS SECOND HALF:`mason doctor --json --tables` checks the database AND lists its tables on ONE connection,
 // from the catalog the checks read (src/cli/doctor.ts databaseChecks), in mason tables --json's shape. The connections are
 // counted by the database itself: every client's startup is traced (src/demo/source.ts `trace`).
@@ -838,7 +953,8 @@ test("mason doctor --tables: mason tables --json's tables on the checks' one con
 test("mason add of a table a replicating file cannot replicate says it was written sync: poll 5m, why, and the alternatives", async () => {
   const { addedLines } = await import("../src/cli/commands.ts");
   const b = { table: "public.events", file: "/app/mason/sources/app.yml", entry: "events", columns: null, exclude: [], key: ["tenant_id", "id"], addedKey: [], skippedSecrets: [], already: false,
-    sync: { value: "poll 5m", from: "entry" as const }, bigOff: false, pollCost: null, disk: null, notReplicated: "it has no primary key, so logical replication cannot apply its changes by its key:" };
+    sync: { value: "poll 5m", from: "entry" as const }, bigOff: false, pollCost: null, disk: null, notReplicated: "it has no primary key, so logical replication cannot apply its changes by its key:",
+    referencesWritten: [], referencesLeftOut: [] };
   assert.deepEqual(addedLines(b, "mason/sources/app.yml"), { line: "Added public.events to mason/sources/app.yml: every column, keyed by tenant_id, id", notes: [
     "sync: poll 5m written on its entry, not the file's replication: it has no primary key, so logical replication cannot apply its changes by its key: — " +
     "mason add events --sync \"poll 1h\" polls it hourly; mason add events --sync off reads it only by mason sync events"] });
@@ -1979,4 +2095,147 @@ test("mason sync: a poll's updated count is said as an estimate, ~N updated; add
   assert.equal(streamCountsText({ inserts: 1000, updates: 200, deletes: 4, truncates: 0 }), "1,000 added, 200 updated, 4 deleted");
   // --json: the plain number, and the declared shape says a poll's updated may count rows read again
   assert.match(cli.SYNC_USAGE.replace(/\s+/g, " "), /updated \(an estimate: it may count rows the poll read again, shown as ~N updated\)/);
+});
+
+test("mason user check <name>: the password on stdin, answered ok, wrong, disabled or removed with the user's id and an exit code each, as a person and with --json; nothing secret on the line or in the output", async () => {
+  // src/cli/user.ts checkCommand, src/duck/users.ts checkPassword; a stopped project: it needs the project, never the run
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mason-user-check-")));
+  try {
+    fs.mkdirSync(path.join(root, "mason", "sources"), { recursive: true });
+    fs.mkdirSync(path.join(root, ".mason"), { mode: 0o700 });
+    fs.writeFileSync(path.join(root, ".mason", "config.json"), JSON.stringify({ name: "shop", folder: "mason", remote: false, apiKey: "k".repeat(48), sourceServer: null, running: null, lastRun: null }), { mode: 0o600 });
+    fs.writeFileSync(path.join(root, "mason", "sources", "shop.yml"), "kind: postgres\nurl: postgres://mason:x@127.0.0.1:1/shop\ndatabase: shop\ntables: {}\n");
+    const run = (argv: string[], stdin?: string) => runMason(root, argv, matrixEnv(), 60_000, undefined, stdin);
+    const added = JSON.parse((await run(["user", "add", "metabase", "--json"])).stdout) as { id: string; password: string };
+    assert.match(added.id, /^[0-9a-f]{16}$/);
+    // the id is in the list, with --json and for a person, so an operator checks that a name still has the same id
+    const listed = JSON.parse((await run(["user", "list", "--json"])).stdout) as { users: Array<{ name: string; id: string }> };
+    assert.deepEqual(listed.users.map((x) => [x.name, x.id]), [["metabase", added.id]]);
+    assert.match((await run(["user", "list"])).stdout, new RegExp(`metabase +id ${added.id} · added `));
+    const check = async (stdin: string | undefined, json = true): Promise<Answer> => run(["user", "check", "metabase", ...(json ? ["--json"] : [])], stdin);
+    const secretFree = (a: Answer): void => { assert.ok(!`${a.stdout}${a.stderr}`.includes(added.password.slice(-32)), `the password reached the output:\n${a.stdout}${a.stderr}`); };
+
+    const ok = await check(`${added.password}\n`);
+    assert.equal(ok.code, 0, ok.stderr);
+    assert.deepEqual(JSON.parse(ok.stdout), { user: "metabase", answer: "ok", id: added.id, next: [{ command: "mason user list", what: "the users, each with its id" }] });
+    secretFree(ok);
+    const person = await check(added.password, false);
+    assert.equal(person.code, 0);
+    assert.equal(person.stdout, `That is metabase's password\n  answer   ok\n  id       ${added.id}\n\nNext:\n  mason user list                               the users, each with its id\n`);
+    secretFree(person);
+
+    const wrong = await check(`mason_${added.id}_${"0".repeat(32)}\n`);
+    assert.equal(wrong.code, 3);
+    assert.deepEqual(JSON.parse(wrong.stdout).answer, "wrong");
+    assert.equal(JSON.parse(wrong.stdout).id, null);
+
+    assert.equal((await run(["user", "disable", "metabase"])).code, 0);
+    const disabled = await check(added.password);
+    assert.equal(disabled.code, 4);
+    assert.deepEqual(JSON.parse(disabled.stdout), { user: "metabase", answer: "disabled", id: added.id, next: [{ command: "mason user enable metabase", what: "it connects again, with the same password" }] });
+    assert.equal((await run(["user", "enable", "metabase"])).code, 0);
+
+    assert.equal((await run(["user", "remove", "metabase"])).code, 0);
+    const again = JSON.parse((await run(["user", "add", "metabase", "--json"])).stdout) as { id: string; password: string };
+    const removed = await check(added.password);
+    assert.equal(removed.code, 5);
+    assert.deepEqual([JSON.parse(removed.stdout).answer, JSON.parse(removed.stdout).id], ["removed", added.id], "the old password: the old id");
+    const now = await check(again.password);
+    assert.deepEqual([now.code, JSON.parse(now.stdout).answer, JSON.parse(now.stdout).id], [0, "ok", again.id]);
+
+    // no password on stdin: a wrong line, nothing checked; a password on the command line refused without repeating it
+    const none = await check(undefined);
+    assert.equal(none.code, 2);
+    assert.equal(JSON.parse(none.stdout).error.message, "no password was read, so nothing was checked");
+    // ITS LINE IS UNTRUSTED (a sign-in page's user-name field): exit 0 is ok alone. --help, -h, any option but --json: a
+    // wrong line (exit 2), never the help's exit 0, the password on stdin right or not
+    for (const argv of [["--help"], ["-h"], ["--help", "--json"], ["-h", "--json"], ["metabase", "--help"], ["metabase", "-h", "--json"], ["metabase", "--replica", "acme/shop", "--json"]]) {
+      const a = await run(["user", "check", ...argv], again.password);
+      assert.equal(a.code, 2, argv.join(" "));
+    }
+    // -- ends the options: the word after it is the name
+    const dashed = await run(["user", "check", "--json", "--", "metabase"], again.password);
+    assert.deepEqual([dashed.code, JSON.parse(dashed.stdout).answer, JSON.parse(dashed.stdout).user], [0, "ok", "metabase"]);
+    // NO WORD OF THE LINE IS REPEATED unless it is a user's name: every shape a password typed on the line takes — near
+    // a password's, inside another word, after an option, cut short — is answered or refused without a part of it
+    const [, pid, mac] = /^mason_([0-9a-f]{16})_([0-9a-f]{32})$/.exec(again.password)!;
+    const lines: string[][] = [[`${again.password}\r`], [`${again.password} `], [`metabase=${again.password}`], [`metabase:${again.password}`], [`metabase ${again.password}`],
+      [`postgres://metabase:${again.password}@db.example.test/shop`], ["--role", again.password], [`--set=${again.password}`], ["--from", again.password], ["metabase", "--role", again.password],
+      [again.password.slice(0, -1)], [`${pid}_${mac}`], [mac!], [again.password], ["metabase", again.password], [again.password, "metabase"]];
+    for (const line of lines) {
+      for (const json of [true, false]) {
+        const a = await run(["user", "check", ...line, ...(json ? ["--json"] : [])], `${again.password}\n`);
+        const said = `${a.stdout}${a.stderr}`;
+        assert.notEqual(a.code, 0, `${JSON.stringify(line)}: never ok`);
+        for (const part of [pid!, mac!.slice(0, 12), mac!.slice(-12)]) assert.ok(!said.includes(part), `${JSON.stringify(line)}${json ? " --json" : ""}: a part of the password repeated:\n${said}`);
+      }
+    }
+    // a word that is no user's: wrong, its user null, the line not repeated
+    const stranger = await run(["user", "check", mac!, "--json"], again.password);
+    assert.deepEqual([stranger.code, JSON.parse(stranger.stdout)], [3, { user: null, answer: "wrong", id: null, next: [{ command: "mason user list", what: "the users, each with its id" }] }]);
+    assert.equal((await run(["user", "check", mac!], again.password)).stdout.split("\n")[0], "That is not the password of a user of this project");
+    // the user's own help says the exit codes
+    assert.match((await run(["user", "--help"])).stdout, /Exit 0 ok, 3 wrong, 4 disabled, 5 removed/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("mason user check with options BEFORE check (mason user --json check <name>, -- check, --help check): check's own reader, never add; exit 0 for the right password alone, users.json unchanged, no part of the password said", async () => {
+  // src/cli/user.ts user(): the verb found as the parser finds it (verbAt, src/cli/command.ts), wherever options put it.
+  // At 3b8cd567 a line with an option before check reached the add code: a user made from the sign-in page's word, exit 0
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mason-user-check-before-")));
+  try {
+    fs.mkdirSync(path.join(root, "mason", "sources"), { recursive: true });
+    fs.mkdirSync(path.join(root, ".mason"), { mode: 0o700 });
+    fs.writeFileSync(path.join(root, ".mason", "config.json"), JSON.stringify({ name: "shop", folder: "mason", remote: false, apiKey: "k".repeat(48), sourceServer: null, running: null, lastRun: null }), { mode: 0o600 });
+    fs.writeFileSync(path.join(root, "mason", "sources", "shop.yml"), "kind: postgres\nurl: postgres://mason:x@127.0.0.1:1/shop\ndatabase: shop\ntables: {}\n");
+    const run = (argv: string[], stdin?: string, env: Record<string, string> = {}) => runMason(root, argv, matrixEnv(env), 60_000, undefined, stdin);
+    const pw = (JSON.parse((await run(["user", "add", "metabase", "--json"])).stdout) as { password: string }).password;
+    const [, pid, mac] = /^mason_([0-9a-f]{16})_([0-9a-f]{32})$/.exec(pw)!;
+    const usersFile = path.join(root, ".mason", "users.json");
+    const users = fs.readFileSync(usersFile, "utf8");
+    const held = (line: string[], a: Answer, stdin: string): void => {
+      const said = `${a.stdout}${a.stderr}`;
+      if (stdin !== pw) assert.notEqual(a.code, 0, `${JSON.stringify(line)}: exit 0 is ok alone`);
+      assert.equal(fs.readFileSync(usersFile, "utf8"), users, `${JSON.stringify(line)}: the users file changed`);
+      // the id is said on ok alone (the user's own, as mason user list says it); the MAC never
+      for (const part of [...(a.code === 0 ? [] : [pid!]), mac!.slice(0, 12), mac!.slice(-12)]) assert.ok(!said.includes(part), `${JSON.stringify(line)}: a part of the password said:\n${said}`);
+    };
+    // [the line after `mason user`, stdin, the exit expected (null: any but 0)]
+    const lines: Array<[string[], string, number | null]> = [
+      [["--json", "check", "stranger"], "wrong", 3], [["check", "--json", "stranger"], "wrong", 3],
+      [["--json", "check", pw], pw, null], [["--json", "check", "metabase"], pw, 0], [["--json", "check", "metabase"], "wrong", 3],
+      [["--", "check", "x"], "wrong", 3], [["--json", "--", "check", "x"], "wrong", 3], [["--", "check", "metabase"], pw, 0],
+      [["--json", "check", `${pw}\r`], pw, null], [["--json", "check", `${pw} `], pw, null], [["--json", "check", "--help"], pw, 2], [["--json", "check", "-h"], pw, 2],
+      [["--help", "check", "metabase"], pw, 2], [["-h", "--json", "check", "metabase"], pw, 2], [["--json=1", "check", "metabase"], pw, 2],
+      [["--role", "r", "check", "metabase"], pw, 2], [["--replica", "acme/shop", "check", "metabase"], pw, 2], [["--any", "check", pw], pw, 2],
+    ];
+    for (const [line, stdin, expected] of lines) {
+      for (const json of [true, false]) {
+        const argv = json ? line : line.filter((w) => w !== "--json");
+        const a = await run(["user", ...argv], stdin);
+        held(argv, a, stdin === pw && expected === 0 ? pw : "wrong");
+        if (expected !== null) assert.equal(a.code, expected, `${JSON.stringify(argv)}:\n${a.stdout}${a.stderr}`);
+        if (argv.includes("--json") && expected !== null && expected !== 2) assert.equal(JSON.parse(a.stdout).answer, expected === 0 ? "ok" : "wrong", JSON.stringify(argv));
+      }
+    }
+    // MASON_REPLICA reaches no replica from check's line, wherever check sits: this project's users answer
+    for (const line of [["--json", "check", "x"], ["--json", "check", "metabase"]]) {
+      const a = await run(["user", ...line], pw, { MASON_REPLICA: "acme/shop" });
+      held(line, a, line[2] === "metabase" ? pw : "wrong");
+      assert.equal(a.code, line[2] === "metabase" ? 0 : 3, `${JSON.stringify(line)} under MASON_REPLICA:\n${a.stdout}${a.stderr}`);
+    }
+    // another spelling of check is no check, and never add: refused, exit 2, nothing written
+    for (const line of [["CHECK", "metabase"], ["--json", "Check", "x"], ["--check", "metabase"], ["check=metabase"], ["--json", `--check=${pw}`]]) {
+      const a = await run(["user", ...line], pw);
+      held(line, a, "wrong");
+      assert.equal(a.code, 2, JSON.stringify(line));
+    }
+    // and no other verb's line is taken for check: a user NAMED check is added and removed, options before or after
+    for (const line of [["--json", "add", "check"], ["--json", "remove", "check"], ["add", "check", "--json"], ["remove", "--json", "check"]]) {
+      const a = await run(["user", ...line]);
+      assert.equal(a.code, 0, `${JSON.stringify(line)}:\n${a.stdout}${a.stderr}`);
+      const said = JSON.parse(a.stdout) as { user?: string; removedUser?: { name: string } };
+      assert.equal(said.user ?? said.removedUser?.name, "check");
+    }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

@@ -89,8 +89,19 @@ async function keptAside(store: DuckStore, n: number, logged: readonly string[])
 }
 const same = async (store: DuckStore, url: string, step: string): Promise<void> =>
   assert.equal(await rowsOf(store, "SELECT id, v, n FROM public.t ORDER BY 1"), psql(url, "SELECT id, v, n FROM t ORDER BY 1"), `public.t after ${step}`);
+/**
+ * THE CHECKPOINT DuckDB TAKES at 16 MiB of log and at every stop, taken here by hand (issue 926). DuckDB 2.0 refuses a
+ * plain CHECKPOINT ("there are other write transactions active") while any transaction that began before the last
+ * committed UPDATE or DDL is still open, on any connection. The sync reads on connections of its own beside the test:
+ * the catalog at the end of each pass, and the stored JSON paths' review every 10 s. And a poll's commit updates the
+ * table's row count, and a compaction's swap is DDL. So a plain checkpoint failed whenever one of those reads was in
+ * flight. FORCE waits for those transactions to end and aborts none (measured on DuckDB 2.0.0). It runs on the writer's
+ * turn, so it never lands inside a poll's or a stream batch's open transaction, where DuckDB refuses it.
+ */
+const checkpoint = (sync: Sync, store: DuckStore): Promise<void> =>
+  (sync as unknown as { onWriter(f: () => Promise<void>): Promise<void> }).onWriter(async () => { await store.writer.run("FORCE CHECKPOINT"); });
 
-test("a polled table churned through many polls and checkpoints: compacted from the synced data, within the bound, equal to the source", { skip: "quarantined: #926" }, async () => {
+test("a polled table churned through many polls and checkpoints: compacted from the synced data, within the bound, equal to the source", async () => {
   const { db, url, source } = aSource("poll", 20_000);
   const T = { ...await tableOf(source, "public.t"), sync: { mode: "poll", every: "1s", seconds: 1 } as const };
   const logged: string[] = [];
@@ -110,7 +121,7 @@ test("a polled table churned through many polls and checkpoints: compacted from 
       const polled = await sync.pollNow(["public.t"]);
       wrote = Math.max(wrote, polled.tables[0]!.added + polled.tables[0]!.updated + polled.tables[0]!.deleted);
       // the checkpoint DuckDB takes at 16 MiB of log, and at every stop
-      await store.writer.run("CHECKPOINT");
+      await checkpoint(sync, store);
       // what a scan reads: its stored rows, the deleted ones too — held to the threshold (0.3 of its space) and one
       // round's writes past it, before the check that compacts it
       const stored = await one(store, "SELECT estimated_size FROM duckdb_tables() WHERE table_name = 't'");
@@ -153,7 +164,7 @@ test("a streamed table's changes while it is compacted are spilled and applied a
     // churned: half its rows written again by the stream, then a checkpoint
     psql(url, "UPDATE t SET n = 1 WHERE id % 2 = 0");
     await sync.caughtUp();
-    await store.writer.run("CHECKPOINT");
+    await checkpoint(sync, store);
     await sync.checkCompaction();
     await reached;
     assert.equal(sync.state()[0]!.rebuilding, "compact");
@@ -209,7 +220,7 @@ test("a compaction stopped half way: the side table gone, the table as it was, c
     await sync.caughtUp();
     psql(url, "UPDATE t SET n = 1 WHERE id % 2 = 0");
     await sync.caughtUp();
-    await store.writer.run("CHECKPOINT");
+    await checkpoint(sync, store);
     await sync.checkCompaction();
     await reached;
     psql(url, "UPDATE t SET n = 5, v = 'held' WHERE id <= 10");

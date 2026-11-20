@@ -44,13 +44,17 @@ import { gapIn, gapMark, type GapId } from "./gaps.ts";
 import { cellsOf, evaluateText, fieldOverflow, NumericError } from "../lib/pg-numeric.ts";
 import { explainJson, explainText, planNodes, profiled, qualifiedName, scannedTables, type Copy, type CopyFacts, type Explained, type PlanNode, type TableName } from "./explain.ts";
 import type { PlannedSql } from "./plan.ts";
+import type { NumberedRead } from "./reference-keys.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { DuckDBType } from "@duckdb/node-api";
 import { extensionSettings, findExtensions, type Extensions } from "./extensions.ts";
 import { messageOf } from "../lib/secret-mask.ts";
 import { SCALE_PREFIX } from "./scale-column.ts";
+import { unnumberedSql } from "./reference-keys.ts";
 import { BOM_PROBE, keepLeadingBom } from "./text.ts";
+import { Admission, heavyRowsFor, heavyTurns, keptRows } from "./admission.ts";
+import type { Tally } from "./tally.ts";
 
 export const MASON_SCHEMA = "_mason";
 
@@ -68,8 +72,10 @@ export const DUCKDB_VERSION = version();
  * `force_compression: zstd`: DuckDB's analyzer never picks ZSTD by itself, and stored a copied table's
  * JSON text column Uncompressed (the test server's 194 M-row table: 0.66 GB a million rows, which would have filled the
  * disk at 125 GB, against 0.26 GB forced; a sample of its text columns 4.5× smaller, the integer, UUID and timestamp
- * columns keeping their own methods, BitPacking and RLE, since forcing only touches what ZSTD can store). The cost of
- * reading a ZSTD column is not measured. tests/duck-wire.test.ts holds a string column to ZSTD.
+ * columns keeping their own methods, BitPacking and RLE, since forcing only touches what ZSTD can store). It is the
+ * DEFAULT: a copy and a compaction give each text column its own method (`USING COMPRESSION`, which wins over it), the
+ * dictionary for short or repeated values, where ZSTD stored a six-value status 16 times larger and read it slower
+ * (src/duck/text-compression.ts, issue 1140). tests/duck-wire.test.ts holds a string column to ZSTD.
  *
  * `lambda_syntax: ENABLE_SINGLE_ARROW`: the rewrite is a Postgres parse tree, printed by Postgres's deparser, which
  * can spell DuckDB's lambda only as `x -> f(x)` (Postgres's `->` operator), never as `lambda x: f(x)`; DuckDB 2.0
@@ -339,6 +345,8 @@ export class DuckStore {
   private readonly closeGraceMs: number | undefined;
   /** where the copy's extensions come from: Mason's package for this platform, or DuckDB's install (src/duck/extensions.ts) */
   readonly extensions: Extensions;
+  /** the heavy statements' turns (src/duck/admission.ts): how many run at once, and what is heavy */
+  get admission(): Admission { return this.executor.admission; }
   private constructor(file: string, executor: Executor, memoryLimit: number, extensions: Extensions, spill: { limit: number; set: number | null; diskFree: (dir: string) => number }, log: (line: string) => void, closeGraceMs?: number) {
     this.file = file; this.executor = executor; this.memoryLimitBytes = memoryLimit; this.extensions = extensions; this.closeGraceMs = closeGraceMs;
     this.spillLimitBytes = spill.limit; this.spillSet = spill.set; this.diskFree = spill.diskFree; this.log = log;
@@ -351,7 +359,11 @@ export class DuckStore {
   /** `silentMs` and `closeGraceMs`: the executor's bounds (src/duck/executor.ts SILENT_MS, CLOSE_GRACE_MS), shorter only
    *  in a test; `workerFile`, the executor worker's module, another only in a test; `extensions`, this machine's
    *  (`findExtensions`) unless a test names a package */
-  static async open(file: string, log: (line: string) => void, options: { memoryLimit?: string; spillLimit?: string; diskFree?: (dir: string) => number; silentMs?: number; closeGraceMs?: number; workerFile?: string; extensions?: Extensions } = {}): Promise<DuckStore> {
+  /** `heavyQueries`: MASON_HEAVY_QUERIES (src/duck/admission.ts `heavyQueriesOf`), the heavy statements run at once;
+   *  absent or null, derived from the memory limit and the engine's threads. `heavyRows`: the rows kept at which a
+   *  statement is heavy, another only in a test (else `heavyRowsFor`) */
+  static async open(file: string, log: (line: string) => void, options: { memoryLimit?: string; spillLimit?: string; diskFree?: (dir: string) => number; silentMs?: number; closeGraceMs?: number; workerFile?: string; extensions?: Extensions;
+    heavyQueries?: number | null; heavyRows?: number } = {}): Promise<DuckStore> {
     const extensions = options.extensions ?? findExtensions();
     const memoryLimit = options.memoryLimit ?? DEFAULT_MEMORY_LIMIT;
     if (!MEMORY_LIMIT_RE.test(memoryLimit)) throw new Error(memoryProblemText(memorySettingWrong(memoryLimit)));
@@ -381,6 +393,11 @@ export class DuckStore {
     try {
       await executor.writer().run(spillCeilingSql(spillLimit));
       problem = await instanceSettingsProblem(executor.writer(), { ...settings, max_temp_directory_size: spillSetting(spillLimit) });
+      // THE HEAVY STATEMENTS' TURNS (src/duck/admission.ts), from the memory limit and the threads the engine runs on (its
+      // own count: a container's CPU limit is what it reads, never the machine's)
+      const threads = Number((await executor.writer().runAndReadAll("SELECT current_setting('threads')")).getRowsJS()[0]?.[0]);
+      const bytes = memoryLimitBytes(memoryLimit);
+      executor.admission = new Admission(heavyTurns(bytes, threads, options.heavyQueries ?? null), options.heavyRows ?? heavyRowsFor(bytes));
     } catch (e) { problem = `its settings could not be set and read back: ${e instanceof Error ? e.message : String(e)}`; }
     if (problem !== null) {
       // closed as a store closes: a thread given up on keeps the file here (`abandoned`)
@@ -427,6 +444,9 @@ export class DuckStore {
 
   /** called once if the engine's thread dies while the run uses it (src/duck/executor.ts): the run exits with the reason */
   onCrash(f: (reason: string) => void): void { this.executor.onCrash(f); }
+  /** a slot counting the rows of one read as they arrive (src/duck/tally.ts: its `filter` in the read's WHERE), or null
+   *  when every slot is taken */
+  tally(): Tally | null { return this.executor.tallies.take(); }
   /** how many vectors each Mason function was called with so far, on the engine's thread (a test's, a measurement's) */
   functionCalls(): Promise<Map<string, number>> { return this.executor.functionCalls(); }
   /** how many rows each Mason function was handed so far, on the engine's thread (a plan's cost in calls) */
@@ -577,8 +597,10 @@ export function pgErrorOf(err: unknown, sql: string): StatementError {
   // a refusal raised inside DuckDB (a Mason function's, the rewrite's error() call) crossed it as its text alone: the
   // entry its text names (gapIn), read here, the one place that text becomes a statement's error
   // (Mason's own refusal keeps the engine's text out of the DETAIL: it may quote the row, tests/conventions.test.ts)
-  // (a Mason function's error that carries Postgres's own DETAIL sends it as Postgres does, apart from the message)
-  if (pg !== null) return new StatementError({ code: pg.code, message: pg.message, ...(pg.code === "0A000" ? {} : { detail: pg.detail ?? `the engine: ${message}` }) }, sql, pg.gap ?? (pg.code === "0A000" ? gapIn(pg.message) : null));
+  // (a Mason function's error that carries Postgres's own DETAIL sends it as Postgres does, apart from the message; one
+  // raised in Postgres's own words, `mason[<code>]: …`, sends no DETAIL of the engine's: Postgres sends none there)
+  const detail = pg === null || pg.code === "0A000" ? undefined : pg.detail ?? (pg.postgres === true ? undefined : `the engine: ${message}`);
+  if (pg !== null) return new StatementError({ code: pg.code, message: pg.message, ...(detail === undefined ? {} : { detail }) }, sql, pg.gap ?? (pg.code === "0A000" ? gapIn(pg.message) : null));
   const fn = /(?:Scalar|Aggregate|Table) Function with name "?([A-Za-z_][\w]*)"? does not exist/.exec(message)?.[1];
   if (fn !== undefined) {
     // what reaches DuckDB was verified against Postgres (src/duck/verified.ts), so a function DuckDB lacks is a gap in
@@ -626,7 +648,7 @@ export function pgErrorOf(err: unknown, sql: string): StatementError {
 }
 
 /** The errors DuckDB raises for what Postgres raises too, in Postgres's code and words (a tool or a person matches them). */
-function postgresWording(kind: string, message: string): { code: string; message: string; gap?: GapId | null; detail?: string } | null {
+function postgresWording(kind: string, message: string): { code: string; message: string; gap?: GapId | null; detail?: string; postgres?: true } | null {
   if (/^Division by zero\b/i.test(message) || message === "division by zero") return { code: "22012", message: "division by zero" };
   const zone = /Unknown TimeZone '([^']*)'/.exec(message);
   if (zone) return { code: "22023", message: `time zone "${zone[1]}" not recognized` };
@@ -662,7 +684,8 @@ function postgresWording(kind: string, message: string): { code: string; message
   // Postgres's own error, from its own function (src/duck/pg-eval.ts): its SQLSTATE, said
   // (and its DETAIL on a line of its own, src/duck/functions.ts `raised`)
   const pg = /^mason\[([0-9A-Z]{5})\]: (.*?)(?:\nDETAIL: (.*))?$/s.exec(message);
-  if (pg) return { code: pg[1]!, message: pg[2]!, ...(pg[3] === undefined ? {} : { detail: pg[3] }) };
+  // (it is Postgres's error as Postgres sends it: its own DETAIL or none, never the engine's text beside it)
+  if (pg) return { code: pg[1]!, message: pg[2]!, ...(pg[3] === undefined ? {} : { detail: pg[3] }), postgres: true };
   const own = /^mason: (.*)$/s.exec(message);
   if (own) return { code: /^cannot |argument list|key must not be null/.test(own[1]!) ? "22023" : /^invalid input syntax/.test(own[1]!) ? "22P02" : / is not supported| not supported for type /.test(own[1]!) ? "0A000" : "XX000", message: own[1]! };
   // the rewrite's own error() calls carry Postgres's message (src/duck/rewrite.ts)
@@ -788,10 +811,11 @@ export class SessionRunner implements DuckRunner {
   /** `run`, and where its time goes as it is read: DuckDB's (its prepare, which plans; each chunk it computes) and
    *  Mason's (the exact numerics, the encoding), ms — what an EXPLAIN ANALYZE says. `profile`: the file DuckDB's
    *  profiler writes this statement's profile to (EXPLAIN ANALYZE), turned on here, after the settle */
-  private async streamed(planned: PlannedSql, params: readonly (string | null)[], session: DuckSession, signal: AbortSignal,
+  private async streamed(asked: PlannedSql, params: readonly (string | null)[], session: DuckSession, signal: AbortSignal,
     fields: ReadonlyArray<{ name: string; oid: number; typmod?: number }> | null, exact: readonly ExactColumn[],
     profile: string | null = null): Promise<{ answer: DuckAnswer; timing: { prepareMs: number; duckdbMs: number; masonMs: number } }> {
-    const sql = planned.text;
+    let planned = asked;
+    let sql = planned.text;
     const seq = this.next;
     await Promise.all([...this.releasing]);
     // this statement's calls read their cancel from here on: never before the last one is released, which a cancel of
@@ -799,17 +823,33 @@ export class SessionRunner implements DuckRunner {
     beginStatement(this.cancels, this.slot, seq);
     try { await this.settle(session); }
     catch (e) { throw pgErrorOf(e, sql); }
+    // A JOIN ON A REFERENCE'S HIDDEN INTEGER KEYS runs in a transaction whose snapshot holds every row it reads numbered,
+    // else as it was written (`numbersHold`); the transaction ends when the statement is released (`endHeld`)
+    let held = false;
+    if (planned.numbers !== undefined) {
+      held = await this.numbersHold(planned.numbers.sides, sql);
+      if (!held) { planned = planned.numbers.plain; sql = planned.text; }
+    }
+    const endHeld = (): void => {
+      if (!held) return;
+      held = false;
+      const ended = this.conn.run("ROLLBACK").then(() => undefined, (e: unknown) => this.log(`the transaction of a statement that joined on hidden integer keys could not be ended: ${messageOf(e)} — ${oneLine(sql)}`));
+      this.releasing.add(ended);
+      void ended.finally(() => this.releasing.delete(ended));
+    };
     // THE PROFILER IS ON FOR THE STATEMENT ALONE: DuckDB writes the profile of the LAST statement it profiled on the
     // connection, so it is turned on after every other statement Mason runs here (the settle's probe of the schemas,
     // turned on before it, was reported as the plan of a count(*) that wrote no profile of its own), and the caller turns
     // it off before it runs another (`explained`, which also holds the profile to the statement's text)
     if (profile !== null) {
       try { await this.conn.run("SET enable_profiling = 'json'"); await this.conn.run(`SET profiling_output = ${quoteLiteral(profile)}`); }
-      catch (e) { throw pgErrorOf(e, sql); }
+      catch (e) { endHeld(); throw pgErrorOf(e, sql); }
     }
     const timing = { prepareMs: 0, duckdbMs: 0, masonMs: 0 };
     const t0 = performance.now();
-    const p = await this.prepare(sql);
+    let p: DuckDBPreparedStatement;
+    try { p = await this.prepare(sql); }
+    catch (e) { endHeld(); throw e; }
     timing.prepareMs = performance.now() - t0;
     // HOW A STATEMENT IS CANCELLED (src/duck/functions.ts "every call carries its session"; the test
     // server's hung process). It is interrupted — its tasks stop at their next chunk — and, if it calls a Mason
@@ -831,7 +871,7 @@ export class SessionRunner implements DuckRunner {
     signal.addEventListener("abort", cancel);
     const failure = (e: unknown): StatementError => failureOf(signal, e, sql);
     // an abort before the listener was there (the timeout fired in the settle or the prepare) cancels nothing
-    if (signal.aborted) { signal.removeEventListener("abort", cancel); p.destroySync(); throw failure(null); }
+    if (signal.aborted) { signal.removeEventListener("abort", cancel); p.destroySync(); endHeld(); throw failure(null); }
     const started = Date.now();
     let total = 0;
     let result: DuckDBResult | null = null;
@@ -855,6 +895,7 @@ export class SessionRunner implements DuckRunner {
       signal.removeEventListener("abort", cancel);
       result?.closeSync();
       p.destroySync();
+      endHeld();
       say();
     };
     // A STATEMENT THAT DID NOT RUN TO ITS END (it failed, its cancel raised, it was closed early) IS CLOSED ONLY ONCE
@@ -1001,7 +1042,8 @@ export class SessionRunner implements DuckRunner {
         // naming the statement it timed. None: DuckDB ran no operator (it answered while planning — a count(*) of a
         // whole table is the table's row count), and its plan is its EXPLAIN, the rows the ones it answered
         const profile = fs.existsSync(file) ? profiled(JSON.parse(fs.readFileSync(file, "utf8"))) : null;
-        if (profile !== null && profile.sql !== sql.text) {
+        // (a join on hidden integer keys that ran as it was written: the plain plan's text, `numbersHold`)
+        if (profile !== null && profile.sql !== sql.text && profile.sql !== sql.numbers?.plain.text) {
           throw new StatementError({ code: "XX000", message: `the engine's profile of an EXPLAIN ANALYZE is of another statement (${oneLine(profile.sql ?? "none named")}): report it (Mason's EXPLAIN)` }, sql.text);
         }
         if (profile !== null) plan = profile.plan;
@@ -1016,6 +1058,20 @@ export class SessionRunner implements DuckRunner {
     const explained: Explained = { copies: await this.copies(scannedTables(plan), how.copies, how.rowFilters ?? []), sql: oneLine(sql.text), computed: computedOf(how.exact, how.fields),
       functions: [...sql.functions], plan, ...(analyzed === undefined ? {} : { analyzed }), ...(how.detailsHidden === true ? { detailsHidden: true as const } : {}) };
     return o.format === "json" ? [explainJson(explained, o)] : explainText(explained, o);
+  }
+
+  /** the rows the statement's plan keeps in memory at once, by DuckDB's estimates (src/duck/admission.ts `keptRows`):
+   *  what decides whether it waits for a heavy statement's turn. Its plain EXPLAIN, after the session's last answer is
+   *  released, as an EXPLAIN is */
+  weigh(sql: PlannedSql, params: readonly (string | null)[], session: DuckSession, signal: AbortSignal): Promise<number> {
+    const seq = this.next;
+    return this.track((async () => {
+      await Promise.all([...this.releasing]);
+      // ITS OWN NUMBER IN THE CANCEL TABLE, as a run's: the engine folds a Mason function over constants while it plans,
+      // and that call must read this one's cancel, never the cancel of the statement before it (which would raise)
+      beginStatement(this.cancels, this.slot, seq);
+      return keptRows(await this.plainPlan(sql, params, session, signal));
+    })());
   }
 
   /** DuckDB's `EXPLAIN (FORMAT JSON)` of the planned SQL, its parameters bound: its plan, estimates only */
@@ -1092,6 +1148,26 @@ export class SessionRunner implements DuckRunner {
         else if (pgErrorOf(e, "SELECT 1").fields.code !== "57014") this.log(`the check that a statement ended failed: ${e instanceof Error ? e.message : String(e)} — ${oneLine(sql)}`);
       }
     } finally { clearTimeout(slow); }
+  }
+
+  /**
+   * WHETHER A STATEMENT THAT JOINS ON HIDDEN INTEGER KEYS MAY RUN SO (src/duck/reference-keys.ts `unnumberedSql`): a
+   * transaction begun, and every row of the tables whose numbers it reads numbered in its snapshot. True: the
+   * transaction is left open, and the statement runs in it, so it reads the rows the check read. False: a row is not
+   * numbered, or the check failed (said), and the transaction is ended: the statement runs as it was written.
+   */
+  private async numbersHold(sides: readonly NumberedRead[], sql: string): Promise<boolean> {
+    try { await this.conn.run("BEGIN TRANSACTION"); }
+    catch (e) { throw pgErrorOf(e, sql); }
+    let numbered = false;
+    try { numbered = (await this.conn.runAndReadAll(unnumberedSql(sides))).getRowsJS()[0]?.[0] === false; }
+    // tolerable: the statement runs on the keys themselves, which answer it as the numbers would (a table synced again
+    // under another shape, its hidden column gone, fails here)
+    catch (e) { this.log(`a join on hidden integer keys runs on the keys themselves: the check that its rows are numbered failed: ${messageOf(e)}`); }
+    if (numbered) return true;
+    try { await this.conn.run("ROLLBACK"); }
+    catch (e) { throw pgErrorOf(e, sql); }
+    return false;
   }
 
   /** Closes the connection once nothing runs on it: an answer left open drained (its statement cancelled), every

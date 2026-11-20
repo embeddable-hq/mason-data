@@ -35,7 +35,7 @@ paths:
   no path and no engine in the answer, gap `spill-limit` on its request-log row. A sizing decision reads
   `store.spillLimitBytes`. ("A top N over joined tables")
 - **A sizing decision reads `store.memoryLimitBytes`**, never `os.totalmem()` or a constant: the operator may have set
-  the limit. The copy reads it: a chunk's values out of line are held to an eighth of it over the readers
+  the limit. So do the heavy statements' turns (src/duck/admission.ts `heavyTurns`, `heavyRowsFor`). The copy reads it: a chunk's values out of line are held to an eighth of it over the readers
   (`chunkCeiling`, `COPY_CHUNK_MEMORY_SHARE`; docs/DESIGN.md "Large values out of line").
 - **A copy shares that limit with the stream, the polls and the BI queries** (it runs beside them):
   what does not fit beside fails its own statement, is said, and is tried again.
@@ -50,10 +50,16 @@ paths:
   (`payload->>'key' IS NOT NULL`) over 22 M rows took 93.5 s on DuckDB against 15 s on ClickHouse. So size a machine's
   RAM to the working set, never promise ClickHouse's speed on a JSON path, and the later remedy is extracting the hot
   JSON fields into columns. ("What stands between this and production")
-- **Strings are stored ZSTD, forced on the instance** (`INSTANCE_SETTINGS`, `src/duck/store.ts`): DuckDB's
+- **Strings are stored ZSTD by default, forced on the instance** (`INSTANCE_SETTINGS`, `src/duck/store.ts`): DuckDB's
   analyzer never picks ZSTD by itself and left a copied table's JSON text column Uncompressed — 0.66 GB a million rows
   on the test server, 0.26 forced, a text sample 4.5× smaller — while integers, UUIDs and timestamps keep their own
-  methods. A copy's size is measured with it on; the read cost of a ZSTD column is not measured yet.
+  methods. **A copy and a compaction give each text column its own method** (`src/duck/text-compression.ts`, issue
+  1140), which wins over the instance's: the dictionary for short or repeated values, ZSTD for long ones. ZSTD stored
+  short text 1.2 to 8.5 times larger (a status the most) and read it up to 7 times slower warm; it stores long JSON
+  24 % smaller and a column with values of 16 KiB or more 4.6 times smaller (docs/DESIGN.md "Text compression by column"). A table made
+  before keeps ZSTD until it is synced again whole or compacted. A dictionary column is smaller on disk than in memory
+  by more than a ZSTD one, so a compaction's pieces sized by `COMPACT_ROW_EXPANSION` can take more memory than planned;
+  a piece out of memory halves.
 - **A copy that would fill the disk is stopped before it does** (`copyDiskProjection`, `src/duck/sync.ts`): once an
   attempt read 1 % of the heap, what the pages left would add (from what its pages added to the file and its log) is
   held to what is free where the file is; past it the copy FAILS with the way out (free disk, `mason remove`, `mason add

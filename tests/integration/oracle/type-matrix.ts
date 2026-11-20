@@ -12,6 +12,7 @@
  * else reads every row. A statement Postgres refuses (min(json), a % of floats) is asked too: it must be refused alike.
  */
 import { FROM_ITEM_VIEWS, FROM_ITEMS_SORTED } from "./unordered-limit.ts";
+import { spellings } from "./unit-spellings.ts";
 
 
 /** the columns, by family, with the type each is declared with */
@@ -250,6 +251,23 @@ const INSTANTS: Array<[number, string | null]> = [
   [23, "1999-12-31 23:59:59.999999+00"], [24, "2262-04-11 23:47:16+00"], [25, "2026-03-29 00:30:00+00"], [26, "2026-11-01 04:59:59.999999+00"],
 ];
 
+/** the zones a GROUP BY of a time's unit is held in (issue 1146): UTC, daylight saving, +5:30, +5:45, Lord Howe's
+ *  30-minute change, Chatham's +12:45 / +13:45, and St. John's, whose changes were a minute past midnight until 2011 */
+const BUCKET_ZONES = ["UTC", "America/New_York", "Asia/Kolkata", "Asia/Kathmandu", "Australia/Lord_Howe", "Pacific/Chatham", "America/St_Johns"];
+const BUCKET_EDGES = `WITH zones(z) AS (VALUES ${[...BUCKET_ZONES, "Europe/London", "Antarctica/Casey"].map((z) => `('${z}')`).join(", ")}),
+  q AS (SELECT t FROM generate_series(timestamptz '2023-12-25 00:00+00', timestamptz '2025-01-05 00:00+00', interval '15 minutes') t),
+  changes AS (SELECT q.t FROM q, zones WHERE (q.t AT TIME ZONE zones.z) - (q.t AT TIME ZONE 'UTC') <> ((q.t - interval '15 minutes') AT TIME ZONE zones.z) - ((q.t - interval '15 minutes') AT TIME ZONE 'UTC')),
+  months AS (SELECT (m AT TIME ZONE zones.z) AS t FROM zones, generate_series(timestamp '2024-01-01', timestamp '2025-01-01', interval '1 month') m),
+  edges AS (SELECT t FROM changes UNION SELECT t FROM months)
+  INSERT INTO public.bucket_edges (at) SELECT t FROM (
+    SELECT t + d * interval '1 microsecond' AS t FROM edges, (VALUES (-1), (0), (1)) v(d)
+    UNION ALL SELECT timestamptz '2024-01-01 00:00+00' + g * interval '1 day 19 hours 13 minutes 17.123456 seconds' FROM generate_series(0, 200) g
+    UNION ALL SELECT t::timestamptz FROM (VALUES ('2010-11-07 02:30:30+00'), ('2010-11-07 02:31:30+00'), ('2011-03-13 03:30:30+00'), ('2011-03-13 03:31:30+00'),
+      ('2022-10-01 16:00:30+00'), ('2022-10-01 16:01:30+00'), ('1979-10-01 10:39:59.999999+00'), ('1979-12-31 23:59:59.999999+00'), ('1980-01-01 00:00:00+00'),
+      ('1960-02-29 12:34:56.789+00'), ('9999-12-31 23:59:59.999999+00'), ('infinity'), ('-infinity')) v(t)
+    UNION ALL SELECT NULL) e ORDER BY t;
+  UPDATE public.bucket_edges SET v = CASE WHEN id % 11 = 0 THEN NULL ELSE id % 97 END, x = (id % 1000) / 8.0, f = id / 3.0, s = 's' || (id % 5);`;
+
 /** the table and its rows (the oracle's TimeZone is UTC: a timestamptz literal's offset is folded into UTC); beside it,
  *  `typed_arrays` holds the array types the review found sent as text[] */
 export const TYPED = `${MAPPED_TABLE} CREATE EXTENSION IF NOT EXISTS citext; CREATE TABLE public.typed (id int PRIMARY KEY, ${ALL.map((c) => `${c} ${COLUMNS[c]}`).join(", ")}); ` +
@@ -265,6 +283,9 @@ export const TYPED = `${MAPPED_TABLE} CREATE EXTENSION IF NOT EXISTS citext; CRE
   `CREATE TABLE public.castable (id int PRIMARY KEY, s text); INSERT INTO public.castable VALUES ${CASTABLE.map(([id, v]) => `(${id}, '${v.replace(/'/g, "''")}')`).join(", ")}; ` +
   // a column named as typed's `t` in another case: DuckDB binds names case-insensitively (the corpus rerun)
   `CREATE TABLE public.cased (id int PRIMARY KEY, "T" text, "Tz" text); INSERT INTO public.cased VALUES (1, 'one', 'Europe/London'), (2, 'a', 'utc'), (4, 'B', 'UT'), (9, NULL, 'asia/kolkata');` +
+  // columns named like names Mason invents (issue 1024): the row number a top N over a join reads rows by, and a native
+  // json read's lambda parameter in another case
+  ` CREATE TABLE public.own_named (id int PRIMARY KEY, "__mason_rid" int, "__MASON_V" jsonb, v text); INSERT INTO public.own_named VALUES (1, 30, '{"a": 1.50}', 'a'), (2, 10, '{"a": [1]}', 'b'), (4, NULL, NULL, 'd'), (5, 40, '{"a": "s"}', 'e');` +
   // JSON COLUMNS NAMED AS typed's j and jb in another case (the review of the native read): a read's column
   // is placed in every arm of its CASE, and each place must be qualified as Postgres resolved the bare name; its
   // documents hold `#>` elements an index reads otherwise than a key (`+1`, ` 1`, `1 `)
@@ -382,6 +403,11 @@ export const TYPED = `${MAPPED_TABLE} CREATE EXTENSION IF NOT EXISTS citext; CRE
   // of Europe/Berlin's and America/New_York's changes of 2026, a repeated hour's two halves, before 1970, a zone's local
   // mean time (1880), the first instant of a week, a century and a millennium, a microsecond, ±infinity and NULL
   `CREATE TABLE public.instants (id int PRIMARY KEY, at timestamptz); INSERT INTO public.instants VALUES ${INSTANTS.map(([id, v]) => `(${id}, ${v === null ? "NULL" : `'${v}'`})`).join(", ")};` +
+  // A TIME'S 15-MINUTE BUCKET AT ITS EDGES (issue 1146, src/duck/bucket-group.ts): every change of offset of 2024 in the
+  // zones the oracle groups in and each local month's first instant, at and 1 µs either side; rows through the year;
+  // a change a minute past midnight (St. John's 2010 and 2011, Casey 2022); and rows no bucket holds (before 1980,
+  // year 9999's last, ±infinity, NULL). Europe/Amsterdam before 1940 is left out: the engine's zone data is not Postgres's
+  `CREATE TABLE public.bucket_edges (id serial PRIMARY KEY, at timestamptz, v int, x numeric(10,2), f float8, s text); ${BUCKET_EDGES}` +
   // DOCUMENTS A PREVIEW EXPANDS (a LEFT JOIN LATERAL json_each … ON TRUE): objects of several keys, a key twice in a
   // json, an empty object, NULL, an array and a string the tool's CASE passes over; and arrays of other element types
   // (an unnest's padding NULL is of each), empty, NULL, or holding a NULL
@@ -407,6 +433,14 @@ export const TYPED = `${MAPPED_TABLE} CREATE EXTENSION IF NOT EXISTS citext; CRE
   "INSERT INTO public.pairs VALUES (1, 1, 'a'), (1, 2, 'a'), (2, 1, 'A'), (2, 2, NULL), (3, 1, 'b'), (5, 1, 'none'), (5, 2, ''), (5, 3, 'c'); " +
   "CREATE TABLE public.vkeys (id varchar(8) PRIMARY KEY, label text); " +
   "INSERT INTO public.vkeys VALUES ('a', 'one'), ('A', 'one'), ('b', NULL), ('', 'empty'), ('zz', 'two'), ('none', 'two');" +
+  // A JOIN ON A DECLARED REFERENCE (src/duck/reference-keys.ts, issue 1144): `rchild`'s references to `rparent` by a
+  // uuid, a text (from a varchar), a key of two columns and a sparse bigint are numbered in hidden columns (the
+  // oracle's sources file names them: duck-oracle.itest.ts REFERENCES). The parent's keys repeat and hold NULLs, a case
+  // pair, a trailing blank, an empty text and a composed é; the child's hold keys no parent has and the decomposed é
+  "CREATE TABLE public.rparent (pk int PRIMARY KEY, u uuid, code text, t int, n int, big bigint, label text); " +
+  "INSERT INTO public.rparent VALUES (1, '00000000-0000-4000-8000-000000000001', 'a', 1, 1, 9000001000000000000, 'one'), (2, '00000000-0000-4000-8000-000000000002', 'A', 1, 2, 9000002000000000000, 'two'), (3, '00000000-0000-4000-8000-000000000002', 'b', 2, 1, NULL, 'three'), (4, NULL, NULL, NULL, 1, 9000004000000000000, 'four'), (5, '00000000-0000-4000-8000-000000000005', 'b ', 2, NULL, 9000005000000000000, NULL), (6, '00000000-0000-4000-8000-000000000006', '', 3, 3, 9000006000000000000, 'six'), (7, '00000000-0000-4000-8000-000000000007', 'é', 3, 4, 9000007000000000000, 'seven');" +
+  "CREATE TABLE public.rchild (id int PRIMARY KEY, u uuid, code varchar(4), t int, n int, big bigint, v int); " +
+  "INSERT INTO public.rchild VALUES (1, '00000000-0000-4000-8000-000000000001', 'a', 1, 1, 9000001000000000000, 10), (2, '00000000-0000-4000-8000-000000000002', 'A', 1, 2, 9000002000000000000, 20), (3, '00000000-0000-4000-8000-000000000002', 'b', 2, 1, 9000004000000000000, 30), (4, NULL, NULL, NULL, 1, NULL, 40), (5, '00000000-0000-4000-8000-000000000099', 'zz', 9, 9, 7, 50), (6, '00000000-0000-4000-8000-000000000005', 'b ', 2, NULL, 9000005000000000000, 60), (7, '00000000-0000-4000-8000-000000000006', '', 3, 3, 9000006000000000000, 70), (8, '00000000-0000-4000-8000-000000000001', 'a', 1, 1, 9000001000000000000, 80), (9, '00000000-0000-4000-8000-000000000007', 'e' || chr(769), 3, 4, 9000009000000000000, 90);" +
   FROM_ITEM_VIEWS
 
 /** a round of changes the poll carries: values move, a row goes, one comes */
@@ -422,6 +456,16 @@ function typedRows(round: number): string {
       "INSERT INTO public.typed (id, i2, i4, i8, f8, n, t, d, tz, iv, jb, ai, at) VALUES (11, 11, 11, 11, 11.5, 11.25, 'new', '2026-10-24', '2026-10-24 12:00:00+00', '11 minutes', '{\"n\": 11}', '{11}', '{new}')"
     : "UPDATE public.typed SET i8 = NULL, t = NULL, jb = NULL, ai = NULL WHERE id = 11; UPDATE public.typed SET b = NOT b, d = d + 1 WHERE id < 10; " +
       "UPDATE public.typed_arrays SET ca = ca || 'Z'::citext, ia = ia || '192.168.0.1'::inet, jba = jba || '{\"m\": 2}'::jsonb, n = n + 1 WHERE id IN (1, 4)";
+}
+
+/** a round of changes to the references' tables (src/duck/reference-keys.ts): a key the parent did not have, a child's
+ *  key changed and set NULL, a parent's key changed, a parent deleted and inserted again */
+export function referenceMutations(round: number): string {
+  return round === 1
+    ? "INSERT INTO public.rparent VALUES (8, '00000000-0000-4000-8000-000000000099', 'zz', 9, 9, 7, 'eight'); UPDATE public.rchild SET u = '00000000-0000-4000-8000-000000000006', code = 'é' WHERE id = 1; " +
+      "UPDATE public.rchild SET u = NULL, code = NULL, t = NULL, big = NULL WHERE id = 2; UPDATE public.rparent SET code = 'B' WHERE pk = 3; INSERT INTO public.rchild VALUES (10, '00000000-0000-4000-8000-000000000099', 'B', 9, 9, 7, 100)"
+    : "DELETE FROM public.rparent WHERE pk = 1; INSERT INTO public.rparent VALUES (9, '00000000-0000-4000-8000-000000000001', 'a', 1, 1, 9000001000000000000, 'one again'); " +
+      "UPDATE public.rparent SET u = '00000000-0000-4000-8000-000000000003', big = 9000003000000000000 WHERE pk = 2; INSERT INTO public.rchild VALUES (11, '00000000-0000-4000-8000-000000000003', 'A', 1, 2, 9000003000000000000, 110)";
 }
 
 const ORDINARY = "id < 100";
@@ -1305,7 +1349,7 @@ function* matrix(): Generator<Matrixed> {
     ["every value, descending", "SELECT id, s FROM coll ORDER BY s DESC, id LIMIT 30"],
     ["every value, a page", "SELECT id, s FROM coll ORDER BY s, id LIMIT 30 OFFSET 60"],
     ["grouped (as written)", "SELECT s FROM coll_top GROUP BY s ORDER BY s ASC LIMIT 12"],
-    ["DISTINCT (as written)", "SELECT DISTINCT s FROM coll_top ORDER BY 1 LIMIT 12"],
+    ["DISTINCT", "SELECT DISTINCT s FROM coll_top ORDER BY 1 LIMIT 12"],
     ["DISTINCT ON (as written)", "SELECT DISTINCT ON (s) s, id FROM coll_top ORDER BY s, id LIMIT 5"],
     ["a set operation (as written)", "SELECT s FROM coll_top UNION ALL SELECT s FROM coll ORDER BY 1 LIMIT 5"],
     ["a join (as written)", "SELECT a.id, a.s FROM coll_top a JOIN coll_top b ON b.id = a.id ORDER BY a.s LIMIT 5"],
@@ -1335,7 +1379,7 @@ function* matrix(): Generator<Matrixed> {
     ["every value", "SELECT min(s), max(s) FROM coll"],
     ["of an expression", "SELECT min(lower(s)), max(s || 'x') FROM coll_top"],
     ["a derived table", "SELECT min(s), max(s) FROM (SELECT s FROM coll_top WHERE n > 10) q"],
-    ["grouped (as written)", "SELECT n % 5, min(s), max(s) FROM coll_top GROUP BY 1 ORDER BY 1"],
+    ["grouped", "SELECT n % 5, min(s), max(s) FROM coll_top GROUP BY 1 ORDER BY 1"],
     ["FILTER (as written)", "SELECT min(s) FILTER (WHERE n > 5), max(s) FROM coll_top"],
     ["a window (as written)", "SELECT id, max(s) OVER (PARTITION BY n % 3) FROM coll_top ORDER BY id LIMIT 5"],
     ["a control character inside a value", "SELECT min(s), max(s) FROM coll_top WHERE s IN ('abc', 'ab' || chr(2) || 'cd')"],
@@ -1369,11 +1413,48 @@ function* matrix(): Generator<Matrixed> {
     ["bytes (as written)", `SELECT id, s FROM coll_rep ORDER BY s COLLATE "C", id LIMIT 10`],
     ["min and max in bytes (as written)", `SELECT min(s COLLATE "C"), max(s COLLATE "C") FROM coll_rep`],
   ] as Array<[string, string]>) yield q(`text keyed once a value: ${name}`, sql);
+  // the third round: a grouped min / max keys each group's candidates once (src/duck/libc-bound.ts `pickGrouped`), and a
+  // SELECT DISTINCT sorted sorts its distinct rows (`distinctSorted`), over the value most rows hold, every value, and
+  // values each their own
+  for (const [name, sql] of [
+    ["grouped", "SELECT n, min(s), max(s) FROM coll_rep GROUP BY n ORDER BY n"],
+    ["grouped by an expression, a varchar beside a count", "SELECT n % 3, min(v), max(v), count(*) FROM coll_rep GROUP BY 1 ORDER BY 1"],
+    ["grouped, HAVING and ORDER BY the min", "SELECT n, min(s) FROM coll_rep GROUP BY n HAVING max(s) > 'b' ORDER BY min(s) DESC, n"],
+    ["grouped by two keys, a NULL group", "SELECT n % 2, CASE WHEN n = 3 THEN NULL ELSE n % 3 END AS g, min(s), max(s) FROM coll_rep GROUP BY 1, 2 ORDER BY 1, 2 NULLS FIRST"],
+    ["grouped, a group of NULLs alone", "SELECT s IS NULL, min(s), max(s) FROM coll_rep GROUP BY 1 ORDER BY 1"],
+    ["grouped by the text itself", "SELECT s, min(s), max(v), count(*) FROM coll_rep GROUP BY s ORDER BY 1 NULLS FIRST"],
+    ["grouped, values glibc weighs alike", "SELECT n, min(s), max(s) FROM coll_rep WHERE s IN ('k', 'K', chr(8490), 'é', 'e' || chr(769), 'E', 'e') GROUP BY n ORDER BY n"],
+    ["grouped, letters of Latin", "SELECT n % 2, min(s), max(s) FROM coll_rep WHERE left(s, 1) IN ('Ø', 'o', 'Ł', 'l', 'Ö', 'ŀ', 'ª', 'a', '²', '2', 'É', 'e') GROUP BY 1 ORDER BY 1"],
+    ["grouped, control characters", "SELECT n % 2, min(s), max(s) FROM coll_top WHERE s LIKE '%' || chr(2) || '%' OR s LIKE 'ab%' OR s LIKE 'z%' GROUP BY 1 ORDER BY 1"],
+    ["grouped, every value", "SELECT id % 4, min(s), max(s) FROM coll GROUP BY 1 ORDER BY 1"],
+    ["grouped, values each their own", "SELECT n, min(s), max(s) FROM coll_top GROUP BY n ORDER BY n"],
+    ["grouped, a group a row", "SELECT id, min(s), max(s) FROM coll_top WHERE id < 40 GROUP BY id ORDER BY id"],
+    ["grouped, filtered outside", "SELECT * FROM (SELECT n, min(s) AS lo, max(s) AS hi FROM coll_rep GROUP BY n) q WHERE q.n = 3"],
+    ["grouped, a LIMIT", "SELECT n, max(s) FROM coll_top GROUP BY n ORDER BY max(s), n LIMIT 5"],
+    ["grouped, no row", "SELECT n, min(s) FROM coll_rep WHERE n > 7 GROUP BY n"],
+    // (one value under several orders in one grouped statement, each its own: the first review of PR 1104)
+    ["grouped, one value under several collations", `SELECT n, min(s), min(s COLLATE "C"), max(s COLLATE "en_US"), max(s), min(v COLLATE "en_US") FROM coll_rep GROUP BY n ORDER BY n`],
+    ["DISTINCT sorted", "SELECT DISTINCT s FROM coll_rep ORDER BY s"],
+    ["DISTINCT sorted, descending, NULLs last", "SELECT DISTINCT s FROM coll_rep ORDER BY s DESC NULLS LAST"],
+    ["DISTINCT of two columns", "SELECT DISTINCT n, s FROM coll_rep ORDER BY s, n"],
+    ["DISTINCT by an output's name", "SELECT DISTINCT lower(s) AS l FROM coll_rep ORDER BY l NULLS FIRST"],
+    ["DISTINCT, every value", "SELECT DISTINCT s FROM coll ORDER BY 1"],
+    ["DISTINCT, a page", "SELECT DISTINCT s FROM coll_top ORDER BY s LIMIT 20 OFFSET 40"],
+    ["DISTINCT, a varchar descending", "SELECT DISTINCT v FROM coll_top ORDER BY v DESC LIMIT 15"],
+    ["DISTINCT in bytes (as written)", `SELECT DISTINCT s COLLATE "C" FROM coll_rep ORDER BY 1`],
+    ["grouped, FILTER (as written)", "SELECT n, min(s) FILTER (WHERE id > 100) FROM coll_rep GROUP BY n ORDER BY n"],
+    ["grouped, ROLLUP (as written)", "SELECT n, min(s), max(s) FROM coll_rep GROUP BY ROLLUP (n) ORDER BY n NULLS LAST"],
+  ] as Array<[string, string]>) yield q(`text keyed once a group: ${name}`, sql);
   // ---- the corpus rerun of fbbf8f08: what reached DuckDB and failed, and the pieces still unverified -------------------
   // a name another table has in another case: qualified with the table Postgres resolved it to
   yield q("a name in another case, joined", `SELECT id, "T", t, "Tz" FROM typed JOIN cased USING (id) ORDER BY id`);
   yield q("a name in another case, correlated", `SELECT id, t FROM typed x WHERE EXISTS (SELECT 1 FROM cased c WHERE c.id = x.id AND "T" = t) ORDER BY id`);
   yield q("GROUP BY an output name in another case", `SELECT upper(t) AS "T", count(*) FROM typed GROUP BY "T" ORDER BY 1`);
+  // ---- issue 1024: a column named like a name Mason invents is the table's (src/duck/own-names.ts) -------------------
+  yield q("issue 1024: a column named like the row number, a top N over a LEFT JOIN", `SELECT o.id, o."__mason_rid", o.v, c."T" FROM own_named o LEFT JOIN cased c ON c.id = o.id ORDER BY o."__mason_rid" DESC NULLS LAST, o.id LIMIT 3`);
+  yield q("issue 1024: a column named like the row number, through a *", "SELECT * FROM own_named o LEFT JOIN cased c ON c.id = o.id ORDER BY o.v DESC LIMIT 3");
+  yield q("issue 1024: a column named like the row number, in a whole row", `SELECT row_to_json(o) AS r, c."T" FROM own_named o LEFT JOIN cased c ON c.id = o.id ORDER BY o.id LIMIT 3`);
+  yield q("issue 1024: a jsonb named like a lambda's parameter in another case", `SELECT id, "__MASON_V" -> 'a' AS a FROM own_named ORDER BY id`);
   // a DISTINCT aggregate's ORDER BY over a division (its zero test was a volatile error() DuckDB refuses there)
   yield q("DISTINCT aggregate ordered by a division", "SELECT array_agg(DISTINCT (t || ': ' || (i4::float8 / 2)::text) ORDER BY (t || ': ' || (i4::float8 / 2)::text)), array_agg(DISTINCT i4::float8 / nullif(i2, 0) ORDER BY i4::float8 / nullif(i2, 0)) FROM typed WHERE id < 100");
   yield q("division by zero, a float", "SELECT id, i4::float8 / i2 FROM typed WHERE id = 1");
@@ -1842,16 +1923,87 @@ function* matrix(): Generator<Matrixed> {
       "date_trunc('month', at, 'UTC'), date_trunc('century', at, 'Europe/Berlin'), date_trunc('week', at, 'utc'), date_trunc('second', at, 'Australia/Lord_Howe'), date_trunc('quarter', at, 'Etc/UTC') FROM instants ORDER BY id", zone);
     yield q(`date_trunc of a date as a timestamptz, in ${zone}`, "SELECT id, date_trunc('week', at::date), date_trunc('hour', at::date) FROM instants WHERE isfinite(at) ORDER BY id", zone);
   }
+  // ---- issue 1146: a GROUP BY of a time's unit, grouped by its 15-minute bucket first (src/duck/bucket-group.ts), in
+  // each zone: every unit, every aggregate that adds up from parts, at and either side of every change and month's start
+  const BUCKET_UNITS = ["hour", "day", "week", "month", "quarter", "year"];
+  for (const zone of BUCKET_ZONES) {
+    for (const u of BUCKET_UNITS) {
+      yield q(`issue 1146: a GROUP BY of a timestamptz's ${u}, every aggregate, in ${zone}`, `SELECT date_trunc('${u}', at) AS k, count(*), count(v), sum(v), min(v), max(v), avg(v), sum(x), avg(x), ` +
+        `min(x), min(f), max(f), min(at), max(at), count(*) FILTER (WHERE v > 50), sum(v) FILTER (WHERE s <> 's1') FROM bucket_edges GROUP BY 1 ORDER BY 1`, zone);
+    }
+  }
+  // (and in UTC, issue 1174: a table this small keeps the row's arithmetic there, its answer held as the bucket's is elsewhere)
+  for (const zone of ["UTC", "Asia/Kathmandu", "America/New_York"]) {
+    yield q(`issue 1146: a time's unit grouped beside another key, a HAVING, a WHERE and a LIMIT, in ${zone}`, "SELECT date_trunc('month', at) AS m, s, count(*), sum(v) FROM bucket_edges WHERE id % 3 <> 0 " +
+      "GROUP BY date_trunc('month', at), s HAVING count(*) > 2 ORDER BY m DESC NULLS FIRST, s LIMIT 25", zone);
+    yield q(`issue 1146: a time's unit inside an expression of the list, sorted by the expression, in ${zone}`, "SELECT to_char(date_trunc('day', at), 'YYYY-MM-DD') AS d, max(v) - min(v), count(*) FROM bucket_edges " +
+      "GROUP BY date_trunc('day', at) ORDER BY date_trunc('day', at) NULLS FIRST LIMIT 40", zone);
+    yield q(`issue 1146: a time's unit over a join and in a WITH query, in ${zone}`, "WITH w AS (SELECT date_trunc('week', a.at) AS w, count(*) AS n, sum(b.v) AS t FROM bucket_edges a JOIN bucket_edges b ON b.id = a.id + 1 GROUP BY 1) " +
+      "SELECT * FROM w ORDER BY w NULLS FIRST", zone);
+    // a float's sum added in another order may move in its last digit: it keeps its plan, added as Postgres adds it
+    yield q(`issue 1146: a time's unit beside a sum and an average of a float, in ${zone}`, "SELECT date_trunc('day', at) AS d, sum(f), avg(f), count(*) FROM bucket_edges GROUP BY 1 ORDER BY 1", zone);
+    yield q(`issue 1146: a time's unit beside an aggregate that does not add up from parts, in ${zone}`, "SELECT date_trunc('quarter', at), count(DISTINCT v), string_agg(DISTINCT s, ',' ORDER BY s), count(*) FROM bucket_edges GROUP BY 1 ORDER BY 1", zone);
+    // two columns' units (one column's bucket is read, the other's unit computed a row), and keys of no unit
+    yield q(`issue 1146: two columns' units over a join, in ${zone}`, "SELECT date_trunc('month', a.at) AS m, date_trunc('year', b.at) AS y, sum(a.x), count(*) FROM bucket_edges a " +
+      "JOIN bucket_edges b ON b.id = a.id + 7 GROUP BY 1, 2 ORDER BY 1 NULLS FIRST, 2 NULLS FIRST", zone);
+    yield q(`issue 1146: a time's unit beside a key of the time that is no unit, and an output named as a key it is not, in ${zone}`,
+      "SELECT upper(s) AS s, date_trunc('month', at) AS m, extract(dow FROM at) AS dow, count(*), sum(v) FROM bucket_edges WHERE at BETWEEN '1980-01-01' AND '2100-01-01' " +
+      "GROUP BY s, 2, 3 ORDER BY s DESC, m, dow LIMIT 60", zone);
+    // an ORDER BY item is what Postgres binds it to (the database's ICU text sorted by number is a COLLATE expression)
+    yield q(`issue 1146: a time's unit and a text key sorted by number, by name and by a column no output names, in ${zone}`,
+      "SELECT date_trunc('month', at) w, s AS status, count(*) FROM bucket_edges GROUP BY 1, 2 ORDER BY 1 NULLS FIRST, 2", zone);
+    yield q(`issue 1146: a time's unit sorted after a key no output names, in ${zone}`,
+      "SELECT date_trunc('month', at) w, count(*) FROM bucket_edges GROUP BY 1, s, v ORDER BY s DESC, v NULLS FIRST, 1 NULLS FIRST", zone);
+    yield q(`issue 1146: a time's unit beside a constant key, sorted by number, in ${zone}`,
+      "SELECT date_trunc('month', at) w, 1 AS one, count(*) FROM bucket_edges GROUP BY 1, 2 ORDER BY 2, 1 NULLS FIRST", zone);
+    yield q(`issue 1146: a time's unit grouped by its number and sorted by its count, in ${zone}`, "SELECT date_trunc('hour', at) AS h, count(*) FROM bucket_edges GROUP BY 1 ORDER BY 2 DESC, 1 NULLS FIRST LIMIT 12", zone);
+    // issue 1174: two units of one column, a truncation in a zone of its own, and a DISTINCT over the grouping
+    yield q(`issue 1174: two units of one time grouped, in ${zone}`, "SELECT date_trunc('month', at) AS m, date_trunc('hour', at) AS h, count(*), sum(x) FROM bucket_edges " +
+      "GROUP BY 1, 2 HAVING count(*) > 0 ORDER BY m NULLS FIRST, 2 DESC NULLS LAST", zone);
+    yield q(`issue 1174: a time's unit in a zone of its own grouped beside the session's, in ${zone}`, "SELECT date_trunc('day', at) AS d, date_trunc('day', at, 'UTC') AS u, " +
+      "date_trunc('month', at, 'Asia/Kathmandu') AS k, count(*) FROM bucket_edges GROUP BY 1, 2, 3 ORDER BY 1 NULLS FIRST, 2 NULLS FIRST, 3 NULLS FIRST", zone);
+    yield q(`issue 1174: a DISTINCT over a time's unit grouped, in ${zone}`, "SELECT DISTINCT date_trunc('year', at) AS y, count(*) > 100 AS many FROM bucket_edges GROUP BY date_trunc('week', at), 1 " +
+      "ORDER BY 1 NULLS FIRST, 2", zone);
+  }
+  // ---- issue 1160: a key over the smaller side of a grouped join computed on that side, before the join
+  // (src/duck/side-first.ts): the shop's 31 customers against its 400 orders, an inner, LEFT, RIGHT and FULL join (the
+  // customers' side null-extended), the key in a HAVING and an ORDER BY by its expression; beside a time's bucket key
+  // (issue 1146) of the larger side; and the instants (±infinity, NULL, before 1970) against the bucket edges
+  for (const zone of ["UTC", "Asia/Kathmandu", "America/New_York", "Pacific/Chatham"]) {
+    yield q(`issue 1160: the customers' signup year beside the orders' month, revenue, in ${zone}`, "SELECT date_trunc('month', o.created_at) AS month, date_trunc('year', c.created_at) AS signup_year, " +
+      "sum(o.amount) AS revenue FROM orders o JOIN customers c ON c.id = o.customer_id GROUP BY 1, 2 ORDER BY 1, 2", zone);
+    yield q(`issue 1160: the customers' week and lowered name over a LEFT JOIN from the orders, in ${zone}`, "SELECT date_trunc('week', c.created_at) AS w, lower(c.name) AS n, count(o.id), " +
+      "sum(o.amount) FROM orders o LEFT JOIN customers c ON c.id = o.customer_id GROUP BY 1, 2 ORDER BY 1 NULLS FIRST, 2 NULLS FIRST", zone);
+    yield q(`issue 1160: the customers' quarter over a RIGHT and a FULL join, in ${zone}`, "SELECT date_trunc('quarter', c.created_at) AS q, c.tenant_id IS NULL AS lone, count(*), max(o.amount) " +
+      "FROM customers c RIGHT JOIN orders o ON o.customer_id = c.id GROUP BY 1, 2 ORDER BY 1 NULLS FIRST, 2", zone);
+    yield q(`issue 1160: the customers' month and tenant over a FULL join, in ${zone}`, "SELECT date_trunc('month', c.created_at) AS m, coalesce(c.tenant_id, 'none') AS t, count(o.id), sum(o.amount) " +
+      "FROM orders o FULL JOIN customers c ON c.id = o.customer_id GROUP BY 1, 2 ORDER BY 1 NULLS FIRST, 2", zone);
+    yield q(`issue 1160: the customers' key in a HAVING and sorted by its expression, in ${zone}`, "SELECT date_trunc('quarter', c.created_at), upper(c.tenant_id), count(*) FROM orders o " +
+      "JOIN customers c ON c.id = o.customer_id GROUP BY date_trunc('quarter', c.created_at), upper(c.tenant_id) HAVING date_trunc('quarter', c.created_at) > '2000-01-01' " +
+      "ORDER BY date_trunc('quarter', c.created_at) DESC, 2", zone);
+    yield q(`issue 1160: an instant's day beside the bucket edges' month, in ${zone}`, "SELECT date_trunc('day', i.at) AS d, date_trunc('month', b.at) AS m, count(*), sum(b.v) " +
+      "FROM bucket_edges b JOIN instants i ON i.id = b.id % 26 + 1 GROUP BY 1, 2 ORDER BY 1 NULLS FIRST, 2 NULLS FIRST", zone);
+    yield q(`issue 1160: an instant's hour and its finiteness over a LEFT JOIN from the bucket edges, in ${zone}`, "SELECT date_trunc('hour', i.at) AS h, isfinite(i.at) AS f, count(b.id), max(b.x) " +
+      "FROM bucket_edges b LEFT JOIN instants i ON i.id = b.id % 40 GROUP BY 1, 2 ORDER BY 1 NULLS FIRST, 2 NULLS FIRST", zone);
+  }
   // ---- issue 464: to_char of a time in a format DuckDB's strftime writes (src/duck/to-char.ts strftimeTemplate), and
   // Metabase's US week grouped by the engine's integer: each side of a clock change, before 1970, a zone's local mean
   // time, a year's end, a leap day, ±infinity and NULL, in zones of daylight saving and of a quarter hour ---------------
   const FORMATS = ["YYYY-MM", "YYYY-MM-DD", "Mon YYYY", "FMMonth YYYY", "Dy DD Mon", "FMDay, DDD", "YYYY-MM-DD HH24:MI:SS", "YYYY-MM-DD\"T\"HH24:MI:SS.US", "HH24:MI:SS.MS", "IYYY-IW", "YYYY \"100%\" MM", "YYYY-\"Q\"Q", "Month YYYY"];
+  const PATTERNS = ["Day|DAY|day|FMDay|FMDAY|Dy|DY|dy|Mon|MON|mon|Month|MONTH|month|FMMONTH|FMmonth", "Q|Qth|QTH|DDth|FMDDth|ddTH|FMDD|FMMM|J|Jth|W|WW|FMWW|IW|FMIW|IDDD|FMIDDD|ID|D|CC|CCth",
+    "RM|rm|FMRM|Y,YYY|Y,YYYth|YYY|YY|Y|FMYY|IYY|IY|I|FMIYYY|FMYYYY|yyyy-mm-dd|iyyy-iw", "HH12:MI AM|hh p.m.|a.m.|PM|FMHH12|FMHH24:FMMI:FMSS|HH24th|SSSS|SSSSS|FF1|FF2|FF4|FF5|FMMS|FMUS|FMFF3",
+    "AD|ad|BC|b.c.|A.D.", "TMMonth|MonthTH|DyTH"];
   for (const zone of ["UTC", "America/New_York", "Asia/Kathmandu", "Australia/Lord_Howe"]) {
     yield q(`issue 464: to_char of a timestamptz in a strftime format, in ${zone}`, `SELECT id, ${FORMATS.map((f, i) => `to_char(at, '${f.replace(/'/g, "''")}') AS f${i}`).join(", ")} FROM instants ORDER BY id`, zone);
     yield q(`issue 464: to_char of a timestamp and a date in a strftime format, in ${zone}`, `SELECT id, ${FORMATS.map((f, i) => `to_char(at::timestamp, '${f.replace(/'/g, "''")}') AS t${i}, to_char(at::date, '${f.replace(/'/g, "''")}') AS d${i}`).join(", ")} FROM instants WHERE isfinite(at) ORDER BY id`, zone);
     // a template that writes nothing, the empty one and one prefix an item (the review of PR 955)
     yield q(`issue 464: to_char of an empty template or prefixes alone, in ${zone}`, `SELECT id, ${["FM", '""', "", "FMFM", "FMTMMonth", "FXFMDD"].map((f, i) => `to_char(at, '${f}') AS z${i}, to_char(at::timestamp, '${f}') AS t${i}, to_char(at::date, '${f}') AS d${i}`).join(", ")} FROM instants WHERE isfinite(at) OR at IS NULL ORDER BY id`, zone);
     yield q(`issue 464: to_char of a month grouped, in ${zone}`, "SELECT to_char(i.at, 'YYYY-MM') AS m, count(*) FROM instants i GROUP BY 1 ORDER BY 1 NULLS FIRST", zone);
+    // every pattern the engine writes beside strftime (src/duck/to-char.ts nativeTemplate): each name in each case and
+    // padded or not, the quarter and every number with and without FM and its ordinal, the meridiems, the eras, the Roman
+    // month, the fractions, Y,YYY; and the templates that stay the function's (a translated name, an ordinal of a name)
+    yield q(`issue 464: to_char of every pattern the engine writes, in ${zone}`, `SELECT id, ${PATTERNS.map((f, i) => `to_char(at, '${f}') AS z${i}, to_char(at::timestamp, '${f}') AS t${i}, to_char(at::date, '${f}') AS d${i}`).join(", ")} FROM instants ORDER BY id`, zone);
+    yield q(`issue 464: to_char of a quarter and a padded name grouped, in ${zone}`, "SELECT to_char(i.at, 'YYYY \"Q\"Q') AS q, to_char(i.at, 'Month') AS m, to_char(i.at, 'FMDay DDth') AS d, count(*) FROM instants i GROUP BY 1, 2, 3 ORDER BY 1 NULLS FIRST, 2, 3", zone);
     yield q(`issue 464: Metabase's US week grouped, in ${zone}`, "SELECT ceil((CAST(extract(doy from i.at) AS integer) / 7.0)) AS w, count(*) FROM instants i GROUP BY ceil((CAST(extract(doy from i.at) AS integer) / 7.0)) ORDER BY ceil((CAST(extract(doy from i.at) AS integer) / 7.0)) ASC NULLS FIRST", zone);
   }
   // date_trunc is strict and reads its zone before the part: a NULL zone is NULL for every part (an infinite instant's
@@ -2060,6 +2212,23 @@ function* matrix(): Generator<Matrixed> {
   yield q("count(DISTINCT id) over a join to a composite key's table (repeated)", "SELECT count(DISTINCT k.id), count(k.id) FROM keyed k JOIN pairs p ON p.id = k.id");
   yield q("count(DISTINCT id) over a join on a partial unique index's column (repeated)", "SELECT count(DISTINCT k.id), count(k.id) FROM keyed k JOIN keyed r ON r.part = k.part");
   yield q("count(DISTINCT id) of a composite key's table joined on the other's key", "SELECT k.code, count(DISTINCT p.id), count(DISTINCT p.line) FROM pairs p LEFT JOIN keyed k ON k.id = p.id GROUP BY 1 ORDER BY 1 NULLS FIRST");
+  // ---- a join on a declared reference, on its hidden integer keys (src/duck/reference-keys.ts, issue 1144): each kind of
+  // key, an inner, LEFT, RIGHT and FULL join, the WHERE of a list of tables, two references at once, a sort and a limit
+  // over it; and what reads the keys themselves: `=` as a value, USING, IN, a subquery's column ------------------------
+  yield q("reference: a uuid key joined, grouped", "SELECT p.label, count(*), sum(c.v) FROM rchild c JOIN rparent p ON c.u = p.u GROUP BY 1 ORDER BY 1 NULLS FIRST");
+  yield q("reference: a text key from a varchar, LEFT", "SELECT c.id, p.pk FROM rchild c LEFT JOIN rparent p ON p.code = c.code ORDER BY 1, 2");
+  yield q("reference: a key of two columns, FULL", "SELECT c.id, p.pk FROM rchild c FULL JOIN rparent p ON c.t = p.t AND c.n = p.n ORDER BY 1, 2");
+  yield q("reference: a sparse bigint key in a WHERE", "SELECT c.id, p.label FROM rchild c, rparent p WHERE c.big = p.big ORDER BY 1, 2");
+  yield q("reference: RIGHT, sorted and limited", "SELECT c.id, p.pk FROM rparent p RIGHT JOIN rchild c ON p.u = c.u WHERE c.v > 20 ORDER BY c.v DESC, p.pk LIMIT 3");
+  yield q("reference: two at once, LEFT from the parent", "SELECT p.pk, count(c.id) FROM rparent p LEFT JOIN rchild c ON c.u = p.u AND c.code = p.code GROUP BY 1 ORDER BY 1");
+  yield q("reference: DISTINCT over a text key's join", "SELECT DISTINCT p.label FROM rchild c JOIN rparent p ON c.code = p.code ORDER BY 1 NULLS FIRST");
+  yield q("reference: a key of two columns, the late select list", "SELECT c.id, p.label FROM rchild c JOIN rparent p ON c.t = p.t AND c.n = p.n ORDER BY c.v DESC LIMIT 2");
+  yield q("reference: two keys in one ON", "SELECT count(*), sum(c.v) FROM rchild c JOIN rparent p ON c.u = p.u AND c.big = p.big");
+  yield q("reference: a window over the join", "SELECT c.id, p.pk, row_number() OVER (PARTITION BY p.pk ORDER BY c.id) FROM rchild c JOIN rparent p ON p.u = c.u ORDER BY 1, 2");
+  yield q("reference: = as a value reads the keys", "SELECT c.id, p.pk, c.u = p.u, c.code = p.code FROM rchild c JOIN rparent p ON p.pk = c.id ORDER BY 1");
+  yield q("reference: USING reads the keys", "SELECT c.id, p.pk FROM rchild c JOIN rparent p USING (u) ORDER BY 1, 2");
+  yield q("reference: IN a subquery reads the keys", "SELECT c.id FROM rchild c WHERE c.code IN (SELECT p.code FROM rparent p) ORDER BY 1");
+  yield q("reference: a subquery's column reads the keys", "SELECT c.id, s.label FROM rchild c JOIN (SELECT u, label FROM rparent) s ON s.u = c.u ORDER BY 1, 2");
   yield q("window frames", "SELECT id, sum(i4) OVER (ORDER BY id RANGE BETWEEN 2 PRECEDING AND CURRENT ROW), count(*) OVER (ORDER BY ts RANGE BETWEEN interval '1 day' PRECEDING AND interval '1 day' FOLLOWING), sum(i4) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND 2 FOLLOWING), max(i4) OVER (ORDER BY id GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW), sum(i4) OVER (ORDER BY id ROWS UNBOUNDED PRECEDING EXCLUDE CURRENT ROW), sum(i4) OVER (ORDER BY id RANGE UNBOUNDED PRECEDING) FROM typed WHERE id < 100 ORDER BY id");
 }
 
@@ -2128,6 +2297,75 @@ function* wholeCases(): Generator<Matrixed> {
   yield q("whole: div()'s own arithmetic", "SELECT id, div(b, 2) * div(b, 2) AS sq, div(i, 2) * a AS m, div(i, 2) + m AS p, div(i, 2) / 3 AS q, round(div(i, 2), 2) AS r, div(i, 2)::text AS t FROM public.bins ORDER BY id");
 }
 
-export const TYPE_MATRIX: Matrixed[] = [...matrix(), ...mappedTypes(), ...binCases(), ...wholeCases(),...FROM_ITEMS_SORTED.map((f) => q(f.name, f.sql, f.zone)),
+/**
+ * EACH UNIT UNDER EVERY SPELLING POSTGRES TAKES (issue 1167; oracle/unit-spellings.ts, from Postgres's own tables):
+ * `date_part('seconds', ts)` once lost the fraction of a second `date_part('second', ts)` kept, and `date_part('hour',
+ * d)` was refused where `date_part('h', d)` answered. A unit's spellings are asked side by side, of a date, a timestamp,
+ * a timestamptz (in UTC and in Asia/Kathmandu, +5:45), a time and an interval, over `typed`'s rows (a fraction of a
+ * second, ±infinity, 24:00, a negative interval, NULL). extract of a unit that grows with time reads the ordinary rows:
+ * an infinite one is refused by name (`infinite-extract`), its spellings alike. Each spelling Postgres refuses is asked
+ * too, and must be refused alike.
+ */
+function* unitSpellings(): Generator<Matrixed> {
+  const growing = new Set(["year", "decade", "century", "millennium", "isoyear", "epoch", "julian"]);
+  const BC_YEARS = new Set(["year", "decade", "isoyear"]);
+  const list = (spelled: string[], call: (s: string) => string): string => spelled.map(call).join(", ");
+  for (const [unit, { all, trunc }] of spellings()) {
+    for (const c of ["d", "ts", "tz", "tm", "iv"] as const) {
+      for (const zone of c === "tz" || c === "d" ? ["UTC", "Asia/Kathmandu"] : ["UTC"]) {
+        const at = zone === "UTC" ? "" : ` in ${zone}`;
+        const z = zone === "UTC" ? undefined : zone;
+        // (row 103's year 4713 BC is issue 1108's, open: a year, a decade and an ISO year of a date before year 1)
+        yield q(`unit spellings: date_part of ${c}'s ${unit}${at}`, `SELECT id, ${list(all, (s) => `date_part('${s}', ${c})`)} FROM typed ${BC_YEARS.has(unit) ? "WHERE id <> 103 " : ""}ORDER BY id`, z);
+        yield q(`unit spellings: extract of ${c}'s ${unit}${at}`, `SELECT id, ${list(all, (s) => `extract('${s}' FROM ${c})`)} FROM typed ${growing.has(unit) && c !== "tm" && c !== "iv" ? `WHERE ${ORDINARY} ` : ""}ORDER BY id`, z);
+        // (a time's date_trunc is the interval's, refused by name: time-date-trunc)
+        if (trunc.length > 0 && c !== "tm") yield q(`unit spellings: date_trunc of ${c}'s ${unit}${at}`, `SELECT id, ${list(trunc, (s) => `date_trunc('${s}', ${c})`)} FROM typed ORDER BY id`, z);
+        if (trunc.length > 0 && c === "tz") yield q(`unit spellings: date_trunc of ${c}'s ${unit} in a zone of its own${at}`, `SELECT id, ${list(trunc, (s) => `date_trunc('${s}', ${c}, 'Asia/Kathmandu')`)} FROM typed ORDER BY id`, z);
+      }
+    }
+  }
+  // spellings datetktbl holds, which date_trunc does not read; a reserved word; one no table holds; a space; a month
+  for (const s of ["epoch", "dow", "mm", "jd", "infinity", "now", "foo", " second", "second ", "jan", "isoyears"]) {
+    for (const c of ["d", "ts", "tz", "tm", "iv"]) {
+      yield q(`unit spellings: date_part('${s}', ${c})`, `SELECT id, date_part('${s}', ${c}) FROM typed ORDER BY id`);
+      yield q(`unit spellings: extract('${s}' FROM ${c})`, `SELECT id, extract('${s}' FROM ${c}) FROM typed WHERE ${ORDINARY} ORDER BY id`);
+      if (c !== "tm") yield q(`unit spellings: date_trunc('${s}', ${c})`, `SELECT id, date_trunc('${s}', ${c}) FROM typed ORDER BY id`);
+    }
+  }
+  // EXTRACT's own syntax: a keyword, a name Postgres lowercases, one it quotes (and lowercases as a unit); `dec`, a
+  // keyword of another meaning, which only the quoted form takes (bare, it is Postgres's syntax error, 42601)
+  yield q("unit spellings: EXTRACT(… FROM) by a name", "SELECT id, EXTRACT(SECOND FROM ts), extract(seconds FROM ts), EXTRACT(SECS FROM tz), extract(\"Msec\" FROM tm), EXTRACT(mon FROM iv), EXTRACT(Hours FROM ts) FROM typed ORDER BY id");
+  yield q("unit spellings: extract('dec' FROM)", `SELECT id, extract('dec' FROM ts), EXTRACT(qtr FROM tz), EXTRACT(us FROM tm) FROM typed WHERE ${ORDINARY} ORDER BY id`);
+  yield q("unit spellings: EXTRACT(dec FROM), a syntax error", `SELECT id, EXTRACT(dec FROM ts) FROM typed WHERE ${ORDINARY} ORDER BY id`);
+  // A DATE'S JULIAN DAY (the review of PR 1170): a whole numeric, under each spelling, of a date before year 1 and of
+  // ±infinity (refused by name, `infinite-extract`: the engine's DECIMAL has no Infinity), and filtered by it, where
+  // an infinite row must be refused, never dropped. date_part reads the date as a timestamp: ±Infinity
+  yield q("unit spellings: extract of a date's Julian day, every row", "SELECT id, extract(julian FROM d), extract('jd' FROM d), extract('J' FROM d) FROM typed ORDER BY id");
+  yield q("unit spellings: extract of a date's Julian day, finite", "SELECT id, extract(julian FROM d), extract('jd' FROM d), extract('j' FROM d), extract(julian FROM d) - 2440588 AS since_1970 FROM typed WHERE isfinite(d) OR d IS NULL ORDER BY id");
+  yield q("unit spellings: filtered by a date's Julian day", "SELECT id FROM typed WHERE extract('jd' FROM d) > 2451545 ORDER BY id");
+  yield q("unit spellings: date_part of a date's Julian day", "SELECT id, date_part('julian', d), date_part('jd', d), date_part('j', d) FROM typed ORDER BY id");
+  // issue 1006: a short spelling's fraction of a second inside a sum, and of an interval
+  yield q("unit spellings: summed (issue 1006)", `SELECT sum(extract(sec FROM ts)), sum(extract(seconds FROM ts)), sum(extract(msec FROM tz)), sum(extract(usecs FROM tm)), sum(extract(sec FROM iv)), sum(extract(ms FROM iv)) FROM typed WHERE ${ORDINARY}`);
+  // a unit's spelling as a key: grouped, filtered and sorted by it
+  yield q("unit spellings: grouped by date_part('secs')", "SELECT date_part('secs', ts) AS s, count(*) FROM typed GROUP BY 1 ORDER BY 1 NULLS FIRST");
+  yield q("unit spellings: filtered by date_part('ms')", "SELECT id FROM typed WHERE date_part('ms', ts) > 500 ORDER BY id");
+  yield q("unit spellings: grouped by date_trunc('hrs') in Asia/Kathmandu", "SELECT date_trunc('hrs', tz) AS h, count(*) FROM typed GROUP BY 1 ORDER BY 1 NULLS FIRST", "Asia/Kathmandu");
+  // PR 1106's, carried over. A TIMETZ'S UNITS under every spelling, over `mapped`'s (offsets with seconds, 24:00): its
+  // epoch is its time of day less its offset east, in any session zone (it was the time of day alone)
+  for (const [unit, { all }] of spellings()) {
+    yield q(`unit spellings: date_part and extract of a timetz's ${unit}`, `SELECT id, ${list(all, (s) => `date_part('${s}', tz)`)}, ${list(all, (s) => `extract('${s}' FROM tz)`)} FROM mapped ORDER BY id`);
+  }
+  for (const zone of ["UTC", "America/New_York", "Asia/Kolkata"]) {
+    yield q(`unit spellings: a timetz's epoch in ${zone}`, "SELECT id, extract(epoch FROM tz), date_part('epoch', tz), extract(epoch FROM tz3), date_part('epoch', tz3), sum(extract(epoch FROM tz)) OVER () FROM mapped ORDER BY id", zone === "UTC" ? undefined : zone);
+  }
+  // A TIMESTAMP'S JULIAN DAY: Postgres's numeric quotient at its row's scale (28, 24 or 20 decimals), in every reader
+  // that writes its text, summed and averaged; and a quotient's text in concat, format and json (it was its double's)
+  yield q("unit spellings: a timestamp's Julian day's text in every reader", "SELECT id, extract('jd' from ts)::text, length(extract('julian' from ts)::text), concat(extract('j' from tz)), " +
+    `format('%s', extract('julian' from ts)), to_json(extract('jd' from tz)), json_build_object('j', extract('julian' from ts)), extract('julian' from ts) || '' FROM typed WHERE ${ORDINARY} ORDER BY id`);
+  yield q("unit spellings: a timestamp's Julian day summed", `SELECT avg(extract('jd' from ts)), sum(extract('julian' from tz)), min(extract('j' from ts)), max(extract('julian' from tz)) FROM typed WHERE ${ORDINARY}`);
+  yield q("unit spellings: a quotient's text in concat, format and json", `SELECT id, concat(n / 7), format('%s', n2 / 3), to_json(n / 7), json_build_object('q', n2 / 3), (n / 7) || '', concat(avg(n2) OVER ()) FROM typed WHERE ${ORDINARY} ORDER BY id`);
+}
+
+export const TYPE_MATRIX: Matrixed[] = [...matrix(), ...mappedTypes(), ...binCases(), ...wholeCases(), ...unitSpellings(), ...FROM_ITEMS_SORTED.map((f) => q(f.name, f.sql, f.zone)),
   // issue 665: a quotient grouped by its exact key alone, its day of the year read in the session's zone
   q("issue 665: the week of year grouped in a session zone of daylight saving", "SELECT ceil(cast(extract(doy from o.created_at) as integer) / 7.0) AS w, count(*) FROM orders o GROUP BY 1 ORDER BY 1", "America/New_York")];

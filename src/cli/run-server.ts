@@ -21,6 +21,7 @@
  * LOOPBACK BY CONSTRUCTION: `listenOnLoopback` is how this server listens, and it takes no address. No setting names
  * one, and a container's page is reached from inside the container, never published (docs/WEB-UI.md).
  */
+import { presetsForPage } from "./address-presets.ts";
 import * as fs from "node:fs";
 import * as http from "node:http";
 import * as path from "node:path";
@@ -39,7 +40,7 @@ import { liveColumns, syncChoice, type LiveCheck, type SyncChoice } from "./sync
 import { liveReadinessFailure } from "./replication-mode.ts";
 import { unreplicable } from "./source-check.ts";
 import { errorJson, nextJson, type Failure, type NextStep } from "./command.ts";
-import { phaseCounts, readiness, syncTotals, tableSync, type SyncFacts, type SyncTotals } from "./readiness.ts";
+import { phaseCounts, readiness, syncProgressOf, syncTotals, tableSync, type SyncFacts, type SyncTotals } from "./readiness.ts";
 import { restartsFact, type Restart } from "./supervise.ts";
 import { withRestarts, type SyncEvents } from "../duck/events.ts";
 import { fileStamp, syncedDataBytes, walBytes } from "../duck/file-bytes.ts";
@@ -63,6 +64,7 @@ import { eventLimit, requestFilter, requestFilterText, SLOW_MS, timeOf } from ".
 import type { PgApiServer } from "../api/postgres/server.ts";
 import { tunnelReport, type RunShares } from "./share-run.ts";
 import { pageWithIcon } from "./ui-icon.ts";
+import type { TitleFile } from "./ui-title.ts";
 import { UI_ERROR_BODY_MAX, uiErrorReport, type UiErrors } from "./ui-errors.ts";
 import type { PageShares } from "./page-share.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
@@ -129,8 +131,14 @@ export interface RunContext {
   /** MASON_UI_ICON (src/cli/ui-icon.ts): the page's icon, a data: URL validated at the start, or null. Written into the
    *  page's HTML once, when the server starts (`pageWithIcon`) */
   pageIcon?: string | null;
+  /** MASON_UI_TITLE_FILE (src/cli/ui-title.ts): the file the header box's label is read from, read again when the page's
+   *  document is loaded (`GET /`) and when a command asks the whole state (`?columns=1`), never on the page's polls; or
+   *  null, and `/api/state` says no `pageTitle` */
+  pageTitle?: Pick<TitleFile, "read" | "last"> | null;
   /** MASON_UI_SOCKET (src/cli/ui-socket.ts): the Unix socket the page is served on too, or null */
   pageSocket?: string | null;
+  /** mason serve's MCP endpoint (src/cli/mcp-http.ts): its public address and issuer, or null when it is off */
+  mcp?: { url: string; issuer: string } | null;
   /** the project's database is the demo database this run hosts (`mason init demo`, src/cli/demo.ts): mason status says so */
   demo?: boolean;
   /** the project's users (src/cli/user.ts): what `/api/users` lists and changes, with the functions `mason user` calls —
@@ -143,7 +151,7 @@ export interface RunContext {
   roles?: () => RolesLive;
   /** what `mason share` opens (src/cli/share-run.ts): mason start's run alone; a server has an address of its own */
   shares?: RunShares;
-  /** the web page's Temporary cloud login (src/cli/page-share.ts): the same shares, held by the page's beats; absent with `shares` */
+  /** the web page's Temporary cloud tunnel (src/cli/page-share.ts): the same shares, held by the page's beats; absent with `shares` */
   pageShares?: PageShares;
   /** the web page's own errors (src/cli/ui-errors.ts): `POST /api/ui/error` records them, `/metrics` counts them;
    *  absent, the route answers 404 and `/metrics` says no count */
@@ -314,6 +322,9 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
       // its last sync asked by hand in this run (mason sync, the page's Sync now; src/cli/sync-by-hand.ts): syncing,
       // then what it did or why it failed — `POST /api/sync` answers as it starts, and the page follows it here
       ...(byHand !== null ? { syncByHand: byHand } : {}),
+      // HOW FAR THAT SYNC BY HAND IS, while it runs (issue 1173): its rows counted as they arrive, and a share only where a
+      // total is known (src/cli/readiness.ts syncProgressOf) — mason status and the page render it, never the old full bar
+      ...(byHand?.state === "syncing" ? { syncProgress: syncProgressOf(byHand.startedAt, c?.polling, now) } : {}),
       // THE RUN'S OWN SYNC OF IT RUNNING NOW, and since when (issue 1011): `copy` its whole read (a first sync, or read
       // again whole), `catch-up` the one poll after it — the page's Sync events lists it while it runs. A compaction is
       // no sync of the database's rows, and is not said here
@@ -354,6 +365,12 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     pageCard: ctx.pageCard ?? null,
     // the Unix socket the page is served on too (MASON_UI_SOCKET), or null: mason status says it
     pageSocket: ctx.pageSocket ?? null,
+    // the header box's label (MASON_UI_TITLE_FILE, src/cli/ui-title.ts): { label, problem } as last read; absent unset
+    ...(ctx.pageTitle ? { pageTitle: ctx.pageTitle.last() } : {}),
+    // mason serve's MCP endpoint (MASON_MCP_URL), or null: mason status and the Users page say it
+    mcp: ctx.mcp ?? null,
+    // the address ranges hosted agents' companies publish (src/cli/address-presets.ts): the Users page's Connects from
+    addressPresets: presetsForPage(),
     source: { url: maskedUrl(ctx.source.url), host: ctx.source.host, database: ctx.source.database, remote: ctx.source.remote, demo: ctx.demo === true,
       // `replication` while a table's sync is replication (the run streams), else `poll`: each table's own is its kept
       version: facts.versionText, standby: facts.standby, changes: repl !== null ? "replication" : "poll", name: sources.file?.name ?? null, file: sources.file?.file ?? null,
@@ -893,16 +910,17 @@ async function openShare(ctx: RunContext, req: http.IncomingMessage, res: http.S
 const SERVED_SHARE: Failure = { message: "this run is on a server, and has an address of its own: mason share is for a run on a laptop", code: "refused", next: [["mason help production", "reaching a server's Postgres API"]] };
 
 /**
- * `POST /api/share` { from: "page", confirmed: true, role? }: the web page's Temporary cloud login (src/cli/page-share.ts),
+ * `POST /api/share` { from: "page", confirmed: true, role? }: the web page's Temporary cloud tunnel (src/cli/page-share.ts),
  * answered ONCE with the share and its password, which nothing here keeps; the page's beats hold it from then on.
- * `confirmed` is the person's yes to a public address: on the page, the click on Open a cloud login is that yes, the
- * pane's sentence ("…Opens a public address with a login of its own, until you stop it.") what the person has read
+ * `confirmed` is the person's yes to a public address: on the page, the click on Open a cloud tunnel is that yes, the
+ * pane's sentence ("…Opens an address reachable online, protected by a login and password of its own, until you stop
+ * it.") what the person has read
  * before it, and no question follows. It is still required of the request: a body without it opens nothing.
  */
 async function openPageShare(ctx: RunContext, body: { role?: unknown; confirmed?: unknown }, res: http.ServerResponse): Promise<void> {
   if (ctx.pageShares === undefined) { sendFailure(res, 409, SERVED_SHARE); return; }
   if (body.confirmed !== true) {
-    sendFailure(res, 400, { message: "nothing was shared: a temporary public address is opened only once the person said yes to it", code: "usage", fix: "send { from: \"page\", confirmed: true, role? }: the Users page's Temporary cloud login sends it once the person clicks Open a cloud login" });
+    sendFailure(res, 400, { message: "nothing was shared: a temporary public address is opened only once the person said yes to it", code: "usage", fix: "send { from: \"page\", confirmed: true, role? }: the Users page's Temporary cloud tunnel sends it once the person clicks Open a cloud tunnel" });
     return;
   }
   if (body.role !== undefined && typeof body.role !== "string") throw new Refusal(400, "role is a role's name, or left out");
@@ -978,6 +996,8 @@ export function createRunServer(ctx: RunContext): http.Server {
       try {
         const file = method === "GET" ? page.get(url.pathname) : undefined;
         if (file !== undefined) {
+          // the page loads: its header's label is read again (MASON_UI_TITLE_FILE), for the state it asks next
+          if (url.pathname === "/" && ctx.pageTitle) await ctx.pageTitle.read();
           res.writeHead(200, { "Content-Type": file.type, "Content-Length": file.body.length, ...(file.immutable ? { "Cache-Control": IMMUTABLE } : {}) })
             .end(file.body);
         } else if (method === "GET" && url.pathname === "/api/ping") {
@@ -988,7 +1008,10 @@ export function createRunServer(ctx: RunContext): http.Server {
           // ?fresh=1 (mason add, before it checks its tables): the database as it is now, waited for
           const fresh = url.searchParams.get("fresh") === "1";
           if (fresh && !await readNow(ctx, req, res)) return;
-          const body = await state(ctx, url.searchParams.get("columns") === "1", !fresh) as Record<string, unknown>;
+          const columns = url.searchParams.get("columns") === "1";
+          // a command's whole state (mason status) reads the header's label again; the page's lean polls never do
+          if (columns && ctx.pageTitle) await ctx.pageTitle.read();
+          const body = await state(ctx, columns, !fresh) as Record<string, unknown>;
           // ?storage=1 (mason upgrade --check): what the synced data holds of each table, as a start reads it (src/duck/
           // reread.ts). Asked alone, never by the page's poll: it reads the engine's catalog of every synced table
           sendJson(res, 200, url.searchParams.get("storage") === "1" && ctx.duck.storage !== undefined ? { ...body, storage: await ctx.duck.storage() } : body);
@@ -1134,7 +1157,7 @@ export function createRunServer(ctx: RunContext): http.Server {
           const ended = ctx.shares.ended;
           const why = ended?.user === user ? `: ${ended.why}` : "";
           const ok = method === "DELETE" ? await ctx.pageShares.stop(user) : ctx.pageShares.beat(user);
-          if (!ok) { sendFailure(res, 404, { message: `the share ${user} is not open${why === "" ? "" : `; it ended${why}`}`, code: "not_found", fix: "Open a cloud login, in the Users page's Temporary cloud login, opens a new one, with a new address and password" }); return; }
+          if (!ok) { sendFailure(res, 404, { message: `the share ${user} is not open${why === "" ? "" : `; it ended${why}`}`, code: "not_found", fix: "Open a cloud tunnel, in the Users page's Temporary cloud tunnel, opens a new one, with a new address and password" }); return; }
           sendJson(res, 200, { ok: true });
         } else if (method === "POST" && /^\/api\/share\/[^/]+$/.test(url.pathname)) {
           // what the command knows of its tunnel, as it knows it: mason status says it, and the run stops the client

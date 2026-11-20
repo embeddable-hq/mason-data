@@ -362,8 +362,10 @@ export const STATISTICS_WALL = "try(COLUMNS(*))";
  *  hold the barrier's shapes by itself. Nothing in src/ sets it */
 export const wallSwitch = { statistics: true };
 
-/** the walls Mason wrote into a statement: their select's name, which nothing the statement wrote holds, and how many */
-export interface Walls { alias: string; reads: number }
+/** the walls Mason wrote into a statement: their select's name, which nothing the statement wrote holds, and how many.
+ *  `written` is every name the filtered reads hold that Mason wrote (the walls', the parents' reads), which the names
+ *  Mason invents for the statement need not keep apart from (src/duck/own-names.ts `ownPrefix`) */
+export interface Walls { alias: string; reads: number; written?: readonly string[] }
 
 /** a name for the walls that no string of the statement holds (its names, its literals), so nothing of the user's can be
  *  taken for Mason's: a name is no proof of whose a subquery is unless it is chosen after reading the statement. The
@@ -412,15 +414,16 @@ export function wallStatistics(tree: unknown, walls: Walls): void {
 
 /** the filtered read of `table` as SQL: its rows the filter keeps, `through:` read through its parent's filtered read;
  *  behind the barrier at its outermost (`depth` 1), where the statement meets it */
-export function filteredSql(table: string, filters: ReadonlyMap<string, BoundFilter>, depth = 1, wall = WALL): string {
+export function filteredSql(table: string, filters: ReadonlyMap<string, BoundFilter>, depth = 1, wall = WALL, written: Set<string> = new Set()): string {
   const f = filters.get(table);
   if (f === undefined) return `SELECT * FROM ${tableSql(table)}`;
   // the select around the barrier, for the wall (`wallStatistics`)
-  const walled = (read: string): string => depth === 1 ? `SELECT * FROM (${read} ${BARRIER}) AS ${wall}` : read;
+  const walled = (read: string): string => { if (depth === 1) written.add(wall); return depth === 1 ? `SELECT * FROM (${read} ${BARRIER}) AS ${wall}` : read; };
   if (f.predicate !== undefined) return walled(`SELECT * FROM ${tableSql(table)} WHERE (${f.predicate})`);
   const t = f.through!;
   const p = `__mason_parent${depth}`;
-  return walled(`SELECT * FROM ${tableSql(table)} WHERE EXISTS (SELECT 1 FROM (${filteredSql(t.parent, filters, depth + 1)}) AS ${p} WHERE ${p}.${quoteIdent(t.parentColumn)} = ${tableSql(table)}.${quoteIdent(t.column)})`);
+  written.add(p);
+  return walled(`SELECT * FROM ${tableSql(table)} WHERE EXISTS (SELECT 1 FROM (${filteredSql(t.parent, filters, depth + 1, WALL, written)}) AS ${p} WHERE ${p}.${quoteIdent(t.parentColumn)} = ${tableSql(table)}.${quoteIdent(t.column)})`);
 }
 
 /** the items a select's FROM reads itself: never a subquery's, through its JOINs */
@@ -564,11 +567,12 @@ export async function expandRowFilters(catalog: Catalog, stmt: Node, analysis: P
   const qualified = new Set<string>();
   const parsedOf = new Map<string, unknown>();
   const wall = wallName(tree);
+  const written = new Set<string>();
   for (const [i, table] of asFiltered) {
     const r = ranges[i]!;
     let sub = parsedOf.get(table);
     if (sub === undefined) {
-      const s = (await parseSql(filteredSql(table, filters, 1, wall))).stmts?.[0]?.stmt;
+      const s = (await parseSql(filteredSql(table, filters, 1, wall, written))).stmts?.[0]?.stmt;
       if (s === undefined) throw new Error(`the filtered read of ${table} did not parse: report it`);
       parsedOf.set(table, s);
       sub = s;
@@ -596,5 +600,5 @@ export async function expandRowFilters(catalog: Catalog, stmt: Node, analysis: P
   const tables = new Set<string>();
   const reach = (t: string): void => { if (tables.has(t)) return; const f = filters.get(t); if (f === undefined) return; tables.add(t); if (f.through) reach(f.through.parent); };
   for (const t of found) reach(t);
-  return { text, stmt: back as Node, walls: { alias: wall, reads: asFiltered.size }, tables: [...tables] };
+  return { text, stmt: back as Node, walls: { alias: wall, reads: asFiltered.size, written: [...written] }, tables: [...tables] };
 }
