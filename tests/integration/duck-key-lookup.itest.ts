@@ -135,8 +135,9 @@ const settled = async (sync: Sync): Promise<void> => { await (sync as unknown as
  * (another test file's, when two run at once) that ran during the last poll makes the next poll write again every row
  * the test changed since. `givenAgain` deletes the table's end and polls. Rows written again land in the last row
  * group, which is then not wholly deleted, and no checkpoint drops it. So the table is polled until its last poll's
- * watermark is past a transaction id taken after every change. Measured: a transaction held open on another database
- * across those polls failed the test as #1192 says, with 712 rows written again at the end.
+ * watermark is past a transaction id taken after every change, before the side table is built again over the table.
+ * Measured: a transaction held open on another database from round 1 to the deletes failed the test 3 times in 3 as
+ * #1192 says, with 4,469 rows written again at the end.
  */
 async function pollPastChanges(sync: Sync, store: DuckStore, url: string): Promise<void> {
   const after = BigInt(psql(url, "SELECT pg_current_xact_id()"));
@@ -157,9 +158,8 @@ async function pollPastChanges(sync: Sync, store: DuckStore, url: string): Promi
  * nothing else (`pollPastChanges`).
  */
 async function givenAgain(sync: Sync, store: DuckStore, db: string, url: string, quiet: () => Promise<void>, synced: () => Promise<void>): Promise<void> {
-  await sync.checkCompaction();
-  await settled(sync);
   await quiet();
+  await sync.checkCompaction();
   await settled(sync);
   const one = async (sql: string): Promise<bigint> => (await store.writer.runAndReadAll(sql)).getRowsJS()[0]![0] as bigint;
   const covered = await one("SELECT covered FROM _mason.key_lookups WHERE source = 'public.orders'");
