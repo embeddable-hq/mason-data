@@ -91,3 +91,23 @@ test("a checkpoint whose writer turn never comes fails within its limit and neve
   await sync.onWriter(async () => undefined);
   assert.deepEqual(ran, [], "the turn that came after the limit ran nothing");
 });
+
+test("a checkpoint whose turn comes in the tick its limit passes is still ended: the interrupt is sent again until it lands", { timeout: 120_000 }, async () => {
+  const { store, reader } = await heldBack("same-tick");
+  try {
+    // the review of PR 1190: an interrupt sent in the same tick as the checkpoint's start was lost 30 times in 40
+    for (let round = 0; round < 10; round++) {
+      const sync = turns();
+      let release!: () => void;
+      void sync.onWriter(() => new Promise<void>((r) => { release = r; }));
+      // made before the helper's own timer, with the same delay: it fires first, so the turn begins just before the limit
+      setTimeout(() => release(), 200);
+      const began = Date.now();
+      await assert.rejects(checkpoint(sync, store, 200), (e: Error) => {
+        assert.match(e.message, /FORCE CHECKPOINT waits for every transaction/, `round ${round}`);
+        return true;
+      });
+      assert.ok(Date.now() - began < 10_000, `round ${round}: ended ${Date.now() - began} ms after it began`);
+    }
+  } finally { reader.closeSync(); await store.close(); }
+});

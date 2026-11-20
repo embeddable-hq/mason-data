@@ -46,9 +46,12 @@ export async function checkpoint(sync: object, store: DuckStore, limitMs = CHECK
   const reached = running;
   expired = true;
   if (reached) {
+    // re-sent every 50 ms until the turn ends: an interrupt that lands in the same tick as the checkpoint's start is lost
+    // (30 of 40 in the review of PR 1190), so a turn begun just before the limit would wait unbounded
     store.writer.interrupt();
+    const again = setInterval(() => store.writer.interrupt(), 50);
     // the turn ends with the interrupt, caught above; any other failure of it is thrown here, the more specific
-    await turn;
+    try { await turn; } finally { clearInterval(again); }
   }
   throw new Error(`the checkpoint did not end within ${limitMs / 1000} s (${Date.now() - began} ms). ` +
     (reached
