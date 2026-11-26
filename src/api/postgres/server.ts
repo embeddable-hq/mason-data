@@ -420,6 +420,9 @@ export interface PgApiServer {
   roles(): RolesLive;
   /** the roles with every row filter checked by the catalog Postgres now (it starts it where needed): `mason start`'s line */
   checkRoles(): Promise<RolesLive>;
+  /** the tables of a schema the catalog Postgres leaves out, and why, by `<schema>.<table>` (catalog.ts `PgCatalog.probe`):
+   *  asked by the sync before it says a table is served (src/duck/sync.ts `useCatalogProbe`, issue 1197) */
+  probeCatalog(schema: PgSchema): Promise<ReadonlyMap<string, string>>;
   /** sessions open now (every connection, its login under way included) */
   readonly sessions: number;
   /** the sessions logged in now, by user and client, and how many of each run a statement (`/api/state` `sessions`) */
@@ -3292,9 +3295,11 @@ class Server {
     const s = this.options.schema();
     const r = this.options.roles?.() ?? NO_ROLES;
     if (s !== this.lastSchema || r !== this.lastRoles) {
+      const rolesMoved = r !== this.lastRoles;
       this.lastSchema = s;
       this.lastRoles = r;
-      void this.catalog.replace(s, catalogRolesOf(r)).catch((e: unknown) => this.log(`replacing the catalog failed: ${e instanceof Error ? e.message : String(e)}`));
+      // a schema a probe left the catalog holding is not started again (`PgCatalog.holds`), unless the roles moved
+      if (rolesMoved || !this.catalog.holds(s)) void this.catalog.replace(s, rolesMoved ? catalogRolesOf(r) : undefined).catch((e: unknown) => this.log(`replacing the catalog failed: ${e instanceof Error ? e.message : String(e)}`));
     }
     return s;
   }
@@ -3308,6 +3313,13 @@ class Server {
       plan: (text, stmt, relations) => { this.schema(); return duck.plan(catalog, text, stmt as NonNullable<RawStmt["stmt"]>, 0, [], GENERATED_SESSION, this.userTypes(), false, null, relations, true); },
       rows: (sql) => { this.schema(); return catalogRows(catalog, sql); },
     };
+  }
+
+  /** the tables of `schema` the catalog leaves out, and why (`PgCatalog.probe`), under the roles the catalog holds now.
+   *  Once the sync serves this schema, `schema()` moves the listener to it, and an instance the probe left up already
+   *  holds it (`PgCatalog.holds`), so it is not started again */
+  probeCatalog(schema: PgSchema): Promise<ReadonlyMap<string, string>> {
+    return this.catalog.probe(schema);
   }
 
   /** the roles as of now (src/duck/grants.ts RolesLive); the catalog is replaced when they changed, as for the schema */
@@ -3528,6 +3540,7 @@ export async function startPostgresApi(options: PgApiOptions): Promise<PgApiServ
     get sessions() { return server.sessions.size; },
     roles: () => server.rolesChecked(),
     checkRoles: () => server.checkRoles(),
+    probeCatalog: (schema) => server.probeCatalog(schema),
     planner: () => server.planner(),
     openSessions: () => server.openSessions(),
     running: () => server.running(),

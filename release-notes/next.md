@@ -37,3 +37,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **A source given by an IP address under `sslmode=verify-full` could not be connected to.** On Node 26, which the
   `mason-data` image runs, every connection failed with `Setting the TLS ServerName to an IP address is not
   permitted`. Mason now sends no server name for an IP address, and still checks that the certificate names it.
+- **On Postgres 19, one table with a column of a type new in 19 (`oid8`, `regdatabase` or their arrays) stopped every
+  query on every table.** Each statement failed with an error that named an internal engine, and `mason status` and
+  `mason wait` still said every table was synced and served. Now that table alone is not served, and the others are.
+  `mason status`, `mason wait` and the log name its columns and the line to add: `exclude: [<columns>]` on its entry in
+  the sources file. A query of it is told the same. Any other type the source has and Mason cannot serve is handled the
+  same way.

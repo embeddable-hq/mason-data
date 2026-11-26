@@ -314,6 +314,9 @@ export interface CopyState {
   seconds: number | null;
   copiedAt: string | null;
   error: string | null;
+  /** synced, but the catalog leaves it out, so no query can read it: why, in a person's words, the end of `error` too
+   *  (`state`, issue 1197); in memory, never the ledger's */
+  notServed?: string;
   /** while a table copies: its committed chunks' rows (exact), else absent */
   rowsSoFar?: number | null;
   /** while a table copies: the source's estimate of its rows that `rowsSoFar` is a share of, else absent */
@@ -1382,6 +1385,11 @@ export class Sync {
   private schemaKey = "";
   /** the tables the catalog could not read, and why (`catalogTypes`): each said once a reason */
   private readonly unread = new Map<string, string>();
+  /** the listener's catalog, asked which tables it holds (`useCatalogProbe`); what it last answered, by `<schema>.<table>`,
+   *  and the schema it answered of (`schemaBuilt`, issue 1197) */
+  private catalogProbe: ((schema: PgSchema) => Promise<ReadonlyMap<string, string>>) | null = null;
+  private catalogLeftOut: ReadonlyMap<string, string> = new Map();
+  private probedKey = "";
   /**
    * A FIRST SYNC THE CATALOG HAS NOT READ YET (issue 920): marked just before its swap records it copied, when the
    * catalog does not hold the table, and cleared by the first rebuild of the catalog that reads that record
@@ -2490,6 +2498,13 @@ export class Sync {
       // A FIRST SYNC IS DONE ONCE A QUERY CAN READ IT (`joining`, issue 920): recorded copied, and still syncing here until
       // the catalog has read that record, with every row it read
       .map((s): CopyState => s.phase === "copied" && this.joining.has(s.source) ? { ...s, phase: "copying", rowsSoFar: s.rows } : s)
+      // A TABLE THE CATALOG LEAVES OUT IS NOT SERVED, and says why (issue 1197): synced, but no query can read it until its
+      // entry changes, so `mason wait` and `mason status` say it failed, with the way out, never that it is served
+      .map((s): CopyState => {
+        const t = this.tables.get(s.source);
+        const why = t === undefined || s.phase !== "copied" || s.error !== null ? undefined : this.catalogLeftOut.get(`${t.schema}.${t.table}`);
+        return why === undefined ? s : { ...s, error: `it is not served: ${why}`, notServed: why };
+      })
       // a copy's chunks as they are NOW: the rows the ones in flight have read by now at the measured rate
       .map((s) => { const l = this.copyLive.get(s.source); return s.phase === "copying" && l !== undefined ? { ...s, progress: copyProgressNow(l, Date.now()) } : s; })
       // its last poll as it is NOW: the rows its reads have passed so far, counted as they arrive (issue 1173)
@@ -6635,17 +6650,47 @@ export class Sync {
       tables.push({ name: g.table, schema: g.schema, primaryKey: [], columns, joins: [], ...(g.comment !== null ? { description: g.comment } : {}) });
     }
     const views = this.views, collations = this.collations;
-    // THE REFERENCES WHOSE KEYS ARE NUMBERED (src/duck/reference-keys.ts): both sides served, each with its hidden column
-    const served = (s: { schema: string; table: string; hidden: string }): boolean => tables.some((t) => t.schema === s.schema && t.name === s.table);
-    const references = this.numbers.published().filter((r) => served(r.from) && served(r.to))
-      .map((r) => ({ from: { schema: r.from.schema, table: r.from.table, columns: r.from.columns, hidden: r.from.hidden }, to: { schema: r.to.schema, table: r.to.table, columns: r.to.columns, hidden: r.to.hidden } }));
-    this.schemaReferences = JSON.stringify(references.map((r) => [r.from.hidden, r.to.hidden]));
-    const key = JSON.stringify([tables, views, collations, references]);
-    if (key !== this.schemaKey) {
-      this.schemaKey = key;
-      this.currentSchema = { database: this.currentSchema.database, tables, ...(views.length > 0 ? { views } : {}), ...(collations.length > 0 ? { collations } : {}), ...(references.length > 0 ? { references } : {}) };
+    const build = (tables: PgTable[]): { schema: PgSchema; key: string } => {
+      // THE REFERENCES WHOSE KEYS ARE NUMBERED (src/duck/reference-keys.ts): both sides served, each with its hidden column
+      const served = (s: { schema: string; table: string; hidden: string }): boolean => tables.some((t) => t.schema === s.schema && t.name === s.table);
+      const references = this.numbers.published().filter((r) => served(r.from) && served(r.to))
+        .map((r) => ({ from: { schema: r.from.schema, table: r.from.table, columns: r.from.columns, hidden: r.from.hidden }, to: { schema: r.to.schema, table: r.to.table, columns: r.to.columns, hidden: r.to.hidden } }));
+      return { key: JSON.stringify([tables, views, collations, references]),
+        schema: { database: this.currentSchema.database, tables, ...(views.length > 0 ? { views } : {}), ...(collations.length > 0 ? { collations } : {}), ...(references.length > 0 ? { references } : {}) } };
+    };
+    // A TABLE IS SERVED ONLY ONCE THE CATALOG HOLDS IT (issue 1197): the listener's catalog is asked of every table before
+    // any is said to be served, and a table it leaves out (a type newer than its Postgres) is left out here too, its
+    // first sync held until then (`decided`). Its line says why (`state`), and every other table is served
+    const all = build(tables);
+    // (no table, nothing to leave out: a run before its first sync starts no catalog for it)
+    if (tables.length === 0) this.catalogLeftOut = new Map();
+    else if (this.catalogProbe !== null && all.key !== this.probedKey) {
+      try {
+        this.catalogLeftOut = await this.catalogProbe(all.schema);
+        this.probedKey = all.key;
+      } catch (e) {
+        // the catalog could not start at all: every statement says so on the wire, and the check is made again at the next rebuild
+        this.log(`the catalog could not be checked for the synced tables (it is checked again at the next rebuild of the catalog): ${this.errorText(e)}`);
+      }
+    }
+    const kept = tables.filter((t) => !this.catalogLeftOut.has(`${t.schema ?? "public"}.${t.name}`));
+    const built = kept.length === tables.length ? all : build(kept);
+    this.schemaReferences = JSON.stringify((built.schema.references ?? []).map((r) => [r.from.hidden, r.to.hidden]));
+    if (built.key !== this.schemaKey) {
+      this.schemaKey = built.key;
+      this.currentSchema = built.schema;
     }
     for (const s of decided) this.joining.delete(s);
+  }
+
+  /**
+   * THE LISTENER'S CATALOG, ASKED WHICH TABLES IT HOLDS (issue 1197; src/api/postgres/server.ts `probeCatalog`): set once the
+   * listener is up, and the catalog rebuilt at once, so the tables synced before it are checked too. Without it (a test
+   * of the sync alone) every table the synced data holds is served. Never rejects: a rebuild that fails is said.
+   */
+  useCatalogProbe(probe: (schema: PgSchema) => Promise<ReadonlyMap<string, string>>): Promise<void> {
+    this.catalogProbe = probe;
+    return this.rebuildSchema().catch((e: unknown) => this.log(`the catalog could not be rebuilt (it is at the next pass): ${this.errorText(e)}`));
   }
 }
 

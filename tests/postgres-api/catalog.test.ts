@@ -348,14 +348,69 @@ test("a source's NOT NULL, defaults, serials and identities are the catalog's; a
   } finally { await catalog.replace(schema); }
 });
 
-test("a schema whose DDL Postgres refuses fails the run naming the statement, and the object tries again", async () => {
+test("a table whose DDL the catalog refuses is left out and said, and every other table is served (issue 1197)", async () => {
+  // Postgres 19's oid8 and regdatabase, which the catalog's Postgres (18) lacks; and a definition refused for another reason
+  const ledger: PgTable = { name: "ledger", primaryKey: ["id"], joins: [], columns: [
+    { name: "id", type: "int8" }, { name: "o", type: "text", spelled: "oid8" }, { name: "r", type: "text", spelled: "regdatabase[]" }, { name: "note", type: "text" }] };
+  const counts: PgTable = { name: "counts", schema: "stats", primaryKey: [], joins: [], columns: [{ name: "o", type: "text", spelled: "oid8" }] };
   const clash: PgTable = { ...customers, columns: [...customers.columns, { name: "name", type: "text" }] };
-  await catalog.replace({ database: "x", tables: [clash] });
-  await assert.rejects(catalog.run(simpleQuery("SELECT 1")), (e: Error) => {
-    assert.match(e.message, /^PGlite could not start: the catalog DDL was refused \(.*column "name" specified more than once.*\) at:\nCREATE TABLE public\."customers"/);
-    return true;
-  });
-  assert.equal(catalog.started, false);
+  const lines: string[] = [];
+  const own = new PgCatalog({ database: "shop", tables: [orders, clash, regions, ledger, counts] }, { log: (l) => lines.push(l) });
+  try {
+    // every other table is served: orders, whose foreign key to customers is a comment again, and regions
+    assert.deepEqual(rowsOf(await own.run(simpleQuery("SELECT (SELECT count(*) FROM orders), (SELECT count(*) FROM regions)"))), [["0", "0"]]);
+    // a table left out is not there, as on Postgres for a table that is not
+    assert.equal(decode(await own.run(simpleQuery("SELECT * FROM ledger"))).find((m) => m.type === "E")?.error?.C, "42P01");
+    const said = (catalogModule as { PgCatalog: { prototype: object } }).PgCatalog.prototype;
+    assert.ok(Object.getOwnPropertyDescriptor(said, "leftOut") !== undefined, "PgCatalog says the tables it left out");
+    assert.deepEqual([...(own as unknown as { leftOut: ReadonlyMap<string, string> }).leftOut], [
+      ["public.customers", 'its definition was refused (column "name" specified more than once)'],
+      ["public.ledger", "its columns o, r have types Mason cannot serve yet (oid8, regdatabase[]). Leave them out with exclude: [o, r] on its entry in the sources file"],
+      ["stats.counts", "its column o has a type Mason cannot serve yet (oid8). Leave the column out with exclude: [o] on its entry in the sources file"]]);
+    const leftOut = lines.filter((l) => l.includes("is left out"));
+    assert.deepEqual(leftOut, [
+      'catalog: public.customers is left out, so it is not served (every other table is): its definition was refused (column "name" specified more than once)',
+      "catalog: public.ledger is left out, so it is not served (every other table is): its columns o, r have types Mason cannot serve yet (oid8, regdatabase[]). Leave them out with exclude: [o, r] on its entry in the sources file",
+      "catalog: stats.counts is left out, so it is not served (every other table is): its column o has a type Mason cannot serve yet (oid8). Leave the column out with exclude: [o] on its entry in the sources file"]);
+    // said once a schema, not at every start of the instance
+    await own.stop();
+    await own.run(simpleQuery("SELECT 1"));
+    assert.equal(lines.filter((l) => l.includes("is left out")).length, 3);
+  } finally { await own.stop(); }
+});
+
+test("the catalog's probe answers which tables of a schema it leaves out, and stops an instance that was not up (issue 1197)", async () => {
+  const lines: string[] = [];
+  const own = new PgCatalog(schema, { log: (l) => lines.push(l) });
+  try {
+    const probe = (own as unknown as { probe?: (s: PgSchema) => Promise<ReadonlyMap<string, string>> }).probe?.bind(own);
+    assert.ok(probe !== undefined, "PgCatalog.probe exists");
+    const odd: PgTable = { name: "odd", primaryKey: [], joins: [], columns: [{ name: "o", type: "text", spelled: "oid8" }] };
+    assert.deepEqual([...await probe({ database: "shop", tables: [orders, customers, regions, odd] })],
+      [["public.odd", "its column o has a type Mason cannot serve yet (oid8). Leave the column out with exclude: [o] on its entry in the sources file"]]);
+    assert.equal(own.started, false, "a probe of a catalog nobody had started stops it again");
+    // the listener replaces the schema while a probe waits (a statement under the schema it serves): the probe still
+    // answers for the schema it was asked about
+    const asked = probe({ database: "shop", tables: [orders, odd] });
+    void own.replace(schema);
+    assert.deepEqual([...await asked].map(([t]) => t), ["public.odd"]);
+    // up before, it stays up for the queries
+    await own.run(simpleQuery("SELECT 1"));
+    assert.deepEqual([...await probe(schema)], []);
+    assert.equal(own.started, true);
+  } finally { await own.stop(); }
+});
+
+test("a refused statement of no table fails the start in the catalog's words, never naming its engine, and the object tries again", async () => {
+  const own = new PgCatalog(schema, { log: () => undefined, setup: ["SELECT * FROM no_such_relation"] });
+  try {
+    await assert.rejects(own.run(simpleQuery("SELECT 1")), (e: Error) => {
+      assert.match(e.message, /^the catalog could not start: the catalog DDL was refused \(relation "no_such_relation" does not exist\) at:\nSELECT \* FROM no_such_relation$/);
+      assert.doesNotMatch(e.message, /PGlite/);
+      return true;
+    });
+    assert.equal(own.started, false);
+  } finally { await own.stop(); }
   await catalog.replace(schema);
   assert.deepEqual(rowsOf(await catalog.run(simpleQuery("SELECT 1"))), [["1"]]);
 });
