@@ -718,8 +718,6 @@ export class PgCatalog {
   /** Swaps in a new schema (after an apply), and the roles with it (the roles file moved): the running instance is
    *  stopped and the next `run` starts with the new DDL. Resolves once the old instance is gone; a caller need not wait for it. */
   replace(schema: PgSchema, roles: ReadonlyMap<string, RoleGrants> = this.#roles): Promise<void> {
-    // the schema and roles it holds already (a `probe` of the schema the listener now asks for): nothing to start again
-    if (schema === this.#schema && roles === this.#roles) return Promise.resolve();
     this.#schema = schema;
     this.#roles = roles;
     this.#policies = [];
@@ -842,6 +840,10 @@ export class PgCatalog {
     }
     this.#leftOut = left;
   }
+
+  /** whether this is the schema the catalog holds now (a `probe` of the schema the listener then asks for left it): the
+   *  listener does not replace it with itself, which would start the instance again (server.ts `schema`) */
+  holds(schema: PgSchema): boolean { return this.#schema === schema; }
 
   /** the tables the last start left out, and why, in a person's words (`leftOutReason`), by `tableKey` */
   get leftOut(): ReadonlyMap<string, string> { return this.#leftOut; }

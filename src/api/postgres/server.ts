@@ -3294,8 +3294,8 @@ class Server {
       const rolesMoved = r !== this.lastRoles;
       this.lastSchema = s;
       this.lastRoles = r;
-      // the roles given only when they moved, so a schema a probe left up is not started again (`PgCatalog.replace`)
-      void this.catalog.replace(s, rolesMoved ? catalogRolesOf(r) : undefined).catch((e: unknown) => this.log(`replacing the catalog failed: ${e instanceof Error ? e.message : String(e)}`));
+      // a schema a probe left the catalog holding is not started again (`PgCatalog.holds`), unless the roles moved
+      if (rolesMoved || !this.catalog.holds(s)) void this.catalog.replace(s, rolesMoved ? catalogRolesOf(r) : undefined).catch((e: unknown) => this.log(`replacing the catalog failed: ${e instanceof Error ? e.message : String(e)}`));
     }
     return s;
   }
@@ -3311,11 +3311,10 @@ class Server {
     };
   }
 
-  /** the tables of `schema` the catalog leaves out, and why (`PgCatalog.probe`). The schema is the listener's from now on,
-   *  so the sync's schema, once it is this one, starts no catalog again (`schema`) */
+  /** the tables of `schema` the catalog leaves out, and why (`PgCatalog.probe`), under the roles the catalog holds now.
+   *  Once the sync serves this schema, `schema()` moves the listener to it, and an instance the probe left up already
+   *  holds it (`PgCatalog.holds`), so it is not started again */
   probeCatalog(schema: PgSchema): Promise<ReadonlyMap<string, string>> {
-    // under the roles the catalog holds now; `schema()` moves the listener to this schema once the sync serves it, and
-    // the instance the probe left up then holds it already (`PgCatalog.replace`)
     return this.catalog.probe(schema);
   }
 
