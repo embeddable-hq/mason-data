@@ -722,6 +722,69 @@ before.
 `src/duck/stream.ts` (`relationMoved`), `src/cdc/shape.ts` (`identitySql`); `tests/duck-column-identity.test.ts`,
 `tests/integration/cli-column-identity.itest.ts`.
 
+### A table renamed on the database (issue 1199, 2026-11-26)
+
+**Decision.** Mason knows a table by its oid, and the sources file names it. A table whose name is no table on the
+database now is held by its entry, by the same hold and the same look as any entry the run cannot take ("One entry's
+problem holds its table alone"). It is not synced, its synced data serves as it was, and its line in `mason status`
+says so with what to do. A replicated one is marked behind. Once its name is a table again, the look lets it go and it
+is caught up by one poll, with every change made meanwhile. Mason never follows a table to a new name by itself: the
+person decides, by renaming it back or by syncing it under its new name.
+
+**Which tables that covers.** A table renamed, or moved to another schema, is held under polling and under replication.
+Under replication the stream sees its next change under the other name, and a pass's replication check sees its name
+gone. A dropped table is held under polling, at its next poll. Under replication it is held only once a pass runs, and
+a pass runs only when something else asks for one (a `mason add`, another table's catch-up). A drop sends the stream no
+change of the table, and nothing else checks its name. Until then it stays `synced` and serves its old rows, and a
+table made again under its name never has its new rows synced. It was the same before this change. Issue 1208 fixes
+it on its own.
+
+**Why.** Found on Postgres 19.0, the same on 18.7, with synthetic tables. A table synced with `sync: replication` was
+renamed, a row was inserted, and the table was renamed back. The row never reached the synced data, even after a
+restart. Measured at main: pgoutput named the relation as the catalog did at the change (`public.activity`, the same
+relid). The stream looked tables up by name, found none, and passed the insert over as a table it does not sync. Its
+position was acknowledged, so the slot never sent it again. Nothing marked the table behind, so `mason status` said 0
+bytes behind and `mason sync` said there was nothing to sync. With Mason's own publication, each pass's `SET TABLE`
+named the table that no longer existed, so the pass failed and every replicated table showed the stream's failure. A
+polled table renamed failed its poll every interval with the engine's Binder Error, and lost nothing. A table renamed
+during its first sync failed its next chunk and backed off at least 5 minutes. Once the catalog was read again, the
+table left the catalog, and `mason status` dropped it from its list of tables.
+
+**Holding, not following.** Following the oid under its new name would need no person, but the sources file names
+tables, a table keeps its database's name in the synced data (CLAUDE.md "Naming"), and a name can come back as another
+table. Holding fits how a column renamed away is handled ("Which column is which"), and loses nothing.
+
+**One hold.** The first version of this fix held such a table with a mechanism of its own: its own words, its own
+recheck every 30 s. Issue 1074 then gave every entry the run cannot take a hold that is said on its line and looked at
+again on the database. A name that is no table is such an entry, so the fix feeds it there instead: the table's catalog
+is read again, as for a column change, and the run's read of the file holds the entry. The cost: the hold's words are
+the entry's ("has no table public.events this user can read"), and where the table went is said in the log and its
+event, not on its line.
+
+**How it is found.** One catalog query reads, for each table, the shape at its name and where its oid is now
+(`placesNow`, `placeSql`). It runs before every poll, after a whole read or a catch-up that failed, at a stream
+relation message's check, and at each pass's replication check. The stream also knows each streamed table by its oid
+(`StreamTarget.byOid`): a relation of that oid under another name refuses the table before anything past it is
+acknowledged, and its name is checked at the next pass.
+
+**The publication.** Postgres keeps a table in a publication by its oid, so a rename changes nothing there. Mason's own
+publication is set with a renamed table's current name, so it is never dropped from it and added back. A transaction
+open across that could reach neither the stream nor the catch-up's poll. A dropped table is in no publication. A named
+publication is not checked for such a table, so no wrong `ALTER PUBLICATION … ADD TABLE` is suggested.
+
+**Swaps.** Two tables that swap names in one transaction are each the table of the other name now. Each name is still
+a table, so neither is held. Each table's shape at its name has another oid, so each is read again whole ("Which column
+is which", "A table made again under its name").
+
+**What is left.** A start reads the sources file against the catalog, so a start while a table is away is refused with
+the file's error, and the slot keeps the WAL until it is fixed. A table renamed away and back while Mason is stopped is
+caught up at the start, from the slot's changes under the other name. A table dropped under replication is held only
+once a pass runs (above; issue 1208).
+
+**Where.** `src/duck/sync.ts` (`placesNow`, `nameGone`, `columnsChanged`, `prepareReplication`, `refuseStreamed`),
+`src/duck/stream.ts` (`renamedFrom`), `src/cdc/shape.ts` (`placeSql`), `src/cli/run-server.ts` (`runState`);
+`tests/integration/cli-table-rename.itest.ts`, `tests/integration/duck-table-rename.itest.ts`.
+
 ### One entry's problem holds its table alone (issue 1074, 2026-11-16)
 
 **Decision.** When the run reads the sources file again, each entry is checked against the catalog on its own

@@ -19,6 +19,21 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **Two subqueries with the same name in one query no longer break each other.** This covers a subquery that names
   two columns alike, or two in different case, such as `"T"` and `t`. Another subquery with its name, in a `UNION ALL`
   arm or an `EXISTS`, failed with 42703 or 42804. Now each reads its own columns.
+- **A table synced with `sync: replication` lost the changes made to it while it was renamed on the database.** A row
+  inserted, updated or deleted while the table had another name never reached the synced data, even after the table
+  was renamed back and Mason restarted. All the while, `mason status` said the stream was current and `mason sync` said
+  there was nothing to sync. Now a table renamed on the database, or moved to another schema, is held, as an entry
+  Mason cannot take is held (below). Its line in `mason status` says it is not synced and what to do, and it is never
+  said to be current. Its synced data serves as it was. Once it is back under its name, Mason catches it up by one
+  poll, with every change made meanwhile. Two tables that swap names are each synced again whole as the table of its
+  name.
+- **A polled table renamed or dropped on the database failed its poll every few seconds** with the engine's error. A
+  table renamed during its first sync waited at least 5 minutes after it was renamed back. Now both are held the same
+  way, and their sync goes on soon after the table is back under its name.
+- **A replicated table renamed on the database stopped the stream for every table** when Mason made its own
+  publication. Now the other tables stream on.
+- **A table renamed or dropped on the database left `mason status`' list of tables** once Mason read the catalog
+  again, so the count read like "3 of 2 added synced". Now it stays on the list, with why it is not synced.
 - **A mistake in one table's entry no longer stops Mason keeping the other tables current.** Before, if a column that a
   `columns:` entry lists was renamed on your database, Mason stopped taking the sources file while it ran. From then on,
   a column added to any other table was never synced, and a renamed column elsewhere made that table's polls fail, until

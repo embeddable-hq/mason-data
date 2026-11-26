@@ -54,7 +54,7 @@ import { catalogTable, copiedColumns, effectiveSync, entryName, everyColumnLeave
 import { projectWriteState } from "./project.ts";
 import { addEntry, plannedEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type PollMeasure, type RemoveResult } from "./source-edit.ts";
 import { shortageOf, shortageWarning, syncedEstimate, type DiskRoom, type DiskShortage } from "../duck/disk-fit.ts";
-import { notAddedRefusal, PollRefused, type CopyState, type DiskStatus, type PolledTable, type StreamedAnswer, type StreamStatus } from "../duck/sync.ts";
+import { notAddedRefusal, PollRefused, type AddedTable, type CopyState, type DiskStatus, type PolledTable, type StreamedAnswer, type StreamStatus } from "../duck/sync.ts";
 import type { StoredFacts } from "../duck/reread.ts";
 import { SyncsByHand, type SyncByHand } from "./sync-by-hand.ts";
 import { agoText, DEFAULT_SYNC, parseSync, syncText, type TableSync } from "../lib/table-sync.ts";
@@ -167,7 +167,7 @@ export interface RunContext {
   startedAt: number;
   /** the sources file the run copies from as it last read it, and what is wrong with it now (null: nothing); `tables`,
    *  each added table's columns as the run syncs them from its next whole read (absent: a run that does not say) */
-  sources: () => { file: SourceFile | null; problem: string | null; tables?: ReadonlyArray<{ source: string; columns: ReadonlyArray<{ name: string }> }> };
+  sources: () => { file: SourceFile | null; problem: string | null; tables?: readonly AddedTable[] };
   /** the sources file was edited (`edited`: the tables the edit wrote, `schema.table`): the run reads it again.
    *  `confirmed`: the tables an add wrote against the database's columns, each with the shape of the table it read
    *  (src/cli/preflight.ts `shape`), so a table changed since is no confirmation (src/duck/sync.ts `placeColumns`) */
@@ -281,7 +281,13 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
   // an entry the run neither takes nor holds (a new one it cannot take, issue 1074) is no added table: it is said among
   // the run's warnings, and never waited for as a first sync
   const taken = sources.tables === undefined ? null : new Set(sources.tables.map((x) => x.source));
-  const tables = facts.tables.map((t) => {
+  // A TABLE THE RUN SYNCS OR HOLDS THAT THE CATALOG NO LONGER NAMES (issue 1199: renamed, moved to another schema or
+  // dropped on the database) is still listed, as the run took it, with its hold on its line: left out, mason status
+  // counted it out of the added tables and said every one was synced while its changes were missing
+  const named = new Set(facts.tables.map((t) => t.source));
+  const listed: SourceTable[] = [...facts.tables, ...(sources.tables ?? []).filter((x) => !named.has(x.source))
+    .map(({ replicaIdentity, ...x }): SourceTable => ({ comment: null, ...x, ...(replicaIdentity !== undefined ? { replicaIdentity } : {}) }))];
+  const tables = listed.map((t) => {
     const c = by.get(t.source), entry = taken === null || taken.has(t.source) ? sources.file?.tables.find((e) => e.table === t.source) : undefined;
     const byHand = syncsOf(ctx).of(t.source);
     const { columns: cols, ...catalog } = catalogTable(t, entry);
