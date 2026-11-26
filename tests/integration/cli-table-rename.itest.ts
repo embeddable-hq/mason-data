@@ -6,14 +6,16 @@
  * Mason restarted. Meanwhile `mason status` said the stream was 0 bytes behind and `mason sync` said nothing was to sync.
  * Under the poll, a renamed table failed its poll every interval with the engine's Binder Error.
  *
- * Mason knows a table by its oid, and the sources file names it. So a table away from its name is held: said on its line
- * with where it is and what to do, never synced and never said current, and caught up by one poll, with every change made
- * meanwhile, once it is back under its name. Each form has a table of its own in one project:
+ * Mason knows a table by its oid, and the sources file names it. The stream refuses a table it carries under another name,
+ * marked behind before anything past the change is acknowledged. A table whose name is no table is read again, and the
+ * run holds its entry (issue 1074): said on its line with what to do, and where it is in the log and an event, never
+ * synced and never said current. It is looked at again on the database, and caught up by one poll, with every change
+ * made meanwhile, once it is back under its name. Each form has a table of its own in one project:
  * - `ev`: renamed away, written to (an insert, an update, a delete), renamed back, written to again.
  * - `mv`: moved to another schema and back, written to meanwhile.
  * - `sa` and `sb`: their names swapped in one transaction, each written to after. Each name is the sources file's, so each
  *   entry is the table of that name now: synced again whole, never held, every row the source's.
- * - `gn`: dropped. Held, said as gone; the others sync on.
+ * - `gn`: dropped. Held; the others sync on. Its way out, `mason remove`, drops its hold.
  * - `ev` again with Mason stopped: renamed away, written to, renamed back, written to, then started.
  *
  * What it needs: IT_POSTGRES_URL (`wal_level = logical` for the replication test), psql on PATH, and DuckDB's postgres
@@ -121,9 +123,11 @@ async function renamed(mode: Mode): Promise<void> {
     }
     throw new Error(`${mode}: timed out waiting for ${what}; still failing: ${failing.join(", ")}; lines: ${JSON.stringify(Object.fromEntries(lines()))}`);
   };
-  const awayLine = (t: string, how: string, now: string): RegExp => new RegExp(`^public\\.${t} is not synced: it was ${how} on the database, and is ${now.replace(".", "\\.")} now\\. ` +
-    `Its synced data serves as it was\\. Once it is public\\.${t} again, Mason catches it up by one poll, with every change made meanwhile\\. ` +
-    `To sync it as ${now.replace(".", "\\.")} instead, run mason remove ${t} && mason add `);
+  /** a table held by its entry, whose name is no table now (issue 1074's hold): its line in mason status */
+  const heldLine = (t: string): RegExp => new RegExp(`^public\\.${t} is not synced: mason/sources/[^ ]+\\.yml: tables\\.${t}: \\S+ has no table public\\.${t} this user can read` +
+    "( — did you mean `[^`]+`\\?)?\\.? Mason holds the table and serves its synced data as it was\\. ");
+  /** what the log and its event say when its name is found to be no table: where it is now */
+  const goneLine = (t: string, how: string, now: string): RegExp => new RegExp(`^it was ${how} on the database, and is ${now.replace(".", "\\.")} now: its catalog is read again, and the sources file names it as public\\.${t}, `);
 
   // AWAY: renamed, moved, swapped and dropped, each written to while away
   psql(dbUrl, "ALTER TABLE ev RENAME TO ev_away; INSERT INTO ev_away VALUES (100, 'while away'); UPDATE ev_away SET v = 'updated away' WHERE id = 2; DELETE FROM ev_away WHERE id = 3");
@@ -132,9 +136,9 @@ async function renamed(mode: Mode): Promise<void> {
     "INSERT INTO sa VALUES (50, 'sa after the swap'); INSERT INTO sb VALUES (50, 'sb after the swap')");
   psql(dbUrl, "DROP TABLE gn");
   await all("each table away held, said on its line, and the swapped ones synced as the tables of their names now", {
-    ev: (l) => awayLine("ev", "renamed", "public.ev_away").test(errorOf(l, "ev")) && l.get("ev")?.state !== "synced",
-    mv: (l) => awayLine("mv", "moved to the schema elsewhere", "elsewhere.mv").test(errorOf(l, "mv")),
-    gn: (l) => /^public\.gn is not synced: no table of that name is on the database now, and the table it was is gone \(dropped\)\. Its synced data serves as it was\. /.test(errorOf(l, "gn")),
+    ev: (l) => heldLine("ev").test(errorOf(l, "ev")) && l.get("ev")?.state !== "synced",
+    mv: (l) => heldLine("mv").test(errorOf(l, "mv")),
+    gn: (l) => heldLine("gn").test(errorOf(l, "gn")),
     sa: (l) => current(l, "sa"),
     sb: (l) => current(l, "sb"),
   });
@@ -142,19 +146,21 @@ async function renamed(mode: Mode): Promise<void> {
   assert.equal(served("ev"), "1\tev1\n2\tev2\n3\tev3\n4\tev4\n5\tev5", "a held table serves its synced data as it was");
   const sync = mason("sync", "ev", "--json");
   assert.equal(sync.status, 1, `mason sync of a held table is refused:\n${sync.stdout}${sync.stderr}`);
-  assert.match(JSON.stringify(sync.json), /it was renamed on the database, and is public\.ev_away now/);
+  assert.match(JSON.stringify(sync.json), /has no table public\.ev this user can read/);
   const wait = mason("wait", "ev", "--timeout", "3", "--json");
   assert.notEqual(wait.status, 0, `mason wait never says a held table is ready:\n${wait.stdout}${wait.stderr}`);
   if (mode === "replication") {
     const stream = (mason("status", "--json").json.stream as { tables?: Array<{ table: string; state: string }> } | undefined)?.tables ?? [];
     assert.notEqual(stream.find((t) => t.table === "public.ev")?.state, "streamed", `the stream never says it streams a held table: ${JSON.stringify(stream)}`);
   }
-  // said in the log and as an event too, once
+  // said in the log and as events too: where it is now (once), and its hold (again only when its words change)
   const events = ok(mason("logs", "--events", "--json"), "mason logs --events").json.events as Array<{ kind: string; table: string | null; message: string }>;
-  assert.equal(events.filter((e) => e.table === "public.ev" && awayLine("ev", "renamed", "public.ev_away").test(e.message)).length, 1, JSON.stringify(events));
+  assert.equal(events.filter((e) => e.table === "public.ev" && goneLine("ev", "renamed", "public.ev_away").test(e.message)).length, 1, JSON.stringify(events));
+  assert.equal(events.filter((e) => e.table === "public.mv" && goneLine("mv", "moved to another schema", "elsewhere.mv").test(e.message)).length, 1, JSON.stringify(events));
+  assert.ok(events.some((e) => e.table === "public.ev" && heldLine("ev").test(e.message)), JSON.stringify(events));
   if (mode === "poll 1s") {
     // the poll is held, never failing at every interval with the engine's error
-    for (let i = 0; i < 4; i++) { await sleep(1_000); assert.match(errorOf(lines(), "ev"), /^public\.ev is not synced: it was renamed/); }
+    for (let i = 0; i < 4; i++) { await sleep(1_000); assert.match(errorOf(lines(), "ev"), heldLine("ev")); }
     assert.ok(!events.some((e) => e.kind === "poll_failed" && e.table === "public.ev"), JSON.stringify(events));
   }
 

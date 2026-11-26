@@ -725,11 +725,11 @@ before.
 ### A table renamed on the database (issue 1199, 2026-11-26)
 
 **Decision.** Mason knows a table by its oid, and the sources file names it. A table whose name is no table on the
-database now (renamed, moved to another schema, or dropped) is held, as a table held for its columns is. It is not
-synced, its synced data serves as it was, and its line in `mason status` says where it is and what to do. A replicated
-one is marked behind. Once its name is a table again, it is caught up by one poll, with every change made meanwhile.
-Mason never follows a table to a new name by itself: the person decides, by renaming it back or by syncing it under its
-new name (`mason remove`, then `mason add`).
+database now (renamed, moved to another schema, or dropped) is held by its entry, by the same hold and the same look as
+any entry the run cannot take ("One entry's problem holds its table alone"). It is not synced, its synced data serves
+as it was, and its line in `mason status` says so with what to do. A replicated one is marked behind. Once its name is
+a table again, the look lets it go and it is caught up by one poll, with every change made meanwhile. Mason never
+follows a table to a new name by itself: the person decides, by renaming it back or by syncing it under its new name.
 
 **Why.** Found on Postgres 19.0, the same on 18.7, with synthetic tables. A table synced with `sync: replication` was
 renamed, a row was inserted, and the table was renamed back. The row never reached the synced data, even after a
@@ -739,36 +739,103 @@ position was acknowledged, so the slot never sent it again. Nothing marked the t
 bytes behind and `mason sync` said there was nothing to sync. With Mason's own publication, each pass's `SET TABLE`
 named the table that no longer existed, so the pass failed and every replicated table showed the stream's failure. A
 polled table renamed failed its poll every interval with the engine's Binder Error, and lost nothing. A table renamed
-during its first sync failed its next chunk and backed off at least 5 minutes.
+during its first sync failed its next chunk and backed off at least 5 minutes. Once the catalog was read again, the
+table left the catalog, and `mason status` dropped it from its list of tables.
 
 **Holding, not following.** Following the oid under its new name would need no person, but the sources file names
-tables, a table keeps its database's name in the synced data (CLAUDE.md "Naming"), and a name can come back as
-another table. Holding fits how a column renamed away is handled ("Which column is which"), and loses nothing.
+tables, a table keeps its database's name in the synced data (CLAUDE.md "Naming"), and a name can come back as another
+table. Holding fits how a column renamed away is handled ("Which column is which"), and loses nothing.
+
+**One hold.** The first version of this fix held such a table with a mechanism of its own: its own words, its own
+recheck every 30 s. Issue 1074 then gave every entry the run cannot take a hold that is said on its line and looked at
+again on the database. A name that is no table is such an entry, so the fix feeds it there instead: the table's catalog
+is read again, as for a column change, and the run's read of the file holds the entry. The cost: the hold's words are
+the entry's ("has no table public.events this user can read"), and where the table went is said in the log and its
+event, not on its line.
 
 **How it is found.** One catalog query reads, for each table, the shape at its name and where its oid is now
-(`placesNow`, `placeSql`). It runs before every poll, after a read that failed, at each pass's replication check, and
-again for each held table at its poll's interval, else every 30 s (`AWAY_RECHECK_MS`). The stream also knows each
-streamed table by its oid (`StreamTarget.byOid`): a relation of that oid under another name refuses the table before
-anything past it is acknowledged, and its name is looked for at once. A relation message under a held table's name
-looks for it at once too, so a table renamed back with a change is caught up within a pass.
+(`placesNow`, `placeSql`). It runs before every poll, after a whole read or a catch-up that failed, at a stream
+relation message's check, and at each pass's replication check. The stream also knows each streamed table by its oid
+(`StreamTarget.byOid`): a relation of that oid under another name refuses the table before anything past it is
+acknowledged, and its name is checked at the next pass.
 
 **The publication.** Postgres keeps a table in a publication by its oid, so a rename changes nothing there. Mason's own
-publication is set with a held table's current name, so it is never dropped from it and added back. A transaction open
-across that could reach neither the stream nor the catch-up's poll. A dropped table is in no publication. A named
-publication is not checked for a held table, so no wrong `ALTER PUBLICATION … ADD TABLE` is suggested.
+publication is set with a renamed table's current name, so it is never dropped from it and added back. A transaction
+open across that could reach neither the stream nor the catch-up's poll. A dropped table is in no publication. A named
+publication is not checked for such a table, so no wrong `ALTER PUBLICATION … ADD TABLE` is suggested.
 
 **Swaps.** Two tables that swap names in one transaction are each the table of the other name now. Each name is still
-a table, so neither is held. Each table's shape at its name has another oid, so each is read again whole
-("Which column is which", "A table made again under its name").
+a table, so neither is held. Each table's shape at its name has another oid, so each is read again whole ("Which column
+is which", "A table made again under its name").
 
-**What is left.** The hold is in memory. A start reads the sources file against the catalog, so a start while a table
-is away is refused with the file's error, and the slot keeps the WAL until it is fixed. A table renamed away and back
-while Mason is stopped is caught up at the start, from the slot's changes under the other name. A table renamed back
-with no change made since waits for the next recheck.
+**What is left.** A start reads the sources file against the catalog, so a start while a table is away is refused with
+the file's error, and the slot keeps the WAL until it is fixed. A table renamed away and back while Mason is stopped is
+caught up at the start, from the slot's changes under the other name.
 
-**Where.** `src/duck/sync.ts` (`away`, `holdAway`, `checkAway`, `placesNow`, `awayAfterFailure`, `TableAway`),
-`src/duck/stream.ts` (`renamedFrom`), `src/cdc/shape.ts` (`placeSql`); `tests/integration/cli-table-rename.itest.ts`,
-`tests/integration/duck-table-rename.itest.ts`.
+**Where.** `src/duck/sync.ts` (`placesNow`, `nameGone`, `columnsChanged`, `prepareReplication`, `refuseStreamed`),
+`src/duck/stream.ts` (`renamedFrom`), `src/cdc/shape.ts` (`placeSql`), `src/cli/run-server.ts` (`runState`);
+`tests/integration/cli-table-rename.itest.ts`, `tests/integration/duck-table-rename.itest.ts`.
+
+### One entry's problem holds its table alone (issue 1074, 2026-11-16)
+
+**Decision.** When the run reads the sources file again, each entry is checked against the catalog on its own
+(`entryTables`). An entry that passes is taken as it is now. An entry that does not is held as the run took it before:
+its table is not synced, it serves what it holds, and its line says what is wrong with the line to write. The sync holds
+it as it holds a table for its columns (`unplaced`). An entry the run never took is not synced, and said among the
+run's warnings. A problem of the whole file (it does not parse, its `url:` names another database, it goes silent on
+`sync:` over a slot, or it sets a table to `replication` the run never checked the database for) still keeps every table
+as the run took it.
+
+**Why.** With `t3: { columns: [id, amount_total] }`, a rename of `amount_total` on the database made `entryProblems`
+refuse the whole file at the run's re-read, because the name is close to a column the table has. The run kept every
+table as it took it before, so a column added to another table was never synced, and a column renamed elsewhere made
+that table's polls fail, until a restart. One entry's problem is that entry's.
+
+**A problem across entries is decided by what the run syncs, never by the file's order** (the review of PR 1091). Two
+entries whose tables are one in the synced data (a table's or a schema's name differs only in case) refuse every entry
+after the first at a start. At the run's re-read that order let a new `Accents` written above a synced `accents` be
+taken beside it, and the two shared one synced table, which neither served after: data lost. So in such a group the
+one entry the run syncs is decided on its own, and every other entry is never taken, said with the clash. No entry of
+a group the run syncs none of is taken.
+
+**A `references:` problem is the entry's that names it** (issue 1143). It is said at that entry's key, so
+that entry is held. But a reference into an entry the run does not take, because that entry has a problem of its own or
+lost a clash, is passed over for the referencing entry's verdict. It is neither checked nor carried, as `mason add` and
+the start's check already pass over a reference to a table that failed (`src/cli/source-check.ts`). Otherwise a column
+renamed in `customers` would hold every table that references `customers`, which is the spread this decision removes.
+Passed over, the reference only loses its numbered join keys until the entry is taken again. That costs speed, never an
+answer.
+
+**Fail closed.** A renamed column a `columns:` entry lists is never synced under its new name by a guess. The line the
+hold gives (`renamedColumns`) is checked against `entryProblems`, but only the person writes it: `mason add` through the
+run takes it at once, and a hand edit at the next time the run reads the file (a restart, an add or a remove, or a
+table's columns changing). The run has no watch on the file: the README says a hand edit applies at the next start.
+
+**A held table is still looked at on the database** (the reviews of PR 1091). A held table is not polled or caught up,
+so at first nothing looked at it again. A rename put back on the database, or a unique index a `key:` needs restored,
+left it held for good, serving stale rows. Main had kept polling the table and recovered. Now the run reads a held
+table's catalog row again on the schedule its `sync:` would read it. It reads the sources file against that row when the
+row differs from the one the file was last read against, in what an entry is checked by. Its size and statistics are
+left out of that comparison, so a look that finds nothing new costs one catalog row and no more. The comparison is never
+with the catalog's row just before the look. A whole read of the catalog, which `mason status` and the web page ask for
+once the last one is a minute old, refreshes that row without reading the file. A look after it saw no change, and the
+table stayed held for the rest of the run (the third review of PR 1091). A polled table is looked at at its poll interval, and a replicated one
+every minute and at a stream's relation message. A table under `sync: off` is looked at when `mason sync` asks for it,
+before the sync is refused, since that is the only time such a table is read. Once its entry passes, the table is let
+go and caught up by one poll. A first version compared only the column shape of a polled or replicated table, so it
+missed a key's restored index and every `sync: off` table.
+
+**An entry the run never takes is no added table** (the same review). `mason status` and the web page counted a table
+as added by its entry in the file alone, so `mason wait` waited for a first sync that never starts. The run's state now
+reads an entry only for a table the run takes or holds.
+
+**What is left.** A start still refuses the whole file on any entry's problem: the file is the person's to fix before
+anything runs. `mason add` and `mason remove` still refuse while another entry fails against the database
+(`othersHold`), so a held entry is fixed by its own `mason add`, or removed.
+
+**Where.** `src/cli/sources.ts` (`entryTables`, `rereadSources`, `renamedColumns`, `refusedEntryText`), `src/cli/dev.ts`,
+`src/duck/sync.ts` (`setTables`' `held`, `placeColumns`); `tests/cli-sources.test.ts`, `tests/duck-sync-added.test.ts`,
+`tests/integration/cli-entry-hold.itest.ts`.
 
 ### Logical replication
 

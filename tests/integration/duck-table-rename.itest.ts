@@ -2,12 +2,15 @@
  * A TABLE RENAMED ON THE DATABASE WHILE ITS FIRST SYNC RUNS (issue 1199), against a real Postgres, at the sync's own level,
  * polled and streamed. The first sync's next chunk read a name that was no table: it failed with the engine's "does not
  * exist" and backed off as a failure, at least 5 minutes, so a table renamed back waited that long, said as failed. Now
- * the table is held while it is away, said on its line with where it is, and its first sync goes on from where it was
- * once it is back, every change made meanwhile in it.
+ * the failure finds its name is no table, so the run reads the table's catalog and the sources file again, and holds its
+ * entry (issue 1074) with the words of the hold. The held table is looked at again on the database at its poll's interval
+ * (a replicated one every minute), and once it is back its first sync goes on from where it was, with every change made
+ * meanwhile in it.
  *
- * The run's own re-read of the columns (src/cli/dev.ts `onColumnsChanged`) is played by the test, as in
- * duck-columns-change.itest.ts: it is what makes the sync check a table's name and columns before it reads. The copy is
- * held by the test (`heldCopy`), so the rename lands between two of its chunks by construction, never by its size.
+ * The run's own reads of the sources file (src/cli/dev.ts `added`, at `onColumnsChanged` and `onHeldLook`) are played by
+ * the test with the run's own `rereadSources`. The copy is held by the test (`heldCopy`), so the rename lands between two
+ * of its chunks by construction, never by its size. With the table cut to 50 rows, it lands in the first sync's catch-up
+ * poll instead, and the test still passes.
  *
  * What it needs: IT_POSTGRES_URL (`wal_level = logical` for the streamed test), psql on PATH, and DuckDB's postgres
  * extension. It writes only inside databases it creates, `it_trename_<random>_*`, and drops them and its slots at the end.
@@ -19,9 +22,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { DuckStore } from "../../src/duck/store.ts";
-import { Sync, type AddedTable } from "../../src/duck/sync.ts";
-import { connectSource, parseSource, readTables, type Source } from "../../src/cli/preflight.ts";
-import { addedTables, type SourceFile } from "../../src/cli/sources.ts";
+import { Sync } from "../../src/duck/sync.ts";
+import { connectSource, parseSource, readTables, type Source, type SourceTable } from "../../src/cli/preflight.ts";
+import { rereadSources, type ProjectSource, type RunSources, type SourceFile } from "../../src/cli/sources.ts";
 import { heldCopy } from "./held-copy.ts";
 
 const adminUrl = process.env.IT_POSTGRES_URL;
@@ -66,18 +69,25 @@ async function until(what: string, ok: () => Promise<boolean> | boolean, logged:
   }
 }
 
-/** The tables as the run reads them: the catalog by the run's own reader, each an entry of every column. */
-async function tablesOf(source: Source, names: readonly string[], sync: SourceFile["sync"]): Promise<AddedTable[]> {
-  const c = await connectSource(source);
-  if ("failure" in c) throw new Error(c.failure.message);
-  try {
-    const catalog = await readTables(c.pg);
-    const file: SourceFile = { name: "app", file: path.join(dir, "app.yml"), kind: "postgres", url: { env: "DATABASE_URL" }, database: null, sync, publication: null,
-      tables: names.map((n) => ({ name: n, table: `public.${n}`, columns: null, exclude: [], key: null, sync: null })) };
-    const added = addedTables(file, catalog, source.database, dir);
-    if (!Array.isArray(added)) throw new Error(`${added.message}: ${added.why ?? ""}`);
-    return added;
-  } finally { c.pg.close(); }
+/**
+ * THE RUN'S OWN READ OF THE SOURCES FILE, played by the test (src/cli/dev.ts `added`): the catalog by the run's own reader,
+ * the file read against it by the run's own `rereadSources`, so an entry the catalog refuses is held as the run took it
+ * before (issue 1074), and the tables set with it. One entry of every column a table, at the given sync.
+ */
+function runOf(source: Source, url: string, names: readonly string[], sync: SourceFile["sync"]) {
+  const file: ProjectSource = { name: "app", file: path.join(dir, "app.yml"), kind: "postgres", url: { env: "DATABASE_URL" }, database: null, sync, publication: null,
+    tables: names.map((n) => ({ name: n, table: `public.${n}`, columns: null, exclude: [], key: null, sync: null })), resolved: url, from: "the test", publicationName: null };
+  let sources: RunSources = { file, tables: [], problem: null };
+  return async (s: Sync): Promise<void> => {
+    const c = await connectSource(source);
+    if ("failure" in c) throw new Error(c.failure.message);
+    let catalog: SourceTable[];
+    try { catalog = await readTables(c.pg); } finally { c.pg.close(); }
+    const r = rereadSources(sources, file, url, catalog, source.database, dir);
+    if (r.problem !== null) throw new Error(r.problem);
+    sources = r;
+    await s.setTables(r.tables, { held: new Map((r.refused ?? []).filter((x) => x.held).map((x) => [x.table, x.text])) });
+  };
 }
 
 async function renamedDuringFirstSync(mode: "poll" | "replication"): Promise<void> {
@@ -93,9 +103,12 @@ async function renamedDuringFirstSync(mode: "poll" | "replication"): Promise<voi
   const store = await DuckStore.open(path.join(dir, `${mode}.db`), (l) => logged.push(l));
   const held = heldCopy("public.first");
   let sync: Sync | null = null;
-  const onColumnsChanged = async (): Promise<void> => { await sync!.setTables(await tablesOf(source, ["first"], syncOf)); };
+  // the run's read of the file, at a table's columns changed and at a held table's look (src/cli/dev.ts)
+  const read = runOf(source, url, ["first"], syncOf);
+  const onColumnsChanged = (): Promise<void> => read(sync!);
+  const onHeldLook = async (): Promise<boolean> => { await read(sync!); return true; };
   sync = new Sync(store, source, source.database, (l) => { logged.push(l); if (process.env.IT_DEBUG) console.error(`${new Date().toISOString()} ${l.slice(0, 300)}`); }, 3_600_000, mode,
-    mode === "replication" ? { slot: db, publication: db, owned: true } : null, { copyChunkRows: 2_000, copyParallel: 1, onChunk: held.onChunk, onColumnsChanged, awayRecheckMs: 1_000 });
+    mode === "replication" ? { slot: db, publication: db, owned: true } : null, { copyChunkRows: 2_000, copyParallel: 1, onChunk: held.onChunk, onColumnsChanged, onHeldLook });
   // a connection of the test's own: a read on the writer's would land inside whatever transaction a writer's turn has open there (a swap's), and fail it
   const reader = await store.instance.connect();
   const line = (): string => sync!.state().find((s) => s.source === "public.first")?.error ?? "";
@@ -106,7 +119,7 @@ async function renamedDuringFirstSync(mode: "poll" | "replication"): Promise<voi
   const sourceNow = (): string => JSON.stringify(psql(url, "SELECT count(*), sum(id), max(v) FILTER (WHERE id > 200000) FROM first").split("\t"));
   try {
     await sync.open();
-    await sync.setTables(await tablesOf(source, ["first"], syncOf));
+    await read(sync);
     sync.start();
     await until("the first sync held in its chunks", held.held, logged);
     // renamed between two chunks, and written to while away
@@ -114,8 +127,9 @@ async function renamedDuringFirstSync(mode: "poll" | "replication"): Promise<voi
     await waitingOnLock(url);
     held.release();
     await renamed;
-    await until("the table held, said on its line", () => /^public\.first is not synced: it was renamed on the database, and is public\.first_away now\. Its first sync waits\. Once it is public\.first again, Mason goes on with its first sync from where it was\. /.test(line()), logged);
-    assert.ok(!logged.some((l) => l.startsWith("sync of public.first failed")), `held, never failed and backed off:\n${logged.join("\n")}`);
+    await until("the table held, said on its line", () => /^public\.first is not synced: app\.yml: tables\.first: \S+ has no table public\.first this user can read — did you mean `first_away`\? Mason holds the table /.test(line()), logged);
+    assert.ok(logged.some((l) => l === "public.first: it was renamed on the database, and is public.first_away now: its catalog is read again, and the sources file names it as public.first, so it is held, its synced data served as it was, until it is public.first again"), logged.join("\n"));
+    assert.ok(logged.filter((l) => l.startsWith("sync of public.first failed")).length <= 1, `its first sync failed at most once, at the chunk that met the rename:\n${logged.join("\n")}`);
     // back under its name: the first sync goes on, and holds every change made while it was away
     psql(url, "ALTER TABLE first_away RENAME TO first; INSERT INTO first VALUES (200002, 'after it was back')");
     // (its first sync is done once a query can read it: `copied` only then)
@@ -125,5 +139,5 @@ async function renamedDuringFirstSync(mode: "poll" | "replication"): Promise<voi
   } finally { held.release(); reader.closeSync(); await sync.stop(); await store.close(); }
 }
 
-test("a table renamed while its first sync is polled: held and said while it is away, never failed and backed off, and synced with every change once it is back", { skip, timeout: 600_000 }, () => renamedDuringFirstSync("poll"));
-test("a table renamed while its first sync is streamed: held and said while it is away, never failed and backed off, and synced with every change once it is back", { skip: skip || (!logical && "IT_POSTGRES_URL's server has no wal_level = logical"), timeout: 600_000 }, () => renamedDuringFirstSync("replication"));
+test("a table renamed while its first sync is polled: held by its entry while it is away, never backed off, and synced with every change once it is back", { skip, timeout: 600_000 }, () => renamedDuringFirstSync("poll"));
+test("a table renamed while its first sync is streamed: held by its entry while it is away, never backed off, and synced with every change once it is back", { skip: skip || (!logical && "IT_POSTGRES_URL's server has no wal_level = logical"), timeout: 600_000 }, () => renamedDuringFirstSync("replication"));

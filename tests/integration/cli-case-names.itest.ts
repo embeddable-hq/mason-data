@@ -132,14 +132,12 @@ test("columns and tables whose names differ only in case: refused by name at mas
   same('SELECT * FROM accents ORDER BY id');
   same('SELECT "É", "é" FROM accents WHERE "é" > \'e2\' ORDER BY id');
 
-  // WHILE THE RUN IS UP: a column whose name differs from accents' id only in case, added on the database. Said among
-  // mason status's warnings with the line to write; accents still served as it was, its line without an error
+  // WHILE THE RUN IS UP: a column whose name differs from accents' id only in case, added on the database. Said on
+  // accents' line in mason status with the line to write, accents alone held (issue 1074) and served as it was
   psql(dbUrl, `ALTER TABLE accents ADD COLUMN "ID" int; UPDATE accents SET "ID" = id * 2; INSERT INTO accents VALUES (5, 'E5', 'e5', 10)`);
-  const warned = /tables\.accents: public\.accents has columns id and ID, whose names differ only in case\. The synced data cannot hold them all\. Leave one out: exclude: \[ID\]/;
-  let status: Ran | null = null;
-  await until("mason status to say accents' new column", () => { status = mason("status", "--json"); return ((status.json.warnings ?? []) as string[]).some((w) => warned.test(w)); });
-  const accents = ((status!.json.tables ?? []) as Array<{ table: string; error: string | null }>).find((x) => x.table === "public.accents");
-  assert.equal(accents?.error ?? null, null, JSON.stringify(accents));
+  const warned = /^public\.accents is not synced: .*tables\.accents: public\.accents has columns id and ID, whose names differ only in case\. The synced data cannot hold them all\. Leave one out: exclude: \[ID\]\. Mason holds the table and serves its synced data as it was\./;
+  const accentsLine = (): string => ((mason("status", "--json").json.tables ?? []) as Array<{ table: string; error: string | null }>).find((x) => x.table === "public.accents")?.error ?? "";
+  await until("mason status to say accents' new column", () => warned.test(accentsLine()));
   same("SELECT * FROM accents WHERE id <= 4 ORDER BY id", 'SELECT id, "É", "é" FROM accents WHERE id <= 4 ORDER BY id');
   // the line it names syncs the table again, its new row included, without ID
   write("  orders: {}\n  t:\n    exclude: [u]\n  accents:\n    exclude: [ID]\n");

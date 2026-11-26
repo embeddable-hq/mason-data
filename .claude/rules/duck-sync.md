@@ -89,6 +89,17 @@ paths:
   sync it, the table is HELD (`unplaced`): it is not copied, polled, caught up or streamed, it serves what it holds, and
   its line says why with the line to write. Only `mason add` confirms it (through the run, or recorded in `.mason/` while
   Mason is stopped, src/cli/confirmed.ts), and only for the table's shape as the add read it, or its entry removed. A
+  table whose ENTRY the run's re-read cannot take is held the same way (`setTables`' `held`, issue 1074), as the run
+  took it before, its record left as it was: one entry's problem never stops the others being kept current. Such a
+  table is still LOOKED AT on the database as its `sync:` would read it (`lookAtHeld`): its catalog row read again
+  alone, and the sources file read against it when the row differs, in what an entry is checked by, from the row the
+  file was last read against (src/cli/dev.ts `onHeldLook`, `heldReadAgainst`; never the catalog's row before the look,
+  which a whole read of the catalog by `mason status` or the page refreshes without reading the file: the third review
+  of PR 1091 found such a look saw no change, and the table stayed held for the run). A polled one
+  at its interval (`heldLooks`), a replicated one every `HELD_LOOK_REPLICATED_MS` and at a relation message
+  (`relationSeen`), one under `sync: off` at `mason sync` of it (`/api/sync` looks before it refuses). So a hold the
+  database fixes (a rename put back, a `key:`'s unique index restored) is let go with no restart (the reviews of PR
+  1091: never looked at, such a hold stayed for good, where main's kept table was polled again and recovered). A
   table is placed against EVERY record of its oid, every entry's and the ones kept by oid
   (`_mason.column_identity_former`), all read before any is written (issue 1080: two tables or schemas swapped names and
   the entry syncing every column served the other's left-out column). In a project deployed read-only the committed file is
@@ -100,25 +111,26 @@ paths:
   still be other columns after a drop. The shape carries the table's oid and each column's number, so a swap, a drop and
   an add of one name, or a table made again under its name changes it; a table of another oid is decided again by name,
   a name its predecessor left out kept out, and read again whole. ("Which column is which")
-- **A table is known by its oid, and the sources file names it: a table away from its name is HELD, never followed and
-  never passed over** (issue 1199: a streamed table renamed on the database arrived under its new name, matched no
-  synced table, and its changes were acknowledged and lost for good, while `mason status` said it was current; a polled
-  one failed every poll with the engine's Binder Error; one Mason's own publication named stopped the stream for every
-  table). The stream knows a table by its oid too (`StreamTarget.byOid`, `renamedFrom`): a relation of a streamed
-  table's oid under another name refuses that table (`refuse`'s `renamed`), marked behind before anything past it is
-  acknowledged. Its name is looked for in ONE catalog query (`placesNow`: the shape at its name, and where its oid is,
-  `placeSql`): before every poll (`shapeGate`, which throws `TableAway`), after a read that failed (`awayAfterFailure`:
-  a whole read's chunk, a catch-up's or a poll's read between that check and its read), and at each pass's replication
-  check (`prepareReplication`) before the publication is set. A name that is no table holds the table (`away`,
-  `holdAway`): not copied, polled, caught up or streamed, its synced data served as it was, said once and on its line
-  with where it is and the way out, never backed off; a replicated one already synced marked behind with a mark of its
-  own. Mason's own publication names it as it is now (it carries a table by its oid, so nothing is dropped and added
-  back), a dropped one not at all, and a named one is not checked for it. It is looked for again at its poll's interval,
-  else every `AWAY_RECHECK_MS`, and at once at a relation message of its name; back under its name it is let go and
-  caught up by one poll. A name that is another table now (made, renamed or swapped into its place) is the sources
-  file's: read again whole (`columnsChanged`). A start refuses a file naming a table that is not there. DETECTOR:
-  `tests/integration/cli-table-rename.itest.ts`, `tests/integration/duck-table-rename.itest.ts`. ("A table renamed on
-  the database")
+- **A table is known by its oid, and the sources file names it: a table whose name is no table now is held by its
+  entry, never followed and never passed over** (issue 1199: a streamed table renamed on the database arrived under its
+  new name, matched no synced table, and its changes were acknowledged and lost for good, while `mason status` said it
+  was current; a polled one failed every poll with the engine's Binder Error; one Mason's own publication named stopped
+  the stream for every table). The stream knows a table by its oid too (`StreamTarget.byOid`, `renamedFrom`): a relation
+  of a streamed table's oid under another name refuses that table (`refuse`'s `renamed`), marked behind with a mark of
+  its own before anything past it is acknowledged, and its name checked at the next pass. Its name is looked for in ONE
+  catalog query (`placesNow`: the shape at its name, and where its oid is, `placeSql`), everywhere a shape is checked:
+  before every poll (`shapeGate`), after a whole read or a catch-up that failed (`reshapeAfterFailure`), at a relation
+  message's check, and at each pass's replication check (`prepareReplication`) before the publication is set. A name
+  that is no table (`nameGone`) is a change of its own: its catalog is read again (`columnsChanged`, said once with where
+  its oid is now), and the run holds its ENTRY, as one entry's problem is held (issue 1074, the bullet above): said on
+  its line, looked at again on its schedule, let go and caught up by one poll once its name is a table again. One hold,
+  one look: never a second mechanism. Mason's own publication names it as it is now (Postgres carries a table by its oid,
+  so nothing is dropped and added back), a dropped one not at all, and a named one is not checked for it. A table the
+  run syncs or holds that the catalog no longer names is still listed by `/api/state` (src/cli/run-server.ts
+  `runState`), so `mason status` and `mason wait` never count it out. A name that is another table now (made, renamed or
+  swapped into its place) is the sources file's: read again whole. A start refuses a file naming a table that is not
+  there. DETECTOR: `tests/integration/cli-table-rename.itest.ts`, `tests/integration/duck-table-rename.itest.ts`. ("A
+  table renamed on the database")
 - **A batch holds a table's changes of ONE STAY in the stream, and only the stay it is in now is applied**
   (`StreamedTable.stay`: a new number when the table enters `streamed` or its copy is swapped, never used twice;
   `streamOnce`, `applyStreamed`): an ended stay's changes committed before the next copy's catch-up, so that copy or

@@ -11,7 +11,7 @@
  *
  * ONE fragment for both readers, so the two are equal by construction: the catalog's read (src/cli/preflight.ts
  * `TABLES_SQL` `shape`, carried on `SourceTable.shape`) and the sync's check before a poll and after a stream's relation
- * message (src/duck/sync.ts `shapesNow`). The ORDER BY is the aggregate's, over the catalog's rows of one table: never a
+ * message (src/duck/sync.ts `placesNow`). The ORDER BY is the aggregate's, over the catalog's rows of one table: never a
  * sort of a table's rows.
  */
 import { pgIdent, pgLiteral } from "./pg-wire.ts";

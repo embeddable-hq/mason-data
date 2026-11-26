@@ -466,38 +466,30 @@ test("a named publication's gap is its own error and its own recovery: set by th
   });
 });
 
-// A TABLE AWAY FROM ITS NAME ON THE DATABASE (issue 1199): renamed, moved to another schema or dropped. Away only when
-// its name is no table: a table at its name, its own or another made or renamed into its place, is the sources file's
-test("a table is away from its name only when its name is no table, and its line says where it is and what to do", async () => {
+// A TABLE WHOSE NAME IS NO TABLE ON THE DATABASE NOW (issue 1199): renamed, moved to another schema or dropped. Only then:
+// a table at its name, its own or another made or renamed into its place, is the sources file's
+test("a table's name is no table only when the catalog has none of that name, and the log says where its oid is", async () => {
   const sync = await import("../src/duck/sync.ts");
   const shape = await import("../src/cdc/shape.ts");
   type Place = { schema: string; table: string };
-  const awayVerdict = (sync as { awayVerdict?: (oid: number | undefined, shape: string | null | undefined, place: Place | null) => { at: Place | null } | null }).awayVerdict;
-  const awayText = (sync as { awayText?: (t: { source: string; schema: string; table: string; entry?: { name: string } }, at: Place | null, served: boolean) => string }).awayText;
+  const nameGone = (sync as { nameGone?: (oid: number | undefined, shape: string | null | undefined) => boolean }).nameGone;
+  const goneWords = (sync as { goneWords?: (t: { schema: string }, at: Place | null) => string }).goneWords;
   const placeOf = (shape as { placeOf?: (text: string | null) => Place | null }).placeOf;
-  assert.equal(typeof awayVerdict, "function", "the sync tells a table away from its name");
-  assert.ok(awayText !== undefined && placeOf !== undefined);
-  const elsewhere = { schema: "public", table: "activity" };
-  // renamed: its name is no table, its oid is
-  assert.deepEqual(awayVerdict!(16401, null, elsewhere), { at: elsewhere });
-  // dropped: neither
-  assert.deepEqual(awayVerdict!(16401, null, null), { at: null });
+  assert.equal(typeof nameGone, "function", "the sync tells a table whose name is no table");
+  assert.ok(goneWords !== undefined && placeOf !== undefined);
+  // renamed or dropped: its name is no table
+  assert.equal(nameGone!(16401, null), true);
   // at its name: its own table, or another made or renamed into its place (read again whole by its shape)
-  assert.equal(awayVerdict!(16401, "16401:[]", elsewhere), null);
-  assert.equal(awayVerdict!(16401, "16999:[]", null), null);
-  // a table whose oid or shape the run never read (a test's) is never away
-  assert.equal(awayVerdict!(undefined, null, null), null);
-  assert.equal(awayVerdict!(16401, undefined, null), null);
+  assert.equal(nameGone!(16401, "16401:[]"), false);
+  assert.equal(nameGone!(16401, "16999:[]"), false);
+  // a table whose oid the run never read (a test's), or a shape not read
+  assert.equal(nameGone!(undefined, null), false);
+  assert.equal(nameGone!(16401, undefined), false);
   // placeSql's answer read back
   assert.deepEqual(placeOf!('["archive", "events"]'), { schema: "archive", table: "events" });
   assert.equal(placeOf!(null), null);
   assert.equal(placeOf!("not json"), null);
-  const t = { source: "public.events", schema: "public", table: "events", entry: { name: "events" } };
-  assert.equal(awayText!(t, elsewhere, true), "public.events is not synced: it was renamed on the database, and is public.activity now. Its synced data serves as it was. " +
-    "Once it is public.events again, Mason catches it up by one poll, with every change made meanwhile. " +
-    "To sync it as public.activity instead, run mason remove events && mason add activity (it is synced again whole).");
-  assert.match(awayText!(t, { schema: "archive", table: "events" }, true), /^public\.events is not synced: it was moved to the schema archive on the database, and is archive\.events now\. .* mason add archive\.events /);
-  assert.match(awayText!(t, elsewhere, false), /Its first sync waits\. Once it is public\.events again, Mason goes on with its first sync from where it was\. /);
-  assert.equal(awayText!(t, null, true), "public.events is not synced: no table of that name is on the database now, and the table it was is gone (dropped). Its synced data serves as it was. " +
-    "A table made again under that name is synced again whole. To stop syncing it, run mason remove events.");
+  assert.equal(goneWords!({ schema: "public" }, { schema: "public", table: "activity" }), "it was renamed on the database, and is public.activity now");
+  assert.equal(goneWords!({ schema: "public" }, { schema: "archive", table: "events" }), "it was moved to another schema on the database, and is archive.events now");
+  assert.equal(goneWords!({ schema: "public" }, null), "no table of that name is on the database now, and the table it was is gone (dropped)");
 });

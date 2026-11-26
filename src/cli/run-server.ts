@@ -54,7 +54,7 @@ import { catalogTable, copiedColumns, effectiveSync, entryName, everyColumnLeave
 import { projectWriteState } from "./project.ts";
 import { addEntry, plannedEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type PollMeasure, type RemoveResult } from "./source-edit.ts";
 import { shortageOf, shortageWarning, syncedEstimate, type DiskRoom, type DiskShortage } from "../duck/disk-fit.ts";
-import { notAddedRefusal, PollRefused, type CopyState, type DiskStatus, type PolledTable, type StreamedAnswer, type StreamStatus } from "../duck/sync.ts";
+import { notAddedRefusal, PollRefused, type AddedTable, type CopyState, type DiskStatus, type PolledTable, type StreamedAnswer, type StreamStatus } from "../duck/sync.ts";
 import type { StoredFacts } from "../duck/reread.ts";
 import { SyncsByHand, type SyncByHand } from "./sync-by-hand.ts";
 import { agoText, DEFAULT_SYNC, parseSync, syncText, type TableSync } from "../lib/table-sync.ts";
@@ -167,7 +167,7 @@ export interface RunContext {
   startedAt: number;
   /** the sources file the run copies from as it last read it, and what is wrong with it now (null: nothing); `tables`,
    *  each added table's columns as the run syncs them from its next whole read (absent: a run that does not say) */
-  sources: () => { file: SourceFile | null; problem: string | null; tables?: ReadonlyArray<{ source: string; columns: ReadonlyArray<{ name: string }> }> };
+  sources: () => { file: SourceFile | null; problem: string | null; tables?: readonly AddedTable[] };
   /** the sources file was edited (`edited`: the tables the edit wrote, `schema.table`): the run reads it again.
    *  `confirmed`: the tables an add wrote against the database's columns, each with the shape of the table it read
    *  (src/cli/preflight.ts `shape`), so a table changed since is no confirmation (src/duck/sync.ts `placeColumns`) */
@@ -196,6 +196,9 @@ export interface RunContext {
     /** why a poll of these tables is refused now, or null when it would start (src/duck/sync.ts pollRefusal, the check
      *  `poll` refuses with): `POST /api/sync` answers it at once, before any sync starts */
     refused: (sources: string[]) => PollRefused | null;
+    /** the tables among these held by their entry, looked at again on the database first (src/duck/sync.ts
+     *  `lookAtHeld`): a hold the database fixed is let go before `refused` is asked (absent: a run that holds none) */
+    lookAtHeld?: (sources: string[]) => Promise<void>;
     /** where the replication stream is (src/duck/sync.ts streamStatus): null outside replication mode; `refresh: false`
      *  never reaches the database (the position and the slot as last read) */
     stream: (o?: { refresh?: boolean }) => Promise<StreamStatus | null>;
@@ -275,8 +278,17 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
   const repl = ctx.replication();
   const bytes = fileBytes(ctx.duck.file);
   const disk = ctx.duck.disk();
-  const tables = facts.tables.map((t) => {
-    const c = by.get(t.source), entry = sources.file?.tables.find((e) => e.table === t.source);
+  // an entry the run neither takes nor holds (a new one it cannot take, issue 1074) is no added table: it is said among
+  // the run's warnings, and never waited for as a first sync
+  const taken = sources.tables === undefined ? null : new Set(sources.tables.map((x) => x.source));
+  // A TABLE THE RUN SYNCS OR HOLDS THAT THE CATALOG NO LONGER NAMES (issue 1199: renamed, moved to another schema or
+  // dropped on the database) is still listed, as the run took it, with its hold on its line: left out, mason status
+  // counted it out of the added tables and said every one was synced while its changes were missing
+  const named = new Set(facts.tables.map((t) => t.source));
+  const listed: SourceTable[] = [...facts.tables, ...(sources.tables ?? []).filter((x) => !named.has(x.source))
+    .map(({ replicaIdentity, ...x }): SourceTable => ({ comment: null, ...x, ...(replicaIdentity !== undefined ? { replicaIdentity } : {}) }))];
+  const tables = listed.map((t) => {
+    const c = by.get(t.source), entry = taken === null || taken.has(t.source) ? sources.file?.tables.find((e) => e.table === t.source) : undefined;
     const byHand = syncsOf(ctx).of(t.source);
     const { columns: cols, ...catalog } = catalogTable(t, entry);
     // WHAT IS SYNCED NOW (issue 977): the synced data's own columns, while its columns changed on the database and it is
@@ -380,7 +392,9 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
       sync: { default: syncText(sources.file?.sync ?? DEFAULT_SYNC), written: sources.file?.sync != null },
       ...(repl !== null ? { replication: { slot: repl.slot, publication: repl.publication, owned: repl.owned } } : {}) },
     // a sources file edited into a mistake while the run is up: the run copies what it read last, and says so
-    warnings: [...ctx.warnings, ...(sources.problem ? [`${sources.problem} (Mason syncs the tables it read before; mason start reads the file again)`] : []),
+    // (its way out once: a problem that names mason stop && mason start already, such as a url: whose .env changed, is not
+    // told to fix the file)
+    warnings: [...ctx.warnings, ...(sources.problem ? [`${sources.problem} (Mason syncs the tables it read before${sources.problem.includes("mason stop && mason start") ? "" : ". Fix the file, then run mason stop && mason start"})`] : []),
       // a table added anyway though it likely won't fit, until its first sync is in (the backstop's stop is its error)
       ...tables.flatMap((x) => x.diskShort !== undefined && x.diskShort.estimated && x.error === null ? [shortageWarning(x.table, x.diskShort)] : [])],
     folder, project, tables,
@@ -1247,6 +1261,9 @@ export function createRunServer(ctx: RunContext): http.Server {
           // issue 1007: a second Sync now is never queued for another read of the table), with that sync beside it
           const running = syncs.running(tables);
           if (running !== null) { sendFailure(res, 409, busyFailure(tables, running), { code: "busy", sync: running }); return; }
+          // A TABLE HELD BY ITS ENTRY (issue 1074) is looked at again first: `mason sync` of a `sync: off` table is how it is
+          // read again, so a hold the database fixed since (a rename put back) is let go and the sync runs, as main's did
+          if (ctx.duck.lookAtHeld !== undefined) await ctx.duck.lookAtHeld(tables);
           // the sync's one check, as it is asked: a refusal now is the answer (`busy` while the run itself syncs it), and no sync starts
           const refused = ctx.duck.refused(tables);
           if (refused !== null) { sendFailure(res, refused.code === "not_found" ? 404 : 409, { message: refused.message, code: refused.code, ...(refused.code === "busy" ? { fix: BUSY_FIX } : {}) }, { code: refused.code, ...(refused.follow !== null ? { follow: refused.follow } : {}) }); return; }
