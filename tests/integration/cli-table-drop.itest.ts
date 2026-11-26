@@ -116,13 +116,15 @@ async function project(t: TestContext, publication: "own" | "named") {
   /**
    * UNTIL `n` IS CURRENT, and at every look before, NEVER SAID CURRENT WHILE IT SERVES OTHER ROWS than the source's. The
    * first look waits 6 s after the change, so the run's last look at the database (at most every 5 s) is after it.
+   * `lags`: an ordinary write to a table already current, which the stream applies a moment later, said current
+   * meanwhile as any streamed table is (its lag is the stream's to say): only waited for.
    */
-  const settles = async (n: string, what: string): Promise<void> => {
+  const settles = async (n: string, what: string, lags = false): Promise<void> => {
     await sleep(6_000);
     for (const end = Date.now() + SETTLE_MS; Date.now() < end; await sleep(1_000)) {
       const l = line(n), rows = served(n), want = source(n);
       if (rows === want && l.error === null && l.state === "synced" && l.stream === "streamed") return;
-      assert.ok(rows === want || (l.state !== "synced" && l.stream !== "streamed"), `${what}: said current while it serves other rows: ${JSON.stringify(l)}\nserved:\n${rows}\nsource:\n${want}`);
+      assert.ok(lags || rows === want || (l.state !== "synced" && l.stream !== "streamed"), `${what}: said current while it serves other rows: ${JSON.stringify(l)}\nserved:\n${rows}\nsource:\n${want}`);
     }
     throw new Error(`${what}: never current: ${JSON.stringify(line(n))}\nserved:\n${served(n)}\nsource:\n${source(n)}`);
   };
@@ -147,7 +149,7 @@ test("sync: replication, Mason's own publication — a table dropped, made again
     await p.settles("d1", "d1");
     // and kept current by the stream from then on
     psql(p.dbUrl, "INSERT INTO d1 VALUES (102, 'new d1 102')");
-    await p.settles("d1", "d1 after a write");
+    await p.settles("d1", "d1 after a write", true);
   });
 
   await t.test("d2: dropped alone, held and said on its line, then made again with rows and synced as the new table", async () => {
@@ -169,7 +171,7 @@ test("sync: replication, Mason's own publication — a table dropped, made again
     await p.settles("d3", "d3 made again empty");
     assert.equal(p.served("d3"), "");
     psql(p.dbUrl, "INSERT INTO d3 VALUES (300, 'new d3 300')");
-    await p.settles("d3", "d3 written to");
+    await p.settles("d3", "d3 written to", true);
   });
 
   await t.test("d4: made again and committed, then written to", async () => {
