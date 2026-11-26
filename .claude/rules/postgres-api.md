@@ -45,7 +45,12 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
   server keeps its protocol state itself: after an ErrorResponse it sends the Sync Postgres waits for
   (`ignore_till_sync`; without it one refused Parse silenced the catalog for every session), and a `SET` it validates
   runs inside a transaction it rolls back. A view or default of the source the catalog cannot hold is said in one
-  log line, by name, never silently dropped.
+  log line, by name, never silently dropped. **A table whose DDL the catalog refuses is left out, and every other
+  table starts** (`catalogDdlOwned`, `#ensureStarted`, issue 1197): each statement names the tables it belongs to, a
+  refused one leaves them out, and the start is tried again without them. The reason is said in a person's words
+  (`leftOutReason`: the columns of a type the catalog lacks, and the `exclude:` to write), never the engine's name. Only
+  a refused statement of no table fails the start. Why: one `oid8` column from Postgres 19 failed every statement of
+  every session. DETECTOR: `tests/postgres-api/catalog.test.ts` "issue 1197".
 - **The password is a user's or a token's** (`authenticate`; `listenerLogins`,
   src/duck/users.ts): a `mason user`'s password (`mason_<id>_<mac>`, the MAC over its NAME and id keyed by the API key,
   so the startup packet's user name must be the user's and every statement is attributed), or a token minted from the
