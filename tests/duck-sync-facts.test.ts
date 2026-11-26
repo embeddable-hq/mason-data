@@ -493,3 +493,18 @@ test("a table's name is no table only when the catalog has none of that name, an
   assert.equal(goneWords!({ schema: "public" }, { schema: "archive", table: "events" }), "it was moved to another schema on the database, and is archive.events now");
   assert.equal(goneWords!({ schema: "public" }, null), "no table of that name is on the database now, and the table it was is gone (dropped)");
 });
+
+// WHAT A LOOK AT A REPLICATED TABLE'S NAME DECIDES BY (issue 1208): its name no table, another table at its name (dropped
+// and made again, or renamed into its place: read again whole), or its own table
+test("a look at a replicated table's name tells a name gone from another table at it, and its own table from both", async () => {
+  const sync = await import("../src/duck/sync.ts");
+  const placeVerdict = (sync as { placeVerdict?: (oid: number | undefined, p: { shape: string | null } | undefined) => string | null }).placeVerdict;
+  assert.equal(typeof placeVerdict, "function", "the sync tells what a look found");
+  assert.equal(placeVerdict!(16401, { shape: null }), "gone");
+  assert.equal(placeVerdict!(16401, { shape: "16999:[]" }), "other");
+  assert.equal(placeVerdict!(16401, { shape: "16401:[[\"id\",23,-1,1,false]]" }), null);
+  // a table whose oid the run never read (a test's), a name not looked at, and a shape without an oid
+  assert.equal(placeVerdict!(undefined, { shape: null }), null);
+  assert.equal(placeVerdict!(16401, undefined), null);
+  assert.equal(placeVerdict!(16401, { shape: "[]" }), null);
+});

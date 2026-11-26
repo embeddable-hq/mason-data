@@ -10,6 +10,14 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   said to be current. Its synced data serves as it was. Once it is back under its name, Mason catches it up by one
   poll, with every change made meanwhile. Two tables that swap names are each synced again whole as the table of its
   name.
+- **A table synced with `sync: replication` and dropped on the database kept serving its old rows as current.** This
+  happened when it was dropped alone, and when it was dropped and made again under its name. The new table's rows
+  never reached the synced data, and `mason status`, `mason wait` and `mason sync` said the table was current. The same
+  happened when a table was renamed away and another table was renamed into its name. Now Mason looks at the names of
+  the replicated tables every 30 seconds, and whenever `mason status`, `mason wait` or `mason sync` asks. A table made
+  again under its name is synced again whole as the new table. A dropped table is held until it is back. Neither is
+  said to be current meanwhile. If your sources file names a publication that lists its tables, the new table is not
+  in it. Mason says so on the table's line, with the line to run.
 - **A polled table renamed or dropped on the database failed its poll every few seconds** with the engine's error. A
   table renamed during its first sync waited at least 5 minutes after it was renamed back. Now both are held the same
   way, and their sync goes on soon after the table is back under its name.

@@ -494,7 +494,10 @@ async function state(ctx: RunContext, columns = false, show = true): Promise<unk
   // the request read the database itself just now (an add, a remove: `readNow`), and its answer's state is that read,
   // never a second one (the review at 0d5a63fc, B2)
   if (show) await ctx.freshFacts?.();
-  return runState(ctx, ctx.duck.copies(), await ctx.duck.stream(), Date.now(), { columns });
+  // the stream first: asking where it is looks at the replicated tables' names (issue 1208), and a table found dropped
+  // or made again is then said as such in the copies read after it
+  const stream = await ctx.duck.stream();
+  return runState(ctx, ctx.duck.copies(), stream, Date.now(), { columns });
 }
 
 /**
@@ -577,8 +580,10 @@ function oneAtATime<A, R>(f: (a: A) => Promise<R>): (a: A) => Promise<R> {
  * the copies by phase (`phaseCounts`, the count `/healthz` says) for `GET /metrics`.
  */
 export async function usageFacts(ctx: RunContext, now = Date.now(), { refresh = true }: { refresh?: boolean } = {}): Promise<UsageFacts> {
+  // the stream first, as `/api/state` reads it (issue 1208)
+  const stream = await ctx.duck.stream({ refresh });
   const copies = ctx.duck.copies();
-  const s = runState(ctx, copies, await ctx.duck.stream({ refresh }), now) as { totals: SyncTotals; engine: { bytes: number | null }; disk: { freeBytes: number | null }; sessions: { open: number };
+  const s = runState(ctx, copies, stream, now) as { totals: SyncTotals; engine: { bytes: number | null }; disk: { freeBytes: number | null }; sessions: { open: number };
     tables: Array<{ added: boolean; sync?: SyncFacts }>; stream?: StreamStatus };
   const ages = s.tables.flatMap((t) => (t.added && t.sync?.ageSeconds != null ? [t.sync.ageSeconds] : []));
   const slot = s.stream?.slotWal;

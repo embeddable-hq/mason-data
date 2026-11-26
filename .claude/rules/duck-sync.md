@@ -18,6 +18,7 @@ paths:
   - "tests/integration/duck-stream.itest.ts"
   - "tests/integration/duck-table-rename.itest.ts"
   - "tests/integration/cli-table-rename.itest.ts"
+  - "tests/integration/cli-table-drop.itest.ts"
   - "src/duck/kept.ts"
   - "src/duck/compact.ts"
   - "tests/duck-compact.test.ts"
@@ -124,16 +125,25 @@ paths:
   that is no table (`nameGone`) is a change of its own: its catalog is read again (`columnsChanged`, said once with where
   its oid is now), and the run holds its ENTRY, as one entry's problem is held (issue 1074, the bullet above): said on
   its line, looked at again on its schedule, let go and caught up by one poll once its name is a table again. One hold,
-  one look: never a second mechanism. A rename or a move is held under polling and under replication. A drop is held
-  under polling at its next poll, and under replication only once a pass runs, as a drop sends the stream no change
-  and nothing else checks its name: until then it stays `synced` with its old rows (issue 1208, the same at main).
-  Mason's own publication names it as it is now (Postgres carries a table by its oid,
-  so nothing is dropped and added back), a dropped one not at all, and a named one is not checked for it. A table the
+  one look: never a second mechanism. A rename, a move and a drop are held under polling and under replication.
+  **A replicated table's name is looked at on a schedule, never only when a pass is kicked** (issue 1208: a DROP, a
+  CREATE or a RENAME sends the stream no change, so a table dropped and made again under its name stayed `synced` with
+  its old rows, and the new table's rows never arrived): `lookAtPlaces`, ONE `placesNow` query for every replicated
+  table on `databasePosition`'s connection, every `PLACE_LOOK_MS` (30 s, `armPlaceLook`) and whenever `mason status`,
+  `mason wait` or `mason sync` asks where the stream is (at most every 5 s), and at each pass's replication check.
+  What it finds (`placeVerdict`: `gone`, or `other`, another oid at its name) is acted on by ONE function
+  (`placesMoved`): the table marked behind at once, its mark written on the writer's turn, and its catalog read again.
+  A streamed table is current only as of the last look that answered (`streamedSyncedAt`, `placesLookedAt`), so a
+  look that keeps failing leaves it behind (fail closed). Mason's own publication names a renamed table as it is now
+  (Postgres carries a table by its oid, so nothing is dropped and added back), a dropped one not at all, and the table
+  made again at its name as soon as a pass sees it; a named one is not checked for a gone one, and one that does not
+  carry the new table says it as its gap. A table the
   run syncs or holds that the catalog no longer names is still listed by `/api/state` (src/cli/run-server.ts
   `runState`), so `mason status` and `mason wait` never count it out. A name that is another table now (made, renamed or
   swapped into its place) is the sources file's: read again whole. A start refuses a file naming a table that is not
-  there. DETECTOR: `tests/integration/cli-table-rename.itest.ts`, `tests/integration/duck-table-rename.itest.ts`. ("A
-  table renamed on the database")
+  there. DETECTOR: `tests/integration/cli-table-rename.itest.ts`, `tests/integration/duck-table-rename.itest.ts`,
+  `tests/integration/cli-table-drop.itest.ts`. ("A table renamed on the database", "A replicated table dropped or made
+  again")
 - **A batch holds a table's changes of ONE STAY in the stream, and only the stay it is in now is applied**
   (`StreamedTable.stay`: a new number when the table enters `streamed` or its copy is swapped, never used twice;
   `streamOnce`, `applyStreamed`): an ended stay's changes committed before the next copy's catch-up, so that copy or

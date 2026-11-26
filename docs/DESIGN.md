@@ -731,13 +731,11 @@ says so with what to do. A replicated one is marked behind. Once its name is a t
 is caught up by one poll, with every change made meanwhile. Mason never follows a table to a new name by itself: the
 person decides, by renaming it back or by syncing it under its new name.
 
-**Which tables that covers.** A table renamed, or moved to another schema, is held under polling and under replication.
-Under replication the stream sees its next change under the other name, and a pass's replication check sees its name
-gone. A dropped table is held under polling, at its next poll. Under replication it is held only once a pass runs, and
-a pass runs only when something else asks for one (a `mason add`, another table's catch-up). A drop sends the stream no
-change of the table, and nothing else checks its name. Until then it stays `synced` and serves its old rows, and a
-table made again under its name never has its new rows synced. It was the same before this change. Issue 1208 fixes
-it on its own.
+**Which tables that covers.** A table renamed, moved to another schema or dropped is held under polling and under
+replication. Under polling its next poll sees it. Under replication the stream sees a renamed table's next change under
+the other name, and the run looks at every replicated table's name on a schedule, which sees the rest ("A replicated
+table dropped or made again", issue 1208). Before that look, a dropped table was held only once a pass ran, and in
+replication mode a pass runs only when something asks for one.
 
 **Why.** Found on Postgres 19.0, the same on 18.7, with synthetic tables. A table synced with `sync: replication` was
 renamed, a row was inserted, and the table was renamed back. The row never reached the synced data, even after a
@@ -778,12 +776,51 @@ is which", "A table made again under its name").
 
 **What is left.** A start reads the sources file against the catalog, so a start while a table is away is refused with
 the file's error, and the slot keeps the WAL until it is fixed. A table renamed away and back while Mason is stopped is
-caught up at the start, from the slot's changes under the other name. A table dropped under replication is held only
-once a pass runs (above; issue 1208).
+caught up at the start, from the slot's changes under the other name.
 
 **Where.** `src/duck/sync.ts` (`placesNow`, `nameGone`, `columnsChanged`, `prepareReplication`, `refuseStreamed`),
 `src/duck/stream.ts` (`renamedFrom`), `src/cdc/shape.ts` (`placeSql`), `src/cli/run-server.ts` (`runState`);
 `tests/integration/cli-table-rename.itest.ts`, `tests/integration/duck-table-rename.itest.ts`.
+
+### A replicated table dropped or made again (issue 1208, 2026-11-26)
+
+**Decision.** The run looks at every replicated table's name and oid on the database every 30 s, and whenever `mason
+status`, `mason wait` or `mason sync` asks where the stream is. A name that is no table now is held by its entry, as a
+renamed table is ("A table renamed on the database"). A name that is another table now is read again whole as that
+table, as the catalog's read does for a polled one. Mason's own publication is set to carry the new table at the pass
+that read kicks, and a named publication that does not carry it says so as its gap, with the line to run. From the
+moment a look sees either, the table is marked behind, so nothing says it is current until it is synced again.
+
+**Why.** Found by the review of PR 1202, on Postgres 18.7, with synthetic tables. Under `sync: replication` a table
+was dropped and made again under its name, in one transaction or apart, with rows or empty. It stayed `synced` and
+`streamed` for as long as it was watched, served the old table's rows, and a row inserted into the new table never
+arrived. `mason status` said it was current. A table renamed away with no write, then another renamed into its name,
+was the same. Measured at main: nothing was written to the log after the DROP, and Mason's own publication carried no
+table, as Postgres drops a dropped table from a publication and the new table was never added. Three things together:
+- A DROP or a CREATE sends the stream no change. In replication mode a pass runs only when something kicks it, so the
+  name check #1202 put in a pass's replication check never ran.
+- So Mason's own publication's `SET TABLE` never named the new table, and its writes never reached the slot.
+- That check asked only whether a name was gone, never whether it was another table now.
+
+**How often, and what it costs.** One catalog query for every replicated table (`placesNow`: the shape at each name
+and where each oid is), on the connection that reads the database's position for `mason status` and the usage
+sample. No row of a table is read and no lock is taken. Measured on Postgres 18.7: 0.1 ms on the server for 5 tables,
+1.2 ms for 100 and 12 ms for 1,000, and 4 to 8 ms to connect. The usage sample already connects once a minute to read
+the position, so the look adds about one connection a minute when nobody asks. 30 s is well inside the 120 s a
+streamed table promises. A streamed table is current only as of the last look that answered, so a look that keeps
+failing makes it behind after 120 s, rather than current for ever.
+
+**No signal to wait for.** pgoutput sends nothing for DDL, and an event trigger would be an object on the source,
+which Mason never creates. A look on a schedule is the only signal that needs nothing of the database.
+
+**What is left.** Between the change and the next look, up to 30 s, the table is still said to be current. `mason
+status`, `mason wait` and `mason sync` look first, at most every 5 s, so a person asking sees it at once. A table
+made again under its name and listed by a named publication is a gap until its owner adds it. After `ALTER
+PUBLICATION … ADD TABLE`, the table's first change kicks a pass, as for any gap.
+
+**Where.** `src/duck/sync.ts` (`PLACE_LOOK_MS`, `lookAtPlaces`, `placeVerdict`, `placesMoved`, `armPlaceLook`,
+`streamedSyncedAt`, `prepareReplication`), `src/cli/run-server.ts` (the stream read before the tables);
+`tests/integration/cli-table-drop.itest.ts`.
 
 ### One entry's problem holds its table alone (issue 1074, 2026-11-16)
 
