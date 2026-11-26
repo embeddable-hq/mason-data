@@ -289,6 +289,10 @@ export class KeyNotHeld extends Error {}
  */
 export const KEY_RETRY_MS = 60_000;
 
+/** HOW OFTEN A REPLICATED TABLE HELD BY ITS ENTRY IS LOOKED AT AGAIN (`lookAtHeld`), beside a relation message of it: as
+ *  a catch-up refused for its key asks again (`KEY_RETRY_MS`), one catalog row read, no row of the table */
+export const HELD_LOOK_REPLICATED_MS = KEY_RETRY_MS;
+
 /** the catch-up mark of a streamed table refused for its key (`refuseKey`), in `_mason.catch_up`: how its catch-up knows,
  *  after a restart too, to wait for the stream to pass where the key came back (`keyBackPassed`) */
 const KEY_REFUSED_WHY = "after the database stopped keeping its rows apart by its key";
@@ -1308,7 +1312,8 @@ export class Sync {
    *  named before, and one that holds a table not by its own record */
   private readonly formerRecords = new Map<number, FormerRecord>();
   /** THE TABLES HELD BY THEIR COLUMNS' IDENTITY (issue 1073), and why: a column the sources file left out would be synced
-   *  under another name. Not copied, polled, caught up or streamed; their synced data served as it was */
+   *  under another name — or by their entry, which the run cannot take as it is (issue 1074). Not copied, polled, caught
+   *  up or streamed; their synced data served as it was */
   private readonly unplaced = new Map<string, string>();
   /** the error each table a named publication did not carry was given (`settlePrepared`): cleared by the pass that finds
    *  it carried again, and by nothing else that pass */
@@ -1341,6 +1346,15 @@ export class Sync {
   /** the shape each table's columns were last read again for (`columnsChanged`): a shape read again once, never at
    *  every poll — the sources file may not take it (an entry naming a column gone), and the poll then says so */
   private readonly reshapedTo = new Map<string, string>();
+  /** THE TABLES HELD BY THEIR ENTRY (issue 1074): each looked at again on the database as its `sync:` would read it
+   *  (`lookAtHeld`), so a hold whose cause the database fixes (a rename put back, a unique index restored) is let go */
+  private heldByEntry = new Set<string>();
+  /** the run reads a held table's catalog row again, and the sources file when the row changed (src/cli/dev.ts) */
+  private readonly onHeldLook: ((sources: string[]) => Promise<boolean>) | undefined;
+  /** the held tables being looked at now (`lookAtHeld`): one look at a time each */
+  private readonly heldLooking = new Map<string, Promise<void>>();
+  /** when each polled table held by its entry is looked at next (`heldLooks`): at its poll's interval */
+  private readonly heldLookAt = new Map<string, number>();
   /** the replicated tables a stream's relation message asks to check (`relationSeen`), at the next pass */
   private readonly shapeChecks = new Set<string>();
   /** when a replicated table's shape was last checked for a relation message that carried its copy's columns */
@@ -1521,6 +1535,9 @@ export class Sync {
       onEvent?: (e: SyncEventInput) => void;
       /** a table's columns changed on the database: the run reads them again and sets the tables (`onColumnsChanged`) */
       onColumnsChanged?: (sources: string[]) => Promise<void>;
+      /** a table held by its entry looked at again: the run reads its catalog row, and the sources file when the row
+       *  changed; true when it did (`onHeldLook`) */
+      onHeldLook?: (sources: string[]) => Promise<boolean>;
       /** when the synced tables' space is read and when one is compacted (`CompactOptions`): the defaults, but in tests */
       compact?: CompactOptions;
       /** when a table is given a side table for its lookups by key, and when it is built again (`LookupOptions`): the
@@ -1548,6 +1565,7 @@ export class Sync {
     this.onChunk = options.onChunk;
     this.onEvent = options.onEvent ?? (() => undefined);
     this.onColumnsChanged = options.onColumnsChanged;
+    this.onHeldLook = options.onHeldLook;
     this.diskFree = options.diskFree ?? freeBytesAt;
     if (mode === "replication" && replication === null) throw new Error("replication mode needs its slot and publication (Mason bug: report it)");
     this.replication = replication;
@@ -2212,14 +2230,18 @@ export class Sync {
    *  here and current (said as its records say it, `addedText`), a removed one dropped. `confirmed`: the tables whose
    *  entry the person just wrote against the database's columns as they are now (`mason add` through the run), taken
    *  afresh by name (src/duck/column-identity.ts). `readOnly`: the project's files are deployed read-only, so the
-   *  sources file is the owner's committed word, which confirms a column left out that did not move.
+   *  sources file is the owner's committed word, which confirms a column left out that did not move. `held`: the tables
+   *  whose entry the run cannot take as it is (issue 1074, src/cli/sources.ts `rereadSources`), each as the run took it
+   *  before, and why: held as a table held for its columns is (`placeColumns`), and looked at again (`lookAtHeld`).
    *  What it returns is the catalog rebuilt over them (never rejected: a failure is said in the log) */
-  setTables(tables: readonly AddedTable[], o: { confirmed?: ReadonlyArray<{ table: string; shape: string | undefined }>; readOnly?: boolean } = {}): Promise<void> {
+  setTables(tables: readonly AddedTable[], o: { confirmed?: ReadonlyArray<{ table: string; shape: string | undefined }>; readOnly?: boolean; held?: ReadonlyMap<string, string> } = {}): Promise<void> {
     // (called at mason start and at mason add / remove only: the catalog's keys and constraints are the source's as of
     // then — docs/DESIGN.md "A count of distinct keys")
     const before = this.tables;
     this.tables = new Map(tables.map((t) => [t.source, t]));
-    this.placeColumns(tables, new Map((o.confirmed ?? []).map((c) => [c.table, c.shape])), o.readOnly === true);
+    this.heldByEntry = new Set((o.held ?? new Map()).keys());
+    for (const s of [...this.heldLookAt.keys()]) if (!this.heldByEntry.has(s)) this.heldLookAt.delete(s);
+    this.placeColumns(tables, new Map((o.confirmed ?? []).map((c) => [c.table, c.shape])), o.readOnly === true, o.held ?? new Map());
     // the references the sources file names: their hidden keys made, dropped and numbered on the writer's turn
     this.numbers.set(tables);
     this.numbersSoon();
@@ -2382,7 +2404,47 @@ export class Sync {
     // a table copying, queued, or owed its catch-up is not polled by a pass (its catch-up polls it, then `rearm`): counted
     // as due it would run a pass every few ms that polls nothing and attaches the source each time
     const dues = [...this.tables.values()].filter((t) => this.pollable(t)).flatMap((t) => this.dueAt(t) ?? []);
+    dues.push(...this.heldLooks().map((t) => this.heldLookAt.get(t.source) ?? 0));
     return dues.length ? passDelayMs(Math.min(...dues), Date.now(), this.lastPassMs) : null;
+  }
+
+  /** THE TABLES HELD BY THEIR ENTRY (issue 1074) a pass looks at on a schedule (`heldLookAt`, `lookAtHeld`): a polled one
+   *  at its poll's interval, a replicated one every `HELD_LOOK_REPLICATED_MS` and at a stream's relation message
+   *  (`relationSeen`). One under `sync: off` is looked at only by `mason sync` of it, as it is polled only so */
+  private heldLooks(): AddedTable[] {
+    if (this.mode === "recopy" || this.onHeldLook === undefined || this.stopped) return [];
+    return [...this.heldByEntry].flatMap((s) => this.tables.get(s) ?? [])
+      .filter((t) => (this.replicated(t) || this.syncOf(t).mode === "poll") && !this.heldLooking.has(t.source));
+  }
+
+  /** how long until a held table is looked at again: a polled one's interval, else `HELD_LOOK_REPLICATED_MS` */
+  private heldLookMs(t: AddedTable): number {
+    const s = this.syncOf(t);
+    return !this.replicated(t) && s.mode === "poll" ? s.seconds * 1000 : HELD_LOOK_REPLICATED_MS;
+  }
+
+  /**
+   * A TABLE HELD BY ITS ENTRY, LOOKED AT AGAIN ON THE DATABASE (issue 1074; the reviews of PR 1091): the run reads its
+   * catalog row again, and the sources file when that row changed (`onHeldLook`, src/cli/dev.ts), so a hold whose cause
+   * the database fixes is let go: a rename put back, a unique index a `key:` needs restored. Main kept such a table and
+   * polled it, so it recovered by itself. One look at a time a table; resolves once it ended. A look that fails is said,
+   * and the table is looked at again at its next look (it stays held: fail closed).
+   */
+  async lookAtHeld(sources: readonly string[]): Promise<void> {
+    if (this.onHeldLook === undefined || this.stopped) return;
+    const ask = sources.filter((s) => this.heldByEntry.has(s) && !this.heldLooking.has(s));
+    if (ask.length) {
+      const look = this.onHeldLook(ask).then(() => undefined, (e: unknown) => {
+        this.log(`${ask.join(", ")}: held by its entry, and could not be looked at again on the database (looked at again at its next look): ${this.errorText(e)}`);
+      }).finally(() => {
+        for (const s of ask) this.heldLooking.delete(s);
+        // ITS NEXT LOOK TIMED (the fourth review of PR 1091): a pass that ended while it looked left it out of the next
+        // pass's time (`heldLooks`), and with no other polled table due no pass was timed, so it was never looked at again
+        this.rearm();
+      });
+      for (const s of ask) this.heldLooking.set(s, look);
+    }
+    await Promise.all(sources.flatMap((s) => this.heldLooking.get(s) ?? []));
   }
 
   /** a copy or a catch-up of the table is queued (a compaction queued is not one: the table is polled until it runs) */
@@ -3066,7 +3128,11 @@ export class Sync {
    */
   private relationSeen(source: string, columns: readonly RelationColumn[]): void {
     const t = this.tables.get(source);
-    if (t === undefined || !this.replicated(t) || t.shape === undefined || this.onColumnsChanged === undefined || this.stopped) return;
+    if (t === undefined || !this.replicated(t) || this.stopped) return;
+    // A TABLE HELD BY ITS ENTRY (issue 1074): looked at again at once, its definition having changed on the database
+    // (Postgres sends a relation message after any change of it, before its next change)
+    if (this.heldByEntry.has(source)) { void this.lookAtHeld([source]); return; }
+    if (t.shape === undefined || this.onColumnsChanged === undefined) return;
     const generated = new Set(t.columns.filter((c) => c.generated).map((c) => c.name));
     const shape = shapeTuples(t.shape).filter((c) => !generated.has(c.name));
     const differs = shape.length !== columns.length || shape.some((c, i) => c.name !== columns[i]!.name || c.typeOid !== columns[i]!.typeOid || c.typmod !== columns[i]!.typmod);
@@ -3082,10 +3148,12 @@ export class Sync {
    * out, under another name, is HELD (`unplaced`): said in the log, as an event and as its error while it is held (`state`:
    * `mason status`, the web page), with the line to write; not copied, polled, caught up or streamed, its synced data
    * served as it was. A replicated one is marked behind, so it is caught up by one poll once it is let go (the stream
-   * skips its changes meanwhile). Every other table's record is written as taken. A copy recorded by a Mason before columns had numbers
+   * skips its changes meanwhile). A table whose ENTRY the run cannot take (`entryHeld`, issue 1074) is held the same way,
+   * as the run took it before, its record left as it was: what it syncs is decided again once its entry is fixed.
+   * Every other table's record is written as taken. A copy recorded by a Mason before columns had numbers
    * takes them from its table now, where its names and types are the same: never read again for it.
    */
-  private placeColumns(tables: readonly AddedTable[], confirmed: ReadonlyMap<string, string | undefined>, readOnly: boolean): void {
+  private placeColumns(tables: readonly AddedTable[], confirmed: ReadonlyMap<string, string | undefined>, readOnly: boolean, entryHeld: ReadonlyMap<string, string>): void {
     const wasHeld = new Map(this.unplaced);
     this.unplaced.clear();
     // EVERY RECORD READ BEFORE ANY IS WRITTEN (issue 1080): two tables, or two schemas, that swap names bring each its
@@ -3113,6 +3181,8 @@ export class Sync {
     const heldBy: Array<[string, ColumnRecord, string]> = [];
     const unconfirmed: string[] = [];
     for (const t of tables) {
+      const byEntry = entryHeld.get(t.source);
+      if (byEntry !== undefined) { this.unplaced.set(t.source, byEntry); continue; }
       // A CONFIRMATION IS OF THE TABLE THE ADD SAW (the re-check of PR 1078): its oid, and each column's number, name and
       // type (its shape). Any of it changed since, and it is no confirmation: the table is placed as the run took it
       const asked = confirmed.has(t.source);
@@ -3879,6 +3949,12 @@ export class Sync {
   private notStreamedReason(source: string): string {
     const t = this.tables.get(source);
     if (t === undefined) return "it is no longer added (its synced data is dropped)";
+    // HELD (`placeColumns`: its columns, or its entry, issue 1074): never synced meanwhile, whatever else it waits for
+    if (this.unplaced.has(source)) {
+      const st = this.states.get(source);
+      return st?.phase === "copied" ? "it is held, and serves its synced data as it was: its line says why, and what syncs it again"
+        : "it is held, and is not synced: its line says why, and what syncs it";
+    }
     const gap = this.unpublished.get(source);
     if (gap !== undefined) return gapLine(gap);
     const st = this.states.get(source);
@@ -4681,6 +4757,12 @@ export class Sync {
     // table whose columns changed read again (`columnsChanged`)
     const asked = [...this.shapeChecks].flatMap((s) => this.tables.get(s) ?? []);
     this.shapeChecks.clear();
+    // A TABLE HELD BY ITS ENTRY (issue 1074) at its look's time (`heldLooks`): never polled, but looked at again on the
+    // database, so a hold the database fixes is let go with no restart (never awaited: the look reads the catalog on a
+    // connection of its own, and sets the tables when its row changed)
+    const looks = this.heldLooks().filter((t) => (this.heldLookAt.get(t.source) ?? 0) <= Date.now());
+    for (const t of looks) this.heldLookAt.set(t.source, Date.now() + this.heldLookMs(t));
+    if (looks.length) void this.lookAtHeld(looks.map((t) => t.source));
     if (asked.length) {
       try {
         const now = await this.onWriter(() => this.shapesNow(this.store.writer, asked));

@@ -189,7 +189,21 @@ CLI lacks).
   way out. A name of `columns:` its table lacks and no column is close to was dropped on the database: passed over and
   said, never a refusal (`goneColumns`, `goneNotes`; issue 977), since it only narrows; one close to a column is refused.
   A name of `exclude:` the table lacks is ALWAYS refused, fail closed (the review of PR 995: passed over, a salary renamed
-  annual_pay was served), with the way out; the run moves one that went while it was up (`leftOutArrivals`). A file that cannot be read mid-run keeps the tables read before: a typo never drops a copy.
+  annual_pay was served), with the way out; the run moves one that went while it was up (`leftOutArrivals`). A file that cannot be read mid-run keeps the tables read before: a typo never drops a copy, and the run's warning says
+  mason stop && mason start, never `mason start`, which answers that Mason runs. **An ENTRY the catalog refuses mid-run
+  is that entry's alone** (issue 1074: a column renamed under `columns:` refused the whole re-read, and no table took a
+  column change until a restart): each entry is checked on its own (`entryTables`), the others taken, and its table
+  HELD as the run took it before (`rereadSources`, `refused`; the sync's `held`), said on its line with the line to write
+  (`refusedEntryText`, `renamedColumns`: a guess offered, never taken; every way out a line that runs), or, never taken,
+  said among the warnings. **A problem across entries (a case clash of tables or schemas) is decided by what the run
+  syncs, never the file's order**: the group's one synced entry decided alone, every other never taken (the review of
+  PR 1091: a new entry written first was taken beside the synced one, and the two shared one synced table). **A
+  `references:` problem is the entry's that names it**, but a reference into an entry the run does not take (a problem
+  of its own, or a clash) is passed over for that verdict, neither checked nor carried, so one entry's problem never
+  holds the tables that reference it (`entryTables`, `OwnEntry.passedOver`). **An entry the run neither takes nor holds
+  is no added table** (`runState` reads the file's entry only for a table among the run's `tables`): said among the
+  warnings, never a first sync `mason wait` waits for (the review of PR 1091: it waited to its timeout). A start still
+  refuses the file on any entry.
 - **`mason add` and `mason remove` work before `mason start` as after it** (`needs: "project"`): the sources file is
   the list, and `mason init demo` already writes entries before any run, so `mason init && mason add orders && mason
   start` is a natural order. With Mason up they ask the run (`/api/pick`, `/api/remove`: the copy starts or is dropped
@@ -215,8 +229,8 @@ CLI lacks).
 - **An edit is checked before it is written, against the database the run copies** (the run's catalog, or with Mason
   down the one the command reads): `mason add` checks its own entry
   (a `--key` must be NOT NULL columns over a unique index: `keyProblems`) and the file's other entries; `mason remove` the
-  entries that stay — else the run's re-read would refuse the file, keep the removed table and go on copying it while
-  the command said "Removed". A `url:` that now resolves to another database (a `.env` edited) refuses both, and the
+  entries that stay — else the next start would refuse the file the command said it wrote (the run's re-read holds
+  only the entry that fails, issue 1074). A `url:` that now resolves to another database (a `.env` edited) refuses both, and the
   run's own re-read (`rereadSources`) keeps the tables read before and says mason stop && mason start.
 - **A server reads its URL from its environment first** (`shellFirst`: `mason serve` is configured by the environment
   alone, a `.env` in its data folder never overrides the platform's), and the variable the sources file names is a

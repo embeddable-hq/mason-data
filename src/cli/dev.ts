@@ -251,6 +251,14 @@ function recordReplication(cfg: ProjectConfig, repl: ReturnType<typeof projectRe
   writeConfig(home, cfg);
 }
 
+/** A table's catalog row as its entry is checked by (src/cli/sources.ts `entryProblems`): its size and statistics left
+ *  out, which move with its rows. "" when the catalog has no such table. A held table's look compares two (`onHeldLook`) */
+function entryFacts(table: SourceTable | undefined): string {
+  if (table === undefined) return "";
+  const { rows: _rows, bytes: _bytes, tableBytes: _tableBytes, toastBytes: _toastBytes, estimateBytes: _estimateBytes, ...rest } = table;
+  return JSON.stringify({ ...rest, columns: rest.columns.map(({ width: _width, ...c }) => c) });
+}
+
 async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // when this run began: the uptime /api/state says (engine.startedAt, a supervisor's restart is a new run)
   const startedAt = Date.now();
@@ -537,6 +545,11 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const syncMode = syncModeOf(process.env);
   // THE SYNC'S EVENTS (src/duck/events.ts): its failures and notable events, kept as the request log is, before the sync
   // that records them starts
+  // EACH HELD TABLE'S CATALOG ROW AS THE SOURCES FILE WAS LAST READ AGAINST IT (`entryFacts`), set by every read of the
+  // file (`added`): what a look of it compares the row now with. Never the catalog's row before the look, which a whole
+  // read of the catalog (mason status, the web page) refreshes without reading the file (the third review of PR 1091:
+  // that look found no change, and the table stayed held for the run)
+  const heldReadAgainst = new Map<string, string>();
   let events: SyncEvents;
   try { events = await SyncEvents.open(store, logLine, { days: keptDays }); }
   catch (e) { fail("Opening the synced data"); say(`  the sync's events (${EVENTS_TABLE}) could not be opened: ${(e as Error).message}`); await store.close(); return 1; }
@@ -551,6 +564,17 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
         const r = await catalog.refreshTables(changed);
         if ("failed" in r) throw new Error(r.failed);
         await added();
+      },
+      // A TABLE HELD BY ITS ENTRY, LOOKED AT AGAIN (issue 1074): its catalog row read again alone, and the sources file
+      // read against it only when the row changed in what an entry is checked by (its size and statistics left out), so
+      // a hold the database fixed (a rename put back, a unique index restored) is let go with no restart
+      onHeldLook: async (held) => {
+        const heldRead = await catalog.refreshTables(held);
+        if ("failed" in heldRead) throw new Error(heldRead.failed);
+        // against the row the file was last read against (`heldReadAgainst`), never the catalog's before this read
+        if (held.every((s) => entryFacts(catalog.facts().tables.find((x) => x.source === s)) === heldReadAgainst.get(s))) return false;
+        await added();
+        return true;
       },
       // what the run made on the database, recorded as it is made and dropped: mason destroy drops it by that name
       onReplication: (made) => {
@@ -621,23 +645,31 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
       if (arrived.length) { leaveOut(read, arrived, now.tables); read = readSources(); }
       if (!("message" in read)) read = record.taken(read, now.tables);
     }
-    const r = rereadSources(sources, read, src.resolved, now.tables, source.database, project.root, { replicationChecked, slot: cfg.replication?.slot ?? null });
+    const readOnly = projectWriteRefusal(project.root, process.env) !== null;
+    const r = rereadSources(sources, read, src.resolved, now.tables, source.database, project.root, { replicationChecked, slot: cfg.replication?.slot ?? null, readOnly });
     if (r.said !== null) logLine(`[sync] ${r.said}`);
-    // the names the file's entries pass over now (`goneNotes`): a new one said, and the warnings the file's as it is now
-    const notes = goneNotes(r.file, now.tables, project.root);
+    // the names the file's entries pass over now (`goneNotes`), and the entries it cannot take that the run never synced
+    // (issue 1074): a new one said, and the warnings the file's as it is now. A HELD entry is said on its table's line
+    // (the sync's own words, `placeColumns`), never as a warning too
+    const untaken = r.refused ?? [];
+    const notes = [...goneNotes(r.file, now.tables, project.root), ...untaken.filter((x) => !x.held).map((x) => x.text)];
     for (const n of notes) if (!fileNotes.includes(n)) logLine(`[sync] ${n}`);
     for (const n of fileNotes) { const i = runWarnings.indexOf(n); if (i >= 0) runWarnings.splice(i, 1); }
     runWarnings.push(...notes);
     fileNotes = notes;
-    sources = { file: r.file, tables: r.tables, problem: r.problem };
+    sources = { file: r.file, tables: r.tables, problem: r.problem, refused: untaken };
     sync.setViews(now.views ?? []);
     sync.setCollations(now.collations ?? []);
     // the tables an edit just wrote (mason add, now or while Mason was stopped: src/cli/confirmed.ts): their entry written
     // against the columns as they are now, so each is taken afresh by name, whatever the run took of its columns before;
     // and in a project deployed read-only, the committed file is the owner's word (src/duck/column-identity.ts)
-    // — each as the table the add read: one changed since is no confirmation (src/duck/sync.ts `placeColumns`)
-    return sync.setTables(sources.tables, { confirmed: r.problem === null ? edit.confirmed ?? [] : [],
-      readOnly: projectWriteRefusal(project.root, process.env) !== null });
+    // — each as the table the add read: one changed since is no confirmation (src/duck/sync.ts `placeColumns`). An entry
+    // the run cannot take holds its table alone (issue 1074): never confirmed, held as the run took it before
+    const held = new Map(untaken.filter((x) => x.held).map((x) => [x.table, x.text]));
+    const notTaken = new Set(untaken.map((x) => x.table));
+    heldReadAgainst.clear();
+    for (const s of held.keys()) heldReadAgainst.set(s, entryFacts(now.tables.find((x) => x.source === s)));
+    return sync.setTables(sources.tables, { confirmed: r.problem === null ? (edit.confirmed ?? []).filter((c) => !notTaken.has(c.table)) : [], readOnly, held });
   };
 
   if (pg.said) say(`  ${pg.said}`);
@@ -882,7 +914,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     uiErrors: new UiErrors((e) => events.record(e), (m) => say(`  ${m}`)),
     // the statements running now, and a cancel of one: the listener's own (a CancelRequest's path)
     listener: api,
-    duck: { copies: () => sync.state(), file: duckFile, poll: (sources) => sync.pollNow(sources), refused: (sources) => sync.pollRefusal(sources), stream: (o) => sync.streamStatus(o), measured: (table) => sync.measured(table), disk: () => sync.diskStatus(),
+    duck: { copies: () => sync.state(), file: duckFile, poll: (sources) => sync.pollNow(sources), refused: (sources) => sync.pollRefusal(sources), lookAtHeld: (sources) => sync.lookAtHeld(sources), stream: (o) => sync.streamStatus(o), measured: (table) => sync.measured(table), disk: () => sync.diskStatus(),
       // what queries may spill into now, and whether MASON_SPILL_LIMIT sets it: the room an add keeps beside a table
       spill: () => ({ limitBytes: store.spillLimitBytes, set: spillLimit !== undefined }), requests, events, usage,
       restarts: () => readRestarts(home), jsonPaths: () => sync.kept.status(), generated: () => sync.generated.status(), storage: () => sync.storedFacts() },
@@ -898,7 +930,8 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const confirmedOffline = "tables" in offline ? offline.tables : [];
   const tablesSet = added({ confirmed: confirmedOffline }).then(() => {
     // only once the file was taken: else the next start takes them
-    if (sources.problem === null && (confirmedOffline.length > 0 || "problem" in offline)) forgetConfirmed(home);
+    const notTaken = (sources.refused ?? []).map((x) => x.table);
+    if (sources.problem === null && !confirmedOffline.some((c) => notTaken.includes(c.table)) && (confirmedOffline.length > 0 || "problem" in offline)) forgetConfirmed(home);
   });
   // the run's own start beside its pid (src/cli/runs.ts masonProcess): how a command tells this run, alive and silent,
   // from another process given the number later, whatever started it (mason start, mason serve, a supervisor, npx)
