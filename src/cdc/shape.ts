@@ -11,7 +11,7 @@
  *
  * ONE fragment for both readers, so the two are equal by construction: the catalog's read (src/cli/preflight.ts
  * `TABLES_SQL` `shape`, carried on `SourceTable.shape`) and the sync's check before a poll and after a stream's relation
- * message (src/duck/sync.ts `shapesNow`). The ORDER BY is the aggregate's, over the catalog's rows of one table: never a
+ * message (src/duck/sync.ts `placesNow`). The ORDER BY is the aggregate's, over the catalog's rows of one table: never a
  * sort of a table's rows.
  */
 import { pgIdent, pgLiteral } from "./pg-wire.ts";
@@ -21,6 +21,26 @@ import { pgIdent, pgLiteral } from "./pg-wire.ts";
 export const shapeSql = (rel: string): string => `(SELECT (${rel})::oid::text || ':' || ` +
   "coalesce(json_agg(json_build_array(a.attname, a.atttypid, a.atttypmod, a.attnum, a.attgenerated <> '') ORDER BY a.attnum), '[]'::json)::text " +
   `FROM pg_attribute a WHERE a.attrelid = ${rel} AND a.attnum > 0 AND NOT a.attisdropped)`;
+
+/**
+ * WHERE THE TABLE OF THE OID `oid` (SQL: a column of type oid) IS ON THE DATABASE NOW (issue 1199): its schema and name as a JSON array (`["public","orders"]`),
+ * or null when no table has that oid any more (dropped). A rename, or a move to another schema, keeps a table's oid, so
+ * this finds a table the sources file names after it was renamed away. One index lookup of `pg_class` by oid, no lock.
+ */
+export const placeSql = (oid: string): string => "(SELECT json_build_array(n.nspname, c.relname)::text FROM pg_class c " +
+  `JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = ${oid})`;
+
+/** `placeSql`'s answer as a schema and a name, or null (no table has the oid, or a text this module did not write). */
+export function placeOf(text: string | null): { schema: string; table: string } | null {
+  if (text === null) return null;
+  try {
+    const v = JSON.parse(text) as unknown;
+    return Array.isArray(v) && typeof v[0] === "string" && typeof v[1] === "string" ? { schema: v[0], table: v[1] } : null;
+  } catch (e) {
+    if (e instanceof SyntaxError) return null;
+    throw e;
+  }
+}
 
 /** A table's name as `to_regclass` reads it, as an SQL literal: quoted, so a name of any case or character is the table
  *  it names. */
