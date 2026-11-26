@@ -82,7 +82,9 @@ tables:
 - `mason add` and `mason remove` edit one entry and keep every other byte of the file, your comments included, and
   apply at once; an entry you edit by hand is applied at the next `mason start`. A mistake — a column the table does
   not have, `columns` and `exclude` together, a variable that is not set — is refused, every one of the file's
-  mistakes on one report, each with its key and the way out (`did you mean …?`).
+  mistakes on one report, each with its key and the way out (`did you mean …?`). While Mason runs, an entry that stops
+  matching the database (a column it lists renamed there) holds only its table: it serves what it holds, its line in
+  `mason status` gives the line to write, and the other tables are kept current.
 
 `mason init --folder <dir>` puts `sources/` elsewhere in the folder (`--folder .` for the folder itself). Keep it in
 your app's repo, so a schema change and the tables that sync it travel together. A teammate who clones the repo runs

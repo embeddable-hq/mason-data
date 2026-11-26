@@ -113,6 +113,9 @@ tables:
   Where the key is a UUID, a text or several columns, a join on it reads small numbers Mason keeps for it.
 - While Mason runs, `mason add` and `mason remove` take effect at once. A change you make by hand applies at the next
   `mason start`. If an entry has a mistake, Mason names the key and says how to fix it. You never write column types.
+- If an entry stops matching your database while Mason runs, such as a column it lists that was renamed, only that
+  table is held. It serves the data it holds, and its line in `mason status` gives the line to write. The other tables
+  are kept current.
 - A column the file leaves out stays out until you confirm it, even if you rename it, its table or its schema on your
   database. If a hand edit or a rename would sync such a column again, Mason holds that table and says why on its line in `mason status`. Run the
   `mason add <table> --columns …` the line gives to sync it. In a project deployed read-only, the committed file is your

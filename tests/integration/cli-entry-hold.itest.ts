@@ -1,0 +1,337 @@
+/**
+ * ONE ENTRY'S PROBLEM HOLDS ITS TABLE ALONE (issue 1074), end to end against a real Postgres. With `t3: { columns: [id,
+ * amount_total] }`, renaming `t3.amount_total` on the database made the run's re-read refuse the whole sources file, so
+ * from then on no table took a column change until a restart: a column added to another table was never synced.
+ *
+ * Two tables polled every second. On the database, `t3.amount_total` is renamed and a row of it changed, then `t1` gains a
+ * column. With no restart: `t1`'s new column is synced; `t3` is held, serving what it holds under its old columns, never
+ * the renamed one under its new name (fail closed), and its line in `mason status` says why with the line to write;
+ * `mason add t3 --columns id,amount_total2` takes it at once, and it is synced again with the column as the database
+ * names it now.
+ *
+ * The same re-read takes two entries written by hand whose tables' names differ only in case from a synced table's, one
+ * above the polled `accents` and one below the streamed `bravo` (the review of PR 1091: the one written first was taken,
+ * and both shared one synced table, which neither served after). Neither new entry is taken, each said with its way out,
+ * and `accents` and `bravo` are kept current throughout.
+ *
+ * What it needs: IT_POSTGRES_URL, psql on PATH, and DuckDB's postgres extension. It writes only inside a database it
+ * creates, `it_entryhold_<random>`, drops it at the end, and runs `mason destroy` on its project.
+ */
+import { test, after } from "node:test";
+import * as assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as net from "node:net";
+import * as os from "node:os";
+import * as path from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+const MAIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "src", "cli", "main.ts");
+const adminUrl = process.env.IT_POSTGRES_URL;
+const skip = adminUrl ? false : "IT_POSTGRES_URL is not set";
+const TAG = "it_entryhold";
+
+function psql(url: string, sql: string): string {
+  const r = spawnSync("psql", ["-X", "-q", "-A", "-t", "-F", "\t", "-v", "ON_ERROR_STOP=1", url, "-c", sql], { encoding: "utf8" });
+  if (r.status !== 0) throw new Error(`psql: ${r.stderr.trim()}\n  in: ${sql}`);
+  return r.stdout.trim();
+}
+/** a query's column names and rows, as an answer reads them; null when it fails */
+function psqlWithHeader(url: string, sql: string): { columns: string; rows: string } | null {
+  const r = spawnSync("psql", ["-X", "-q", "-A", "-F", "\t", "-P", "footer=off", "-v", "ON_ERROR_STOP=1", url, "-c", sql], { encoding: "utf8" });
+  if (r.status !== 0) return null;
+  const [columns = "", ...rows] = r.stdout.trim().split("\n");
+  return { columns, rows: rows.join("\n") };
+}
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const s = net.createServer().listen(0, "127.0.0.1", () => { const p = (s.address() as net.AddressInfo).port; s.close(() => resolve(p)); });
+    s.on("error", reject);
+  });
+}
+async function until(what: string, check: () => boolean, ms = 90_000): Promise<void> {
+  for (const end = Date.now() + ms; Date.now() < end;) {
+    if (check()) return;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+
+interface Ran { status: number | null; stdout: string; stderr: string; json: Record<string, unknown> }
+type Line = { table: string; error: string | null; sync?: { state: string } };
+
+test("a column renamed under a columns: entry holds that table alone: another table's new column is synced, and mason add takes the entry at once (issue 1074)", { skip, timeout: 600_000 }, async () => {
+  const tag = `${TAG}_${process.pid}_${Math.floor(Math.random() * 1e6)}`;
+  const dbUrl = (() => { const u = new URL(adminUrl!); u.pathname = `/${tag}`; return u.toString(); })();
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `${TAG}-`)));
+  const root = path.join(dir, "app"), home = path.join(dir, "home");
+  fs.mkdirSync(root);
+  fs.mkdirSync(home);
+  const env: Record<string, string> = { PATH: process.env.PATH ?? "", HOME: home, MASON_PG_PORT: String(await freePort()) };
+  const mason = (...args: string[]): Ran => {
+    const r = spawnSync(process.execPath, [MAIN, ...args], { cwd: root, env, encoding: "utf8", timeout: 300_000 });
+    let json: Record<string, unknown> = {};
+    if (args.includes("--json")) {
+      try { json = JSON.parse(r.stdout) as Record<string, unknown>; } catch { throw new Error(`mason ${args.join(" ")}: not JSON (exit ${r.status}):\n${r.stdout}${r.stderr}`); }
+    }
+    return { status: r.status, stdout: r.stdout, stderr: r.stderr, json };
+  };
+  const ok = (r: Ran, what: string): Ran => { assert.equal(r.status, 0, `${what}:\n${r.stdout}${r.stderr}`); return r; };
+  after(() => {
+    if (fs.existsSync(path.join(root, ".mason"))) {
+      const s = spawnSync(process.execPath, [MAIN, "destroy", "--json"], { cwd: root, env, encoding: "utf8", timeout: 120_000 });
+      if (s.status !== 0) console.error(`mason destroy at the end: ${s.stdout}${s.stderr}`);
+    }
+    psql(adminUrl!, `DROP DATABASE IF EXISTS ${tag} WITH (FORCE)`);
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
+  });
+
+  psql(adminUrl!, `CREATE DATABASE ${tag}`);
+  psql(dbUrl, "CREATE TABLE t1 (id int PRIMARY KEY, a text); INSERT INTO t1 SELECT g, 'a' || g FROM generate_series(1, 5) g; " +
+    "CREATE TABLE t3 (id int PRIMARY KEY, amount_total int, note text); INSERT INTO t3 SELECT g, g * 10, 'n' || g FROM generate_series(1, 5) g; " +
+    // two tables synced, polled and streamed, each beside a table whose name differs only in case and holds a secret
+    "CREATE TABLE accents (id int PRIMARY KEY, v text); INSERT INTO accents SELECT g, 'lower' || g FROM generate_series(1, 4) g; " +
+    "CREATE TABLE \"Accents\" (id int PRIMARY KEY, w text, secret text); INSERT INTO \"Accents\" SELECT g * 100, 'UPPER' || g, 'S' || g FROM generate_series(1, 3) g; " +
+    "CREATE TABLE bravo (id int PRIMARY KEY, v text); INSERT INTO bravo SELECT g, 'lower' || g FROM generate_series(1, 4) g; " +
+    "CREATE TABLE \"Bravo\" (id int PRIMARY KEY, w text, secret text); INSERT INTO \"Bravo\" SELECT g * 100, 'UPPER' || g, 'S' || g FROM generate_series(1, 3) g");
+  ok(mason("init", dbUrl, "--json"), "mason init");
+  const file = path.join(root, "mason", "sources", `${tag}.yml`);
+  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace(/^sync: off {3}#.*$/m, "sync: poll 1s"));
+  ok(mason("add", "t1", "--json"), "mason add t1 (every column)");
+  ok(mason("add", "t3", "--columns", "id,amount_total", "--json"), "mason add t3 --columns id,amount_total");
+  ok(mason("add", "accents", "--json"), "mason add accents");
+  ok(mason("add", "bravo", "--sync", "replication", "--json"), "mason add bravo --sync replication");
+  ok(mason("start", "--json"), "mason start");
+  ok(mason("wait", "--timeout", "120", "--json"), "mason wait");
+  const api = ok(mason("user", "add", "it", "--json"), "mason user add").json.url as string;
+  const status = (): Record<string, unknown> => mason("status", "--json").json;
+  const line = (table: string): Line | undefined => (status().tables as Line[] | undefined)?.find((x) => x.table === table);
+  const t3Before = psqlWithHeader(api, "SELECT * FROM public.t3 ORDER BY id");
+  assert.deepEqual(t3Before, { columns: "id\tamount_total", rows: psql(dbUrl, "SELECT id, amount_total FROM t3 ORDER BY id") });
+  const servesAsSource = (tbl: string): boolean => JSON.stringify(psqlWithHeader(api, `SELECT * FROM public.${tbl} ORDER BY id`)) === JSON.stringify({ columns: "id\tv", rows: psql(dbUrl, `SELECT id, v FROM ${tbl} ORDER BY id`) });
+
+  // BY HAND, an entry whose table's name differs only in case from a synced one's: above the polled one, below the
+  // streamed one (the review of PR 1091: one written first was taken, and the two shared one synced table)
+  fs.writeFileSync(file, `${fs.readFileSync(file, "utf8").replace(/^tables:\n/m, "tables:\n  Accents: {}\n")}  Bravo: {}\n`);
+  // t3's listed column renamed, and a row of it changed: its entry names a column the table no longer has
+  psql(dbUrl, "ALTER TABLE t3 RENAME COLUMN amount_total TO amount_total2; UPDATE t3 SET amount_total2 = amount_total2 + 1000 WHERE id = 1");
+  await until("t3's line to say it is not synced", () => (line("public.t3")?.error ?? null) !== null);
+
+  // ANOTHER TABLE'S COLUMN CHANGE IS TAKEN: t1's new column synced, with no restart
+  psql(dbUrl, "ALTER TABLE t1 ADD COLUMN b int DEFAULT 7");
+  const t1Expected = { columns: "id\ta\tb", rows: psql(dbUrl, "SELECT id, a, b FROM t1 ORDER BY id") };
+  await until("t1's new column to be synced", () => JSON.stringify(psqlWithHeader(api, "SELECT * FROM public.t1 ORDER BY id")) === JSON.stringify(t1Expected));
+
+  // T3 IS HELD: it serves what it holds, under its old columns, never the renamed one under its new name
+  assert.deepEqual(psqlWithHeader(api, "SELECT * FROM public.t3 ORDER BY id"), t3Before, "t3 serves what it holds");
+  const held = line("public.t3")!;
+  assert.match(held.error ?? "", new RegExp(`^public\\.t3 is not synced: mason/sources/${tag}\\.yml: tables\\.t3\\.columns: public\\.t3 has no column amount_total — did you mean \`amount_total2\`\\? .*` +
+    "Mason holds the table and serves its synced data as it was\\. To sync its columns as the database names them now, write columns: \\[id, amount_total2\\] on tables\\.t3, " +
+    "then run mason stop && mason start\\. Or run mason add t3 --columns id,amount_total2 while Mason runs, which takes it at once\\.$"), held.error ?? "");
+  assert.equal(line("public.t1")?.error ?? null, null, "t1 is not held");
+
+  // THE SYNCED TABLES OF A CASE CLASH ARE KEPT CURRENT, whichever entry comes first; the new entries never synced, said
+  psql(dbUrl, "INSERT INTO accents VALUES (5, 'lower5'); INSERT INTO bravo VALUES (5, 'lower5')");
+  await until("accents (polled) and bravo (streamed) to stay current", () => servesAsSource("accents") && servesAsSource("bravo"));
+  for (const t of ["Accents", "Bravo"]) assert.equal(psqlWithHeader(api, `SELECT * FROM public."${t}"`), null, `public."${t}" is never served`);
+  const warnings = (status().warnings as string[] | undefined) ?? [];
+  for (const [t, other] of [["Accents", "accents"], ["Bravo", "bravo"]]) {
+    assert.ok(warnings.includes(`public.${t} is not synced: mason/sources/${tag}.yml: tables.${t}: public.${t} and public.${other} (tables.${other}) have names that differ only in case. ` +
+      `The synced data cannot hold both. Remove one of the two entries. Mason does not sync it until that is fixed. Once that is fixed, run mason stop && mason start. Or run mason remove ${t} to take its entry out.`), warnings.join("\n"));
+  }
+  assert.deepEqual([line("public.accents")?.error ?? null, line("public.bravo")?.error ?? null], [null, null], "the synced tables are not held");
+  // the new entries taken out by hand: taken at the next read of the file (mason add below), nothing dropped
+  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("  Accents: {}\n", "").replace("  Bravo: {}\n", ""));
+
+  // THE WAY OUT IT SAYS, TAKEN AT ONCE: synced again whole, the column as the database names it now
+  ok(mason("add", "t3", "--columns", "id,amount_total2", "--json"), "mason add t3 --columns id,amount_total2");
+  const t3Expected = { columns: "id\tamount_total2", rows: psql(dbUrl, "SELECT id, amount_total2 FROM t3 ORDER BY id") };
+  await until("t3 to be synced with amount_total2", () => JSON.stringify(psqlWithHeader(api, "SELECT * FROM public.t3 ORDER BY id")) === JSON.stringify(t3Expected));
+  await until("t3's line to say it is synced", () => { const l = line("public.t3"); return l !== undefined && l.error === null && l.sync?.state === "synced"; });
+  assert.ok(servesAsSource("accents") && servesAsSource("bravo"), "accents and bravo still served whole");
+});
+
+test("a hold the database fixes is let go with no restart, polled and streamed, and a new entry the run cannot take is never waited for (the review of PR 1091)", { skip, timeout: 600_000 }, async () => {
+  const tag = `${TAG}_${process.pid}_${Math.floor(Math.random() * 1e6)}`;
+  const dbUrl = (() => { const u = new URL(adminUrl!); u.pathname = `/${tag}`; return u.toString(); })();
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `${TAG}-`)));
+  const root = path.join(dir, "app"), home = path.join(dir, "home");
+  fs.mkdirSync(root);
+  fs.mkdirSync(home);
+  const env: Record<string, string> = { PATH: process.env.PATH ?? "", HOME: home, MASON_PG_PORT: String(await freePort()) };
+  const mason = (...args: string[]): Ran => {
+    const r = spawnSync(process.execPath, [MAIN, ...args], { cwd: root, env, encoding: "utf8", timeout: 300_000 });
+    let json: Record<string, unknown> = {};
+    if (args.includes("--json")) {
+      try { json = JSON.parse(r.stdout) as Record<string, unknown>; } catch { throw new Error(`mason ${args.join(" ")}: not JSON (exit ${r.status}):\n${r.stdout}${r.stderr}`); }
+    }
+    return { status: r.status, stdout: r.stdout, stderr: r.stderr, json };
+  };
+  const ok = (r: Ran, what: string): Ran => { assert.equal(r.status, 0, `${what}:\n${r.stdout}${r.stderr}`); return r; };
+  after(() => {
+    if (fs.existsSync(path.join(root, ".mason"))) {
+      const s = spawnSync(process.execPath, [MAIN, "destroy", "--json"], { cwd: root, env, encoding: "utf8", timeout: 120_000 });
+      if (s.status !== 0) console.error(`mason destroy at the end: ${s.stdout}${s.stderr}`);
+    }
+    psql(adminUrl!, `DROP DATABASE IF EXISTS ${tag} WITH (FORCE)`);
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
+  });
+
+  psql(adminUrl!, `CREATE DATABASE ${tag}`);
+  psql(dbUrl, "CREATE TABLE t3 (id int PRIMARY KEY, amount_total int, note text); INSERT INTO t3 SELECT g, g * 10, 'n' || g FROM generate_series(1, 5) g; " +
+    "CREATE TABLE s3 (id int PRIMARY KEY, amount int, note text); INSERT INTO s3 SELECT g, g * 7, 'n' || g FROM generate_series(1, 5) g; " +
+    "CREATE TABLE x2 (id int PRIMARY KEY, value text); INSERT INTO x2 SELECT g, 'v' || g FROM generate_series(1, 3) g; " +
+    // a table with no primary key, synced by a key: over its unique index; and one whose sync: is off
+    "CREATE TABLE k (id int NOT NULL, v int); CREATE UNIQUE INDEX k_id ON k (id); INSERT INTO k SELECT g, g * 10 FROM generate_series(1, 5) g; " +
+    "CREATE TABLE o3 (id int PRIMARY KEY, amount_total int, note text); INSERT INTO o3 SELECT g, g * 10, 'n' || g FROM generate_series(1, 5) g");
+  ok(mason("init", dbUrl, "--json"), "mason init");
+  const file = path.join(root, "mason", "sources", `${tag}.yml`);
+  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace(/^sync: off {3}#.*$/m, "sync: poll 1s"));
+  ok(mason("add", "t3", "--columns", "id,amount_total", "--json"), "mason add t3 --columns id,amount_total");
+  ok(mason("add", "s3", "--columns", "id,amount", "--sync", "replication", "--json"), "mason add s3 --sync replication");
+  ok(mason("add", "k", "--key", "id", "--sync", "poll 20s", "--json"), "mason add k --key id --sync 'poll 20s'");
+  ok(mason("add", "o3", "--columns", "id,amount_total", "--sync", "off", "--json"), "mason add o3 --sync off");
+  ok(mason("start", "--json"), "mason start");
+  ok(mason("wait", "--timeout", "120", "--json"), "mason wait");
+  const api = ok(mason("user", "add", "it", "--json"), "mason user add").json.url as string;
+  type Row = Line & { added?: boolean };
+  const line = (table: string): Row | undefined => ((mason("status", "--json").json.tables as Row[] | undefined) ?? []).find((x) => x.table === table);
+  const serves = (tbl: string, ...cols: string[]): boolean =>
+    JSON.stringify(psqlWithHeader(api, `SELECT * FROM public.${tbl} ORDER BY id`)) === JSON.stringify({ columns: ["id", ...cols].join("\t"), rows: psql(dbUrl, `SELECT id, ${cols.join(", ")} FROM ${tbl} ORDER BY id`) });
+
+  // BY HAND, a new entry with a typo, which the run never takes, read when a column t3's entry leaves out is added
+  fs.writeFileSync(file, `${fs.readFileSync(file, "utf8")}  x2:\n    columns: [id, valu]\n`);
+  psql(dbUrl, "ALTER TABLE t3 ADD COLUMN extra int");
+  await until("x2's entry to be said among the warnings", () => ((mason("status", "--json").json.warnings as string[] | undefined) ?? []).some((w) => w.startsWith("public.x2 is not synced:")));
+  // THE NEW ENTRY THE RUN CANNOT TAKE IS NO ADDED TABLE: never waited for as a first sync
+  assert.notEqual(line("public.x2")?.added, true, "x2 is not an added table");
+  ok(mason("wait", "--timeout", "30", "--json"), "mason wait while x2's entry is wrong");
+
+  // both listed columns renamed, and rows changed: both held
+  psql(dbUrl, "ALTER TABLE t3 RENAME COLUMN amount_total TO amount_total2; UPDATE t3 SET amount_total2 = 20 WHERE id = 2; " +
+    "ALTER TABLE s3 RENAME COLUMN amount TO amount2; UPDATE s3 SET amount2 = 21 WHERE id = 3");
+  await until("t3 and s3 to be held", () => (line("public.t3")?.error ?? null) !== null && (line("public.s3")?.error ?? null) !== null);
+
+  // THE RENAMES PUT BACK ON THE DATABASE, rows changed, the file never touched: both let go and synced, with no restart
+  psql(dbUrl, "ALTER TABLE t3 RENAME COLUMN amount_total2 TO amount_total; UPDATE t3 SET amount_total = 6666 WHERE id = 2; " +
+    "ALTER TABLE s3 RENAME COLUMN amount2 TO amount; UPDATE s3 SET amount = 3333 WHERE id = 3");
+  await until("t3 (polled) and s3 (streamed) to be let go and serve the database's rows", () => serves("t3", "amount_total") && serves("s3", "amount"), 180_000);
+  await until("both lines to say synced", () => [line("public.t3"), line("public.s3")].every((l) => l !== undefined && l.error === null && l.sync?.state === "synced"));
+
+  // A KEY: WHOSE UNIQUE INDEX IS DROPPED holds its table (polled every 20 s); and A SYNC: OFF TABLE held by a rename
+  // (the second review of PR 1091: main recovered from each, and the head held them until another read of the file).
+  // (a column added beside k's drop: the run reads k's catalog again, and finds its key no longer held there)
+  psql(dbUrl, "DROP INDEX k_id; ALTER TABLE k ADD COLUMN w int DEFAULT 1");
+  await until("k to be held for its key", () => /tables\.k\.key: no unique index/.test(line("public.k")?.error ?? ""));
+  psql(dbUrl, "ALTER TABLE o3 RENAME COLUMN amount_total TO amount_total2; UPDATE o3 SET amount_total2 = 7777 WHERE id = 1");
+  assert.equal(mason("sync", "o3", "--json").status, 1, "mason sync o3 while its column is renamed");
+  await until("o3 to be held", () => /tables\.o3\.columns: public\.o3 has no column amount_total/.test(line("public.o3")?.error ?? ""));
+  // BOTH FIXED ON THE DATABASE, THEN A WHOLE READ OF THE CATALOG before either is looked at (the third review of PR
+  // 1091: mason status reads the catalog whole once the last read is CATALOG_FRESH_MS old, and the look then found its
+  // row as that read left it, no change, so the table stayed held for the run). Quiet past that age, then one status
+  await new Promise((r) => setTimeout(r, 65_000));
+  psql(dbUrl, "CREATE UNIQUE INDEX k_id ON k (id); UPDATE k SET v = 999 WHERE id = 2; " +
+    "ALTER TABLE o3 RENAME COLUMN amount_total2 TO amount_total; UPDATE o3 SET amount_total = 4444 WHERE id = 2");
+  ok(mason("status", "--json"), "mason status, a whole read of the catalog");
+  // the sync: off one is looked at by mason sync of it: let go, and synced
+  ok(mason("sync", "o3", "--json"), "mason sync o3 once the rename is put back");
+  assert.ok(serves("o3", "amount_total"), "o3 serves the database's rows");
+  // the polled one at its next look: let go, and synced
+  await until("k to be let go and serve the database's rows", () => serves("k", "v", "w"), 90_000);
+});
+
+test("a held table is looked at again for as long as it is held, when it is the only table a pass would poll (the fourth review of PR 1091)", { skip, timeout: 600_000 }, async () => {
+  const tag = `${TAG}_${process.pid}_${Math.floor(Math.random() * 1e6)}`;
+  const dbUrl = (() => { const u = new URL(adminUrl!); u.pathname = `/${tag}`; return u.toString(); })();
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `${TAG}-`)));
+  const root = path.join(dir, "app"), home = path.join(dir, "home");
+  fs.mkdirSync(root);
+  fs.mkdirSync(home);
+  const env: Record<string, string> = { PATH: process.env.PATH ?? "", HOME: home, MASON_PG_PORT: String(await freePort()) };
+  const mason = (...args: string[]): Ran => {
+    const r = spawnSync(process.execPath, [MAIN, ...args], { cwd: root, env, encoding: "utf8", timeout: 300_000 });
+    let json: Record<string, unknown> = {};
+    if (args.includes("--json")) {
+      try { json = JSON.parse(r.stdout) as Record<string, unknown>; } catch { throw new Error(`mason ${args.join(" ")}: not JSON (exit ${r.status}):\n${r.stdout}${r.stderr}`); }
+    }
+    return { status: r.status, stdout: r.stdout, stderr: r.stderr, json };
+  };
+  const ok = (r: Ran, what: string): Ran => { assert.equal(r.status, 0, `${what}:\n${r.stdout}${r.stderr}`); return r; };
+  after(() => {
+    if (fs.existsSync(path.join(root, ".mason"))) {
+      const s = spawnSync(process.execPath, [MAIN, "destroy", "--json"], { cwd: root, env, encoding: "utf8", timeout: 120_000 });
+      if (s.status !== 0) console.error(`mason destroy at the end: ${s.stdout}${s.stderr}`);
+    }
+    psql(adminUrl!, `DROP DATABASE IF EXISTS ${tag} WITH (FORCE)`);
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
+  });
+
+  psql(adminUrl!, `CREATE DATABASE ${tag}`);
+  // k is the only table: the file's own sync: stays off, as mason init writes it, and k is polled every 20 s
+  psql(dbUrl, "CREATE TABLE k (id int NOT NULL, v int); CREATE UNIQUE INDEX k_id ON k (id); INSERT INTO k SELECT g, g * 10 FROM generate_series(1, 5) g");
+  ok(mason("init", dbUrl, "--json"), "mason init");
+  ok(mason("add", "k", "--key", "id", "--sync", "poll 20s", "--json"), "mason add k --key id --sync 'poll 20s'");
+  ok(mason("start", "--json"), "mason start");
+  ok(mason("wait", "--timeout", "120", "--json"), "mason wait");
+  const api = ok(mason("user", "add", "it", "--json"), "mason user add").json.url as string;
+  const line = (table: string): Line | undefined => ((mason("status", "--json").json.tables as Line[] | undefined) ?? []).find((x) => x.table === table);
+  const serves = (tbl: string, ...cols: string[]): boolean =>
+    JSON.stringify(psqlWithHeader(api, `SELECT * FROM public.${tbl} ORDER BY id`)) === JSON.stringify({ columns: ["id", ...cols].join("\t"), rows: psql(dbUrl, `SELECT id, ${cols.join(", ")} FROM ${tbl} ORDER BY id`) });
+
+  // held for its key's unique index (a column added beside, so its catalog is read again)
+  psql(dbUrl, "DROP INDEX k_id; ALTER TABLE k ADD COLUMN w int DEFAULT 1");
+  await until("k to be held", () => /tables\.k\.key: no unique index/.test(line("public.k")?.error ?? ""));
+  // PAST ITS FIRST LOOKS: a pass that ended while a look ran timed no next pass, so it was never looked at again
+  await new Promise((r) => setTimeout(r, 45_000));
+  psql(dbUrl, "CREATE UNIQUE INDEX k_id ON k (id); UPDATE k SET v = 999 WHERE id = 2");
+  await until("k to be let go and serve the database's rows", () => serves("k", "v", "w"), 60_000);
+});
+
+test("a streamed table held alone is looked at again every minute for as long as it is held (the fourth review of PR 1091)", { skip, timeout: 600_000 }, async () => {
+  const tag = `${TAG}_${process.pid}_${Math.floor(Math.random() * 1e6)}`;
+  const dbUrl = (() => { const u = new URL(adminUrl!); u.pathname = `/${tag}`; return u.toString(); })();
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `${TAG}-`)));
+  const root = path.join(dir, "app"), home = path.join(dir, "home");
+  fs.mkdirSync(root);
+  fs.mkdirSync(home);
+  const env: Record<string, string> = { PATH: process.env.PATH ?? "", HOME: home, MASON_PG_PORT: String(await freePort()) };
+  const mason = (...args: string[]): Ran => {
+    const r = spawnSync(process.execPath, [MAIN, ...args], { cwd: root, env, encoding: "utf8", timeout: 300_000 });
+    let json: Record<string, unknown> = {};
+    if (args.includes("--json")) {
+      try { json = JSON.parse(r.stdout) as Record<string, unknown>; } catch { throw new Error(`mason ${args.join(" ")}: not JSON (exit ${r.status}):\n${r.stdout}${r.stderr}`); }
+    }
+    return { status: r.status, stdout: r.stdout, stderr: r.stderr, json };
+  };
+  const ok = (r: Ran, what: string): Ran => { assert.equal(r.status, 0, `${what}:\n${r.stdout}${r.stderr}`); return r; };
+  after(() => {
+    if (fs.existsSync(path.join(root, ".mason"))) {
+      const s = spawnSync(process.execPath, [MAIN, "destroy", "--json"], { cwd: root, env, encoding: "utf8", timeout: 120_000 });
+      if (s.status !== 0) console.error(`mason destroy at the end: ${s.stdout}${s.stderr}`);
+    }
+    psql(adminUrl!, `DROP DATABASE IF EXISTS ${tag} WITH (FORCE)`);
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
+  });
+
+  psql(adminUrl!, `CREATE DATABASE ${tag}`);
+  // s3 is the only table, streamed: no table is polled, so only its own look runs a pass for it
+  psql(dbUrl, "CREATE TABLE s3 (id int PRIMARY KEY, amount int, note text); INSERT INTO s3 SELECT g, g * 7, 'n' || g FROM generate_series(1, 5) g");
+  ok(mason("init", dbUrl, "--json"), "mason init");
+  ok(mason("add", "s3", "--columns", "id,amount", "--sync", "replication", "--json"), "mason add s3 --sync replication");
+  ok(mason("start", "--json"), "mason start");
+  ok(mason("wait", "--timeout", "120", "--json"), "mason wait");
+  const api = ok(mason("user", "add", "it", "--json"), "mason user add").json.url as string;
+  const line = (table: string): Line | undefined => ((mason("status", "--json").json.tables as Line[] | undefined) ?? []).find((x) => x.table === table);
+  const serves = (tbl: string, ...cols: string[]): boolean =>
+    JSON.stringify(psqlWithHeader(api, `SELECT * FROM public.${tbl} ORDER BY id`)) === JSON.stringify({ columns: ["id", ...cols].join("\t"), rows: psql(dbUrl, `SELECT id, ${cols.join(", ")} FROM ${tbl} ORDER BY id`) });
+
+  // held for a rename
+  psql(dbUrl, "ALTER TABLE s3 RENAME COLUMN amount TO amount2; UPDATE s3 SET amount2 = 21 WHERE id = 3");
+  await until("s3 to be held", () => /tables\.s3\.columns/.test(line("public.s3")?.error ?? ""));
+  // PAST ITS FIRST LOOK, a minute on: a pass that ended while a look ran timed no next pass, so it was never looked at
+  // again. The rename put back with no row changed: no relation message frees it, only a look
+  await new Promise((r) => setTimeout(r, 70_000));
+  psql(dbUrl, "ALTER TABLE s3 RENAME COLUMN amount2 TO amount");
+  await until("s3 to be let go, and say synced, at its next look", () => { const l = line("public.s3"); return l !== undefined && l.error === null && l.sync?.state === "synced"; }, 150_000);
+  assert.ok(serves("s3", "amount"), "s3 serves the database's rows");
+});
