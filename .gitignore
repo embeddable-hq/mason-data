@@ -23,3 +23,6 @@ tests/.tmp-*/
 
 # the log of scripts/worktrees-sweep.ts when the merge hook starts it (scripts/hooks/worktrees-sweep-after-merge.ts)
 /.claude/worktrees-sweep.log
+
+# the git worktrees of agents started with isolation: "worktree" (Claude Code makes them)
+/.claude/worktrees/

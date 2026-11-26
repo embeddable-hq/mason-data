@@ -23,6 +23,7 @@ import { DuckStore } from "../../src/duck/store.ts";
 import { Sync, type AddedTable, type SyncMode } from "../../src/duck/sync.ts";
 import { connectSource, parseSource, readSourceFacts, type Source } from "../../src/cli/preflight.ts";
 import { startPostgresApi } from "../../src/api/postgres/server.ts";
+import { checkpoint } from "./checkpoint.ts";
 
 const adminUrl = process.env.IT_POSTGRES_URL;
 const tag = `it_refstale_${process.pid}_${Math.floor(Math.random() * 1e6)}`;
@@ -156,8 +157,7 @@ test("the stream's update of a key right after a compaction numbers the key agai
     // churned, then compacted, the numbering's turn held from before the compaction until after the update
     psql(s.url, "UPDATE ord SET n = n + 1 WHERE id % 2 = 0");
     await s.sync.caughtUp();
-    const c = await s.store.instance.connect();
-    try { await c.run("CHECKPOINT"); } finally { c.closeSync(); }
+    await checkpoint(s.sync, s.store);
     const hold = holdNumbering(s.sync);
     const from = s.logged.length;
     await s.sync.checkCompaction();

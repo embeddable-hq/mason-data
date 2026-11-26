@@ -18,6 +18,7 @@ import { DuckStore } from "../../src/duck/store.ts";
 import { Sync } from "../../src/duck/sync.ts";
 import { connectSource, parseSource, readSourceFacts, type SourceFacts } from "../../src/cli/preflight.ts";
 import { syncedDataBytes } from "../../src/duck/file-bytes.ts";
+import { checkpoint } from "./checkpoint.ts";
 
 const adminUrl = process.env.IT_POSTGRES_URL;
 const db = `it_fit_${process.pid}_${Math.floor(Math.random() * 1e6)}`;
@@ -90,7 +91,7 @@ test("the catalog reads each table's size without indexes, its TOAST's, and each
     const before = syncedDataBytes(file) ?? 0;
     sync.setTables([orders]);
     await sync.once();
-    await store.writer.run("CHECKPOINT");
+    await checkpoint(sync, store);
     const synced = (syncedDataBytes(file) ?? 0) - before;
     assert.ok(synced > 0, "the table was synced");
     assert.ok(estimate >= synced && estimate <= synced * 6, `the estimate ${estimate} is at or above the ${synced} bytes the synced table takes, and within reach of it`);
