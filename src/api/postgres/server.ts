@@ -243,10 +243,11 @@ export interface DuckOptions {
   /** a Bind's values as DuckDB must read them: each through Postgres's input function for the plan's parameter type
    *  (a StatementError with Postgres's own error for a value it refuses) */
   parameters(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, oids: readonly number[], values: readonly (string | null)[], under: SessionState): Promise<(string | null)[]>;
-  /** whether a statement of no table orders text under a collation that is not byte order ("order"), maps case
-   *  ("case": src/duck/plan.ts `ordersText`), or holds a type whose text the source writes otherwise than the catalog
-   *  ("form"): "order" is the synced data's, never the catalog's; "case" and "form" are the synced data's where its run
-   *  answers them (`Session.routed`). Absent: every such one is the catalog's */
+  /** whether a statement of no table orders text under a collation that is not byte order ("order"), or maps case
+   *  ("case": src/duck/plan.ts `ordersText`): "order" is the synced data's, never the catalog's C database's; "case" is
+   *  the synced data's where its run answers it (`Session.routed`). "form": the catalog would print a constant whose
+   *  text the source writes otherwise (a short pg_lsn on Postgres 19, issue 1198): refused by name. Absent: every such
+   *  one is the catalog's */
   ordersText?(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, text: string, paramOids: readonly number[], under: SessionState, bindable: boolean): Promise<"order" | "case" | "form" | null>;
   /** moves when what a plan is made from moves outside the schema (a stored JSON path ready or gone, src/duck/kept.ts):
    *  the plans kept are made again */
@@ -1699,18 +1700,22 @@ class Session {
     const ask = this.server.options.duck.ordersText;
     if (t.kind !== "catalog" || t.fromless === undefined || ask === undefined) return t;
     const why = await ask((b) => this.server.catalog.run(b), text, paramOids, this.sessionState(), bindable);
-    if (why === null || (why === "case" || why === "form") && !await this.answersCase(text, paramOids, why)) return t;
+    // (the catalog is Postgres 18: on a source that writes the value otherwise, its answer would not be the source's)
+    if (why === "form") {
+      throw gapRefusal("source-text-form", "a pg_lsn whose part after the slash has fewer than 8 hex digits, in a statement that reads no table, is not supported by Mason on this database: Postgres 19 writes it with 8 digits, and Mason would write it as Postgres 18 does",
+        "select it beside a synced table, as in SELECT '0/1'::pg_lsn FROM <table> LIMIT 1, which writes it as your database does", text);
+    }
+    if (why === null || why === "case" && !await this.answersCase(text, paramOids)) return t;
     return { kind: "duckdb", sql: text, names: t.fromless.names };
   }
 
   /**
-   * WHETHER THE SYNCED DATA ANSWERS A STATEMENT OF NO TABLE THAT MAPS CASE (or that holds a value whose text the source
-   * writes otherwise, "form", issue 1198): its plan made and RUN on this session's
+   * WHETHER THE SYNCED DATA ANSWERS A STATEMENT OF NO TABLE THAT MAPS CASE: its plan made and RUN on this session's
    * connection, under its state and clock, every row read and none sent. A statement the plan or the run refuses, or
    * one with a parameter (no value before its Bind), is the catalog's, which answered it before (Mason gap
    * fromless-numeric-text-order). Only a statement's failure is read so; any other is thrown.
    */
-  private async answersCase(text: string, paramOids: readonly number[], why: "case" | "form"): Promise<boolean> {
+  private async answersCase(text: string, paramOids: readonly number[]): Promise<boolean> {
     const raw = (await parseSql(text)).stmts?.[0];
     if (raw?.stmt === undefined) return false;
     const controller = new AbortController();
@@ -1726,11 +1731,9 @@ class Session {
     } catch (e) {
       // the statement's own failure (Postgres's analysis, the rewrite's refusal, the engine's error at the run): said in
       // the log and answered by the catalog, as before this route existed
-      // (a cancel or the statement's timeout is the statement's answer, never a reason to run it again on the catalog;
-      // the statement parsed, so a syntax error is of what the rewrite wrote for the synced data: its plan's failure,
-      // `('{16/B374D848}'::pg_lsn[])[1]`, the review of PR 1201)
-      if (controller.signal.aborted || !(e instanceof StatementError || e instanceof PgError || e instanceof EncodeError || e instanceof NumericError || e instanceof PostgresSyntaxError)) throw e;
-      this.server.log(`session ${this.id}: a statement of no table that ${why === "case" ? "maps case" : "holds a value whose text the source writes otherwise"} is answered by the catalog: the synced data's run failed (${e instanceof StatementError || e instanceof PgError ? `${e.fields.code} ` : ""}${e.message})`);
+      // (a cancel or the statement's timeout is the statement's answer, never a reason to run it again on the catalog)
+      if (controller.signal.aborted || !(e instanceof StatementError || e instanceof PgError || e instanceof EncodeError || e instanceof NumericError)) throw e;
+      this.server.log(`session ${this.id}: a statement of no table that maps case is answered by the catalog: the synced data's run failed (${e instanceof StatementError || e instanceof PgError ? `${e.fields.code} ` : ""}${e.message})`);
       return false;
     } finally { disarm(); }
   }

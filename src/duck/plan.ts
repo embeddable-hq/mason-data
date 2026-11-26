@@ -9,7 +9,7 @@ import { deparseSync, QuoteUtils } from "pgsql-deparser";
 import type { Node } from "libpg-query";
 import { HELD_ROW_INPUT, HELD_TYPE_INPUT } from "../api/postgres/schema.ts";
 import { CATALOG_FORMS, heldName, heldType, isHeldArray, PARAM_ARRAYS, type SourceForms } from "./held-types.ts";
-import { collationOids, functionsCalled, outputExpressions, textOrdering, textReaches, type TreeValue } from "./pgtree.ts";
+import { collationOids, datumBytes, functionsCalled, outputExpressions, printsDiffering, textOrdering, type TreeValue } from "./pgtree.ts";
 import { gapRefusal, StatementError, type DuckPlan } from "./statement.ts";
 import { parseSql } from "../api/postgres/parser.ts";
 import { analyze, catalogRows, readParameters } from "./analyze.ts";
@@ -469,14 +469,12 @@ async function madeTypeRefusal(catalog: Parameters<typeof catalogRows>[0], code:
  * C.UTF-8's rules, never the source's ctype): the synced data's where its RUN answers the statement, which the caller
  * decides (src/api/postgres/server.ts `answersCase`), since what the catalog answered before is kept where the synced
  * data's plan or run fails.
- * "form" (issue 1198): it holds a value of a type whose text the source writes otherwise than the catalog (`forms`, a
- * pg_lsn on Postgres 19) that may reach the answer as text (`textReaches`), beside only the types a case mapping holds,
- * and nothing of the server or the session: the synced data's where its RUN answers it, which writes the value as the
- * source does, else the catalog's, as before; the caller decides, as for "case". One whose every such value is read
- * only by a boolean or a numeric (`SELECT pg_lsn '0/2' - pg_lsn '0/1'`) is the same under either form, and stays the
- * catalog's. Why: the synced data passes some constructs through untranslated (an inet, a jsonb, a numeric's type, a
- * bpchar), so only a statement the probe proves it answers, of types it writes as the catalog does, may move (the
- * review of PR 1201).
+ * "form" (issue 1198): it would print a constant whose text the source writes otherwise than the catalog (`forms`: a
+ * pg_lsn whose low half has fewer than 8 hex digits, on Postgres 19; `printsDiffering`). The caller refuses it by name,
+ * `source-text-form`. Every other such statement stays the catalog's, as before: a pg_lsn of 8 digits, a comparison,
+ * arithmetic's boolean or numeric, a parameter (no value before its Bind). Why the catalog's and not the synced data's:
+ * the synced data answered such statements' other values wrongly with no error (greatest of two pg_lsn as text, an
+ * inet as a struct, `substr('abcdef', -1, 3)`), so no guard of types could tell (the owner's decision on PR 1201).
  */
 export async function ordersText(o: { catalog: (bytes: Uint8Array) => Promise<Uint8Array>; text: string; paramOids: readonly number[]; under: SessionState; collations: CollationResolver; bindable: boolean;
   forms?: SourceForms }): Promise<"order" | "case" | "form" | null> {
@@ -487,15 +485,10 @@ export async function ordersText(o: { catalog: (bytes: Uint8Array) => Promise<Ui
   if (!o.bindable && analysis.params.length > 0) return null;
   const why = await orderOrCase(o, analysis);
   if (why !== null) return why;
-  // a value of a type whose text the source writes otherwise (issue 1198) that may reach the answer as its text: the
-  // synced data's where the statement holds nothing else the catalog may answer otherwise and nothing of the server or
-  // the session, and the synced data's run answers it (the caller's probe, as for "case"); every other stays the
-  // catalog's, as before
-  const differs = o.forms?.differs ?? CATALOG_FORMS.differs;
-  const types = [...analysis.types.values()].flat().map((t) => t.type);
-  if (differs.size === 0 || !types.some((t) => differs.has(t)) || !textReaches(analysis.tree, differs)) return null;
-  if (!types.every((t) => FORM_ROUTED_TYPES.has(t) || differs.has(t))) return null;
-  return await ownArgumentsOnly(o.catalog, analysis.tree) ? "form" : null;
+  // a constant whose text the source writes otherwise (issue 1198), printed in the catalog's form: refused by the caller
+  const forms = o.forms ?? CATALOG_FORMS;
+  if (forms.differs.size === 0) return null;
+  return printsDiffering(analysis.tree, forms.differs, (c) => forms.constDiffers(Number(c.consttype), datumBytes(c.constvalue))) ? "form" : null;
 }
 
 /** `ordersText`'s "order" or "case", or null */
@@ -554,9 +547,6 @@ const NUMERIC = 1700, NUMERIC_ARRAY = 1231;
 /** the types a statement of no table that maps case may hold and still be the synced data's: text's, an unknown
  *  literal's, a name's, a boolean's, an integer's and a text array's */
 const CASE_ROUTED_TYPES = new Set([25, 1043, 1042, 705, 19, 16, 21, 23, 20, 1009, 1015]);
-/** the types a statement of no table may hold beside a value whose text the source writes otherwise and still be the
- *  synced data's (issue 1198): a case mapping's, whose text the synced data writes as the catalog does */
-const FORM_ROUTED_TYPES = CASE_ROUTED_TYPES;
 
 /** a rewrite's refusal as the statement's: a gap says its id (docs/SQL-SUPPORT.md); Postgres's own refusal is its
  *  SQLSTATE, and no gap */

@@ -40,9 +40,9 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
   parameter in a simple Query (Postgres's 42P02, the analysis being a Parse's), and one that holds a numeric (a literal
   such as 1.5 included), which the catalog computes exactly (Mason gap `fromless-numeric-text-order`, its text then in byte order).
   On a source that writes a type's text otherwise than the catalog (a `pg_lsn` on Postgres 19), a statement of no
-  table that names that type (`namesFormType`, translate.ts) and may print it is the synced data's, which writes it as
-  the source does, under the "case" route's guards: a case mapping's types beside it, nothing of the server or the
-  session, and the synced data's run answers it (`ordersText`'s "form"; issue 1198). Every other stays the catalog's.
+  table that names that type (`namesFormType`, translate.ts) stays the catalog's. One whose answer would print a
+  constant of it in the catalog's form is refused by name instead (`ordersText`'s "form", gap `source-text-form`;
+  issue 1198).
   It holds the copied tables' definitions (`schema.ts`, from the copy's own columns and types, each column's own
   collation) and the source's collations (`collationDdl`: a locale PGlite lacks is made under its provider's root, so
   its name and provider are the source's, and Postgres's analysis names it), and no rows. It is ONE connection every session shares, so the

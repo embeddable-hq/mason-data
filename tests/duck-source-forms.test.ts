@@ -87,12 +87,14 @@ async function ask(s: Served, sql: string, values?: unknown[]): Promise<Answer> 
   } finally { await c.end(); }
 }
 async function known(sql: string, values?: unknown[]): Promise<Answer> {
-  return truth.query<unknown[]>(sql, values ?? [], { rowMode: "array", parsers: Object.fromEntries([16, 20, 21, 23, 25, 114, 1700, 3220, 3221, 3802].map((o) => [o, (v: string) => v])) })
+  return truth.query<unknown[]>(sql, values ?? [], { rowMode: "array", parsers: Object.fromEntries([16, 20, 21, 23, 25, 114, 1009, 1700, 3220, 3221, 3802].map((o) => [o, (v: string) => v])) })
     .then((r) => ({ fields: r.fields.map((f) => [f.name, f.dataTypeID] as [string, number]), rows: r.rows.map((x) => x.map((v) => v === null ? null : String(v))) }),
       (e: { code: string; message: string }) => `${e.code}: ${e.message}`);
 }
 const ids = (...n: number[]): Answer => ({ fields: [["id", 23]], rows: n.map((i) => [String(i)]) });
 
+/** an answer Mason refuses by name on a 19 source, where Postgres 19 answers */
+const REFUSED = "refused: source-text-form";
 /** each statement, its parameters, and Postgres 19.0's answer over the same rows */
 const CASES: Array<[string, unknown[] | undefined, Answer]> = [
   ["SELECT id, lsn FROM l ORDER BY id", undefined, { fields: [["id", 23], ["lsn", 3220]], rows: [["1", "0/016B3748"], ["2", "1/00000000"], ["3", null], ["4", "0/016B3748"], ["5", "FFFFFFFF/FFFFFFFF"], ["6", "0/00000000"]] }],
@@ -127,21 +129,36 @@ const CASES: Array<[string, unknown[] | undefined, Answer]> = [
   ["SELECT lsn FROM l INTERSECT SELECT '0/16B3748'::pg_lsn", undefined, { fields: [["lsn", 3220]], rows: [["0/016B3748"]] }],
   ["SELECT lsn::text AS t FROM l EXCEPT SELECT '0/16B3748'::pg_lsn::text ORDER BY 1", undefined, { fields: [["t", 25]], rows: [["0/00000000"], ["1/00000000"], ["FFFFFFFF/FFFFFFFF"], [null]] }],
   ["SELECT id, ARRAY['0/16B3748'::pg_lsn]::text AS a FROM l WHERE id = 1", undefined, { fields: [["id", 23], ["a", 25]], rows: [["1", "{0/016B3748}"]] }],
-  // a statement of no table: the synced data's, which writes it as the source does
-  ["SELECT '0/16B3748'::pg_lsn", undefined, { fields: [["pg_lsn", 3220]], rows: [["0/016B3748"]] }],
-  ["VALUES ('0/16B3748'::pg_lsn), ('1/0')", undefined, { fields: [["column1", 3220]], rows: [["0/016B3748"], ["1/00000000"]] }],
-  ["SELECT '0/016B3748'::pg_lsn AS a, '1/0'::pg_lsn::text AS b", undefined, { fields: [["a", 3220], ["b", 25]], rows: [["0/016B3748", "1/00000000"]] }],
-  ["SELECT '{0/1,1/0}'::pg_lsn[] AS a", undefined, { fields: [["a", 3221]], rows: [["{0/00000001,1/00000000}"]] }],
-  ["SELECT '0/1'::pg_lsn UNION SELECT '0/00000001'::pg_lsn", undefined, { fields: [["pg_lsn", 3220]], rows: [["0/00000001"]] }],
-  // ... and one whose pg_lsn is read only by a boolean or a numeric: the catalog's, the same under either form
+  // a statement of no table is the catalog's (Postgres 18): one that would print a short pg_lsn in 18's form is
+  // refused by name (Mason gap source-text-form), and the rest are answered as Postgres 19 does
+  ["SELECT '0/16B3748'::pg_lsn", undefined, REFUSED],
+  ["VALUES ('0/16B3748'::pg_lsn), ('1/0')", undefined, REFUSED],
+  ["SELECT '0/016B3748'::pg_lsn AS a, '1/0'::pg_lsn::text AS b", undefined, REFUSED],
+  ["SELECT '{0/1,1/0}'::pg_lsn[] AS a", undefined, REFUSED],
+  ["SELECT '0/1'::pg_lsn UNION SELECT '0/00000001'::pg_lsn", undefined, REFUSED],
+  ["SELECT x FROM (VALUES ('0/1'::pg_lsn), ('16/B374D848')) v(x) WHERE x > '0/0'", undefined, REFUSED],
+  ["SELECT min(x) FROM (VALUES ('0/1'::pg_lsn), ('16/B374D848')) v(x)", undefined, REFUSED],
+  ["SELECT greatest('0/1'::pg_lsn, '0/2') AS g", undefined, REFUSED],
+  ["SELECT to_json('0/1'::pg_lsn) AS j", undefined, REFUSED],
+  ["SELECT CASE WHEN true THEN '0/1'::pg_lsn END AS c", undefined, REFUSED],
   ["SELECT pg_lsn '0/2' - pg_lsn '0/1' AS d, pg_lsn '0/2' > pg_lsn '0/01' AS g", undefined, { fields: [["d", 1700], ["g", 16]], rows: [["1", "t"]] }],
+  ["SELECT '0/1'::pg_lsn = '0/00000001' AS e, '0/1'::pg_lsn IN ('0/01', '0/2') AS i", undefined, { fields: [["e", 16], ["i", 16]], rows: [["t", "t"]] }],
+  ["SELECT x > '0/0' AS b FROM (VALUES ('0/1'::pg_lsn)) v(x)", undefined, { fields: [["b", 16]], rows: [["t"]] }],
+  ["SELECT '0/1'::pg_lsn + 268435455 AS l", undefined, { fields: [["l", 3220]], rows: [["0/10000000"]] }],
+  ["SELECT pg_typeof('0/1'::pg_lsn) AS t, pg_column_size('0/1'::pg_lsn) AS n", undefined, { fields: [["t", 2206], ["n", 23]], rows: [["pg_lsn", "8"]] }],
+  ["SELECT CASE '0/1'::pg_lsn WHEN '0/01' THEN 'a' END AS c", undefined, { fields: [["c", 25]], rows: [["a"]] }],
+  ["SELECT CASE x WHEN '0/01' THEN 'a' END AS c FROM (VALUES ('0/1'::pg_lsn)) v(x)", undefined, { fields: [["c", 25]], rows: [["a"]] }],
+  ["SELECT '16/B374D848'::pg_lsn AS l, '{16/B374D848,NULL}'::pg_lsn[] AS a", undefined, { fields: [["l", 3220], ["a", 3221]], rows: [["16/B374D848", "{16/B374D848,NULL}"]] }],
 ];
+
+/** a refusal by name: `source-text-form` */
+const isRefusal = (got: Answer): boolean => typeof got === "string" && got.startsWith("0A000: a pg_lsn whose part after the slash has fewer than 8 hex digits");
 
 test("on a Postgres 19 source, a pg_lsn literal and parameter compare and print as the source writes them (issue 1198)", async () => {
   const differ: string[] = [];
   for (const [sql, values, want] of CASES) {
     const got = await ask(s19, sql, values);
-    if (!util.isDeepStrictEqual(got, want)) differ.push(`${sql}\n    mason:      ${JSON.stringify(got)}\n    postgres 19: ${JSON.stringify(want)}`);
+    if (want === REFUSED ? !isRefusal(got) : !util.isDeepStrictEqual(got, want)) differ.push(`${sql}\n    mason:      ${JSON.stringify(got)}\n    postgres 19: ${JSON.stringify(want)}`);
   }
   assert.deepEqual(differ, []);
 });
@@ -156,14 +173,29 @@ test("on a Postgres 18 source, the same statements answer as Postgres 18 does, a
 });
 
 /**
- * A STATEMENT OF NO TABLE THAT NAMES A PG_LSN BESIDE ANYTHING ELSE (the review of PR 1201): the synced data passes some
- * constructs through untranslated (an inet, a jsonb, a numeric's type, a bpchar, `pg_catalog.length`, `FROM (SELECT)`),
- * and refuses what the catalog answers (a value of the server or the session, an operator it has not verified). So it
- * is the synced data's only where it holds a case mapping's types and the synced data's run answers it, and the
- * catalog's, as before, otherwise. Its pg_lsn's low half already has 8 digits here, which Postgres 18 and 19 write
- * alike: so each answer, on a 19 source, is held to PGlite's, with the allowlist on and off.
+ * A STATEMENT OF NO TABLE THAT NAMES A PG_LSN BESIDE ANYTHING ELSE (the reviews of PR 1201): the synced data passes
+ * some constructs through untranslated (an inet, a jsonb, a numeric's type, a bpchar, `pg_catalog.length`,
+ * `FROM (SELECT)`), answers some wrongly with no error (greatest of two pg_lsn by their text, `substr('abcdef', -1, 3)`,
+ * a reversed combining mark, a two-dimensional array), and refuses what the catalog answers (a value of the server or
+ * the session, an operator it has not verified). So every statement of no table is the catalog's, as on main. Its
+ * pg_lsn's low half has 8 digits here, which Postgres 18 and 19 write alike: so each answer, on a 19 source, is held
+ * to PGlite's, with the allowlist on and off.
  */
 const BESIDE: Array<[string, unknown[] | undefined]> = [
+  // the second review's seven, each answered wrongly by the synced data with no error
+  ["SELECT greatest('A/B374D848'::pg_lsn, '10/B374D848'::pg_lsn) AS g", undefined],
+  ["SELECT least('A/B374D848'::pg_lsn, '10/B374D848'::pg_lsn) AS g", undefined],
+  ["SELECT x FROM (VALUES ('A/B374D848'::pg_lsn), ('10/B374D848')) v(x) WHERE (x, 1) > ('B/B374D848'::pg_lsn, 0)", undefined],
+  ["SELECT upper('abc') AS u, greatest('A/B374D848'::pg_lsn, '10/B374D848'::pg_lsn)::text AS g", undefined],
+  ["SELECT substr('abcdef', -1, 3) AS r, '16/B374D848'::pg_lsn AS l", undefined],
+  ["SELECT reverse('e' || chr(769) || 'x') AS q, '16/B374D848'::pg_lsn AS l", undefined],
+  ["SELECT ARRAY[['a','b'],['c','d']] AS a, '16/B374D848'::pg_lsn AS l", undefined],
+  ["SELECT CASE WHEN 'A/B374D848'::pg_lsn > '10/B374D848'::pg_lsn THEN 'a' ELSE 'b' END AS c, '16/B374D848'::pg_lsn AS l", undefined],
+  ["SELECT '10/B374D848'::pg_lsn BETWEEN 'A/B374D848' AND 'FF/B374D848' AS b, '16/B374D848'::pg_lsn AS l", undefined],
+  ["SELECT 'A/B374D848'::pg_lsn < '10/B374D848'::pg_lsn AS b, '16/B374D848'::pg_lsn AS l", undefined],
+  // a parameter has no value before its Bind: the catalog answers it, as on main (a short one in 18's form)
+  ["SELECT $1::pg_lsn AS p, '16/B374D848'::pg_lsn AS l", ["0/1"]],
+  // the first review's
   ["SELECT '10.0.0.1'::inet AS i, '16/B374D848'::pg_lsn AS l", undefined],
   ["SELECT '2001:db8::1'::inet AS i, '16/B374D848'::pg_lsn AS l", undefined],
   [`SELECT '{"b":1,"a":2}'::jsonb AS j, '16/B374D848'::pg_lsn AS l`, undefined],

@@ -57,6 +57,15 @@ test("a pg_lsn is written as the source writes it: Postgres 19 pads its low half
   // no other type's text is touched
   assert.equal(v19.written(829, "08:00:2b:01:02:03"), "08:00:2b:01:02:03");
   assert.equal(v19.written(25, "0/1"), "0/1");
+  // a constant's bytes as the catalog holds them (little-endian): its text differs where its low half is short
+  const lsn = (hi: number, lo: number): number[] => [lo, lo >>> 8, lo >>> 16, lo >>> 24, hi, hi >>> 8, hi >>> 16, hi >>> 24].map((x) => x & 255);
+  assert.equal(v19.constDiffers(3220, lsn(0, 1)), true);
+  assert.equal(v19.constDiffers(3220, lsn(0x16, 0xB374D848)), false);
+  assert.equal(v19.constDiffers(3220, lsn(0, 0x10000000)), false);
+  assert.equal(v19.constDiffers(3220, lsn(0, 0x0FFFFFFF)), true);
+  assert.equal(v19.constDiffers(3220, null), true, "bytes it cannot read differ");
+  assert.equal(v18.constDiffers(3220, lsn(0, 1)), false);
+  // (an array's datum, as the catalog holds it, is held on the wire: tests/duck-source-forms.test.ts)
 });
 
 test("a time range is written again in the session's zone, by Postgres's own output", () => {

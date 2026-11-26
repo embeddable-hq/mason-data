@@ -991,12 +991,24 @@ named a `pg_lsn` to the synced data. Its review found that wrong in two ways. Th
 through untranslated: beside the `pg_lsn`, an inet printed as a struct's text, a jsonb as written, and a NaN numeric
 as text. And it refuses or fails on what the catalog answers: `version()`, `pg_catalog.length`, `char 'abc'`,
 `FROM (SELECT)`, `pg_lsn + 1`, a binary parameter. Main answered all of those right for a value whose low half
-already has 8 digits. So the route now takes the "case" route's guards (`ordersText`'s "form"). The statement holds
-only a case mapping's types beside the `pg_lsn`, nothing of the server or the session, and the synced data's run must
-answer it. Anything else stays the catalog's, as before. Where the catalog answers, a `pg_lsn` whose low half is short
-still prints in 18's form, as on main. One whose `pg_lsn` is read only by a boolean or a numeric
-(`pg_lsn '0/2' - pg_lsn '0/1'`) is the same under either form, so it stays the catalog's. A value of every other
-built-in held type was compared between 18 and 19, and only `pg_lsn` differs.
+already has 8 digits. The second version took the "case" route's guards: only a case mapping's types beside the
+`pg_lsn`, nothing of the server or the session, and a run that succeeds. Its review found seven statements the synced
+data still answered wrongly with no error: `greatest` and `least` of two `pg_lsn` and a row comparison, by their text;
+`substr('abcdef', -1, 3)`; a reversed combining mark; a two-dimensional array; and with the allowlist off, CASE,
+BETWEEN and `<` of `pg_lsn`. No guard of types can see those.
+
+So the owner decided (2026-11-26) that a statement of no table is the catalog's, exactly as on main. On a source whose
+form differs, one that would print a constant in the catalog's form is refused by name instead (`source-text-form`,
+`printsDiffering` in src/duck/pgtree.ts). It is kept narrow, so nothing main answered right is refused:
+- Only a constant whose text differs counts: a `pg_lsn` whose low half is short (`constDiffers`, read from the
+  constant's bytes). One of 8 digits after the slash is the catalog's, as before.
+- Only where its text is read: an output, or an expression that is not a boolean or a numeric (`::text`, to_json). A
+  comparison, `pg_lsn - pg_lsn`, and the new value `pg_lsn + n` makes are the same under either form.
+- A parameter has no value before its Bind, so the catalog answers it, and a short one prints in 18's form, as on main.
+
+It can over-refuse in one contrived shape. A VALUES list with a short `pg_lsn` in a column the statement never prints,
+beside one it does print, is refused. A value of every other built-in held type was compared between 18 and 19, and
+only `pg_lsn` differs.
 
 What it does not cover is a source upgraded in place from 18 to 19, under a project that was synced before.
 - The forms are read at the start, so a run that stays up through the upgrade still writes literals in 18's form.
