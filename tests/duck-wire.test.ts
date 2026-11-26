@@ -9901,3 +9901,39 @@ test("issue 1008, the fourth review of PR 1100: an IN's output, an EXISTS's inne
     ]);
   } finally { await c.end(); }
 });
+
+// THE FIFTH REVIEW OF PR 1100: an IN of a one-row subquery was taken as never false where its test is a row
+// comparison, whose one part may be false beside another's NULL; and a one-row item's ON read again named an outer
+// column by a FROM name the subquery itself holds. Each is refused by name now. One test a finding
+test("issue 1008, the fifth review of PR 1100: a row compared IN a one-row subquery may be false for an unmatched row, so a NOT of it tells nothing", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      // (IN itself is never true for an unmatched row: the join is inner)
+      [`SELECT a.id, d::text ${NX_LEFT} WHERE (d.a_id, a.id) IN (SELECT 1, 1) ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, d::text ${NX_LEFT} WHERE a.id NOT IN (SELECT d.a_id) ORDER BY 1, 2`, "ordered"],
+    ]), []);
+    await refusedNullExtended(c, [
+      `SELECT a.id, d::text ${NX_LEFT} WHERE (d.a_id, a.id) NOT IN (SELECT 5, 0) ORDER BY 1, 2`,
+      `SELECT a.id, d::text ${NX_LEFT} WHERE NOT ((d.a_id, 1) IN (SELECT 5, 2)) ORDER BY 1, 2`,
+      `SELECT a.id, d::text ${NX_LEFT} WHERE NOT ((d.a_id, 'k') = ANY (SELECT 9, 'z')) ORDER BY 1, 2`,
+      `SELECT a.id, d::text ${NX_LEFT} WHERE ((d.note, a.id) IN (SELECT 'b1', 1)) IS FALSE ORDER BY 1, 2`,
+    ]);
+  } finally { await c.end(); }
+});
+
+test("issue 1008, the fifth review of PR 1100: a one-row item's ON that reads an outer column the subquery's own FROM shadows is refused", async () => {
+  const c = await client();
+  try {
+    const one = "(SELECT max(b.note) AS mv FROM nx_b b WHERE b.id < 0)";
+    assert.deepEqual(await unlike(c, [
+      // (an outer column no FROM name of the subquery shadows is read as it is)
+      [`SELECT a.id, (SELECT x::text FROM nx_c c LEFT JOIN ${one} x ON label = 'one' CROSS JOIN nx_a a2 LIMIT 1) FROM nx_a a ORDER BY 1, 2`, "ordered"],
+    ]), []);
+    await refusedNullExtended(c, [
+      `SELECT a.id, (SELECT x::text FROM nx_c AS a LEFT JOIN ${one} x ON label = 'one' CROSS JOIN nx_a a2 LIMIT 1) FROM nx_a a ORDER BY 1, 2`,
+      `SELECT a.id, (SELECT x::text FROM nx_c AS a LEFT JOIN ${one} x ON a.v = 'c1' AND label = 'one' CROSS JOIN nx_a a2 LIMIT 1) FROM nx_a a ORDER BY 1, 2`,
+      `SELECT a.id, (SELECT x::text FROM nx_c AS a LEFT JOIN ${one} x ON EXISTS (SELECT 1 WHERE label = 'one') CROSS JOIN nx_a a2 LIMIT 1) FROM nx_a a ORDER BY 1, 2`,
+    ]);
+  } finally { await c.end(); }
+});

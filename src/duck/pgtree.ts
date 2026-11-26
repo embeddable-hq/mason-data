@@ -1108,8 +1108,10 @@ function outerJoinsOf(q: TreeNode, queries: readonly TreeNode[], facts: OuterJoi
         if (kind === 2) {
           const outputs = new Map<number, Possible>();
           for (const t of treeList(sub.targetList)) if (isNode(t) && t.resjunk !== "true") { const r = num(t.resno ?? null) ?? 0; outputs.set(r, selected(sub, r, levels)); }
-          // (over a subquery of one row it is never false: NULL, so `NOT IN` of it is NULL too)
-          return (evaluate(e.testexpr, nulled, levels, { test: UNKNOWN, params: outputs }) & IS_T) !== 0 ? UNKNOWN : alwaysOneRow(sub) ? IS_N : IS_F | IS_N;
+          // (over a subquery of one row whose test may only be NULL it is NULL, so `NOT IN` of it is NULL too; a row
+          // compared may be false in one part beside another's NULL, which makes it false: the review of PR 1100)
+          const tested = evaluate(e.testexpr, nulled, levels, { test: UNKNOWN, params: outputs });
+          return (tested & IS_T) !== 0 ? UNKNOWN : tested === IS_N && alwaysOneRow(sub) ? IS_N : IS_F | IS_N;
         }
         // a scalar subquery: NULL over no row, else what it selects
         if (kind === 4) {

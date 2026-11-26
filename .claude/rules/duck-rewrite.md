@@ -408,7 +408,8 @@ paths:
   item alone on a join's nullable side is never unmatched ON true, in any join. Where the join NULL-extends that side
   alone (a LEFT or RIGHT JOIN, or a FULL one a condition above makes so), it is told by that join's ON, evaluated again
   in the reader with each column named by its FROM item (`ownersNamed`), where the ON reads none of its columns and calls
-  nothing volatile; also under further outer joins the ON itself rules out. Never in a FULL JOIN: there the item's own
+  nothing volatile, and no column of an outer query reads under a FROM name the query's own FROM holds (refused: named
+  so, it would read that item, the fifth review); also under further outer joins the ON itself rules out. Never in a FULL JOIN: there the item's own
   row is kept unmatched beside the other side's NULLs, which the ON read again would call absent (the fourth review). A row nothing tells is refused, `null-extended-row`. A whole row's column names have
   one reader, Postgres's (`Typed.rowColumns`: a WITH query's column list, a name held twice renamed in each place by
   `itemTwins`). An item's renamed columns are its own query's (`QueryOutputs.twins`), never its name's across the

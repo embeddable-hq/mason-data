@@ -1236,7 +1236,9 @@ class Rewriter {
     if (on?.by === "on") {
       const quals = this.joinCondition(select, on.at);
       if (quals === null) return refuse("Mason cannot find its join's condition");
-      return caseWhen([[this.ownersNamed(this.clone(quals)), boolConst(true)]], null);
+      const named = this.ownersNamed(this.clone(quals), select);
+      if (named === null) return refuse("its join's condition reads a column of an outer query that a name of this query's FROM hides");
+      return caseWhen([[named, boolConst(true)]], null);
     }
     const inKey = (relid: number | undefined, attno: number | undefined): boolean => relid !== undefined && attno !== undefined && this.rowKeys.get(relid)?.has(attno) === true;
     const table = this.rowTypes.get(t.type);
@@ -1281,9 +1283,21 @@ class Rewriter {
    * bound it to (`Typed.column`): in the SELECT list a bare name may meet another item's column of the same name, which
    * the ON never saw (`… ON id IS NOT NULL CROSS JOIN f`: DuckDB's 42804). A column of the query around a subquery of the
    * condition is named so too, unless that subquery's FROM holds the same name. A name no item names (a merged column of
-   * a join) is left as it is written. The copy is changed in place.
+   * a join) is left as it is written. The copy is changed in place. Null where a column of a query outside this SELECT
+   * cannot be named so: its FROM name is one this SELECT's FROM holds (`… FROM f AS a LEFT JOIN x ON t = 'one'` in a
+   * subquery of `FROM a`, the review of PR 1100), or its query is further out than the one around this SELECT, or it
+   * has no FROM name
    */
-  private ownersNamed(n: AstNode): AstNode {
+  private ownersNamed(n: AstNode, select: Body): AstNode | null {
+    const held = new Set<string>();
+    const fromNames = (x: unknown, into: Set<string>): void => {
+      if (!isNode(x)) return;
+      const xb = bodyOf(x), name = xb.alias?.aliasname ?? (kindOf(x) === "RangeVar" ? xb.relname : undefined);
+      if (typeof name === "string") into.add(name.toLowerCase());
+      if (kindOf(x) === "JoinExpr") { fromNames(xb.larg, into); fromNames(xb.rarg, into); }
+    };
+    for (const x of (select.fromClause ?? []) as unknown[]) fromNames(x, held);
+    let hidden = false;
     const visit = (v: unknown, depth: number, shadow: ReadonlySet<string>): void => {
       if (Array.isArray(v)) { for (const x of v) visit(x, depth, shadow); return; }
       if (!isNode(v)) return;
@@ -1303,14 +1317,23 @@ class Rewriter {
       if (k === "ColumnRef") {
         const fields = (b.fields ?? []) as AstNode[];
         const t = this.typed(v);
-        const owner = t?.node === "VAR" && (t.levelsUp ?? 0) === depth ? t.column?.owner : undefined;
-        if (fields.length === 1 && kindOf(fields[0]!) === "String" && typeof owner === "string" && !shadow.has(owner.toLowerCase())) b.fields = [S(owner), fields[0]];
+        const bare = fields.length === 1 && kindOf(fields[0]!) === "String" && t?.node === "VAR";
+        const up = (t?.levelsUp ?? 0) - depth;
+        // (a column of a query outside this SELECT, named bare: named by its FROM name only where no FROM between hides it)
+        if (bare && up > 0) {
+          const owner = t?.column?.owner;
+          if (up > 1 || typeof owner !== "string" || held.has(owner.toLowerCase()) || shadow.has(owner.toLowerCase())) { hidden = true; return; }
+          b.fields = [S(owner), fields[0]];
+          return;
+        }
+        const owner = bare && up === 0 ? t?.column?.owner : undefined;
+        if (typeof owner === "string" && !shadow.has(owner.toLowerCase())) b.fields = [S(owner), fields[0]];
         return;
       }
       for (const x of Object.values(b)) visit(x, depth, shadow);
     };
     visit(n, 0, new Set());
-    return n;
+    return hidden ? null : n;
   }
 
   /** the condition of the JOIN of this SELECT's FROM whose condition holds an expression at `at` (the analysis's offset:
