@@ -2090,7 +2090,7 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
     or null: none older) }; with --events { events: [{ at, kind (full_sync_failed, poll_failed,
     catch_up_failed, stream_failed, source_unreachable, generated_failed, compact_failed, sync_failed (a sync asked by hand failed),
     restart, full_sync, recovered, synced (a sync
-    asked by hand), sync_changed (a table's sync: changed), columns_changed (a table's columns changed on the database), sync_stopped (a table's sync stopped because the table was removed, or renamed or dropped on the database), sync_waits (a table's whole sync waits for an open transaction on the database: no failure), polled (a poll on its schedule, with --scheduled), streamed (a
+    asked by hand), sync_changed (a table's sync: changed), columns_changed (a table's columns changed on the database), sync_stopped (a table's sync stopped because the table was removed), sync_waits (a table's whole sync waits for an open transaction on the database: no failure), polled (a poll on its schedule, with --scheduled), streamed (a
     minute of the stream's changes to a table, with --scheduled), ui_error (the web page met an error of its own)), failed,
     table (null: the whole sync, the run or the web page),
     message, code (a failure: its SQLSTATE, its system error such as ECONNREFUSED, its error class, disk_short (a

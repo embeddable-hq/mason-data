@@ -59,9 +59,7 @@ export const EVENTS_DISK_DDL = `ALTER TABLE ${EVENTS_TABLE} ADD COLUMN IF NOT EX
  * `columns_changed` (a table's columns changed on the database: what changed, that it is synced again whole with them,
  * and a new column that looks like a secret left out, issue 977), and `sync_stopped` (a table's sync stopped because the
  * table was removed while it ran, and what it had read was dropped: issue 1034, src/duck/sync.ts `cutShort`; or its synced
- * data was dropped with a removed table's whose name differs only in case, and it is synced again whole: issue 1071;
- * or its name is no table on the database now, renamed, moved or dropped, and it is held until it is back: issue 1199,
- * src/duck/sync.ts `holdAway`),
+ * data was dropped with a removed table's whose name differs only in case, and it is synced again whole: issue 1071),
  * and `sync_waits` (a table's whole sync waits for an open transaction on the database to end, and why: issue 1066,
  * src/duck/sync.ts `RewriteWait` — a wait, never a failure, said again only when its words change).
  *

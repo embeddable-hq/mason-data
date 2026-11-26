@@ -113,7 +113,7 @@ async function renamed(mode: Mode): Promise<void> {
   const current = (l: Map<string, Line>, t: string, at = `public.${t}`): boolean => synced(l, t) && served(t) === source(at);
   const errorOf = (l: Map<string, Line>, t: string): string => l.get(t)?.error ?? "";
   /** waits until every check holds at one look */
-  const all = async (what: string, checks: Record<string, (l: Map<string, Line>) => boolean>, ms = 180_000): Promise<void> => {
+  const all = async (what: string, checks: Record<string, (l: Map<string, Line>) => boolean>, ms = 90_000): Promise<void> => {
     let failing: string[] = [];
     for (const end = Date.now() + ms; Date.now() < end;) {
       const l = lines();
