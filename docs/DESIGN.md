@@ -722,6 +722,54 @@ before.
 `src/duck/stream.ts` (`relationMoved`), `src/cdc/shape.ts` (`identitySql`); `tests/duck-column-identity.test.ts`,
 `tests/integration/cli-column-identity.itest.ts`.
 
+### A table renamed on the database (issue 1199, 2026-11-26)
+
+**Decision.** Mason knows a table by its oid, and the sources file names it. A table whose name is no table on the
+database now (renamed, moved to another schema, or dropped) is held, as a table held for its columns is. It is not
+synced, its synced data serves as it was, and its line in `mason status` says where it is and what to do. A replicated
+one is marked behind. Once its name is a table again, it is caught up by one poll, with every change made meanwhile.
+Mason never follows a table to a new name by itself: the person decides, by renaming it back or by syncing it under its
+new name (`mason remove`, then `mason add`).
+
+**Why.** Found on Postgres 19.0, the same on 18.7, with synthetic tables. A table synced with `sync: replication` was
+renamed, a row was inserted, and the table was renamed back. The row never reached the synced data, even after a
+restart. Measured at main: pgoutput named the relation as the catalog did at the change (`public.activity`, the same
+relid). The stream looked tables up by name, found none, and passed the insert over as a table it does not sync. Its
+position was acknowledged, so the slot never sent it again. Nothing marked the table behind, so `mason status` said 0
+bytes behind and `mason sync` said there was nothing to sync. With Mason's own publication, each pass's `SET TABLE`
+named the table that no longer existed, so the pass failed and every replicated table showed the stream's failure. A
+polled table renamed failed its poll every interval with the engine's Binder Error, and lost nothing. A table renamed
+during its first sync failed its next chunk and backed off at least 5 minutes.
+
+**Holding, not following.** Following the oid under its new name would need no person, but the sources file names
+tables, a table keeps its database's name in the synced data (CLAUDE.md "Naming"), and a name can come back as
+another table. Holding fits how a column renamed away is handled ("Which column is which"), and loses nothing.
+
+**How it is found.** One catalog query reads, for each table, the shape at its name and where its oid is now
+(`placesNow`, `placeSql`). It runs before every poll, after a read that failed, at each pass's replication check, and
+again for each held table at its poll's interval, else every 30 s (`AWAY_RECHECK_MS`). The stream also knows each
+streamed table by its oid (`StreamTarget.byOid`): a relation of that oid under another name refuses the table before
+anything past it is acknowledged, and its name is looked for at once. A relation message under a held table's name
+looks for it at once too, so a table renamed back with a change is caught up within a pass.
+
+**The publication.** Postgres keeps a table in a publication by its oid, so a rename changes nothing there. Mason's own
+publication is set with a held table's current name, so it is never dropped from it and added back. A transaction open
+across that could reach neither the stream nor the catch-up's poll. A dropped table is in no publication. A named
+publication is not checked for a held table, so no wrong `ALTER PUBLICATION … ADD TABLE` is suggested.
+
+**Swaps.** Two tables that swap names in one transaction are each the table of the other name now. Each name is still
+a table, so neither is held. Each table's shape at its name has another oid, so each is read again whole
+("Which column is which", "A table made again under its name").
+
+**What is left.** The hold is in memory. A start reads the sources file against the catalog, so a start while a table
+is away is refused with the file's error, and the slot keeps the WAL until it is fixed. A table renamed away and back
+while Mason is stopped is caught up at the start, from the slot's changes under the other name. A table renamed back
+with no change made since waits for the next recheck.
+
+**Where.** `src/duck/sync.ts` (`away`, `holdAway`, `checkAway`, `placesNow`, `awayAfterFailure`, `TableAway`),
+`src/duck/stream.ts` (`renamedFrom`), `src/cdc/shape.ts` (`placeSql`); `tests/integration/cli-table-rename.itest.ts`,
+`tests/integration/duck-table-rename.itest.ts`.
+
 ### Logical replication
 
 **Decision.** A table whose `sync:` is `replication` is kept current from the change log (`src/duck/stream.ts`); the rules

@@ -96,9 +96,11 @@ async function renamedDuringFirstSync(mode: "poll" | "replication"): Promise<voi
   const onColumnsChanged = async (): Promise<void> => { await sync!.setTables(await tablesOf(source, ["first"], syncOf)); };
   sync = new Sync(store, source, source.database, (l) => { logged.push(l); if (process.env.IT_DEBUG) console.error(`${new Date().toISOString()} ${l.slice(0, 300)}`); }, 3_600_000, mode,
     mode === "replication" ? { slot: db, publication: db, owned: true } : null, { copyChunkRows: 2_000, copyParallel: 1, onChunk: held.onChunk, onColumnsChanged, awayRecheckMs: 1_000 });
+  // a connection of the test's own: a read on the writer's would land inside whatever transaction a writer's turn has open there (a swap's), and fail it
+  const reader = await store.instance.connect();
   const line = (): string => sync!.state().find((s) => s.source === "public.first")?.error ?? "";
   const served = async (): Promise<string> => {
-    try { return JSON.stringify((await store.writer.runAndReadAll("SELECT count(*), sum(id), max(v) FILTER (WHERE id > 200000) FROM public.first")).getRowsJS()[0]!.map(String)); }
+    try { return JSON.stringify((await reader.runAndReadAll("SELECT count(*), sum(id), max(v) FILTER (WHERE id > 200000) FROM public.first")).getRowsJS()[0]!.map(String)); }
     catch (e) { if (e instanceof Error) return e.message; throw e; }
   };
   const sourceNow = (): string => JSON.stringify(psql(url, "SELECT count(*), sum(id), max(v) FILTER (WHERE id > 200000) FROM first").split("\t"));
@@ -116,11 +118,11 @@ async function renamedDuringFirstSync(mode: "poll" | "replication"): Promise<voi
     assert.ok(!logged.some((l) => l.startsWith("sync of public.first failed")), `held, never failed and backed off:\n${logged.join("\n")}`);
     // back under its name: the first sync goes on, and holds every change made while it was away
     psql(url, "ALTER TABLE first_away RENAME TO first; INSERT INTO first VALUES (200002, 'after it was back')");
-    await until("synced, every change in it", async () => await served() === sourceNow() && line() === "", logged);
-    assert.equal(sync.state().find((s) => s.source === "public.first")?.phase, "copied");
-    assert.equal(String((await store.writer.runAndReadAll("SELECT v FROM public.first WHERE id = 7")).getRowsJS()[0]?.[0]), "updated away");
-    assert.equal((await store.writer.runAndReadAll("SELECT count(*) FROM public.first WHERE id = 9")).getRowsJS()[0]?.[0], 0n);
-  } finally { held.release(); await sync.stop(); await store.close(); }
+    // (its first sync is done once a query can read it: `copied` only then)
+    await until("synced, every change in it", async () => await served() === sourceNow() && line() === "" && sync!.state().find((s) => s.source === "public.first")?.phase === "copied", logged);
+    assert.equal(String((await reader.runAndReadAll("SELECT v FROM public.first WHERE id = 7")).getRowsJS()[0]?.[0]), "updated away");
+    assert.equal((await reader.runAndReadAll("SELECT count(*) FROM public.first WHERE id = 9")).getRowsJS()[0]?.[0], 0n);
+  } finally { held.release(); reader.closeSync(); await sync.stop(); await store.close(); }
 }
 
 test("a table renamed while its first sync is polled: held and said while it is away, never failed and backed off, and synced with every change once it is back", { skip, timeout: 600_000 }, () => renamedDuringFirstSync("poll"));
