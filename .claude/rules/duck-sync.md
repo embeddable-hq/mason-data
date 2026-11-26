@@ -124,7 +124,10 @@ paths:
   that is no table (`nameGone`) is a change of its own: its catalog is read again (`columnsChanged`, said once with where
   its oid is now), and the run holds its ENTRY, as one entry's problem is held (issue 1074, the bullet above): said on
   its line, looked at again on its schedule, let go and caught up by one poll once its name is a table again. One hold,
-  one look: never a second mechanism. Mason's own publication names it as it is now (Postgres carries a table by its oid,
+  one look: never a second mechanism. A rename or a move is held under polling and under replication. A drop is held
+  under polling at its next poll, and under replication only once a pass runs, as a drop sends the stream no change
+  and nothing else checks its name: until then it stays `synced` with its old rows (issue 1208, the same at main).
+  Mason's own publication names it as it is now (Postgres carries a table by its oid,
   so nothing is dropped and added back), a dropped one not at all, and a named one is not checked for it. A table the
   run syncs or holds that the catalog no longer names is still listed by `/api/state` (src/cli/run-server.ts
   `runState`), so `mason status` and `mason wait` never count it out. A name that is another table now (made, renamed or

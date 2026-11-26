@@ -725,11 +725,19 @@ before.
 ### A table renamed on the database (issue 1199, 2026-11-26)
 
 **Decision.** Mason knows a table by its oid, and the sources file names it. A table whose name is no table on the
-database now (renamed, moved to another schema, or dropped) is held by its entry, by the same hold and the same look as
-any entry the run cannot take ("One entry's problem holds its table alone"). It is not synced, its synced data serves
-as it was, and its line in `mason status` says so with what to do. A replicated one is marked behind. Once its name is
-a table again, the look lets it go and it is caught up by one poll, with every change made meanwhile. Mason never
-follows a table to a new name by itself: the person decides, by renaming it back or by syncing it under its new name.
+database now is held by its entry, by the same hold and the same look as any entry the run cannot take ("One entry's
+problem holds its table alone"). It is not synced, its synced data serves as it was, and its line in `mason status`
+says so with what to do. A replicated one is marked behind. Once its name is a table again, the look lets it go and it
+is caught up by one poll, with every change made meanwhile. Mason never follows a table to a new name by itself: the
+person decides, by renaming it back or by syncing it under its new name.
+
+**Which tables that covers.** A table renamed, or moved to another schema, is held under polling and under replication.
+Under replication the stream sees its next change under the other name, and a pass's replication check sees its name
+gone. A dropped table is held under polling, at its next poll. Under replication it is held only once a pass runs, and
+a pass runs only when something else asks for one (a `mason add`, another table's catch-up). A drop sends the stream no
+change of the table, and nothing else checks its name. Until then it stays `synced` and serves its old rows, and a
+table made again under its name never has its new rows synced. It was the same before this change. Issue 1208 fixes
+it on its own.
 
 **Why.** Found on Postgres 19.0, the same on 18.7, with synthetic tables. A table synced with `sync: replication` was
 renamed, a row was inserted, and the table was renamed back. The row never reached the synced data, even after a
@@ -770,7 +778,8 @@ is which", "A table made again under its name").
 
 **What is left.** A start reads the sources file against the catalog, so a start while a table is away is refused with
 the file's error, and the slot keeps the WAL until it is fixed. A table renamed away and back while Mason is stopped is
-caught up at the start, from the slot's changes under the other name.
+caught up at the start, from the slot's changes under the other name. A table dropped under replication is held only
+once a pass runs (above; issue 1208).
 
 **Where.** `src/duck/sync.ts` (`placesNow`, `nameGone`, `columnsChanged`, `prepareReplication`, `refuseStreamed`),
 `src/duck/stream.ts` (`renamedFrom`), `src/cdc/shape.ts` (`placeSql`), `src/cli/run-server.ts` (`runState`);
