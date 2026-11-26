@@ -25,8 +25,10 @@
  * - THE SCHEMA IS THE CATALOG. When the copied tables change the server calls `replace` with the new schema: the running instance is
  *   stopped and the next `run` starts with the new DDL. There is no ALTER path — a fresh instance is cheaper than
  *   diffing two schemas correctly.
- * - A START FAILURE IS THE CALLER'S. When the WASM cannot load or the DDL is refused, `run` rejects with an Error that
- *   says PGlite could not start and why, and the object is left able to try again (nothing is cached half-started).
+ * - ONE TABLE NEVER STOPS THE OTHERS. A table whose DDL the catalog refuses (a type newer than its Postgres) is left
+ *   out and said, and the rest start (`leftOut`, issue 1197). A START FAILURE IS THE CALLER'S. When the WASM cannot
+ *   load or a statement of no table is refused, `run` rejects with an Error that says the catalog could not start and
+ *   why, and the object is left able to try again (nothing is cached half-started).
  *
  * The instance's TimeZone is UTC (the API treats every time as UTC, §4.8); its search_path is Postgres's default, so
  * `public."orders"` and `orders` both resolve, as a tool expects.
@@ -100,8 +102,21 @@ export function databaseNameSql(name: string): string[] {
  * does not list has no column to carry it and is noted on the table instead.
  */
 export function catalogDdl(schema: PgSchema): string[] {
-  const statements: string[] = [];
-  const constraints: string[] = [];
+  return catalogDdlOwned(schema).map((s) => s.statement);
+}
+
+/** a table's name as the catalog's DDL knows it: its schema (public when none) and its name, never quoted */
+export const tableKey = (t: Pick<PgTable, "schema" | "name">): string => `${t.schema ?? "public"}.${t.name}`;
+
+/**
+ * `catalogDdl`'s statements, each with the tables it belongs to (`tableKey`): a table's own statements, a type only its
+ * columns use, a foreign key between two. A statement the catalog refuses leaves its tables out, and every other table
+ * is served (`PgCatalog`, issue 1197). A statement of no table (a schema, the collations, citext) belongs to none.
+ */
+export function catalogDdlOwned(schema: PgSchema): Array<{ statement: string; tables: string[] }> {
+  const statements: Array<{ statement: string; tables: string[] }> = [];
+  const constraints: Array<{ statement: string; tables: string[] }> = [];
+  const shared = (statement: string): { statement: string; tables: string[] } => ({ statement, tables: [] });
   // a constraint's name as Postgres chooses one (ChooseConstraintName): `<table>_<column>_fkey`, and a number appended
   // from 1 when a constraint of the table already has it — two joins from one column (the shop's `customers.id` to
   // `latest_orders` and to `latest_status`) are two constraints, and one name for both was refused
@@ -114,39 +129,43 @@ export function catalogDdl(schema: PgSchema): string[] {
   };
   // an extension's type a column has (Mason copies a citext as itself): its extension, which the worker
   // bundles (catalog-worker.ts), before the tables
-  if (schema.tables.some((t) => t.columns.some((c) => c.spelled === "citext"))) statements.push("CREATE EXTENSION IF NOT EXISTS citext;");
+  if (schema.tables.some((t) => t.columns.some((c) => c.spelled === "citext"))) statements.push(shared("CREATE EXTENSION IF NOT EXISTS citext;"));
   // a source schema the prototype copies from (decision C): created before its tables
   for (const name of [...new Set(schema.tables.map((t) => t.schema).filter((x): x is string => x !== undefined && x !== "public"))]) {
-    statements.push(`CREATE SCHEMA IF NOT EXISTS ${ident(name)};`);
+    statements.push(shared(`CREATE SCHEMA IF NOT EXISTS ${ident(name)};`));
   }
   // THE SOURCE'S COLLATIONS (src/duck/collation.ts), before the tables: each the catalog lacks, declared under its name with
   // the source's provider, locale and determinism (a locale PGlite cannot open declared on its root locale: what it
   // MEANS is the source's row of its name, read by the resolver, never this one's), so a column's COLLATE and a
   // statement's resolve as on the source. In pg_catalog, public, a table's schema, or a column's collation's schema
-  statements.push(...collationDdl(schema));
+  statements.push(...collationDdl(schema).map(shared));
   // a source enum a column has: the type, its labels in their declared order, before the tables —
   // spelled as the source's format_type spells it (`mood`, `other.level`, `"Odd"`), its schema made first
   const enums = new Map<string, readonly string[]>();
   // one declaration a type, the FIRST column's: the synced tables come first, and src/duck/sync.ts hands a generated
   // table's column its synced type's labels (one source of an enum's labels), so no later column's can replace them
   for (const t of schema.tables) for (const c of t.columns) if (c.enumLabels !== undefined && c.spelled !== undefined && !enums.has(c.spelled.replace(/\[\]$/, ""))) enums.set(c.spelled.replace(/\[\]$/, ""), c.enumLabels);
+  // the tables whose columns use a type: a type the catalog refuses leaves them out
+  const usedBy = (has: (c: PgTable["columns"][number]) => boolean): string[] => schema.tables.filter((t) => t.columns.some(has)).map(tableKey);
   for (const [type, labels] of enums) {
     const qualifier = typeNameParts(type).schema;
-    if (qualifier !== null && qualifier !== '"public"' && qualifier !== "public") statements.push(`CREATE SCHEMA IF NOT EXISTS ${qualifier};`);
-    statements.push(`CREATE TYPE ${type} AS ENUM (${labels.map(literal).join(", ")});`);
+    if (qualifier !== null && qualifier !== '"public"' && qualifier !== "public") statements.push(shared(`CREATE SCHEMA IF NOT EXISTS ${qualifier};`));
+    statements.push({ statement: `CREATE TYPE ${type} AS ENUM (${labels.map(literal).join(", ")});`, tables: usedBy((c) => c.enumLabels !== undefined && c.spelled?.replace(/\[\]$/, "") === type) });
   }
   // a type a database made, held as its text: its name, the text's input and output, and nothing over it
   const made = new Map(schema.tables.flatMap((t) => t.columns.filter((c) => c.made !== undefined).map((c) => [madeTypeName(c.spelled!), c.made] as const)));
   [...made].forEach(([type, kind], i) => {
     const input = kind === "row" ? HELD_ROW_INPUT : HELD_TYPE_INPUT;
     const qualifier = typeNameParts(type).schema;
-    if (qualifier !== null && qualifier !== '"public"' && qualifier !== "public") statements.push(`CREATE SCHEMA IF NOT EXISTS ${qualifier};`);
-    statements.push(`CREATE TYPE ${type};`,
+    if (qualifier !== null && qualifier !== '"public"' && qualifier !== "public") statements.push(shared(`CREATE SCHEMA IF NOT EXISTS ${qualifier};`));
+    const tables = usedBy((c) => c.made !== undefined && madeTypeName(c.spelled!) === type);
+    statements.push(...[`CREATE TYPE ${type};`,
       `CREATE FUNCTION pg_catalog.${input}${i}(cstring) RETURNS ${type} LANGUAGE internal IMMUTABLE STRICT AS 'textin';`,
       `CREATE FUNCTION pg_catalog.mason_held_out${i}(${type}) RETURNS cstring LANGUAGE internal IMMUTABLE STRICT AS 'textout';`,
-      `CREATE TYPE ${type} (INPUT = pg_catalog.${input}${i}, OUTPUT = pg_catalog.mason_held_out${i}, LIKE = text);`);
+      `CREATE TYPE ${type} (INPUT = pg_catalog.${input}${i}, OUTPUT = pg_catalog.mason_held_out${i}, LIKE = text);`].map((statement) => ({ statement, tables })));
   });
   for (const table of schema.tables) {
+    const own = [tableKey(table)];
     const lines: string[] = [];
     for (const c of table.columns) {
       // a column's own collation: the source's, so Postgres's analysis orders it as the source does
@@ -154,24 +173,24 @@ export function catalogDdl(schema: PgSchema): string[] {
       lines.push(`${ident(c.name)} ${c.made !== undefined ? `${madeTypeName(c.spelled!)}${c.spelled!.endsWith("[]") ? "[]" : ""}` : c.spelled ?? PG_API_TYPE_SPELLING[c.type]}${collate}${c.notNull === true ? " NOT NULL" : ""}`);
     }
     if (table.primaryKey.length > 0) lines.push(`PRIMARY KEY (${table.primaryKey.map(ident).join(", ")})`);
-    statements.push(`CREATE TABLE ${qualified(table)} (\n  ${lines.join(",\n  ")}\n);`);
+    statements.push({ statement: `CREATE TABLE ${qualified(table)} (\n  ${lines.join(",\n  ")}\n);`, tables: own });
     // the source's unique indexes, under its names: before the foreign keys that may reference them
     for (const u of table.uniqueKeys ?? []) {
       const cols = `(${u.columns.map(ident).join(", ")})`;
       const nulls = u.nullsNotDistinct ? "NULLS NOT DISTINCT" : "";
       // the two spellings put NULLS NOT DISTINCT on either side of the columns
-      statements.push(u.constraint ? `ALTER TABLE ${qualified(table)} ADD CONSTRAINT ${ident(u.name)} UNIQUE ${nulls} ${cols};`
-        : `CREATE UNIQUE INDEX ${ident(u.name)} ON ${qualified(table)} ${cols} ${nulls};`);
+      statements.push({ statement: u.constraint ? `ALTER TABLE ${qualified(table)} ADD CONSTRAINT ${ident(u.name)} UNIQUE ${nulls} ${cols};`
+        : `CREATE UNIQUE INDEX ${ident(u.name)} ON ${qualified(table)} ${cols} ${nulls};`, tables: own });
     }
 
     const notesOn = new Map<string, string[]>();
     const tableNotes: string[] = [];
     for (const join of table.joins) {
       if (isForeignKey(schema, table, join)) {
-        constraints.push(
+        const target = joinTarget(schema, join.table)!;
+        constraints.push({ statement:
           `ALTER TABLE ${qualified(table)} ADD CONSTRAINT ${ident(constraintName(`${table.name}_${join.on[0]}_fkey`))}` +
-            ` FOREIGN KEY (${ident(join.on[0])}) REFERENCES ${qualified(joinTarget(schema, join.table)!)} (${ident(join.on[1])});`,
-        );
+            ` FOREIGN KEY (${ident(join.on[0])}) REFERENCES ${qualified(target)} (${ident(join.on[1])});`, tables: [...new Set([...own, tableKey(target)])] });
       } else if (table.columns.some((c) => c.name === join.on[0])) {
         notesOn.set(join.on[0], [...(notesOn.get(join.on[0]) ?? []), joinNote(join)]);
       } else {
@@ -180,10 +199,10 @@ export function catalogDdl(schema: PgSchema): string[] {
     }
 
     const tableComment = [table.description, ...tableNotes].filter((s): s is string => s !== undefined && s !== "").join("; ");
-    if (tableComment !== "") statements.push(`COMMENT ON TABLE ${qualified(table)} IS ${literal(tableComment)};`);
+    if (tableComment !== "") statements.push({ statement: `COMMENT ON TABLE ${qualified(table)} IS ${literal(tableComment)};`, tables: own });
     for (const c of table.columns) {
       const parts = [c.description, ...(notesOn.get(c.name) ?? [])].filter((s): s is string => s !== undefined && s !== "");
-      if (parts.length > 0) statements.push(`COMMENT ON COLUMN ${qualified(table)}.${ident(c.name)} IS ${literal(parts.join("; "))};`);
+      if (parts.length > 0) statements.push({ statement: `COMMENT ON COLUMN ${qualified(table)}.${ident(c.name)} IS ${literal(parts.join("; "))};`, tables: own });
     }
   }
   return [...statements, ...constraints];
@@ -538,7 +557,41 @@ export function leftOutLine(r: { statement: string; message: string }): string {
 
 const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
-type Reply = { id: number; ok: true; bytes?: Uint8Array; rows?: Record<string, unknown>[]; refused?: Array<{ statement: string; message: string }>} | { id: number; ok: false; message: string };
+type Reply = { id: number; ok: true; bytes?: Uint8Array; rows?: Record<string, unknown>[]; refused?: Array<{ statement: string; message: string }>} | { id: number; ok: false; message: string; at?: number; reason?: string };
+
+/** a start's DDL statement the catalog refused (catalog-worker.ts): its place in the start's statements, and the catalog's words */
+class StartRefused extends Error {
+  readonly at: number;
+  readonly reason: string;
+  constructor(message: string, at: number, reason: string) {
+    super(message);
+    this.at = at;
+    this.reason = reason;
+  }
+}
+
+/** the schema without the tables `keys` names (`tableKey`): a join to one of them is a comment again (`isForeignKey`) */
+function withoutTables(schema: PgSchema, keys: ReadonlySet<string>): PgSchema {
+  return { ...schema, tables: schema.tables.filter((t) => !keys.has(tableKey(t))) };
+}
+
+/** a column's type as the catalog's DDL declares it, for a column whose type is the catalog's own (no enum, no made type) */
+const ownTypeOf = (c: PgTable["columns"][number]): string | null => c.made !== undefined || c.enumLabels !== undefined ? null : c.spelled ?? PG_API_TYPE_SPELLING[c.type];
+
+/**
+ * WHY A TABLE IS LEFT OUT OF THE CATALOG, in the words of a person who reads `mason status` (issue 1197). The usual case
+ * is a type newer than the catalog's Postgres (`oid8` on Postgres 19): the columns of a type the catalog lacks are
+ * named, with how to leave them out. Otherwise the catalog's own words are given. The engine is never named.
+ */
+export function leftOutReason(table: PgTable, reason: string, missing: ReadonlySet<string>): string {
+  const columns = table.columns.filter((c) => { const t = ownTypeOf(c); return t !== null && missing.has(t); });
+  if (columns.length === 0) return `its definition was refused (${reason})`;
+  const names = columns.map((c) => c.name);
+  const types = [...new Set(columns.map((c) => ownTypeOf(c)!))];
+  return columns.length === 1
+    ? `its column ${names[0]} has a type Mason cannot serve yet (${types.join(", ")}). Leave the column out with exclude: [${names[0]}] on its entry in the sources file`
+    : `its columns ${names.join(", ")} have types Mason cannot serve yet (${types.join(", ")}). Leave them out with exclude: [${names.join(", ")}] on its entry in the sources file`;
+}
 
 /** One worker thread holding one PGlite: requests one at a time (PgCatalog's chain), each with a deadline. */
 class CatalogWorker {
@@ -615,6 +668,8 @@ export class PgCatalog {
   /** the roles' row security policies (`catalogPolicies`), written once the listener checked the filters: run on the
    *  instance up now and at every start after, until the schema or the roles are replaced */
   #policies: string[] = [];
+  /** the tables the last start left out, and why (`#leaveOut`) */
+  #leftOut: ReadonlyMap<string, string> = new Map();
 
   constructor(schema: PgSchema, opts: PgCatalogOptions = {}) {
     this.#schema = schema;
@@ -663,9 +718,12 @@ export class PgCatalog {
   /** Swaps in a new schema (after an apply), and the roles with it (the roles file moved): the running instance is
    *  stopped and the next `run` starts with the new DDL. Resolves once the old instance is gone; a caller need not wait for it. */
   replace(schema: PgSchema, roles: ReadonlyMap<string, RoleGrants> = this.#roles): Promise<void> {
+    // the schema and roles it holds already (a `probe` of the schema the listener now asks for): nothing to start again
+    if (schema === this.#schema && roles === this.#roles) return Promise.resolve();
     this.#schema = schema;
     this.#roles = roles;
     this.#policies = [];
+    this.#leftOut = new Map();
     this.#said.clear();
     return this.#enqueue(() => this.#close("replaced"));
   }
@@ -706,36 +764,111 @@ export class PgCatalog {
       if (this.#db === db) { this.#db = null; this.#log(`catalog: ${errorMessage(e)}`); }
       throw e;
     }
-    if (!reply.ok) throw new Error(reply.message);
+    if (!reply.ok) throw reply.at !== undefined && reply.reason !== undefined ? new StartRefused(reply.message, reply.at, reply.reason) : new Error(reply.message);
     return reply;
   }
 
   async #ensureStarted(): Promise<CatalogWorker> {
     if (this.#db !== null && this.#db.alive) return this.#db;
     this.#db = null;
-    const schema = this.#schema, roles = this.#roles;
+    const roles = this.#roles;
     const t0 = Date.now();
-    const db = new CatalogWorker();
-    try {
-      const started = await this.#ask(db, { op: "init", statements: [CATALOG_BASE_SQL, ...catalogDdl(schema), ...catalogRoles(schema, roles), ...this.#setup],
-        optional: [...catalogDefaults(schema), ...catalogViews(schema, roles), ...this.#policies] }, "its start");
-      // each left-out default or view: one line, once per schema (the instance starts again after every idle stop)
-      for (const r of started.refused ?? []) {
-        const line = leftOutLine(r);
-        if (this.#said.has(line)) continue;
-        this.#said.add(line);
-        this.#log(line);
-        if (this.#trace) this.#log(`trace catalog: the statement left out: ${r.statement}`);
+    // ONE TABLE'S REFUSED DDL NEVER STOPS THE OTHERS (issue 1197: a column of a type newer than the catalog's Postgres,
+    // `oid8` from Postgres 19, refused the start, and every statement of every session failed). The tables a refused
+    // statement belongs to (`catalogDdlOwned`) are left out and said, and the start is tried again without them. Each
+    // try leaves out one table at least, so it ends. A refused statement of no table is the start's failure, as before.
+    const asked = this.#schema;
+    let schema = asked;
+    const refusedBy = new Map<string, string>();
+    for (;;) {
+      const owned = catalogDdlOwned(schema);
+      const db = new CatalogWorker();
+      try {
+        const started = await this.#ask(db, { op: "init", statements: [CATALOG_BASE_SQL, ...owned.map((s) => s.statement), ...catalogRoles(schema, roles), ...this.#setup],
+          optional: [...catalogDefaults(schema), ...catalogViews(schema, roles), ...this.#policies] }, "its start");
+        // each left-out default or view: one line, once per schema (the instance starts again after every idle stop)
+        for (const r of started.refused ?? []) this.#sayOnce(leftOutLine(r), r.statement);
+        this.#db = db;
+        break;
+      } catch (e) {
+        // the half-made worker is discarded so the next `run` tries afresh
+        await db.terminate();
+        // the statements are CATALOG_BASE_SQL, then `owned`: its place in them is one less
+        const tables = e instanceof StartRefused ? owned[e.at - 1]?.tables ?? [] : [];
+        if (e instanceof StartRefused && tables.length > 0) {
+          for (const t of tables) refusedBy.set(t, e.reason);
+          schema = withoutTables(schema, new Set(tables));
+          continue;
+        }
+        // a client reads this on the wire: the catalog's words, never its engine's name
+        throw new Error(`the catalog could not start: ${errorMessage(e)}`, { cause: e });
       }
-    } catch (e) {
-      // the half-made worker is discarded so the next `run` tries afresh
-      await db.terminate();
-      throw new Error(`PGlite could not start: ${errorMessage(e)}`, { cause: e });
     }
-    this.#db = db;
+    const db = this.#db;
+    await this.#leaveOut(db, asked, refusedBy);
     this.#log(`catalog: PGlite started in ${Date.now() - t0} ms with ${schema.tables.length} table(s)${roles.size > 0 ? ` and ${roles.size} role(s)` : ""}`);
     this.#touch();
     return db;
+  }
+
+  /** a line said once for this schema; its statement, where it has one, only under trace */
+  #sayOnce(line: string, statement?: string): void {
+    if (this.#said.has(line)) return;
+    this.#said.add(line);
+    this.#log(line);
+    if (statement !== undefined && this.#trace) this.#log(`trace catalog: the statement left out: ${statement}`);
+  }
+
+  /** the tables a start left out (`#ensureStarted`), each said once a schema in a person's words (`leftOutReason`). The
+   *  types the catalog lacks are asked of the instance just started, in one query over every column of theirs. */
+  async #leaveOut(db: CatalogWorker, asked: PgSchema, refusedBy: ReadonlyMap<string, string>): Promise<void> {
+    const left = new Map<string, string>();
+    if (refusedBy.size > 0) {
+      const tables = asked.tables.filter((t) => refusedBy.has(tableKey(t)));
+      const types = [...new Set(tables.flatMap((t) => t.columns.flatMap((c) => ownTypeOf(c) ?? [])))];
+      let missing = new Set<string>();
+      try {
+        const reply = await this.#ask(db, { op: "query", sql: `SELECT t FROM unnest(ARRAY[${types.map(literal).join(", ")}]::text[]) AS t WHERE pg_catalog.to_regtype(t) IS NULL` }, "a query");
+        missing = new Set((reply.rows ?? []).map((r) => String(r["t"])));
+      } catch (e) {
+        // the reason is then the catalog's own words, which name the type too
+        this.#log(`catalog: the types it lacks could not be read: ${errorMessage(e)}`);
+      }
+      for (const t of tables) {
+        const why = leftOutReason(t, refusedBy.get(tableKey(t))!, missing);
+        left.set(tableKey(t), why);
+        this.#sayOnce(`catalog: ${tableKey(t)} is left out, so it is not served (every other table is): ${why}`);
+      }
+    }
+    this.#leftOut = left;
+  }
+
+  /** the tables the last start left out, and why, in a person's words (`leftOutReason`), by `tableKey` */
+  get leftOut(): ReadonlyMap<string, string> { return this.#leftOut; }
+
+  /**
+   * WHETHER THE CATALOG HOLDS EACH TABLE OF A SCHEMA, asked before any of them is said to be served (issue 1197: every
+   * table was said synced while the catalog refused them all). The schema replaces the catalog's, the instance starts,
+   * and the tables it left out are the answer. An instance that was not up before is stopped again, so a run nobody
+   * queries keeps no catalog in memory.
+   */
+  probe(schema: PgSchema): Promise<ReadonlyMap<string, string>> {
+    // ONE step on the queue, the schema set inside it: a `replace` the listener makes meanwhile is a step of its own,
+    // before or after, and the tables left out are always this schema's (`#ensureStarted` reads the schema it starts)
+    return this.#enqueue(async () => {
+      const wasUp = this.started;
+      if (this.#schema !== schema) {
+        this.#schema = schema;
+        this.#policies = [];
+        this.#leftOut = new Map();
+        this.#said.clear();
+        await this.#close("replaced for its check of the tables");
+      }
+      await this.#ensureStarted();
+      const left = this.#leftOut;
+      if (!wasUp) await this.#close("stopped after its check of the tables");
+      return left;
+    });
   }
 
   /** Every call resets the idle timer; the timer stops the instance only when nothing has used it since. */

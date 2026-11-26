@@ -336,7 +336,9 @@ export function missingRelationHint(relation: string, copies: readonly CopyState
       return `${c.source} is added and being synced (${how}): ${served}`;
     }
     case "failed": return `${c.source} is added, but its first sync failed: ${c.error ?? "no reason recorded"}; mason logs says more`;
-    case "copied": return `${c.source} was just synced and joins the catalog as it is rebuilt: run the statement again in a moment (if it stays missing, mason logs says why)`;
+    // synced, and left out of the catalog (issue 1197): why, and the way out
+    case "copied": return c.notServed !== undefined ? `${c.source} is synced, but it is not served: ${c.notServed}`
+      : `${c.source} was just synced and joins the catalog as it is rebuilt: run the statement again in a moment (if it stays missing, mason logs says why)`;
   }
 }
 

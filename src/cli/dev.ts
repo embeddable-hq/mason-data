@@ -752,6 +752,10 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   } catch (e) { fail("Starting the Postgres listener"); say(`  ${(e as Error).message}`); await requests.close(); await sync.stop(); await usage.close(); await events.close(); await store.close(); return 1; }
   done(`Postgres listener on ${listenerText(pgTls.listener, api.port)}; ${listen.proxyFrom !== undefined ? `a PROXY protocol v2 header required from ${listen.proxyFrom.entries.join(", ")} (MASON_PG_PROXY_FROM); ` : ""}${statementTimeoutMs === 0 ? "statements without a time limit" : `each statement at most ${timeoutSetting.trim()}`} (MASON_STATEMENT_TIMEOUT); ` +
     `every request recorded for ${keptDays} day${keptDays === 1 ? "" : "s"} (MASON_HISTORY_DAYS; mason logs --requests)`);
+  // A TABLE IS SAID TO BE SERVED ONLY ONCE THE CATALOG HOLDS IT (issue 1197): from now on every rebuild of the catalog asks
+  // the listener's, and this first one is over before the run says it is ready
+  // (never rejects: a rebuild that fails is said by the sync, and made again at the next pass)
+  await sync.useCatalogProbe((s) => api.probeCatalog(s));
   {
     // a user whose role the file no longer names reads nothing until it is added again (fail closed): said here, by name
     // the row filters checked by the catalog Postgres here (on the tables copied already): a where: Postgres refuses is

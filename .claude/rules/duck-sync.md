@@ -132,7 +132,12 @@ paths:
   said as `sync_stopped`, never serving rows that may be the other's. A table the ledger says is synced with no table
   under it is synced again whole (`forgetMissing`: at `open`, and when the catalog meets one), and **one table the
   catalog cannot read is left out and said, never failing the catalog** (`catalogTypes`; it served no table at all, the
-  others included, through restarts). DETECTOR: `tests/integration/duck-case-remove.itest.ts`.
+  others included, through restarts). DETECTOR: `tests/integration/duck-case-remove.itest.ts`. **A table is served only
+  once the listener's catalog holds it** (`useCatalogProbe`, issue 1197): every rebuild that changes the schema asks
+  the catalog first (`PgCatalog.probe`), and a table it leaves out is left out of the schema too. Its state carries
+  the reason as its error (`notServed`), so `mason wait` and `mason status` never call it served. Why: a column of a
+  type new in Postgres 19 refused the catalog's start, and every table was said synced while none could be read.
+  DETECTOR: `tests/duck-sync-added.test.ts` "issue 1197".
 - **A stop cancels on the source every read its interrupt has not ended within 200 ms** (`stop`, `cancelOnSource`,
   issue 1037: a chunk, a catch-up or a poll waiting on a lock in the source held `mason stop` until the lock was
   released). It uses the cut's guarded `pg_cancel_backend` (`cancelBackends`), and that statement fails as `Stopping`,
