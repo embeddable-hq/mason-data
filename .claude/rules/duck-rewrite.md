@@ -390,6 +390,32 @@ paths:
   an expression costs (ICU's date_trunc against the arithmetic) is read from the SQL sent: the skeleton lists the time
   functions it calls. DuckDB 2.0 plans a delimiter join as a CTE (`__duckdb_delim_<n>`) joined back to a hash group by
   of its own scan, no operator named DELIM (`delimiterJoin`). ("The plan fixture")
+- **A whole row an outer join may leave unmatched is NULL there, decided in one place** (`rowPresence`,
+  src/duck/rewrite.ts; issue 1008). Postgres's analysis says which rows may be (`Typed.nulled`, its `varnullingrels`).
+  Mason tells an unmatched row by a column of it that no matched row holds NULL: a column of its table's primary key
+  (`rowKeys` in src/duck/plan.ts), or a subquery's output that is one read bare, a count or a constant. It holds only
+  while that column cannot be NULL. The primary key is the key Mason syncs by, which the sync holds to the source
+  before each read, so it holds; a NOT NULL that is no key may be dropped on the source after the catalog read it, so it
+  is never asked. Every reader of the row (its text, its json, json_agg's element) is NULL where that column is. No
+  presence is asked where no unmatched row reaches a reader, as the planner's reduction of outer joins decides it
+  (`extendedReads`, src/duck/pgtree.ts): a WHERE, or an inner join's ON above, never true where the row is unmatched.
+  That is decided by EVALUATING the condition in three-valued logic with the unmatched side's columns NULL and the rest
+  unknown (`outerJoinsOf`): strict functions by pg_proc's `proisstrict`, AND, OR, NOT, the null and truth tests, CASE,
+  COALESCE, EXISTS and IN of a subquery, a scalar subquery and a LATERAL column each by its own rule. A whole row read in
+  a condition is unknown, since Mason writes it with the very presence this decides. Never a shape list: one refused
+  `d.t = 'x' OR d.t = 'y'` and an inner join above (the second review of PR 1100), and the next took a nested `IS NOT
+  NULL` for strict and `length(d::text) > 0` for a proof, so unmatched rows read as rows of NULLs (the third). A one-row
+  item alone on a join's nullable side is never unmatched ON true, in any join. Where the join NULL-extends that side
+  alone (a LEFT or RIGHT JOIN, or a FULL one a condition above makes so), it is told by that join's ON, evaluated again
+  in the reader with each column named by its FROM item (`ownersNamed`), where the ON reads none of its columns and calls
+  nothing volatile, and no column of an outer query reads under a FROM name the query's own FROM holds (refused: named
+  so, it would read that item, the fifth review); also under further outer joins the ON itself rules out. Never in a FULL JOIN: there the item's own
+  row is kept unmatched beside the other side's NULLs, which the ON read again would call absent (the fourth review). A row nothing tells is refused, `null-extended-row`. A whole row's column names have
+  one reader, Postgres's (`Typed.rowColumns`: a WITH query's column list, a name held twice renamed in each place by
+  `itemTwins`). An item's renamed columns are its own query's (`QueryOutputs.twins`), never its name's across the
+  statement: by name, another query's item of the same name took its alias list. Why: the row was written from its
+  columns, so an unmatched row read `(,)` and `{"id":null}` where Postgres reads NULL. `tests/duck-wire.test.ts` "issue
+  1008", the oracle's `issue 1008:`.
 - **A result's names, types and typmods are Postgres's**, from the analysis, and a numeric Postgres computes exactly is
   computed by `src/lib/pg-numeric.ts`, never DuckDB's double or HUGEINT. ("How a statement is answered")
 - **A whole numeric the rewrite writes is a DECIMAL(19, 0), never a DECIMAL(38, 0)** (`wholeNumeric`, issue 929): an
