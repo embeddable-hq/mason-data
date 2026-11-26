@@ -104,6 +104,20 @@ export function relationMoved(relid: number, relation: readonly RelationColumn[]
   return narrower ? { narrower: true } : null;
 }
 
+/**
+ * THE STREAMED TABLE A RELATION IS, WHEN IT ARRIVES UNDER ANOTHER NAME (issue 1199): the source of the streamed table
+ * whose oid is `relid` (`byOid`), when the relation's name (`source`) is not that table's. pgoutput names a relation as
+ * the catalog does at the change, so a table renamed on the database, or moved to another schema, arrives under its new
+ * name. Looked up by name alone, its changes matched no streamed table and were passed over, acknowledged and lost for
+ * good: an insert made while it was renamed never reached the synced data, even after it was renamed back. Null when the
+ * table of that name is this relation (`named`), or no streamed table has its oid.
+ */
+export function renamedFrom(relid: number, source: string, named: StreamedTable | undefined, byOid: ((relid: number) => string | undefined) | undefined): string | null {
+  if (named?.relation?.oid === relid) return null;
+  const was = byOid?.(relid);
+  return was === undefined || was === source ? null : was;
+}
+
 /** the copy's columns a relation does not carry, but for those Postgres never publishes (`generated`, read from the
  *  source instead): what refuses the table (`StreamTarget.refuse`) */
 export function missingFrom(relation: readonly RelationColumn[], table: StreamedTable): string[] {
@@ -330,12 +344,17 @@ export interface StreamTarget {
   /** the streamed tables, by source (`schema.table`), each in the copy's own columns. Read at EVERY change: a table joins
    *  (caught up) or leaves (copied again) while the stream runs */
   tables(): ReadonlyMap<string, StreamedTable>;
+  /** the streamed table (its source, a key of `tables()`) whose oid is `relid`, as the run took it (`relation.oid`), or
+   *  undefined: how a table renamed on the database is known under its new name (`renamedFrom`, issue 1199). Read at a
+   *  change whose relation's name is not a streamed table of that oid */
+  byOid?(relid: number): string | undefined;
   /** a streamed table whose relation (pgoutput's, after a DDL on the database or a narrower publication) no longer
    *  carries `missing`, columns its copy holds, or whose columns are no longer the ones its copy was taken from (`moved`,
-   *  `relationMoved`): its changes are not applied from here on, and the target takes it out of the stream, saying why
-   *  and the way out — recorded before the stream goes on, so nothing past the change is acknowledged without it. Called
-   *  once per `tables()` entry */
-  refuse(source: string, why: { missing: readonly string[] } | { moved: string }): Promise<void>;
+   *  `relationMoved`), or that arrives under another name (`renamed`: renamed on the database, or moved to another
+   *  schema, `renamedFrom`): its changes are not applied from here on, and the target takes it out of the stream, saying
+   *  why and the way out — recorded before the stream goes on, so nothing past the change is acknowledged without it.
+   *  Called once per `tables()` entry */
+  refuse(source: string, why: { missing: readonly string[] } | { moved: string } | { renamed: string }): Promise<void>;
   /** a streamed table's relation message that `relationMoved` does not refuse: whether each column its copy holds is
    *  still that column on the database now, as the catalog says. Null when it is, else why not (a check that cannot tell
    *  says so: fail closed). Asked once a relation message, before a change of it is applied */
@@ -535,6 +554,13 @@ export class ReplicationStream {
               const rel = relations.get(relid);
               // looked up at each change: a table caught up since the stream started is streamed from here on
               const table = rel === undefined ? undefined : this.target.tables().get(rel.source);
+              // A STREAMED TABLE UNDER ANOTHER NAME NOW (issue 1199): renamed on the database, or moved to another schema.
+              // Its changes cannot be passed over as another table's (they would be acknowledged and lost), nor applied
+              // under a name the sources file does not give it: it is refused, out of the stream and marked behind before
+              // anything past this change is acknowledged, and caught up by one poll once it is back under its name
+              const was = rel === undefined ? null : renamedFrom(relid, rel.source, table, this.target.byOid?.bind(this.target));
+              const renamed = was === null ? undefined : this.target.tables().get(was);
+              if (was !== null && renamed !== undefined && !refused.has(renamed)) { refused.add(renamed); await this.target.refuse(was, { renamed: rel!.source }); }
               if (rel === undefined || table === undefined) continue;   // a table the copy does not hold, or not yet caught up
               // its columns no longer the ones its copy was taken from (a rename, a swap, a drop: issue 1073), or a column
               // the copy holds that the relation does not carry (a narrower publication): its changes cannot be written as

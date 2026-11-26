@@ -85,6 +85,28 @@ test("a relation whose columns are no longer the ones the copy was taken from is
   assert.equal(moved(77, rel("x"), { stay: 1, columns: ["x"], key: ["x"] }), null);
 });
 
+// A STREAMED TABLE ARRIVING UNDER ANOTHER NAME IS KNOWN BY ITS OID (issue 1199): looked up by name alone, a table
+// renamed on the database matched no streamed table, and its changes were passed over, acknowledged and lost
+test("a relation under another name than its streamed table's is that table, known by its oid; a relation of its own name and oid is no rename", () => {
+  const renamedFrom = (stream as { renamedFrom?: (relid: number, source: string, named: object | undefined, byOid: ((relid: number) => string | undefined) | undefined) => string | null }).renamedFrom;
+  assert.equal(typeof renamedFrom, "function", "the stream knows a streamed table by its oid");
+  const table = (oid: number): object => ({ stay: 1, columns: ["id"], key: ["id"], relation: { oid, columns: [{ name: "id", skippable: false }] } });
+  const byOid = (relid: number): string | undefined => relid === 16401 ? "public.events" : relid === 16402 ? "public.other" : undefined;
+  // renamed: its new name is no streamed table
+  assert.equal(renamedFrom!(16401, "public.activity", undefined, byOid), "public.events");
+  // moved to another schema
+  assert.equal(renamedFrom!(16401, "archive.events", undefined, byOid), "public.events");
+  // two tables swapped names: each arrives under the other's name, of the other's oid
+  assert.equal(renamedFrom!(16401, "public.other", table(16402), byOid), "public.events");
+  assert.equal(renamedFrom!(16402, "public.events", table(16401), byOid), "public.other");
+  // under its own name: no rename
+  assert.equal(renamedFrom!(16401, "public.events", table(16401), byOid), null);
+  // a table no streamed table is, under any name
+  assert.equal(renamedFrom!(16999, "public.audit", undefined, byOid), null);
+  // a target that knows no oids (a test's)
+  assert.equal(renamedFrom!(16401, "public.activity", undefined, undefined), null);
+});
+
 // A RELATION MESSAGE SHOWS THE KEY HELD only through the replica identity's index (issue 1062): the default identity's
 // primary key, or the index USING INDEX names, each unique over NOT NULL columns. Anything else asks the database.
 type Col = { name: string; typeOid: number; typmod: number; isKey: boolean };
