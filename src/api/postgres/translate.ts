@@ -99,17 +99,18 @@ export function mayOrderText(n: unknown): boolean {
 const ORDERING_OPERATORS = new Set(["<", ">", "<=", ">="]);
 
 /** Whether a statement of no table names a type whose text a source may write otherwise than the catalog Postgres
- *  (`FORM_TYPES`, src/duck/held-types.ts: `'0/1'::pg_lsn`, `pg_lsn '0/1'`): its analysis is asked whether the source's
- *  form differs (`ordersText`'s "form", issue 1198). A false "may" costs time, never an answer. */
+ *  (`FORM_TYPES`, src/duck/held-types.ts: `'0/1'::pg_lsn`, `pg_lsn '0/1'`, `pg_lsn('0/1')`): its analysis is asked
+ *  whether the source's form differs (`ordersText`'s "form", issue 1198). A false "may" costs time, never an answer. A
+ *  value of the type no name of it reaches (a function's result) stays the catalog's, as before. */
 export function namesFormType(n: unknown): boolean {
   if (Array.isArray(n)) return n.some(namesFormType);
   if (n === null || typeof n !== "object") return false;
+  const last = (names: unknown): string => collect(names ?? [], "String").map((s) => String(bodyOf<{ sval?: string }>(s).sval ?? "")).at(-1) ?? "";
   for (const [k, v] of Object.entries(n as Any)) {
-    // a TypeName is a field's value (a cast's `typeName`, a column definition's), or a node of its own
-    if ((k === "typeName" || k === "TypeName") && v !== null && typeof v === "object") {
-      const names = collect((v as Any).names ?? [], "String").map((s) => String(bodyOf<{ sval?: string }>(s).sval ?? ""));
-      if (FORM_TYPES.has(names.at(-1) ?? "")) return true;
-    }
+    // a TypeName is a field's value (a cast's `typeName`, a column definition's), or a node of its own; a cast may be
+    // written as a call of the type's name
+    if ((k === "typeName" || k === "TypeName") && v !== null && typeof v === "object" && FORM_TYPES.has(last((v as Any).names))) return true;
+    if (k === "FuncCall" && v !== null && typeof v === "object" && FORM_TYPES.has(last((v as Any).funcname))) return true;
     if (namesFormType(v)) return true;
   }
   return false;

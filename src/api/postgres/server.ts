@@ -245,10 +245,9 @@ export interface DuckOptions {
   parameters(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, oids: readonly number[], values: readonly (string | null)[], under: SessionState): Promise<(string | null)[]>;
   /** whether a statement of no table orders text under a collation that is not byte order ("order"), maps case
    *  ("case": src/duck/plan.ts `ordersText`), or holds a type whose text the source writes otherwise than the catalog
-   *  ("form", or "form-values" where such a value is read only by a boolean or a numeric): "order" and "form" are the
-   *  synced data's, never the catalog's; "case" and "form-values" are the synced data's where its run answers them
-   *  (`Session.routed`). Absent: every such one is the catalog's */
-  ordersText?(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, text: string, paramOids: readonly number[], under: SessionState, bindable: boolean): Promise<"order" | "case" | "form" | "form-values" | null>;
+   *  ("form"): "order" is the synced data's, never the catalog's; "case" and "form" are the synced data's where its run
+   *  answers them (`Session.routed`). Absent: every such one is the catalog's */
+  ordersText?(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, text: string, paramOids: readonly number[], under: SessionState, bindable: boolean): Promise<"order" | "case" | "form" | null>;
   /** moves when what a plan is made from moves outside the schema (a stored JSON path ready or gone, src/duck/kept.ts):
    *  the plans kept are made again */
   generation?(): number;
@@ -1697,18 +1696,18 @@ class Session {
     const ask = this.server.options.duck.ordersText;
     if (t.kind !== "catalog" || t.fromless === undefined || ask === undefined) return t;
     const why = await ask((b) => this.server.catalog.run(b), text, paramOids, this.sessionState(), bindable);
-    if (why === null || (why === "case" || why === "form-values") && !await this.answersCase(text, paramOids, why)) return t;
+    if (why === null || (why === "case" || why === "form") && !await this.answersCase(text, paramOids, why)) return t;
     return { kind: "duckdb", sql: text, names: t.fromless.names };
   }
 
   /**
-   * WHETHER THE SYNCED DATA ANSWERS A STATEMENT OF NO TABLE THAT MAPS CASE (or that reads a value whose text the source
-   * writes otherwise only by a boolean or a numeric, "form-values", issue 1198): its plan made and RUN on this session's
+   * WHETHER THE SYNCED DATA ANSWERS A STATEMENT OF NO TABLE THAT MAPS CASE (or that holds a value whose text the source
+   * writes otherwise, "form", issue 1198): its plan made and RUN on this session's
    * connection, under its state and clock, every row read and none sent. A statement the plan or the run refuses, or
    * one with a parameter (no value before its Bind), is the catalog's, which answered it before (Mason gap
    * fromless-numeric-text-order). Only a statement's failure is read so; any other is thrown.
    */
-  private async answersCase(text: string, paramOids: readonly number[], why: "case" | "form-values"): Promise<boolean> {
+  private async answersCase(text: string, paramOids: readonly number[], why: "case" | "form"): Promise<boolean> {
     const raw = (await parseSql(text)).stmts?.[0];
     if (raw?.stmt === undefined) return false;
     const controller = new AbortController();
@@ -1724,9 +1723,11 @@ class Session {
     } catch (e) {
       // the statement's own failure (Postgres's analysis, the rewrite's refusal, the engine's error at the run): said in
       // the log and answered by the catalog, as before this route existed
-      // (a cancel or the statement's timeout is the statement's answer, never a reason to run it again on the catalog)
-      if (controller.signal.aborted || !(e instanceof StatementError || e instanceof PgError || e instanceof EncodeError || e instanceof NumericError)) throw e;
-      this.server.log(`session ${this.id}: a statement of no table that ${why === "case" ? "maps case" : "compares a value whose text the source writes otherwise"} is answered by the catalog: the synced data's run failed (${e instanceof StatementError || e instanceof PgError ? `${e.fields.code} ` : ""}${e.message})`);
+      // (a cancel or the statement's timeout is the statement's answer, never a reason to run it again on the catalog;
+      // the statement parsed, so a syntax error is of what the rewrite wrote for the synced data: its plan's failure,
+      // `('{16/B374D848}'::pg_lsn[])[1]`, the review of PR 1201)
+      if (controller.signal.aborted || !(e instanceof StatementError || e instanceof PgError || e instanceof EncodeError || e instanceof NumericError || e instanceof PostgresSyntaxError)) throw e;
+      this.server.log(`session ${this.id}: a statement of no table that ${why === "case" ? "maps case" : "holds a value whose text the source writes otherwise"} is answered by the catalog: the synced data's run failed (${e instanceof StatementError || e instanceof PgError ? `${e.fields.code} ` : ""}${e.message})`);
       return false;
     } finally { disarm(); }
   }

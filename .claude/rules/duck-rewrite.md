@@ -634,9 +634,11 @@ paths:
   is refused (`literal: false`).
 - **A literal or a parameter of a held type is written as the SOURCE writes it** (`SourceForms`, src/duck/held-types.ts,
   from the version the start reads; issue 1198). Why: Postgres 19 writes a `pg_lsn` as `0/016B3748` where the catalog's
-  18 writes `0/16B3748`, so `=` found no row and `<>` every row. A statement of no table holding such a type is the
-  synced data's (`ordersText`'s "form"). Where only a boolean or a numeric reads it ("form-values", `textReaches`),
-  the catalog answers when the synced data's run fails, as for "case".
+  18 writes `0/16B3748`, so `=` found no row and `<>` every row. A statement of no table whose such value may reach
+  the answer as text (`textReaches`) is the synced data's only as "case" is: beside a case mapping's types alone,
+  nothing of the server or the session, and only where the synced data's run answers it; else the catalog's, as before
+  (`ordersText`'s "form"). Why: the synced data passes some constructs through untranslated, and a route on the plan
+  alone answered an inet as a struct's text and a jsonb as written (the review of PR 1201).
   ("A source's text form of a type")
 - **An array parameter is read by Postgres's own array_in, never by the engine's cast of its text** (issue 983:
   node-pg binds `'{"1","3"}'`, which DuckDB's cast cannot read). `PARAM_ARRAYS` (src/duck/held-types.ts) is the one

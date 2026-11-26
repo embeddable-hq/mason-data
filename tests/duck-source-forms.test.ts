@@ -40,9 +40,9 @@ const M18: Array<[number, string]> = [[10, "0/16B3748"], [11, "0/0"], [12, "2/AB
 const as19 = (v: string): string => v.replace(/^([0-9A-F]+)\/([0-9A-F]+)$/, (_, hi: string, lo: string) => `${hi}/${lo.padStart(8, "0")}`);
 
 interface Served { store: DuckStore; api: PgApiServer }
-let s18: Served, s19: Served;
+let s18: Served, s19: Served, s19v: Served;
 
-async function serve(name: string, write: (v: string) => string, sourceVersion: number): Promise<Served> {
+async function serve(name: string, write: (v: string) => string, sourceVersion: number, verified?: null): Promise<Served> {
   const store = await DuckStore.open(path.join(dir, `${name}.db`), () => undefined);
   const q = (v: string | null): string => v === null ? "NULL" : `'${write(v)}'`;
   await store.writer.run("CREATE TABLE public.l (id INTEGER, lsn VARCHAR, la VARCHAR[]); CREATE TABLE public.m (id INTEGER, lsn VARCHAR)");
@@ -52,22 +52,24 @@ async function serve(name: string, write: (v: string) => string, sourceVersion: 
     port: 0, host: "127.0.0.1", tls: null, database: "app", masonVersion: "test", product: "mason-data",
     authenticate: (password) => { const problem = tokenProblem(API_KEY, password); if (problem !== null) throw new Error(problem); return { filters: [], subject: undefined }; },
     schema: () => schema, record: () => undefined, log: () => undefined,
-    // (the allowlist off, as the oracle runs: what is answered is the rewrite's, an IN list of pg_lsn included)
-    duck: await store.listener(undefined, null, undefined, () => [], undefined, { sourceVersion }),
+    // (null: the allowlist off, as the oracle runs: what is answered is the rewrite's, an IN list of pg_lsn included;
+    // undefined: on, as mason start runs)
+    duck: await store.listener(undefined, verified, undefined, () => [], undefined, { sourceVersion }),
   });
   return { store, api };
 }
 
 before(async () => {
-  s18 = await serve("pg18", (v) => v, 180006);
-  s19 = await serve("pg19", as19, 190000);
+  s18 = await serve("pg18", (v) => v, 180006, null);
+  s19 = await serve("pg19", as19, 190000, null);
+  s19v = await serve("pg19v", as19, 190000);
   await truth.exec("CREATE TABLE l (id int PRIMARY KEY, lsn pg_lsn, la pg_lsn[]); CREATE TABLE m (id int PRIMARY KEY, lsn pg_lsn)");
   const q = (v: string | null): string => v === null ? "NULL" : `'${v}'`;
   await truth.exec(`INSERT INTO l VALUES ${L18.map(([id, v, a]) => `(${id}, ${q(v)}, ${a === null ? "NULL" : `'{${a.join(",")}}'`})`).join(", ")}`);
   await truth.exec(`INSERT INTO m VALUES ${M18.map(([id, v]) => `(${id}, ${q(v)})`).join(", ")}`);
 });
 after(async () => {
-  for (const s of [s18, s19]) { await s?.api.close(); await s?.store.close(); }
+  for (const s of [s18, s19, s19v]) { await s?.api.close(); await s?.store.close(); }
   await truth.close();
   fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -85,7 +87,7 @@ async function ask(s: Served, sql: string, values?: unknown[]): Promise<Answer> 
   } finally { await c.end(); }
 }
 async function known(sql: string, values?: unknown[]): Promise<Answer> {
-  return truth.query<unknown[]>(sql, values ?? [], { rowMode: "array", parsers: Object.fromEntries([16, 20, 21, 23, 25, 1700, 3220, 3221].map((o) => [o, (v: string) => v])) })
+  return truth.query<unknown[]>(sql, values ?? [], { rowMode: "array", parsers: Object.fromEntries([16, 20, 21, 23, 25, 114, 1700, 3220, 3221, 3802].map((o) => [o, (v: string) => v])) })
     .then((r) => ({ fields: r.fields.map((f) => [f.name, f.dataTypeID] as [string, number]), rows: r.rows.map((x) => x.map((v) => v === null ? null : String(v))) }),
       (e: { code: string; message: string }) => `${e.code}: ${e.message}`);
 }
@@ -131,7 +133,7 @@ const CASES: Array<[string, unknown[] | undefined, Answer]> = [
   ["SELECT '0/016B3748'::pg_lsn AS a, '1/0'::pg_lsn::text AS b", undefined, { fields: [["a", 3220], ["b", 25]], rows: [["0/016B3748", "1/00000000"]] }],
   ["SELECT '{0/1,1/0}'::pg_lsn[] AS a", undefined, { fields: [["a", 3221]], rows: [["{0/00000001,1/00000000}"]] }],
   ["SELECT '0/1'::pg_lsn UNION SELECT '0/00000001'::pg_lsn", undefined, { fields: [["pg_lsn", 3220]], rows: [["0/00000001"]] }],
-  // ... and one whose pg_lsn is read only by a boolean or a numeric: the catalog's where the synced data cannot
+  // ... and one whose pg_lsn is read only by a boolean or a numeric: the catalog's, the same under either form
   ["SELECT pg_lsn '0/2' - pg_lsn '0/1' AS d, pg_lsn '0/2' > pg_lsn '0/01' AS g", undefined, { fields: [["d", 1700], ["g", 16]], rows: [["1", "t"]] }],
 ];
 
@@ -149,6 +151,62 @@ test("on a Postgres 18 source, the same statements answer as Postgres 18 does, a
   for (const [sql, values] of CASES) {
     const [got, want] = [await ask(s18, sql, values), await known(sql, values)];
     if (!util.isDeepStrictEqual(got, want)) differ.push(`${sql}\n    mason:      ${JSON.stringify(got)}\n    postgres 18: ${JSON.stringify(want)}`);
+  }
+  assert.deepEqual(differ, []);
+});
+
+/**
+ * A STATEMENT OF NO TABLE THAT NAMES A PG_LSN BESIDE ANYTHING ELSE (the review of PR 1201): the synced data passes some
+ * constructs through untranslated (an inet, a jsonb, a numeric's type, a bpchar, `pg_catalog.length`, `FROM (SELECT)`),
+ * and refuses what the catalog answers (a value of the server or the session, an operator it has not verified). So it
+ * is the synced data's only where it holds a case mapping's types and the synced data's run answers it, and the
+ * catalog's, as before, otherwise. Its pg_lsn's low half already has 8 digits here, which Postgres 18 and 19 write
+ * alike: so each answer, on a 19 source, is held to PGlite's, with the allowlist on and off.
+ */
+const BESIDE: Array<[string, unknown[] | undefined]> = [
+  ["SELECT '10.0.0.1'::inet AS i, '16/B374D848'::pg_lsn AS l", undefined],
+  ["SELECT '2001:db8::1'::inet AS i, '16/B374D848'::pg_lsn AS l", undefined],
+  [`SELECT '{"b":1,"a":2}'::jsonb AS j, '16/B374D848'::pg_lsn AS l`, undefined],
+  ["SELECT 'NaN'::numeric AS n, '16/B374D848'::pg_lsn AS l", undefined],
+  ["SELECT char 'abc' AS c, '16/B374D848'::pg_lsn AS l", undefined],
+  ["SELECT n'abc' AS c, '16/B374D848'::pg_lsn AS l", undefined],
+  ["SELECT unknown 'abc' AS c, '16/B374D848'::pg_lsn AS l", undefined],
+  ["SELECT 'abc'::unknown AS c, '16/B374D848'::pg_lsn AS l", undefined],
+  ["SELECT 'ab'::character(4) AS c, '16/B374D848'::pg_lsn AS l", undefined],
+  ["SELECT x, '16/B374D848'::pg_lsn AS l FROM (VALUES (char 'abc')) v(x)", undefined],
+  ["SELECT pg_catalog.length('abc') AS n, '16/B374D848'::pg_lsn AS l", undefined],
+  ["SELECT '16/B374D848'::pg_lsn AS l FROM (SELECT) s", undefined],
+  ["SELECT '16/B374D848'::pg_lsn + 1 AS l", undefined],
+  ["SELECT $1::pg_lsn + 1 AS l", ["16/B374D848"]],
+  ["SELECT ('{16/B374D848}'::pg_lsn[])[1] AS l", undefined],
+  ["SELECT ('{16/B374D848}'::pg_lsn[])::text AS l", undefined],
+  ["SELECT 12.5::money AS m, '16/B374D848'::pg_lsn AS l", undefined],
+  ["SELECT host(inet '10.0.0.1/8') AS h, '16/B374D848'::pg_lsn AS l", undefined],
+  ["SELECT to_json('16/B374D848'::pg_lsn) AS j", undefined],
+  ["SELECT min(x), max(x) FROM (VALUES ('16/B374D848'::pg_lsn), ('17/B374D848')) v(x)", undefined],
+  ["SELECT x FROM (VALUES ('16/B374D848'::pg_lsn), ('17/B374D848')) v(x) ORDER BY 1", undefined],
+  ["SELECT '16/B374D848'::pg_lsn::text::pg_lsn AS l", undefined],
+  ["SELECT pg_lsn('16/B374D848') AS l", undefined],
+  ["SELECT '16/B374D848'::pg_lsn AS l, version() IS NOT NULL AS v", undefined],
+  ["SELECT current_database() = current_database() AS d, '16/B374D848'::pg_lsn AS l", undefined],
+  ["SELECT pg_lsn '16/B374D848' AS l, current_schema() AS s, session_user = session_user AS u", undefined],
+  ["SELECT '16/B374D848'::pg_lsn AS l, has_table_privilege('l', 'SELECT') AS p", undefined],
+  ["SELECT '16/B374D848'::pg_lsn AS l, txid_current() > 0 AS x", undefined],
+  ["SELECT '16/B374D848'::pg_lsn AS l, inet '10.0.0.1' + 1 AS i", undefined],
+  ["SELECT '10:20:10,14,15'::pg_snapshot AS s, '16/B374D848'::pg_lsn AS l", undefined],
+  ["SELECT upper('abc') AS u, '16/B374D848'::pg_lsn AS l", undefined],
+];
+
+test("on a Postgres 19 source, a statement of no table that names a pg_lsn answers its other values as before (the review of PR 1201)", async () => {
+  const differ: string[] = [];
+  for (const s of [s19, s19v]) {
+    for (const [sql, values] of BESIDE) {
+      const [got, want] = [await ask(s, sql, values), await known(sql, values)];
+      if (!util.isDeepStrictEqual(got, want)) differ.push(`${s === s19v ? "allowlist on" : "allowlist off"}: ${sql}\n    mason:      ${JSON.stringify(got)}\n    postgres: ${JSON.stringify(want)}`);
+    }
+    // a pg_lsn bound in binary (PGlite's client sends no binary parameter, so Postgres's answer is written here)
+    const bound = await ask(s, "SELECT $1::pg_lsn AS l", [Buffer.from("00000016b374d848", "hex")]);
+    if (!util.isDeepStrictEqual(bound, { fields: [["l", 3220]], rows: [["16/B374D848"]] })) differ.push(`a binary pg_lsn parameter: ${JSON.stringify(bound)}`);
   }
   assert.deepEqual(differ, []);
 });

@@ -468,20 +468,37 @@ async function madeTypeRefusal(catalog: Parameters<typeof catalogRows>[0], code:
  * decides (src/api/postgres/server.ts `answersCase`), since what the catalog answered before is kept where the synced
  * data's plan or run fails.
  * "form" (issue 1198): it holds a value of a type whose text the source writes otherwise than the catalog (`forms`, a
- * pg_lsn on Postgres 19) that may reach the answer as text (`textReaches`): planned for the synced data, which writes it
- * as the source does, and refused like any other. "form-values": every such value is read only by a boolean or a
- * numeric (`SELECT pg_lsn '0/2' - pg_lsn '0/1'`), which the catalog answers as the source would: the synced data's
- * where its run answers it, else the catalog's, as "case".
+ * pg_lsn on Postgres 19) that may reach the answer as text (`textReaches`), beside only the types a case mapping holds,
+ * and nothing of the server or the session: the synced data's where its RUN answers it, which writes the value as the
+ * source does, else the catalog's, as before; the caller decides, as for "case". One whose every such value is read
+ * only by a boolean or a numeric (`SELECT pg_lsn '0/2' - pg_lsn '0/1'`) is the same under either form, and stays the
+ * catalog's. Why: the synced data passes some constructs through untranslated (an inet, a jsonb, a numeric's type, a
+ * bpchar), so only a statement the probe proves it answers, of types it writes as the catalog does, may move (the
+ * review of PR 1201).
  */
 export async function ordersText(o: { catalog: (bytes: Uint8Array) => Promise<Uint8Array>; text: string; paramOids: readonly number[]; under: SessionState; collations: CollationResolver; bindable: boolean;
-  forms?: SourceForms }): Promise<"order" | "case" | "form" | "form-values" | null> {
+  forms?: SourceForms }): Promise<"order" | "case" | "form" | null> {
   const analysis = await analyze(o.catalog, o.text, o.paramOids, o.under);
   if ("refused" in analysis) return null;
   // the analysis as the session runs the statement: a simple Query binds no parameter, so one naming `$1` is Postgres's
   // 42P02, which the catalog answers (the analysis above is a Parse's, which would infer its type)
   if (!o.bindable && analysis.params.length > 0) return null;
+  const why = await orderOrCase(o, analysis);
+  if (why !== null) return why;
+  // a value of a type whose text the source writes otherwise (issue 1198) that may reach the answer as its text: the
+  // synced data's where the statement holds nothing else the catalog may answer otherwise and nothing of the server or
+  // the session, and the synced data's run answers it (the caller's probe, as for "case"); every other stays the
+  // catalog's, as before
   const differs = o.forms?.differs ?? CATALOG_FORMS.differs;
-  if (differs.size > 0 && [...analysis.types.values()].some((ts) => ts.some((t) => differs.has(t.type)))) return textReaches(analysis.tree, differs) ? "form" : "form-values";
+  const types = [...analysis.types.values()].flat().map((t) => t.type);
+  if (differs.size === 0 || !types.some((t) => differs.has(t)) || !textReaches(analysis.tree, differs)) return null;
+  if (!types.every((t) => FORM_ROUTED_TYPES.has(t) || differs.has(t))) return null;
+  return await ownArgumentsOnly(o.catalog, analysis.tree) ? "form" : null;
+}
+
+/** `ordersText`'s "order" or "case", or null */
+async function orderOrCase(o: { catalog: (bytes: Uint8Array) => Promise<Uint8Array>; collations: CollationResolver },
+  analysis: Exclude<Awaited<ReturnType<typeof analyze>>, { refused: unknown }>): Promise<"order" | "case" | null> {
   const oids = collationOids(analysis.tree);
   if (oids.size === 0) return null;
   let resolved: StatementCollations;
@@ -520,16 +537,24 @@ export async function ordersText(o: { catalog: (bytes: Uint8Array) => Promise<Ui
   // says which: a session keyword or sequence (`functionsCalled`), and a function it does not call immutable
   // (pg_proc.provolatile: pg_catalog.version() and format_type() are stable); such a statement stays the
   // catalog's, which answers it as this session's, as before (Mason gap fromless-numeric-text-order)
-  const called = functionsCalled(analysis.tree);
-  if (called.session || called.oids.has(0)) return null;
-  const unpure = await catalogRows(o.catalog, `SELECT 1 FROM pg_catalog.pg_proc WHERE oid IN (${[...called.oids].join(", ")}) AND provolatile <> 'i' LIMIT 1`);
-  return unpure.length === 0 ? "case" : null;
+  return await ownArgumentsOnly(o.catalog, analysis.tree) ? "case" : null;
+}
+
+/** whether every value of a statement is its own arguments', never the server's or the session's (`ordersText`) */
+async function ownArgumentsOnly(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, tree: TreeValue): Promise<boolean> {
+  const called = functionsCalled(tree);
+  if (called.session || called.oids.has(0)) return false;
+  const unpure = await catalogRows(catalog, `SELECT 1 FROM pg_catalog.pg_proc WHERE oid IN (${[...called.oids, 0].join(", ")}) AND provolatile <> 'i' LIMIT 1`);
+  return unpure.length === 0;
 }
 
 const NUMERIC = 1700, NUMERIC_ARRAY = 1231;
 /** the types a statement of no table that maps case may hold and still be the synced data's: text's, an unknown
  *  literal's, a name's, a boolean's, an integer's and a text array's */
 const CASE_ROUTED_TYPES = new Set([25, 1043, 1042, 705, 19, 16, 21, 23, 20, 1009, 1015]);
+/** the types a statement of no table may hold beside a value whose text the source writes otherwise and still be the
+ *  synced data's (issue 1198): a case mapping's, whose text the synced data writes as the catalog does */
+const FORM_ROUTED_TYPES = CASE_ROUTED_TYPES;
 
 /** a rewrite's refusal as the statement's: a gap says its id (docs/SQL-SUPPORT.md); Postgres's own refusal is its
  *  SQLSTATE, and no gap */

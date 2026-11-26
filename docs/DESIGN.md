@@ -986,13 +986,26 @@ keeps every answer main gave on an 18 source, where nothing changes. Comparing b
 have needed the same rewrite at every reader (`=`, IN, a join, DISTINCT, GROUP BY, a set operation), and the output
 would still need the source's form.
 
-A statement of no table is the catalog's, which prints its own form. So one that holds a `pg_lsn` is the synced
-data's on such a source (`ordersText`'s "form"). One whose `pg_lsn` is read only by a boolean or a numeric
-(`pg_lsn '0/2' - pg_lsn '0/1'`) is the same under either form, and stays the catalog's where the synced data cannot
-answer it. A value of every other built-in held type was compared between 18 and 19, and only `pg_lsn` differs.
+A statement of no table is the catalog's, which prints its own form. The first version sent every such statement that
+named a `pg_lsn` to the synced data. Its review found that wrong in two ways. The synced data passes some constructs
+through untranslated: beside the `pg_lsn`, an inet printed as a struct's text, a jsonb as written, and a NaN numeric
+as text. And it refuses or fails on what the catalog answers: `version()`, `pg_catalog.length`, `char 'abc'`,
+`FROM (SELECT)`, `pg_lsn + 1`, a binary parameter. Main answered all of those right for a value whose low half
+already has 8 digits. So the route now takes the "case" route's guards (`ordersText`'s "form"). The statement holds
+only a case mapping's types beside the `pg_lsn`, nothing of the server or the session, and the synced data's run must
+answer it. Anything else stays the catalog's, as before. Where the catalog answers, a `pg_lsn` whose low half is short
+still prints in 18's form, as on main. One whose `pg_lsn` is read only by a boolean or a numeric
+(`pg_lsn '0/2' - pg_lsn '0/1'`) is the same under either form, so it stays the catalog's. A value of every other
+built-in held type was compared between 18 and 19, and only `pg_lsn` differs.
 
-What it does not cover: a table synced before its source moved from 18 to 19 keeps 18's text in every row no change
-has synced since, beside 19's in the rest. Mason does not detect that.
+What it does not cover is a source upgraded in place from 18 to 19, under a project that was synced before.
+- The forms are read at the start, so a run that stays up through the upgrade still writes literals in 18's form.
+  A restart reads 19.
+- pg_upgrade keeps every row's xmin, so the poll reads no unchanged row again. The same holds for `mason sync` of a
+  `sync: off` table. A streamed table gets only the rows that change. So every row no change has touched since keeps
+  18's text, beside 19's in the rows that changed.
+- A generated table built from such rows keeps their text too.
+- Mason does not detect any of this. `mason destroy` and then `mason start` syncs every table again from the start.
 
 ### The names Mason invents (issue 1024, 2026-11-16)
 

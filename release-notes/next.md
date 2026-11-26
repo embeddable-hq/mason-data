@@ -5,8 +5,14 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **On a Postgres 19 source, a query that compared a `pg_lsn` column with a value gave wrong answers.** Postgres 19
   writes a `pg_lsn` with 8 hex digits after the slash (`0/016B3748`, where 18 wrote `0/16B3748`). So `=` and `IN`
   found no rows, and `<>` returned every row. A `pg_lsn` value written in a query, such as one in a `VALUES` list,
-  came back in 18's form. Now Mason compares and prints a `pg_lsn` as the source writes it, in either spelling. A
-  Postgres 18 source answers as before.
+  came back in 18's form. Now a `pg_lsn` value or parameter in a query is compared and printed as the source writes
+  it, whichever form you write it in. A Postgres 18 source answers as before. Some gaps remain:
+  - A `pg_lsn[]` parameter is still read as you send it.
+  - A query that reads no table still answers a short `pg_lsn` in 18's form when it holds anything beyond text,
+    integers and booleans beside it, as before.
+  - If you upgrade your database from 18 to 19 in place, restart Mason afterwards. Rows synced before the upgrade
+    keep 18's form until they change, and no `mason sync` reads an unchanged row again. To sync every table again
+    from the start, run `mason destroy` and then `mason start`.
 - **A mistake in one table's entry no longer stops Mason keeping the other tables current.** Before, if a column that a
   `columns:` entry lists was renamed on your database, Mason stopped taking the sources file while it ran. From then on,
   a column added to any other table was never synced, and a renamed column elsewhere made that table's polls fail, until
