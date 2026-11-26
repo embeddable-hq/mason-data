@@ -556,6 +556,17 @@ test("each table's sync: its state in one word, when it was last brought current
     ["syncing", "failed", "syncing", "synced", "catching-up", "catching-up", "syncing"], "copying, a failed copy, a copy made again (the old one serves), served and kept current, a catch-up owed, one ending, a copy again of one owed its catch-up");
 });
 
+test("an entry the run neither takes nor holds is no added table: never waited for as a first sync (the review of PR 1091)", async () => {
+  const runServer = await import("../src/cli/run-server.ts");
+  const entry = (name: string) => ({ name, table: `public.${name}`, columns: null, exclude: [], key: null, sync: null });
+  // the file names customers and Shouty; the run took customers alone (Shouty's entry it cannot take, issue 1074)
+  const file = { file: "/app/mason/sources/app.yml", name: "app", sync: null, tables: [entry("customers"), entry("Shouty")] };
+  const c = { ...ctx, sources: () => ({ file, problem: null, tables: [{ source: "public.customers", columns: [{ name: "id" }] }] }) } as unknown as RunContext;
+  const s = runServer.runState(c, [], null) as { tables: Array<{ table: string; added: boolean; sync?: unknown }> };
+  const row = (t: string) => s.tables.find((x) => x.table === t)!;
+  assert.deepEqual([row("public.customers").added, row("public.Shouty").added, row("public.Shouty").sync], [true, false, undefined]);
+});
+
 // BEHIND, LEFT OUT, A FAILED CATCH-UP (issues 254, 106, 100, 82): what each row says through runState, at an injected now —
 // the state in one word, the measured facts, the row's error, readiness and the line, from ONE comparison
 // (src/cli/readiness.ts behindOf) over what the sync promises (src/duck/sync.ts keptPromise), as the sync would carry it
