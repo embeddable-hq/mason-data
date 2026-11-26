@@ -10,7 +10,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   Select its primary key too, or name its columns. Such a subquery is still answered where no row can be left
   unmatched, as Postgres decides it. That is a WHERE or an inner join above that is never true for an unmatched row,
   such as `WHERE d.v = 'x' OR d.v = 'y'`, `JOIN o ON o.id = d.a_id` or `WHERE EXISTS (…)`. A subquery that gives one
-  row is answered too, joined on any condition that reads none of its columns, such as `ON true` or `ON a.id = 1`.
+  row is answered too when it is joined `ON true`. It is also answered in a LEFT or RIGHT JOIN on a condition that reads
+  none of its columns and calls no volatile function such as `random()`, for example `ON a.id = 1`. In a FULL JOIN on
+  any other condition, it is refused by name.
 - **The whole row of a subquery that names two columns alike now reads each column.** In
   `(SELECT v AS id, a_id, id FROM d) x`, `x::text` and `row_to_json(x)` read the first `id` twice. Now each column
   reads its own value, as in Postgres.

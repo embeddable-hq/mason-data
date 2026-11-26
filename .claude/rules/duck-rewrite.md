@@ -405,8 +405,11 @@ paths:
   a condition is unknown, since Mason writes it with the very presence this decides. Never a shape list: one refused
   `d.t = 'x' OR d.t = 'y'` and an inner join above (the second review of PR 1100), and the next took a nested `IS NOT
   NULL` for strict and `length(d::text) > 0` for a proof, so unmatched rows read as rows of NULLs (the third). A one-row
-  item alone on a join's nullable side is told by that join's ON, evaluated again in the reader, where the ON reads none
-  of its columns and calls nothing volatile. A row nothing tells is refused, `null-extended-row`. A whole row's column names have
+  item alone on a join's nullable side is never unmatched ON true, in any join. Where the join NULL-extends that side
+  alone (a LEFT or RIGHT JOIN, or a FULL one a condition above makes so), it is told by that join's ON, evaluated again
+  in the reader with each column named by its FROM item (`ownersNamed`), where the ON reads none of its columns and calls
+  nothing volatile; also under further outer joins the ON itself rules out. Never in a FULL JOIN: there the item's own
+  row is kept unmatched beside the other side's NULLs, which the ON read again would call absent (the fourth review). A row nothing tells is refused, `null-extended-row`. A whole row's column names have
   one reader, Postgres's (`Typed.rowColumns`: a WITH query's column list, a name held twice renamed in each place by
   `itemTwins`). An item's renamed columns are its own query's (`QueryOutputs.twins`), never its name's across the
   statement: by name, another query's item of the same name took its alias list. Why: the row was written from its

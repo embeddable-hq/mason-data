@@ -9830,3 +9830,74 @@ test("issue 1008, the third review of PR 1100: EXISTS, IN, LATERAL and a scalar 
     await refusedNullExtended(c, [`SELECT a.id, x::text FROM nx_a a LEFT JOIN (SELECT max(b.note) AS mv FROM nx_b b) x ON x.mv IS NULL ORDER BY 1`]);
   } finally { await c.end(); }
 });
+
+// THE FOURTH REVIEW OF PR 1100: a one-row item's ON told it in a FULL JOIN, where its own row is kept unmatched; a
+// LIMIT's explicit cast, a bare name of the ON read again beside another FROM item of that name, and conditions inside
+// subqueries (an IN's output, an EXISTS's inner join, a grouped EXISTS, a nested subquery's column) were not read. One
+// test a finding
+test("issue 1008, the fourth review of PR 1100: a one-row item in a FULL JOIN is never told by its ON, which reads NULLs on its own row", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      [`SELECT a.id, x::text FROM nx_a a FULL JOIN (SELECT max(b.note) AS mv FROM nx_b b WHERE b.id < 0) x ON true ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, x::text FROM nx_a a LEFT JOIN (SELECT max(b.note) AS mv FROM nx_b b WHERE b.id < 0) x ON false ORDER BY 1, 2`, "ordered"],
+    ]), []);
+    await refusedNullExtended(c, [
+      `SELECT a.id, x::text FROM nx_a a FULL JOIN (SELECT max(b.note) AS mv FROM nx_b b WHERE b.id < 0) x ON false ORDER BY 1, 2`,
+      `SELECT a.id, x::text FROM (SELECT max(b.note) AS mv FROM nx_b b WHERE b.id < 0) x FULL JOIN nx_a a ON 1 = 2 ORDER BY 1, 2`,
+      `SELECT e.id, x::text FROM (SELECT id FROM nx_a WHERE false) e FULL JOIN (SELECT max(b.note) AS mv FROM nx_b b WHERE b.id < 0) x ON NULL ORDER BY 1, 2`,
+      `SELECT x::text, y::text FROM (SELECT max(b.note) AS mv FROM nx_b b WHERE b.id < 0) x FULL JOIN (SELECT 1 AS k) y ON false`,
+    ]);
+  } finally { await c.end(); }
+});
+
+test("issue 1008, the fourth review of PR 1100: a one-row item's LIMIT under an explicit cast keeps its one row", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      [`SELECT a.id, x::text ${NX_ONE.replace("b.id < 0)", "b.id < 0 LIMIT 1::bigint)")} ON true ORDER BY 1`, "ordered"],
+      [`SELECT a.id, x::text ${NX_ONE.replace("b.id < 0)", "b.id < 0 LIMIT 2::int)")} ON a.id = 1 ORDER BY 1`, "ordered"],
+    ]), []);
+  } finally { await c.end(); }
+});
+
+test("issue 1008, the fourth review of PR 1100: a one-row item's ON read again names each column by its FROM item, so a later item of the same name is no ambiguity", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      [`SELECT a.id, x::text ${NX_ONE} ON id IS NOT NULL CROSS JOIN nx_c c ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, x::text FROM nx_c c CROSS JOIN (nx_a a LEFT JOIN (SELECT max(b.note) AS mv FROM nx_b b WHERE b.id < 0) x ON id = 1) ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, x::text ${NX_ONE} ON label = 'one' CROSS JOIN nx_a a2 ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, x::text ${NX_ONE} ON EXISTS (SELECT 1 FROM nx_b WHERE a_id = id) CROSS JOIN nx_c c ORDER BY 1, 2`, "ordered"],
+      // and under a second outer join its ON rules out
+      [`SELECT a.id, x::text FROM (nx_a a LEFT JOIN (SELECT max(b.note) AS mv FROM nx_b b WHERE b.id < 0) x ON a.id = 1) RIGHT JOIN nx_c c ON c.id = a.id ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, x::text FROM nx_c c LEFT JOIN (nx_a a LEFT JOIN (SELECT max(b.note) AS mv FROM nx_b b WHERE b.id < 0) x ON a.id = 1) ON c.id = a.id ORDER BY 1, 2`, "ordered"],
+    ]), []);
+  } finally { await c.end(); }
+});
+
+test("issue 1008, the fourth review of PR 1100: an IN's output, an EXISTS's inner join, a grouped EXISTS and a nested subquery's column are read", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      [`SELECT a.id, d::text ${NX_LEFT} WHERE a.id IN (SELECT d.a_id) ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, d::text ${NX_LEFT} WHERE a.id NOT IN (SELECT d.a_id) ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, d::text ${NX_LEFT} WHERE EXISTS (SELECT 1 FROM nx_c f JOIN nx_b b ON b.note = d.note) ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, d::text ${NX_LEFT} WHERE EXISTS (SELECT 1 FROM nx_c f WHERE d.note = 'b1' GROUP BY f.id) ORDER BY 1, 2`, "ordered"],
+      [`SELECT a.id, d::text ${NX_LEFT} WHERE (SELECT x FROM (SELECT d.note AS x) s) = 'b1' ORDER BY 1, 2`, "ordered"],
+    ]), []);
+    // what is never true for an unmatched row only by a function's own rules, or by a volatile call's value, is unknown:
+    // refused, never answered from a guess
+    await refusedNullExtended(c, [
+      `SELECT a.id, d::text ${NX_LEFT} WHERE array_position(ARRAY['b1', NULL], d.note) IS NULL ORDER BY 1, 2`,
+      `SELECT a.id, d::text ${NX_LEFT} WHERE d.note = 'b1' OR random() < 0 ORDER BY 1, 2`,
+      `SELECT a.id, x::text ${NX_ONE} ON random() < 2 ORDER BY 1`,
+      // (a grouped EXISTS of an aggregate and no GROUP BY gives a row over none)
+      `SELECT a.id, d::text ${NX_LEFT} WHERE EXISTS (SELECT count(*) FROM nx_c f WHERE d.note = 'b1') ORDER BY 1, 2`,
+      // (a set operation's output is any arm's row, never what its first arm selects)
+      `SELECT a.id, d::text ${NX_LEFT} CROSS JOIN LATERAL (SELECT d.note AS lt UNION ALL SELECT 'q') l WHERE l.lt = 'q' ORDER BY 1, 2`,
+      `SELECT a.id, d::text ${NX_LEFT} WHERE a.id = ANY (SELECT d.a_id UNION SELECT 3) ORDER BY 1, 2`,
+      `SELECT a.id, d::text ${NX_LEFT} WHERE (SELECT d.note UNION SELECT 'q' LIMIT 1) = 'q' ORDER BY 1, 2`,
+    ]);
+  } finally { await c.end(); }
+});

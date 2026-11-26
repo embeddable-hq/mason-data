@@ -1236,7 +1236,7 @@ class Rewriter {
     if (on?.by === "on") {
       const quals = this.joinCondition(select, on.at);
       if (quals === null) return refuse("Mason cannot find its join's condition");
-      return caseWhen([[this.clone(quals), boolConst(true)]], null);
+      return caseWhen([[this.ownersNamed(this.clone(quals)), boolConst(true)]], null);
     }
     const inKey = (relid: number | undefined, attno: number | undefined): boolean => relid !== undefined && attno !== undefined && this.rowKeys.get(relid)?.has(attno) === true;
     const table = this.rowTypes.get(t.type);
@@ -1276,6 +1276,43 @@ class Rewriter {
     const at = bodyOf(n).location;
     return this.extended === null || typeof at !== "number" ? undefined : this.extended.get(at - this.base);
   }
+  /**
+   * A JOIN CONDITION READ AGAIN OUTSIDE ITS JOIN (`rowPresence`), each column of its query named by the FROM item Postgres
+   * bound it to (`Typed.column`): in the SELECT list a bare name may meet another item's column of the same name, which
+   * the ON never saw (`… ON id IS NOT NULL CROSS JOIN f`: DuckDB's 42804). A column of the query around a subquery of the
+   * condition is named so too, unless that subquery's FROM holds the same name. A name no item names (a merged column of
+   * a join) is left as it is written. The copy is changed in place.
+   */
+  private ownersNamed(n: AstNode): AstNode {
+    const visit = (v: unknown, depth: number, shadow: ReadonlySet<string>): void => {
+      if (Array.isArray(v)) { for (const x of v) visit(x, depth, shadow); return; }
+      if (!isNode(v)) return;
+      const k = kindOf(v), b = bodyOf(v);
+      if (k === "SelectStmt") {
+        const names = new Set(shadow);
+        const from = (x: unknown): void => {
+          if (!isNode(x)) return;
+          const xb = bodyOf(x), name = xb.alias?.aliasname ?? (kindOf(x) === "RangeVar" ? xb.relname : undefined);
+          if (typeof name === "string") names.add(name.toLowerCase());
+          if (kindOf(x) === "JoinExpr") { from(xb.larg); from(xb.rarg); }
+        };
+        for (const x of (b.fromClause ?? []) as unknown[]) from(x);
+        for (const x of Object.values(b)) visit(x, depth + 1, names);
+        return;
+      }
+      if (k === "ColumnRef") {
+        const fields = (b.fields ?? []) as AstNode[];
+        const t = this.typed(v);
+        const owner = t?.node === "VAR" && (t.levelsUp ?? 0) === depth ? t.column?.owner : undefined;
+        if (fields.length === 1 && kindOf(fields[0]!) === "String" && typeof owner === "string" && !shadow.has(owner.toLowerCase())) b.fields = [S(owner), fields[0]];
+        return;
+      }
+      for (const x of Object.values(b)) visit(x, depth, shadow);
+    };
+    visit(n, 0, new Set());
+    return n;
+  }
+
   /** the condition of the JOIN of this SELECT's FROM whose condition holds an expression at `at` (the analysis's offset:
    *  a cast's constant is at its literal, the raw cast at its `::`), or null. Two joins' conditions share no offset */
   private joinCondition(select: Body, at: number): AstNode | null {

@@ -932,9 +932,9 @@ function alwaysOneRow(q: TreeNode): boolean {
   const count = (c: TreeValue | undefined): number | null => {
     if (!isNode(c ?? null)) return null;
     let k = c as TreeNode;
-    // (`LIMIT 1` is an implicit cast of an integer to bigint)
-    if (k._node === "FUNCEXPR" && num(k.funcformat ?? null) === 2 && treeList(k.args).length === 1 && isNode(treeList(k.args)[0] ?? null)) k = treeList(k.args)[0] as TreeNode;
-    if (k._node !== "CONST" || ![20, 23].includes(num(k.consttype ?? null) ?? 0)) return Number.NaN;
+    // (`LIMIT 1` is an implicit cast of an integer to bigint, `LIMIT 1::bigint` an explicit one)
+    while (k._node === "FUNCEXPR" && [1, 2].includes(num(k.funcformat ?? null) ?? -1) && [20, 21, 23].includes(num(k.funcresulttype ?? null) ?? 0) && treeList(k.args).length === 1 && isNode(treeList(k.args)[0] ?? null)) k = treeList(k.args)[0] as TreeNode;
+    if (k._node !== "CONST" || ![20, 21, 23].includes(num(k.consttype ?? null) ?? 0)) return Number.NaN;
     if (k.constisnull === "true") return Number.POSITIVE_INFINITY;
     const bytes = datumBytes(k.constvalue);
     return bytes === null || (bytes.length !== 8 && bytes.length !== 4) || bytes[bytes.length - 1]! >= 0x80 ? Number.NaN : bytes.reduce((n, b, i) => n + b * 2 ** (8 * i), 0);
@@ -950,10 +950,25 @@ function alwaysOneRow(q: TreeNode): boolean {
   return isNode(jt) && treeList(jt.fromlist).length === 0 && !isNode(jt.quals ?? null);
 }
 
-/** whether a query's rows are its FROM's rows its WHERE keeps (no aggregate, grouping or set operation makes one) */
+/** whether a query gives a row only where its FROM gave a row its WHERE kept: no set operation, and no aggregate or HAVING
+ *  without a GROUP BY (which gives one row over none); a GROUP BY of no grouping set gives none over none */
 function rowsOfItsWhere(q: TreeNode): boolean {
-  return num(q.commandType ?? null) === 1 && !isNode(q.setOperations ?? null) && q.hasAggs !== "true" && !isNode(q.havingQual ?? null)
-    && treeList(q.groupClause).length === 0 && treeList(q.groupingSets).length === 0;
+  if (num(q.commandType ?? null) !== 1 || isNode(q.setOperations ?? null) || treeList(q.groupingSets).length > 0) return false;
+  return treeList(q.groupClause).length > 0 || (q.hasAggs !== "true" && !isNode(q.havingQual ?? null));
+}
+
+/** the conditions a query's every row passed: its WHERE, and the conditions of the inner joins its FROM holds outside any
+ *  outer join's nullable side */
+function conditionsOfItsRows(q: TreeNode): TreeValue[] {
+  const of = (n: TreeValue | undefined): TreeValue[] => {
+    if (n === undefined || !isNode(n)) return [];
+    if (n._node === "FROMEXPR") return [n.quals ?? null, ...treeList(n.fromlist).flatMap(of)];
+    if (n._node !== "JOINEXPR") return [];
+    const jt = num(n.jointype ?? null);
+    if (jt === 0) return [n.quals ?? null, ...of(n.larg), ...of(n.rarg)];
+    return jt === JOIN_LEFT ? of(n.larg) : jt === JOIN_RIGHT ? of(n.rarg) : [];
+  };
+  return of(q.jointree).filter((c) => isNode(c));
 }
 
 /** the functions an analysed tree calls, by OID (a function's, an operator's) */
@@ -971,7 +986,8 @@ function callsIn(v: TreeValue | undefined, out: Set<number> = new Set()): Set<nu
  * condition's offset).
  */
 function outerJoinsOf(q: TreeNode, queries: readonly TreeNode[], facts: OuterJoinFacts): {
-  nulls: Map<number, Set<number>>; relids: Map<number, Set<number>>; onRow: Map<number, Array<{ item: number; at: number }>>;
+  nulls: Map<number, Set<number>>; relids: Map<number, Set<number>>; onRow: Map<number, Array<{ item: number; at: number; quals: TreeValue }>>;
+  rejects: (quals: readonly TreeValue[], side: ReadonlySet<number>) => boolean;
 } {
   const rtable = treeList(q.rtable).filter(isNode);
   const relids = new Map<number, Set<number>>();
@@ -987,33 +1003,43 @@ function outerJoinsOf(q: TreeNode, queries: readonly TreeNode[], facts: OuterJoi
   };
   items(q.jointree);
   const strict = (id: TreeValue | undefined): boolean => facts.strict.has(num(id ?? null) ?? 0);
-  // the values an expression may take where every column of `nulled` (items of this query) is NULL. `depth` is how many
-  // queries in from this one the expression sits (a VAR of this query has `varlevelsup` equal to it); `test` is a CASE's
-  // operand, which its WHEN compares
-  const evaluate = (e: TreeValue | undefined, nulled: ReadonlySet<number>, depth: number, test: Possible = UNKNOWN): Possible => {
-    const at = (x: TreeValue | undefined, d = depth): Possible => evaluate(x, nulled, d, test);
+  // the values an expression may take where every column of `nulled` (items of this query) is NULL. `levels` are the range
+  // tables of the queries from this one (the first) in to the one the expression sits in (a VAR of this query has
+  // `varlevelsup` one less than their count); `test` is a CASE's operand, which its WHEN compares; `params` a subquery's
+  // outputs, by number, as an IN's test reads them
+  type Context = { test: Possible; params: ReadonlyMap<number, Possible> };
+  const PLAIN: Context = { test: UNKNOWN, params: new Map() };
+  const evaluate = (e: TreeValue | undefined, nulled: ReadonlySet<number>, levels: readonly TreeNode[][], context: Context = PLAIN): Possible => {
+    const at = (x: TreeValue | undefined): Possible => evaluate(x, nulled, levels, context);
+    const inner = (x: TreeValue | undefined, sub: TreeNode, params: ReadonlyMap<number, Possible> = new Map()): Possible =>
+      evaluate(x, nulled, [...levels, treeList(sub.rtable).filter(isNode)], { test: UNKNOWN, params });
+    // what a query selects as its output `resno`, a level of `upTo` in: unknown for a set operation, whose output is any
+    // arm's row (`SELECT d.t UNION SELECT 'q'`), and for an output it does not have
+    const selected = (sub: TreeNode, resno: number, upTo: readonly TreeNode[][]): Possible => {
+      if (isNode(sub.setOperations ?? null)) return UNKNOWN;
+      const entry = treeList(sub.targetList).find((t) => isNode(t) && t.resjunk !== "true" && num(t.resno ?? null) === resno);
+      return isNode(entry ?? null) ? evaluate((entry as TreeNode).expr, nulled, [...upTo, treeList(sub.rtable).filter(isNode)]) : UNKNOWN;
+    };
     if (Array.isArray(e)) return e.reduce<Possible>((p, x) => lift(p, at(x), and3), IS_T);
     if (e === undefined || !isNode(e)) return UNKNOWN;
     const args = treeList(e.args);
     switch (e._node) {
       case "VAR": {
-        if ((num(e.varlevelsup ?? null) ?? 0) !== depth) return UNKNOWN;
+        const level = levels.length - 1 - (num(e.varlevelsup ?? null) ?? 0);
         const varno = num(e.varno ?? null) ?? 0, attno = num(e.varattno ?? null) ?? 0;
-        const rte = rtable[varno - 1];
+        const rte = levels[level]?.[varno - 1];
         // (a whole row is Mason's writing of its columns, told by the very presence this decides: unknown)
-        if (rte === undefined || attno === 0) return UNKNOWN;
-        const kind = num(rte.rtekind ?? null);
+        if (level < 0 || rte === undefined || attno === 0) return UNKNOWN;
+        const kind = num(rte.rtekind ?? null), upTo = levels.slice(0, level + 1);
         // a join's column is the column it aliases, a FULL JOIN's merged one a COALESCE of both
-        if (kind === RTE_JOIN) return evaluate(treeList(rte.joinaliasvars)[attno - 1], nulled, 0);
+        if (kind === RTE_JOIN) return evaluate(treeList(rte.joinaliasvars)[attno - 1], nulled, upTo);
         if (kind === RTE_GROUP) return UNKNOWN;
-        if (nulled.has(varno)) return IS_N;
+        if (level === 0 && nulled.has(varno)) return IS_N;
         // a subquery's column, a LATERAL one's included, is NULL where what it selects is
-        if (kind === RTE_SUBQUERY && isNode(rte.subquery ?? null)) {
-          const entry = treeList((rte.subquery as TreeNode).targetList).find((t) => isNode(t) && num(t.resno ?? null) === attno);
-          return isNode(entry ?? null) && evaluate((entry as TreeNode).expr, nulled, 1) === IS_N ? IS_N : UNKNOWN;
-        }
+        if (kind === RTE_SUBQUERY && isNode(rte.subquery ?? null)) return selected(rte.subquery as TreeNode, attno, upTo) === IS_N ? IS_N : UNKNOWN;
         return UNKNOWN;
       }
+      case "PARAM": return num(e.paramkind ?? null) === 2 ? context.params.get(num(e.paramid ?? null) ?? 0) ?? UNKNOWN : UNKNOWN;
       case "CONST": {
         if (e.constisnull === "true") return IS_N;
         if (num(e.consttype ?? null) !== BOOL) return NOT_NULL;
@@ -1059,13 +1085,13 @@ function outerJoinsOf(q: TreeNode, queries: readonly TreeNode[], facts: OuterJoi
         if (l === IS_N && r === IS_N) return IS_F;
         return (l === IS_N && (r & IS_N) === 0) || (r === IS_N && (l & IS_N) === 0) ? IS_T : IS_T | IS_F;
       }
-      case "CASETESTEXPR": return test;
+      case "CASETESTEXPR": return context.test;
       case "CASEEXPR": {
         const operand = isNode(e.arg ?? null) ? at(e.arg) : UNKNOWN;
         let out = 0;
         for (const w of args) {
           if (!isNode(w)) return UNKNOWN;
-          const when = evaluate(w.expr, nulled, depth, operand);
+          const when = evaluate(w.expr, nulled, levels, { ...context, test: operand });
           if ((when & IS_T) !== 0) out |= at(w.result);
           if (when === IS_T) return out;
         }
@@ -1075,17 +1101,20 @@ function outerJoinsOf(q: TreeNode, queries: readonly TreeNode[], facts: OuterJoi
         const sub = isNode(e.subselect ?? null) ? e.subselect as TreeNode : null;
         if (sub === null) return UNKNOWN;
         const kind = num(e.subLinkType ?? null);
-        // EXISTS: no row where its WHERE may only be false or NULL
-        if (kind === 0) {
-          const where = isNode(sub.jointree ?? null) ? (sub.jointree as TreeNode).quals : undefined;
-          return rowsOfItsWhere(sub) && isNode(where ?? null) && (evaluate(where, nulled, depth + 1) & IS_T) === 0 ? IS_F : IS_T | IS_F;
+        // EXISTS: no row where a condition every row of it passes (its WHERE, an inner join's) may only be false or NULL
+        if (kind === 0) return rowsOfItsWhere(sub) && conditionsOfItsRows(sub).some((c) => (inner(c, sub) & IS_T) === 0) ? IS_F : IS_T | IS_F;
+        // IN / = ANY (SELECT …): false over no row, else NULL or false where its test may only be, each output what it
+        // selects (`a.id IN (SELECT d.a_id)`)
+        if (kind === 2) {
+          const outputs = new Map<number, Possible>();
+          for (const t of treeList(sub.targetList)) if (isNode(t) && t.resjunk !== "true") { const r = num(t.resno ?? null) ?? 0; outputs.set(r, selected(sub, r, levels)); }
+          // (over a subquery of one row it is never false: NULL, so `NOT IN` of it is NULL too)
+          return (evaluate(e.testexpr, nulled, levels, { test: UNKNOWN, params: outputs }) & IS_T) !== 0 ? UNKNOWN : alwaysOneRow(sub) ? IS_N : IS_F | IS_N;
         }
-        // IN / = ANY (SELECT …): false over no row, else NULL or false where its test may only be
-        if (kind === 2) return (at(e.testexpr) & IS_T) === 0 ? IS_F | IS_N : UNKNOWN;
         // a scalar subquery: NULL over no row, else what it selects
         if (kind === 4) {
           const entry = treeList(sub.targetList).find((t) => isNode(t) && t.resjunk !== "true");
-          return isNode(entry ?? null) && evaluate((entry as TreeNode).expr, nulled, depth + 1) === IS_N ? IS_N : UNKNOWN;
+          return isNode(entry ?? null) && selected(sub, num((entry as TreeNode).resno ?? null) ?? 0, levels) === IS_N ? IS_N : UNKNOWN;
         }
         return UNKNOWN;
       }
@@ -1093,7 +1122,7 @@ function outerJoinsOf(q: TreeNode, queries: readonly TreeNode[], facts: OuterJoi
     }
   };
   // a condition that is never true where every column of `side` is NULL
-  const rejects = (quals: readonly TreeValue[], side: ReadonlySet<number>): boolean => quals.some((c) => isNode(c) && (evaluate(c, side, 0) & IS_T) === 0);
+  const rejects = (quals: readonly TreeValue[], side: ReadonlySet<number>): boolean => quals.some((c) => isNode(c) && (evaluate(c, side, [rtable]) & IS_T) === 0);
   // an item that always gives one row: a subquery's, or a WITH query's that is not recursive
   const oneRowItem = (n: TreeValue | undefined): number | null => {
     if (n === undefined || !isNode(n) || n._node !== "RANGETBLREF") return null;
@@ -1115,7 +1144,7 @@ function outerJoinsOf(q: TreeNode, queries: readonly TreeNode[], facts: OuterJoi
     return Object.entries(e).some(([k, x]) => k !== "_node" && reads(x, item, depth));
   };
   const nulls = new Map<number, Set<number>>();
-  const onRow = new Map<number, Array<{ item: number; at: number }>>();
+  const onRow = new Map<number, Array<{ item: number; at: number; quals: TreeValue }>>();
   // reduce_outer_joins_pass2 (src/backend/optimizer/prep/prepjointree.c): the conditions from above, passed down
   const pass = (n: TreeValue | undefined, upper: readonly TreeValue[]): void => {
     if (n === undefined || !isNode(n)) return;
@@ -1134,22 +1163,26 @@ function outerJoinsOf(q: TreeNode, queries: readonly TreeNode[], facts: OuterJoi
     else if (!nullsLeft && !nullsRight) { const local = [...upper, n.quals ?? null]; pass(n.larg, local); pass(n.rarg, local); }
     else { pass(nullsLeft ? n.rarg : n.larg, upper); pass(nullsLeft ? n.larg : n.rarg, [n.quals ?? null]); }
     // a one-row item alone on a side: never unmatched ON true (or no condition at all, a NATURAL JOIN of no common
-    // column); else told by its join's condition, evaluated again, where that reads none of its columns
+    // column), in any join. Else, where the join NULL-extends that side alone (a LEFT or RIGHT JOIN, or a FULL one made so),
+    // it is unmatched exactly where the condition is not true: told by it, evaluated again, where it reads none of the
+    // item's columns and calls nothing volatile. Never in a FULL JOIN: there the item's own row is kept unmatched, beside
+    // the other side's NULLs, and the condition read again over those NULLs would call it absent
     const i = num(n.rtindex ?? null);
     const quals = n.quals ?? null;
-    const always = !isNode(quals) || (quals._node === "CONST" && evaluate(quals, new Set(), 0) === IS_T);
+    const always = !isNode(quals) || (quals._node === "CONST" && evaluate(quals, new Set(), [rtable]) === IS_T);
+    const alone = nullsLeft !== nullsRight;
     for (const [nullable, side] of [[nullsLeft, n.larg], [nullsRight, n.rarg]] as const) {
       const item = nullable ? oneRowItem(side) : null;
       if (item === null || i === null) continue;
       if (always) { if (side === n.larg) nullsLeft = false; else nullsRight = false; continue; }
       const at = placedAt(quals);
       const volatile = [...callsIn(quals)].some((f) => facts.volatile.has(f));
-      if (at !== null && at >= 0 && !volatile && !reads(quals, item)) onRow.set(i, [...(onRow.get(i) ?? []), { item, at }]);
+      if (alone && at !== null && at >= 0 && !volatile && !reads(quals, item)) onRow.set(i, [...(onRow.get(i) ?? []), { item, at, quals }]);
     }
     if (i !== null) nulls.set(i, union([nullsLeft ? left : new Set(), nullsRight ? right : new Set()]));
   };
   pass(q.jointree, []);
-  return { nulls, relids, onRow };
+  return { nulls, relids, onRow, rejects };
 }
 
 /** HOW A VAR AN OUTER JOIN MAY LEAVE UNMATCHED WHERE IT IS READ IS TOLD (`extendedReads`): `column`, by a column of it no
@@ -1186,7 +1219,11 @@ function visitNulledVars(tree: TreeValue, facts: OuterJoinFacts, seen: (v: TreeN
       if (read === null || own === null || level === undefined) { seen(v, { by: "column" }); }
       else {
         const by = rels.filter((j) => { const n = level.nulls.get(j); return n === undefined || overlaps(n, own); });
-        const on = by.length === 1 && varno !== null ? level.onRow.get(by[0]!)?.find((o) => o.item === varno) : undefined;
+        // a one-row item's join condition tells it where every other join that may NULL-extend it makes that condition
+        // never true as it does (`(a LEFT JOIN x ON a.id = 1) RIGHT JOIN f …`): the condition read again is then not true
+        // wherever the item is NULL
+        const on = varno === null ? undefined : by.map((j) => level.onRow.get(j)?.find((o) => o.item === varno)).find((o) => o !== undefined
+          && by.every((j) => level.onRow.get(j)?.includes(o) === true || level.rejects([o.quals], level.nulls.get(j) ?? new Set())));
         seen(v, by.length === 0 ? null : on !== undefined ? { by: "on", at: on.at } : { by: "column" });
       }
     }
