@@ -6,7 +6,7 @@
  * statement that never ends costs one instance, not the process.
  *
  * Messages in: `{ id, op: "init", statements, optional? }` (start PGlite and run the DDL; the reply names the refused
- * statement, or the optional ones refused),
+ * statement, with its place in `statements` as `at` and the catalog's words as `reason`, or the optional ones refused),
  * `{ id, op: "raw", bytes, at? }` (frontend protocol bytes in, backend bytes out; `at`: the instant the FIRST message
  * runs at, in microseconds since the epoch, `pinnedClock`), `{ id, op: "query", sql }` (rows as
  * objects, for the server's own lookups and the tests), `{ id, op: "close" }`. Every reply carries the id:
@@ -27,6 +27,17 @@ const port = parentPort;
 if (port === null) throw new Error("catalog-worker.ts runs on a worker thread only");
 
 const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+/** a statement of the start's DDL the catalog refused: its place in `statements`, and the catalog's own words */
+class DdlRefused extends Error {
+  readonly at: number;
+  readonly reason: string;
+  constructor(message: string, at: number, reason: string, cause: unknown) {
+    super(message, { cause });
+    this.at = at;
+    this.reason = reason;
+  }
+}
 let db: PGlite | null = null;
 
 /**
@@ -82,13 +93,14 @@ port.on("message", (m: Request) => {
           // citext bundled: a copied citext column is declared as itself (catalog.ts `catalogDdl`)
           const instance = new PGlite({ extensions: { citext } });
           await instance.waitReady;
-          for (const statement of m.statements) {
+          for (const [at, statement] of m.statements.entries()) {
             try {
               await instance.exec(statement);
             } catch (e) {
               // the half-made instance is discarded (the start failed, said below with the statement); a close that fails is said too
-              await instance.close().catch((ce: unknown) => console.error(`catalog worker: PGlite did not close cleanly after a refused DDL: ${errorMessage(ce)}`));
-              throw new Error(`the catalog DDL was refused (${errorMessage(e)}) at:\n${statement}`, { cause: e });
+              await instance.close().catch((ce: unknown) => console.error(`catalog worker: the catalog did not close cleanly after a refused DDL: ${errorMessage(ce)}`));
+              // which statement, so the caller can leave out the table it belongs to and start again (catalog.ts `#ensureStarted`)
+              throw new DdlRefused(`the catalog DDL was refused (${errorMessage(e)}) at:\n${statement}`, at, errorMessage(e), e);
             }
           }
           // a statement the catalog may do without (a source's column default or view, catalog.ts `catalogDefaults`,
@@ -132,7 +144,7 @@ port.on("message", (m: Request) => {
         }
       }
     } catch (e) {
-      port.postMessage({ id: m.id, ok: false, message: errorMessage(e) });
+      port.postMessage({ id: m.id, ok: false, message: errorMessage(e), ...(e instanceof DdlRefused ? { at: e.at, reason: e.reason } : {}) });
     }
   })();
 });

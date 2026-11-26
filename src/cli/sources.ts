@@ -615,14 +615,19 @@ function clashProblems(t: SourceTable, e: TableEntry, at: string): string[] {
  * TABLES WHOSE NAMES DIFFER ONLY IN CASE (issue 1019): `"Orders"` and `orders` are two tables in Postgres and one in the
  * synced data, which served one under both names. Each entry after the first of such a group, said at its key.
  */
-function tableClashProblems(src: Pick<SourceFile, "tables">): string[] {
-  return caseClashes(src.tables.map((e) => e.table)).flatMap((group) => {
-    const entries = group.map((name) => src.tables.find((e) => e.table === name)!);
-    const first = entries[0]!;
-    return entries.slice(1).map((e) => `tables.${e.name}: ${e.table} and ${first.table} (tables.${first.name}) have names that differ only in case. ` +
-      "The synced data cannot hold both. Remove one of the two entries");
-  });
+function tableClashProblems(src: Pick<SourceFile, "tables">): Array<{ entry: TableEntry; problem: string }> {
+  return clashGroups(src).flatMap((entries) => entries.slice(1).map((e) => ({ entry: e, problem: clashText(e, entries[0]!) })));
 }
+
+/** The entries of `src` whose tables are one in the synced data (`caseClashes`: a table's name or its schema's differ only
+ *  in case), a group each, in the file's order. */
+function clashGroups(src: Pick<SourceFile, "tables">): TableEntry[][] {
+  return caseClashes(src.tables.map((e) => e.table)).map((group) => group.map((name) => src.tables.find((e) => e.table === name)!));
+}
+
+/** What is said at `e`'s key of its clash with `other`'s entry (`clashGroups`). */
+const clashText = (e: TableEntry, other: TableEntry): string => `tables.${e.name}: ${e.table} and ${other.table} (tables.${other.name}) have names that differ only in case. ` +
+  "The synced data cannot hold both. Remove one of the two entries";
 
 /**
  * Why a table cannot be copied as its entry says, each at its key, against the database's catalog; none when it can.
@@ -771,44 +776,136 @@ function keyProblems(t: SourceTable, key: readonly string[], at: string): string
  * THE TABLES THE RUN COPIES (`AddedTable`, src/duck/sync.ts): each entry against the database's catalog, narrowed to the
  * columns it copies (`copiedColumns`) and its foreign keys out of them. A `key:` is the key the table is copied by, and
  * `primaryKey` keeps the source's own (none): the catalog declares only what the source does. Every entry's problems on
- * one report (`sourceFailure`). Its `references:` are checked and carried, each to a table the file syncs
- * (src/duck/reference-keys.ts numbers their keys; a reference to a table of `skipTo` is neither checked nor carried:
- * see `entryProblems`).
+ * one report (`sourceFailure`): what a start, `mason tables`, `mason add` and `serve` refuse. Its `references:` are
+ * checked and carried, each to a table the file syncs (src/duck/reference-keys.ts numbers their keys; a reference to a
+ * table of `skipTo` is neither checked nor carried: see `entryProblems`).
  */
 export function addedTables(src: SourceFile, tables: readonly SourceTable[], database: string, root: string, skipTo: readonly string[] = []): AddedTable[] | Failure {
-  const problems: string[] = tableClashProblems(src);
-  const out: AddedTable[] = [];
-  for (const e of src.tables) {
-    const t = tables.find((x) => x.source === e.table);
-    const sync = effectiveSync(src, e).sync;
-    const p = entryProblems(t, e, tables, database, sync, src.tables, skipTo);
-    if (p.length || t === undefined) { problems.push(...p); continue; }
-    const keep = new Set(copiedColumns(t, e));
-    const at = `${shownPath(root, src.file)}: tables.${e.name}`;
-    // its references to tables the file syncs, by their `schema.table` (src/duck/reference-keys.ts)
-    const references = (e.references ?? []).filter((r) => !skipTo.includes(r.table)).map((r) => ({ columns: [...r.columns], table: r.table, targetColumns: [...r.targetColumns] }));
-    out.push({ ...t, columns: t.columns.filter((c) => keep.has(c.name)), foreignKeys: t.foreignKeys.filter((f) => keep.has(f.column)),
-      ...(e.key !== null ? { key: e.key, primaryKey: t.key } : {}), sync, entryAt: at, ...(references.length > 0 ? { fileReferences: references } : {}),
-      // its entry's words, for the line a hold for its columns says (src/duck/column-identity.ts)
-      entry: { at, name: e.name, columns: e.columns, exclude: e.exclude } });
-  }
-  return problems.length ? sourceFailure(src.file, root, problems, [["mason tables", "the database's tables and their columns"]]) : out;
+  const e = entryTables(src, tables, database, root, { skipTo });
+  return e.problems.length ? sourceFailure(src.file, root, e.problems, [["mason tables", "the database's tables and their columns"]]) : e.tables;
 }
 
-/** What the run copies: the sources file as it last read it, its tables, and what is wrong with the file now (null: nothing). */
-export interface RunSources { file: SourceFile; tables: AddedTable[]; problem: string | null }
+/** An entry decided on its own (`entryTables`): the table the run syncs for it (null: refused), its problems, and the
+ *  tables its `references:` are not held to, since the run does not take them. */
+export interface OwnEntry { table: AddedTable | null; problems: string[]; passedOver: string[] }
 
 /**
- * THE SOURCES FILE READ AGAIN WHILE THE RUN IS UP (mason add, mason remove): its tables now — or, when the file cannot be
- * taken as it is, the tables read before, kept (a typo never drops a copy), with what is wrong; `said` is the log line,
- * once per new problem. A `url:` that resolves to another database than the one the run copies (a .env edited) is such a
- * problem: the run's catalog is the old database's, so it is said, and mason stop && mason start reads the new one. So
- * is a file gone silent on sync: while `slot` is recorded: taken, it would retire the slot.
+ * EACH ENTRY AGAINST THE CATALOG, ON ITS OWN (issue 1074: a column renamed under a `columns:` entry refused the whole
+ * file at the run's re-read, and from then on no table took a column change until a restart). `tables`: the entries
+ * that pass, as the run syncs them. `problems`: every entry's, in the order a start says them, each held to the whole
+ * file (`skipTo` aside): a start refuses the file on them (`addedTables`). `own`: each entry decided on its own, a clash
+ * with another entry aside, which the run's re-read holds that table alone by (`rereadSources`).
+ *
+ * A `references:` problem is said at the entry that names the reference, so it is that entry's. But an entry is never
+ * refused, in `own`, for a reference into an entry the run does not take: one with a problem of its own besides its
+ * references, or one of `notTaken` (a clash the re-read decided). That reference is neither checked nor carried, as
+ * `mason add` and the start's check pass over a reference to a table that failed (src/cli/source-check.ts), so one
+ * entry's problem never holds the tables that reference it. It is checked and carried again once that entry is taken.
+ */
+export function entryTables(src: SourceFile, tables: readonly SourceTable[], database: string, root: string,
+  o: { skipTo?: readonly string[]; notTaken?: readonly TableEntry[] } = {}):
+  { tables: AddedTable[]; problems: string[]; own: Map<TableEntry, OwnEntry>; clashes: TableEntry[][] } {
+  const skipTo = o.skipTo ?? [];
+  const problems: string[] = tableClashProblems(src).map((c) => c.problem);
+  const out: AddedTable[] = [];
+  const catalogOf = (e: TableEntry): SourceTable | undefined => tables.find((x) => x.source === e.table);
+  const syncOf = (e: TableEntry): TableSync => effectiveSync(src, e).sync;
+  // the entries the run does not take whatever their references say: a problem of their own (every reference passed
+  // over), or not taken by the re-read
+  const untaken = new Set<string>((o.notTaken ?? []).map((e) => e.table));
+  for (const e of src.tables) {
+    const t = catalogOf(e);
+    if (t === undefined || entryProblems(t, e, tables, database, syncOf(e), src.tables, (e.references ?? []).map((r) => r.table)).length) untaken.add(e.table);
+  }
+  // each entry on its own, a clash with another entry aside: what the run's re-read decides a clash group by
+  const own = new Map<TableEntry, OwnEntry>();
+  for (const e of src.tables) {
+    const t = catalogOf(e);
+    const sync = syncOf(e);
+    const whole = entryProblems(t, e, tables, database, sync, src.tables, skipTo);
+    problems.push(...whole);
+    const passOver = [...skipTo, ...[...untaken].filter((x) => x !== e.table)];
+    const p = entryProblems(t, e, tables, database, sync, src.tables, passOver);
+    let added: AddedTable | null = null;
+    if (!p.length && t !== undefined) {
+      const keep = new Set(copiedColumns(t, e));
+      const at = `${shownPath(root, src.file)}: tables.${e.name}`;
+      // its references to tables the file syncs, by their `schema.table` (src/duck/reference-keys.ts)
+      const references = (e.references ?? []).filter((r) => !passOver.includes(r.table)).map((r) => ({ columns: [...r.columns], table: r.table, targetColumns: [...r.targetColumns] }));
+      added = { ...t, columns: t.columns.filter((c) => keep.has(c.name)), foreignKeys: t.foreignKeys.filter((f) => keep.has(f.column)),
+        ...(e.key !== null ? { key: e.key, primaryKey: t.key } : {}), sync, entryAt: at, ...(references.length > 0 ? { fileReferences: references } : {}),
+        // its entry's words, for the line a hold for its columns says (src/duck/column-identity.ts)
+        entry: { at, name: e.name, columns: e.columns, exclude: e.exclude } };
+    }
+    own.set(e, { table: added, problems: p, passedOver: passOver });
+    if (!whole.length && added !== null) out.push(added);
+  }
+  return { tables: out, problems, own, clashes: clashGroups(src) };
+}
+
+/**
+ * THE `columns:` THAT FOLLOWS A RENAME ON THE DATABASE, or null: each name of the entry's `columns:` the table lacks
+ * taken as the column it is close to (`closest`), a name no column is close to left out (it was dropped: `goneColumns`).
+ * Offered only when it differs and the entry would then pass (`entryProblems`). A rename is a guess from the name, so
+ * the line is the person's to write: the run never takes it by itself (fail closed).
+ */
+export function renamedColumns(t: SourceTable | undefined, e: TableEntry, all: readonly SourceTable[], database: string, sync: TableSync,
+  file: readonly TableEntry[], skipTo: readonly string[] = []): string[] | null {
+  if (t === undefined || e.columns === null) return null;
+  const have = t.columns.map((c) => c.name);
+  const cols: string[] = [];
+  for (const c of e.columns) {
+    const now = have.includes(c) ? c : closest(c, have);
+    if (now !== null && !cols.includes(now)) cols.push(now);
+  }
+  if (cols.length === 0 || cols.join("\u0000") === e.columns.join("\u0000")) return null;
+  return entryProblems(t, { ...e, columns: cols }, all, database, sync, file, skipTo).length ? null : cols;
+}
+
+/**
+ * WHAT THE RUN SAYS OF AN ENTRY IT CANNOT TAKE (issue 1074), one sentence each for the log, the table's line and the
+ * run's warnings: what is wrong at its keys (`problems`), whether the table is HELD (`held`: synced before, so it serves
+ * what it holds and is not synced) or not synced at all (new to the run), and the way out. `renamed`: the `columns:`
+ * that follows a rename (`renamedColumns`). In a project deployed read-only the committed file is the way (`readOnly`):
+ * `mason add` is refused there, and the run takes the file at a start.
+ */
+export function refusedEntryText(o: { entry: TableEntry; problems: readonly string[]; shown: string; held: boolean; readOnly: boolean; renamed: readonly string[] | null }): string {
+  const { entry: e, renamed } = o;
+  const what = o.problems.map((p) => `${o.shown}: ${p}`).join("; ");
+  const head = `${e.table} is not synced: ${what}${/[.?!]$/.test(what) ? "" : "."} ` +
+    (o.held ? "Mason holds the table and serves its synced data as it was." : "Mason does not sync it until that is fixed.");
+  // the way out is always a line that runs: the columns the rename asks for, or the fix the problem says, then a start
+  if (renamed !== null) {
+    const line = `To sync its columns as the database names them now, write columns: ${flowList(renamed)} on tables.${e.name}`;
+    if (o.readOnly) return `${head} ${line} in the committed sources file, and start Mason with it.`;
+    const add = `mason add ${e.name} --columns ${renamed.join(",")}${e.key !== null ? ` --key ${e.key.join(",")}` : ""}`;
+    return `${head} ${line}, then run mason stop && mason start. Or run ${add} while Mason runs, which takes it at once.`;
+  }
+  if (o.readOnly) return `${head} Once that is fixed, start Mason with the committed sources file.`;
+  return `${head} Once that is fixed, run mason stop && mason start. Or run mason remove ${e.name} to take its entry out${o.held ? ", which drops its synced data" : ""}.`;
+}
+
+/** What the run copies: the sources file as it last read it, its tables, and what is wrong with the file now (null:
+ *  nothing). `refused`: the entries it could not take (issue 1074), each said (`refusedEntryText`); a `held` one's
+ *  table is among `tables` as the run took it before, and the sync holds it (src/duck/sync.ts `setTables`). */
+export interface RunSources { file: SourceFile; tables: AddedTable[]; problem: string | null; refused?: readonly EntryRefusal[] }
+
+/** An entry the run could not take: its table, whether it is held (synced before), and what the run says of it. */
+export interface EntryRefusal { table: string; held: boolean; text: string }
+
+/**
+ * THE SOURCES FILE READ AGAIN WHILE THE RUN IS UP (mason add, mason remove, a table's columns changed): its tables now —
+ * or, when the FILE cannot be taken as it is, the tables read before, kept (a typo never drops a copy), with what is
+ * wrong; `said` is the log line, once per new problem. A `url:` that resolves to another database than the one the run
+ * copies (a .env edited) is such a problem: the run's catalog is the old database's, so it is said, and mason stop &&
+ * mason start reads the new one. So is a file gone silent on sync: while `slot` is recorded: taken, it would retire the
+ * slot. AN ENTRY the catalog refuses is that entry's alone (issue 1074): every other entry is taken as it is now, and
+ * that table is HELD as the run took it before (`refused`, `held`), or not synced when the run never took it. Its
+ * columns are never taken by a guess: a rename under `columns:` is synced once the file says the new name (fail closed).
  */
 export function rereadSources(prev: RunSources, read: ProjectSource | Failure, runUrl: string, catalog: readonly SourceTable[], database: string, root: string,
-  o: { replicationChecked?: boolean; slot?: string | null } = {}): RunSources & { said: string | null } {
+  o: { replicationChecked?: boolean; slot?: string | null; readOnly?: boolean } = {}): RunSources & { said: string | null } {
   let problem: string | null = null;
-  let next: AddedTable[] | null = null;
   if ("message" in read) problem = `${read.message}${read.why ? `: ${read.why.replace(/\n/g, "; ")}` : ""}`;
   else if (read.resolved !== runUrl) {
     problem = `${shownPath(root, read.file)}: url: now names ${maskedUrl(read.resolved)} (${read.from}), and this run syncs ${maskedUrl(runUrl)}: mason stop && mason start syncs from the new one`;
@@ -822,11 +919,36 @@ export function rereadSources(prev: RunSources, read: ProjectSource | Failure, r
     problem = `${shownPath(root, read.file)}: ${names.join(", ")} ${names.length === 1 ? "is" : "are"} sync: replication, and this run has not checked ${database} for logical replication ` +
       "(no table was replicated when it started): mason stop && mason start checks it and streams them";
   } else {
-    const t = addedTables(read, catalog, database, root);
-    if (Array.isArray(t)) next = t;
-    else problem = `${t.message}${t.why ? `: ${t.why.replace(/\n/g, "; ")}` : ""}`;
+    const shown = shownPath(root, read.file);
+    const before = (entry: TableEntry): AddedTable | undefined => prev.tables.find((x) => x.source === entry.table);
+    // A CLASH GROUP (entries whose tables are one in the synced data: a table's or its schema's name differs only in case)
+    // is decided by what the run syncs, never by the file's order (the review of PR 1091: a new `Accents` written above
+    // a synced `accents` was taken beside it, and the two shared one synced table, which neither served after). The one
+    // entry of the group the run syncs is decided on its own; every other entry is never taken, said with the clash
+    const clashOf = new Map<TableEntry, string>();
+    for (const group of clashGroups(read)) {
+      const synced = group.filter((x) => before(x) !== undefined);
+      const keeper = synced.length === 1 ? synced[0]! : null;
+      for (const x of group) if (x !== keeper) clashOf.set(x, clashText(x, keeper ?? group.find((y) => y !== x)!));
+    }
+    // each entry on its own; a reference into an entry the run does not take is passed over (`entryTables`)
+    const e = entryTables(read, catalog, database, root, { notTaken: [...clashOf.keys()] });
+    const tables: AddedTable[] = [];
+    const refused: EntryRefusal[] = [];
+    for (const entry of read.tables) {
+      const own = e.own.get(entry)!;
+      const clash = clashOf.get(entry);
+      if (own.table !== null && clash === undefined) { tables.push(own.table); continue; }
+      // HELD as the run took it: it serves what it holds, and is synced again once its entry is fixed
+      const was = before(entry);
+      if (was !== undefined) tables.push(was);
+      const now = catalog.find((x) => x.source === entry.table);
+      const renamed = clash === undefined ? renamedColumns(now, entry, catalog, database, effectiveSync(read, entry).sync, read.tables, own.passedOver) : null;
+      refused.push({ table: entry.table, held: was !== undefined,
+        text: refusedEntryText({ entry, problems: [...(clash !== undefined ? [clash] : []), ...own.problems], shown, held: was !== undefined, readOnly: o.readOnly === true, renamed }) });
+    }
+    return { file: read, tables, problem: null, refused, said: null };
   }
-  if (next !== null && !("message" in read)) return { file: read, tables: next, problem: null, said: null };
   return { ...prev, problem, said: problem !== prev.problem ? `the sources file cannot be read as it is now, so the tables read before are kept: ${problem}` : null };
 }
 

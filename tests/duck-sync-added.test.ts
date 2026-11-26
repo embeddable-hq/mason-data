@@ -22,6 +22,10 @@ import { EVENT_KINDS, type SyncEventInput } from "../src/duck/events.ts";
 import { STATUS, streamLines, tableLines, WAIT, type RunState } from "../src/cli/commands.ts";
 import * as commands from "../src/cli/commands.ts";
 import { jsonText } from "../src/cli/command.ts";
+import { PgCatalog } from "../src/api/postgres/catalog.ts";
+import type { PgSchema } from "../src/api/postgres/schema.ts";
+import { readiness, syncStateOf } from "../src/cli/readiness.ts";
+import { missingRelationHint } from "../src/duck/plan.ts";
 
 // read from the module, not imported by name: the file loads at a commit without it (scripts/fails-without.ts)
 type Status = { source: string } & ({ copy: string } | { behind: string } | { refused: string } | { kept: string; off: boolean });
@@ -601,5 +605,63 @@ test("replication the database will not set up is said on the replicated table's
       "give its entry sync: poll <interval> (poll 5m) in the sources file to poll it instead");
     // its line says it, as mason status reads kept
     assert.match(keptText(a as KeptState), /give its entry sync: poll <interval> \(poll 5m\) in the sources file to poll it instead/);
+  });
+});
+
+test("a synced table the catalog cannot hold is not served and says why, and every other table is served (issue 1197)", { timeout: 120_000 }, async () => {
+  // a column of oid8, Postgres 19's, which the catalog's Postgres lacks: synced, and held as text in the synced data
+  const odd = [column("id"), column("o", "oid8")];
+  const lines: string[] = [];
+  const catalog = new PgCatalog({ database: "x", tables: [] }, { log: (l) => lines.push(l) });
+  try {
+    await withSync({
+      mode: "poll", tables: [table("fine"), table("odd", 10, odd)],
+      seed: async (run) => {
+        await run(copied("fine")); await run(polled("fine"));
+        await run(`CREATE TABLE public.odd (id BIGINT, o VARCHAR)`);
+        await run(copied("odd", odd).replace(/^CREATE TABLE IF NOT EXISTS public\."odd" \([^)]*\); /, "")); await run(polled("odd"));
+      },
+    }, async (sync) => {
+      const use = (sync as unknown as { useCatalogProbe?: (p: (s: PgSchema) => Promise<ReadonlyMap<string, string>>) => Promise<void> }).useCatalogProbe;
+      assert.ok(use !== undefined, "the sync asks the catalog which tables it holds");
+      await use.call(sync, (s) => catalog.probe(s));
+      assert.deepEqual(sync.schema().tables.map((t) => t.name), ["fine"], lines.join("\n"));
+      const state = new Map(sync.state().map((s) => [s.source, s]));
+      assert.equal(syncStateOf(state.get("public.fine")), "synced");
+      assert.equal(syncStateOf(state.get("public.odd")), "failed");
+      const why = "it is not served: its column o has a type Mason cannot serve yet (oid8). Leave the column out with exclude: [o] on its entry in the sources file";
+      assert.equal(state.get("public.odd")?.error, why);
+      // mason wait and mason status read it as a failure with its way out, never as synced and served
+      const r = readiness({ tables: [{ table: "public.fine", added: true, copy: { phase: "copied" }, sync: { state: "synced" } },
+        { table: "public.odd", added: true, error: why, copy: { phase: "copied" }, sync: { state: syncStateOf(state.get("public.odd")) } }] } as unknown as Pick<RunState, "tables">);
+      assert.deepEqual(r, { ready: false, failed: [`public.odd: ${why}`], waiting: [] });
+      // a query of it is told why, never that it joins the catalog in a moment
+      assert.equal(missingRelationHint("odd", sync.state()), `public.odd is synced, but ${why}`);
+      assert.ok(!lines.some((l) => /could not start|DuckDB/.test(l)), lines.join("\n"));
+      // the catalog was not up before the check, so it is not kept up for nobody
+      assert.equal(catalog.started, false);
+    });
+  } finally { await catalog.stop(); }
+});
+
+test("a table whose entry the run cannot take is held alone: not synced, its synced data served, its line saying why; the others kept current, and it is let go once its entry is fixed (issue 1074)", async () => {
+  const why = "public.b is not synced: mason/sources/app.yml: tables.b.columns: public.b has no column x. Mason holds the table and serves its synced data as it was.";
+  await withSync({ mode: "poll", tables: [table("a"), table("b")], seed: async (run) => { for (const n of ["a", "b"]) { await run(copied(n)); await run(polled(n)); } } }, async (sync, logged, events) => {
+    // the option read through a cast: the file loads at a commit without it (scripts/fails-without.ts)
+    await (sync.setTables as (t: AddedTable[], o: { held: ReadonlyMap<string, string> }) => Promise<void>).call(sync, [table("a"), table("b")], { held: new Map([["public.b", why]]) });
+    const state = (s: string) => sync.state().find((x) => x.source === s)!;
+    assert.deepEqual([state("public.b").phase, state("public.b").error], ["copied", why], "its synced data served, its line saying why");
+    assert.equal(state("public.a").error, null, "the other table is not held");
+    // its line's own words: a synced table held, never one waiting for its first sync (the review of PR 1091)
+    assert.equal((state("public.b").kept as { pending?: string } | undefined)?.pending, "it is held, and serves its synced data as it was: its line says why, and what syncs it again");
+    assert.equal(sync.pollRefusal(["public.b"])?.message, why, "a sync by hand of it is refused with why");
+    assert.equal(sync.pollRefusal(["public.a"]), null, "the other is synced by hand");
+    assert.ok(logged.includes(`public.b: ${why}`), logged.join("\n"));
+    assert.ok(events.some((e) => e.table === "public.b" && e.message === why), "said as an event");
+    // its entry fixed: let go, and synced again
+    await sync.setTables([table("a"), table("b")]);
+    assert.equal(state("public.b").error, null);
+    assert.equal(sync.pollRefusal(["public.b"]), null);
+    assert.ok(logged.includes("public.b: its columns are placed again, so it is synced again"), logged.join("\n"));
   });
 });

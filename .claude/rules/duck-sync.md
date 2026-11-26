@@ -87,6 +87,17 @@ paths:
   sync it, the table is HELD (`unplaced`): it is not copied, polled, caught up or streamed, it serves what it holds, and
   its line says why with the line to write. Only `mason add` confirms it (through the run, or recorded in `.mason/` while
   Mason is stopped, src/cli/confirmed.ts), and only for the table's shape as the add read it, or its entry removed. A
+  table whose ENTRY the run's re-read cannot take is held the same way (`setTables`' `held`, issue 1074), as the run
+  took it before, its record left as it was: one entry's problem never stops the others being kept current. Such a
+  table is still LOOKED AT on the database as its `sync:` would read it (`lookAtHeld`): its catalog row read again
+  alone, and the sources file read against it when the row differs, in what an entry is checked by, from the row the
+  file was last read against (src/cli/dev.ts `onHeldLook`, `heldReadAgainst`; never the catalog's row before the look,
+  which a whole read of the catalog by `mason status` or the page refreshes without reading the file: the third review
+  of PR 1091 found such a look saw no change, and the table stayed held for the run). A polled one
+  at its interval (`heldLooks`), a replicated one every `HELD_LOOK_REPLICATED_MS` and at a relation message
+  (`relationSeen`), one under `sync: off` at `mason sync` of it (`/api/sync` looks before it refuses). So a hold the
+  database fixes (a rename put back, a `key:`'s unique index restored) is let go with no restart (the reviews of PR
+  1091: never looked at, such a hold stayed for good, where main's kept table was polled again and recovered). A
   table is placed against EVERY record of its oid, every entry's and the ones kept by oid
   (`_mason.column_identity_former`), all read before any is written (issue 1080: two tables or schemas swapped names and
   the entry syncing every column served the other's left-out column). In a project deployed read-only the committed file is
@@ -132,7 +143,12 @@ paths:
   said as `sync_stopped`, never serving rows that may be the other's. A table the ledger says is synced with no table
   under it is synced again whole (`forgetMissing`: at `open`, and when the catalog meets one), and **one table the
   catalog cannot read is left out and said, never failing the catalog** (`catalogTypes`; it served no table at all, the
-  others included, through restarts). DETECTOR: `tests/integration/duck-case-remove.itest.ts`.
+  others included, through restarts). DETECTOR: `tests/integration/duck-case-remove.itest.ts`. **A table is served only
+  once the listener's catalog holds it** (`useCatalogProbe`, issue 1197): every rebuild that changes the schema asks
+  the catalog first (`PgCatalog.probe`), and a table it leaves out is left out of the schema too. Its state carries
+  the reason as its error (`notServed`), so `mason wait` and `mason status` never call it served. Why: a column of a
+  type new in Postgres 19 refused the catalog's start, and every table was said synced while none could be read.
+  DETECTOR: `tests/duck-sync-added.test.ts` "issue 1197".
 - **A stop cancels on the source every read its interrupt has not ended within 200 ms** (`stop`, `cancelOnSource`,
   issue 1037: a chunk, a catch-up or a poll waiting on a lock in the source held `mason stop` until the lock was
   released). It uses the cut's guarded `pg_cancel_backend` (`cancelBackends`), and that statement fails as `Stopping`,
