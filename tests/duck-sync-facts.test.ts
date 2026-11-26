@@ -465,3 +465,31 @@ test("a named publication's gap is its own error and its own recovery: set by th
     assert.equal(st().error, s.wholeFailure.prepare, "copied: current only once the stream says so");
   });
 });
+
+// A TABLE WHOSE NAME IS NO TABLE ON THE DATABASE NOW (issue 1199): renamed, moved to another schema or dropped. Only then:
+// a table at its name, its own or another made or renamed into its place, is the sources file's
+test("a table's name is no table only when the catalog has none of that name, and the log says where its oid is", async () => {
+  const sync = await import("../src/duck/sync.ts");
+  const shape = await import("../src/cdc/shape.ts");
+  type Place = { schema: string; table: string };
+  const nameGone = (sync as { nameGone?: (oid: number | undefined, shape: string | null | undefined) => boolean }).nameGone;
+  const goneWords = (sync as { goneWords?: (t: { schema: string }, at: Place | null) => string }).goneWords;
+  const placeOf = (shape as { placeOf?: (text: string | null) => Place | null }).placeOf;
+  assert.equal(typeof nameGone, "function", "the sync tells a table whose name is no table");
+  assert.ok(goneWords !== undefined && placeOf !== undefined);
+  // renamed or dropped: its name is no table
+  assert.equal(nameGone!(16401, null), true);
+  // at its name: its own table, or another made or renamed into its place (read again whole by its shape)
+  assert.equal(nameGone!(16401, "16401:[]"), false);
+  assert.equal(nameGone!(16401, "16999:[]"), false);
+  // a table whose oid the run never read (a test's), or a shape not read
+  assert.equal(nameGone!(undefined, null), false);
+  assert.equal(nameGone!(16401, undefined), false);
+  // placeSql's answer read back
+  assert.deepEqual(placeOf!('["archive", "events"]'), { schema: "archive", table: "events" });
+  assert.equal(placeOf!(null), null);
+  assert.equal(placeOf!("not json"), null);
+  assert.equal(goneWords!({ schema: "public" }, { schema: "public", table: "activity" }), "it was renamed on the database, and is public.activity now");
+  assert.equal(goneWords!({ schema: "public" }, { schema: "archive", table: "events" }), "it was moved to another schema on the database, and is archive.events now");
+  assert.equal(goneWords!({ schema: "public" }, null), "no table of that name is on the database now, and the table it was is gone (dropped)");
+});
