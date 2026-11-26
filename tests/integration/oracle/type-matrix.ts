@@ -206,7 +206,8 @@ const MAPPED: Record<string, { type: string; values: string[]; eq?: string }> = 
   x8: { type: "xid8", values: ["'1'", "'2'", "'1'", "'3'", "'10'"], eq: "'1'" },
   ct: { type: "cid", values: ["'1'", "'2'", "'1'", "'3'", "'10'"], eq: "'1'" },
   ti: { type: "tid", values: ["'(0,1)'", "'(1,2)'", "'(0,1)'", "'(3,4)'", "'(0,10)'"], eq: "'(0,1)'" },
-  lsn: { type: "pg_lsn", values: ["'0/16B3748'", "'1/0'", "'0/16B3748'", "'FFFFFFFF/FFFFFFFF'", "'0/9'"], eq: "'0/16b3748'" },
+  // (eq in Postgres 19's spelling, its low half padded to 8 hex digits: issue 1198)
+  lsn: { type: "pg_lsn", values: ["'0/16B3748'", "'1/0'", "'0/16B3748'", "'FFFFFFFF/FFFFFFFF'", "'0/9'"], eq: "'0/016b3748'" },
   ch1: { type: '"char"', values: ["'a'", "'b'", "'a'", "'Z'", "'~'"], eq: "'a'" },
   nm: { type: "name", values: ["'abc'", "'B'", "'abc'", "'z'", "'é'"], eq: "'abc'" },
   r4: { type: "int4range", values: ["'[1,5)'", "'[2,3)'", "'[1,4]'", "'empty'", "'(,5)'"], eq: "'(0,5)'" },
@@ -696,6 +697,15 @@ function* mappedTypes(): Generator<Matrixed> {
     yield q(`${name}: a parameter of its type`, `SELECT id, COALESCE(${c}, NULL) FROM mapped ORDER BY id`);
   }
   yield q("mapped: every column", "SELECT * FROM mapped ORDER BY id");
+  // a pg_lsn literal, whose text a Postgres 19 source writes otherwise than the catalog (issue 1198): it compares and
+  // prints as the source writes it, in 18's spelling and in 19's
+  yield q("issue 1198: a pg_lsn literal beside the column", "SELECT id, lsn, '0/16B3748'::pg_lsn AS k, lsn = '0/16B3748' AS e FROM mapped ORDER BY id");
+  yield q("issue 1198: a pg_lsn literal in a UNION ALL arm", "SELECT id, lsn FROM mapped WHERE id = 1 UNION ALL SELECT 0, '0/016B3748'::pg_lsn ORDER BY 1");
+  yield q("issue 1198: a pg_lsn literal in a UNION arm", "SELECT lsn::text AS t FROM mapped UNION SELECT '1/0'::pg_lsn::text ORDER BY 1");
+  yield q("issue 1198: a join on pg_lsn to a VALUES", "SELECT m.id, v.x FROM mapped m JOIN (VALUES ('0/16B3748'::pg_lsn), ('1/00000000')) v(x) ON m.lsn = v.x ORDER BY 1");
+  yield q("issue 1198: a pg_lsn literal of no table", "SELECT '0/16B3748'::pg_lsn AS a, '1/0'::pg_lsn::text AS b, pg_lsn '0/1' = '0/00000001' AS e");
+  yield q("issue 1198: pg_lsn literals of no table read as a number", "SELECT pg_lsn '0/2' - pg_lsn '0/1' AS d, pg_lsn '0/2' > pg_lsn '0/01' AS g");
+  yield q("issue 1198: a pg_lsn VALUES of no table", "VALUES ('0/16B3748'::pg_lsn), ('1/0')");
   yield q("a grouped star read by name", "WITH w AS (SELECT * FROM grouped GROUP BY name, id) SELECT * FROM w GROUP BY y, name, a_id, id ORDER BY id");
   yield q("a grouped star read in a subquery", "SELECT o.id FROM public.one o WHERE o.id IN (SELECT id FROM (SELECT * FROM grouped GROUP BY name, id) s)");
   yield q("a grouped star, a column read from it", "SELECT s.y FROM (SELECT * FROM grouped GROUP BY name, id) s ORDER BY s.id");

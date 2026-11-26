@@ -721,7 +721,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   let duckListener;
   try {
     duckListener = await store.listener(facts.collation, undefined, libc, () => [...sync.state(), ...sync.generated.copies()], sync.kept.enabled ? sync.kept : undefined,
-      { ...(facts.collations !== undefined ? { collations: facts.collations } : {}), libcOrders, readLibc: async (sc) => {
+      { ...(facts.collations !== undefined ? { collations: facts.collations } : {}), libcOrders, sourceVersion: facts.version, readLibc: async (sc) => {
         logLine(`[engine] reading how ${source.database} orders text under the collation ${sc.name} (${sc.collate}), which a statement names first`);
         return readNamed(sc);
       } });

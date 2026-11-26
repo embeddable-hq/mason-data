@@ -2,6 +2,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **On a Postgres 19 source, a query that compared a `pg_lsn` column with a value gave wrong answers.** Postgres 19
+  writes a `pg_lsn` with 8 hex digits after the slash (`0/016B3748`, where 18 wrote `0/16B3748`). So `=` and `IN`
+  found no rows, and `<>` returned every row. A `pg_lsn` value written in a query, such as one in a `VALUES` list,
+  came back in 18's form. Now Mason compares and prints a `pg_lsn` as the source writes it, in either spelling. A
+  Postgres 18 source answers as before.
+
 - **Mason now sends the server name (SNI) on its TLS connections, as libpq does, so a source behind Neon's proxy, or
   another proxy that routes by SNI, can be synced with the URL the provider gives.** Before, Mason sent the name only
   under `sslmode=verify-full`. Under `sslmode=require`, Neon refused Mason's connections with `Endpoint ID is not

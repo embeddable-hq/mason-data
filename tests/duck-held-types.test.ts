@@ -6,7 +6,7 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import { PGlite } from "@electric-sql/pglite";
 import { VARCHAR } from "@duckdb/node-api";
-import { HELD, holdOf, isNative, ZONED_HELD } from "../src/duck/held-types.ts";
+import { CATALOG_LSN_PADDED, HELD, holdOf, isNative, sourceForms, ZONED_HELD } from "../src/duck/held-types.ts";
 import { pgTypedColumn } from "../src/duck/types.ts";
 import { catalogDdl } from "../src/api/postgres/catalog.ts";
 import type { PgSession } from "../src/api/postgres/encode.ts";
@@ -38,6 +38,25 @@ test("what the copy holds: a type nobody named is its text, an enum and the nati
     ["point", "b", "text"], ["bit(8)", "b", "text"], ["bit varying", "b", "text"], ["money", "b", "text"], ["int4range", "r", "text"], ["pair", "c", "text"], ["vector(3)", "b", "text"], ["a_type_from_the_future", "b", "text"],
     ["point[]", "b", "text[]"], ["macaddr[]", "b", "text[]"], ["oid[]", "b", "text[]"], ["pair[]", "c", "text[]"],
   ] as const) assert.equal(holdOf(spelled, kind), hold, spelled);
+});
+
+test("a pg_lsn is written as the source writes it: Postgres 19 pads its low half to 8 hex digits, the catalog's 18 does not (issue 1198)", async () => {
+  // the catalog Postgres's own form, held to the catalog
+  const db = new PGlite();
+  const catalog = (await db.query<{ t: string }>("SELECT '0/016B3748'::pg_lsn::text AS t")).rows[0]!.t;
+  await db.close();
+  assert.equal(catalog, CATALOG_LSN_PADDED ? "0/016B3748" : "0/16B3748");
+  const v19 = sourceForms(190000), v18 = sourceForms(180006), unknown = sourceForms(null);
+  assert.deepEqual([...v19.differs].sort(), [3220, 3221]);
+  assert.deepEqual([v18.differs.size, unknown.differs.size], [0, 0]);
+  for (const [catalogText, source19] of [["0/16B3748", "0/016B3748"], ["1/0", "1/00000000"], ["0/0", "0/00000000"], ["FFFFFFFF/FFFFFFFF", "FFFFFFFF/FFFFFFFF"],
+    ["{0/1,NULL,1/ABC}", "{0/00000001,NULL,1/00000ABC}"]] as const) {
+    assert.equal(v19.written(catalogText.startsWith("{") ? 3221 : 3220, catalogText), source19, catalogText);
+    assert.equal(v18.written(3220, catalogText), catalogText);
+  }
+  // no other type's text is touched
+  assert.equal(v19.written(829, "08:00:2b:01:02:03"), "08:00:2b:01:02:03");
+  assert.equal(v19.written(25, "0/1"), "0/1");
 });
 
 test("a time range is written again in the session's zone, by Postgres's own output", () => {

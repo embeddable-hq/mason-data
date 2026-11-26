@@ -13,6 +13,7 @@
  */
 import { gapMark, type GapId } from "../../duck/gaps.ts";
 import { cteReads } from "../../duck/cte-names.ts";
+import { FORM_TYPES } from "../../duck/held-types.ts";
 import type { A_Const, ColumnRef, Node, RangeVar, SelectStmt, TypeCast, VariableSetStmt } from "libpg-query";
 
 /** A statement, or a part of one, this listener does not answer: named, placed, with a SQLSTATE and the way out. */
@@ -96,6 +97,23 @@ export function mayOrderText(n: unknown): boolean {
   return false;
 }
 const ORDERING_OPERATORS = new Set(["<", ">", "<=", ">="]);
+
+/** Whether a statement of no table names a type whose text a source may write otherwise than the catalog Postgres
+ *  (`FORM_TYPES`, src/duck/held-types.ts: `'0/1'::pg_lsn`, `pg_lsn '0/1'`): its analysis is asked whether the source's
+ *  form differs (`ordersText`'s "form", issue 1198). A false "may" costs time, never an answer. */
+export function namesFormType(n: unknown): boolean {
+  if (Array.isArray(n)) return n.some(namesFormType);
+  if (n === null || typeof n !== "object") return false;
+  for (const [k, v] of Object.entries(n as Any)) {
+    // a TypeName is a field's value (a cast's `typeName`, a column definition's), or a node of its own
+    if ((k === "typeName" || k === "TypeName") && v !== null && typeof v === "object") {
+      const names = collect((v as Any).names ?? [], "String").map((s) => String(bodyOf<{ sval?: string }>(s).sval ?? ""));
+      if (FORM_TYPES.has(names.at(-1) ?? "")) return true;
+    }
+    if (namesFormType(v)) return true;
+  }
+  return false;
+}
 const COLLATED_CALLS = new Set(["min", "max", "upper", "lower", "initcap"]);
 
 const INFORMATION_SCHEMA = "information_schema";
@@ -162,7 +180,7 @@ export function duckTranslate(stmt: Node, text: string): Translation | { kind: "
   // issue 981)
   const ctes = cteReads(stmt);
   const relations = collect(s, "RangeVar").map((n) => bodyOf<RangeVar>(n)).filter((r) => !ctes.has(r));
-  if (relations.length === 0) return mayOrderText(s) ? { kind: "catalog", fromless: { names: pgColumnNames(s) } } : { kind: "catalog" };
+  if (relations.length === 0) return mayOrderText(s) || namesFormType(s) ? { kind: "catalog", fromless: { names: pgColumnNames(s) } } : { kind: "catalog" };
   if (relations.every(isCatalogRelation)) return { kind: "catalog" };
   return { kind: "duckdb", sql: text, names: pgColumnNames(s) };
 }

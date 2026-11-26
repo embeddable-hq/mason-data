@@ -336,6 +336,28 @@ function constTextArray(v: TreeNode): ReadonlyArray<string | null> | null | unde
 
 const BOOL = 16;
 /** The type an expression node yields: exprType (nodeFuncs.c), for the nodes a SELECT's expressions are made of. */
+/**
+ * WHETHER A VALUE OF ONE OF `types` MAY REACH A STATEMENT'S ANSWER AS ITS TEXT (issue 1198: a pg_lsn, whose text a
+ * Postgres 19 source writes otherwise than the catalog): true where an output (any TARGETENTRY: the statement's, a
+ * subquery's or an aggregate's argument) is of such a type, or an expression of another type reads one, unless that
+ * expression is a boolean or a numeric (`=`, `<`, IN, `pg_lsn - pg_lsn`), whose value is the same whichever text the
+ * value is written in. False: the answer is the same under either form.
+ */
+export function textReaches(tree: TreeValue, types: ReadonlySet<number>): boolean {
+  const of = (v: TreeValue): boolean => isNode(v) && types.has(exprType(v)?.type ?? -1);
+  const visit = (v: TreeValue): boolean => {
+    if (Array.isArray(v)) return v.some(visit);
+    if (!isNode(v)) return false;
+    const children = Object.entries(v).filter(([k]) => k !== "_node").flatMap(([, x]) => Array.isArray(x) ? x : [x]);
+    if (v._node === "TARGETENTRY" && of(v.expr ?? null)) return true;
+    const own = exprType(v)?.type;
+    if (own !== undefined && own !== BOOL && own !== NUMERIC_TYPE && !types.has(own) && children.some(of)) return true;
+    return children.some(visit);
+  };
+  return visit(tree);
+}
+const NUMERIC_TYPE = 1700;
+
 export function exprType(n: TreeNode): { type: number; typmod: number } | null {
   const t = (f: string, m?: string): { type: number; typmod: number } | null => {
     const v = num(n[f]);

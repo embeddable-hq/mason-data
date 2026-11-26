@@ -71,6 +71,50 @@ export const PARAM_ARRAYS: ReadonlyMap<number, number> = new Map([
   [1182, 1082], [1115, 1114], [1185, 1184], [1009, 25], [1015, 1043],
 ]);
 
+/**
+ * THE SOURCE'S TEXT OF A HELD TYPE (issue 1198).
+ *
+ * THE CLASS: a source whose text form for a type differs from the catalog Postgres's. The copy holds the source's text
+ * of a value, and a literal or a parameter is read by the catalog Postgres (PGlite 18), which writes it in its own form.
+ * Postgres 19 writes a pg_lsn's low half as 8 hex digits (`0/016B3748`), where 18 writes `0/16B3748`, so on a 19 source
+ * one value had two spellings: `=` found no row, `<>` every row, and a literal printed in 18's form.
+ *
+ * THE DECISION: a literal or a parameter of a held type is written as the source writes it (`written`), from the
+ * source's version read at the start. So each value has one text, in the copy and in the statement, and the text
+ * compares as the value does. A statement of no table that holds such a type is the synced data's, never the catalog's
+ * (src/duck/plan.ts `ordersText`), since the catalog would print its own form.
+ *
+ * Postgres 19 writes every other built-in held type's text as 18 does: a value of each was compared, 18 against 19.
+ */
+export interface SourceForms {
+  /** the types (and their arrays) whose text the source writes otherwise than the catalog Postgres */
+  readonly differs: ReadonlySet<number>;
+  /** a value of type `oid` (or its array) as the source writes it, from the catalog Postgres's text of it */
+  written(oid: number, text: string): string;
+}
+
+/** a source that writes every type as the catalog Postgres does */
+export const CATALOG_FORMS: SourceForms = { differs: new Set(), written: (_oid, text) => text };
+
+const PG_LSN = 3220, PG_LSN_ARRAY = 3221;
+/** the types whose text a source may write otherwise than the catalog Postgres, by name (src/api/postgres/translate.ts
+ *  `namesFormType` reads a statement of no table for them) */
+export const FORM_TYPES: ReadonlySet<string> = new Set(["pg_lsn"]);
+/** whether a Postgres of this `server_version_num` writes a pg_lsn's low half as 8 hex digits (Postgres 19's `%X/%08X`) */
+const lsnPadded = (version: number): boolean => version >= 190000;
+/** the catalog Postgres is 18, which writes `%X/%X` (`tests/duck-held-types.test.ts` holds it to the catalog) */
+export const CATALOG_LSN_PADDED = false;
+/** each pg_lsn in a value's text (a pg_lsn's, or its array's, whose elements are never quoted), in the `padded` form */
+const lsnWritten = (text: string, padded: boolean): string =>
+  text.replace(/\b([0-9A-Fa-f]{1,8})\/([0-9A-Fa-f]{1,8})\b/g, (_, hi: string, lo: string) => `${hi}/${padded ? lo.padStart(8, "0") : lo.replace(/^0+(?=.)/, "")}`);
+
+/** the source's forms, by its `server_version_num` (null where none is known, as in a unit test: the catalog's own) */
+export function sourceForms(version: number | null): SourceForms {
+  if (version === null || lsnPadded(version) === CATALOG_LSN_PADDED) return CATALOG_FORMS;
+  const padded = lsnPadded(version);
+  return { differs: new Set([PG_LSN, PG_LSN_ARRAY]), written: (oid, text) => oid === PG_LSN || oid === PG_LSN_ARRAY ? lsnWritten(text, padded) : text };
+}
+
 /** a time written in the session's zone, which the copy's text cannot be: written again where the statement executes */
 export const ZONED_HELD: ReadonlyMap<number, string> = new Map([[3910, "tstzrange"], [4534, "tstzmultirange"]]);
 

@@ -35,8 +35,12 @@ export interface ListenerCollations {
   collations?: readonly SourceCollation[];
   libcOrders?: ReadonlyMap<string, LibcOrder>;
   readLibc?: (c: SourceCollation) => Promise<LibcOrder>;
+  /** the source's `server_version_num`, read at the start: how it writes a held type's text (src/duck/held-types.ts
+   *  `sourceForms`, issue 1198). Absent: as the catalog Postgres writes it */
+  sourceVersion?: number;
 }
 import { decodeLibcOrder, encodeLibcOrder, isCurrentLibcOrder, type LibcOrder } from "./libc-order.ts";
+import { sourceForms } from "./held-types.ts";
 import { dataRow } from "../api/postgres/protocol.ts";
 import { cellText, exactColumn, pgTypedColumn, wireColumn, type WireColumn } from "./types.ts";
 import type { ExactColumn } from "./rewrite.ts";
@@ -503,6 +507,8 @@ export class DuckStore {
         if (!r.order.bytes) await this.executor.registerLibcOrder(sc.collate ?? "C", r.order, false);
         return r.order;
       } });
+    // how the source writes a held type's text, where the catalog Postgres writes it otherwise (a pg_lsn on 19)
+    const forms = sourceForms(more.sourceVersion ?? null);
     // the database's own order, held where a plan reads each order by its collcollate (src/duck/libc-bound.ts)
     if (c.kind === "libc" && libc !== undefined) resolver.hold(c.collate, libc);
     // a jsonb's stored key is this collation's (src/duck/kept.ts `orderBy`)
@@ -512,12 +518,12 @@ export class DuckStore {
       collations: resolver,
       open: () => this.runner(),
       plan: (catalog, text, stmt, base, paramOids, under, userTypes, wireBound, grants, relations, outputs, boundPaths) =>
-        planDuck({ catalog, text, stmt, base, paramOids, searchPath: under.searchPath, timeZone: under.timeZone, dateStyle: under.dateStyle, collations: resolver, verified, userTypes, copies, kept: kept ?? null, wireBound: wireBound ?? false, grants, ...(relations === undefined ? {} : { relations }), outputs: outputs ?? false, ...(boundPaths === undefined ? {} : { boundPaths }) }),
-      parameters: duckParameters,
+        planDuck({ catalog, text, stmt, base, paramOids, searchPath: under.searchPath, timeZone: under.timeZone, dateStyle: under.dateStyle, collations: resolver, verified, userTypes, copies, kept: kept ?? null, wireBound: wireBound ?? false, grants, ...(relations === undefined ? {} : { relations }), outputs: outputs ?? false, ...(boundPaths === undefined ? {} : { boundPaths }), forms }),
+      parameters: (catalog, oids, values, under) => duckParameters(catalog, oids, values, under, forms),
       // a SELECT of no table that orders text under a collation that is not byte order: the synced data's (issue 122);
       // one that maps case (upper, lower, initcap: issue 406) is the synced data's where its run answers it (the
       // listener's `answersCase`), else the catalog's, as before
-      ordersText: (catalog, text, paramOids, under, bindable) => ordersText({ catalog, text, paramOids, under, collations: resolver, bindable }),
+      ordersText: (catalog, text, paramOids, under, bindable) => ordersText({ catalog, text, paramOids, under, collations: resolver, bindable, forms }),
       // the sync's state, which EXPLAIN says how each copy is kept current from (src/duck/sync.ts KeptCurrent)
       copies,
       // a stored JSON path ready or gone (src/duck/kept.ts): the plans kept are made again

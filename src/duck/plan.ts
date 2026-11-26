@@ -8,8 +8,8 @@
 import { deparseSync, QuoteUtils } from "pgsql-deparser";
 import type { Node } from "libpg-query";
 import { HELD_ROW_INPUT, HELD_TYPE_INPUT } from "../api/postgres/schema.ts";
-import { heldName, heldType, isHeldArray, PARAM_ARRAYS } from "./held-types.ts";
-import { collationOids, functionsCalled, outputExpressions, textOrdering, type TreeValue } from "./pgtree.ts";
+import { CATALOG_FORMS, heldName, heldType, isHeldArray, PARAM_ARRAYS, type SourceForms } from "./held-types.ts";
+import { collationOids, functionsCalled, outputExpressions, textOrdering, textReaches, type TreeValue } from "./pgtree.ts";
 import { gapRefusal, StatementError, type DuckPlan } from "./statement.ts";
 import { parseSql } from "../api/postgres/parser.ts";
 import { analyze, catalogRows, readParameters } from "./analyze.ts";
@@ -270,10 +270,10 @@ export const CITEXT_HELD = "WITH RECURSIVE held(oid) AS (SELECT oid FROM pg_type
 /**
  * A statement's parameter values as DuckDB must read them: what Postgres's input function made of each (readParameters,
  * src/duck/analyze.ts), written back in a form DuckDB reads to the same value. A value Postgres refuses is refused with
- * its error (`'1.5'` for a smallint: 22P02).
+ * its error (`'1.5'` for a smallint: 22P02). A value of a held type is written as the source writes it (`forms`, issue 1198).
  */
 export async function duckParameters(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, oids: readonly number[], values: readonly (string | null)[],
-  under: SessionState): Promise<(string | null)[]> {
+  under: SessionState, forms: SourceForms = CATALOG_FORMS): Promise<(string | null)[]> {
   const read = await readParameters(catalog, oids, values, under);
   if ("refused" in read) {
     const f = read.refused;
@@ -292,7 +292,7 @@ export async function duckParameters(catalog: (bytes: Uint8Array) => Promise<Uin
     if (oid === 1082) return datumText(1082, le(BigInt(text), 4));
     if (oid === 1114 || oid === 1184) return datumText(oid, le(BigInt(text), 8));
     if (oid === 1186) { const [m, d, us] = text.split(" "); return `${m} months ${d} days ${us} microseconds`; }
-    return text;
+    return forms.written(oid, text);
   };
   return values.map((v, i) => {
     const r = read.values[i];
@@ -441,6 +441,8 @@ export interface PlanOptions {
   /** false: no join reads a reference's hidden integer keys (src/duck/reference-keys.ts), the plan a statement that
    *  reads them runs where a row is not numbered (`PlannedSql.numbers`) */
   numbers?: boolean;
+  /** how the source writes a held type's text where the catalog Postgres writes it otherwise (src/duck/held-types.ts) */
+  forms?: SourceForms;
 }
 
 /** The catalog declares a type the source made with nothing over it (`PgColumn.made`), so what its analysis says is not
@@ -465,13 +467,21 @@ async function madeTypeRefusal(catalog: Parameters<typeof catalogRows>[0], code:
  * C.UTF-8's rules, never the source's ctype): the synced data's where its RUN answers the statement, which the caller
  * decides (src/api/postgres/server.ts `answersCase`), since what the catalog answered before is kept where the synced
  * data's plan or run fails.
+ * "form" (issue 1198): it holds a value of a type whose text the source writes otherwise than the catalog (`forms`, a
+ * pg_lsn on Postgres 19) that may reach the answer as text (`textReaches`): planned for the synced data, which writes it
+ * as the source does, and refused like any other. "form-values": every such value is read only by a boolean or a
+ * numeric (`SELECT pg_lsn '0/2' - pg_lsn '0/1'`), which the catalog answers as the source would: the synced data's
+ * where its run answers it, else the catalog's, as "case".
  */
-export async function ordersText(o: { catalog: (bytes: Uint8Array) => Promise<Uint8Array>; text: string; paramOids: readonly number[]; under: SessionState; collations: CollationResolver; bindable: boolean }): Promise<"order" | "case" | null> {
+export async function ordersText(o: { catalog: (bytes: Uint8Array) => Promise<Uint8Array>; text: string; paramOids: readonly number[]; under: SessionState; collations: CollationResolver; bindable: boolean;
+  forms?: SourceForms }): Promise<"order" | "case" | "form" | "form-values" | null> {
   const analysis = await analyze(o.catalog, o.text, o.paramOids, o.under);
   if ("refused" in analysis) return null;
   // the analysis as the session runs the statement: a simple Query binds no parameter, so one naming `$1` is Postgres's
   // 42P02, which the catalog answers (the analysis above is a Parse's, which would infer its type)
   if (!o.bindable && analysis.params.length > 0) return null;
+  const differs = o.forms?.differs ?? CATALOG_FORMS.differs;
+  if (differs.size > 0 && [...analysis.types.values()].some((ts) => ts.some((t) => differs.has(t.type)))) return textReaches(analysis.tree, differs) ? "form" : "form-values";
   const oids = collationOids(analysis.tree);
   if (oids.size === 0) return null;
   let resolved: StatementCollations;
@@ -551,7 +561,7 @@ async function heldRefusal(catalog: Parameters<typeof catalogRows>[0], tree: Tre
  *  `walls`: `text` is the statement with its filtered reads in place (expandRowFilters), each of which the wall ends */
 export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   const { catalog, text, stmt, base, paramOids, searchPath, timeZone, dateStyle = "ISO, MDY", collations: resolver, verified, userTypes = new Map<string, number>(), copies = () => [],
-    depth = 0, kept = null, wireBound = false, boundPaths = new Map<number, string>(), grants, walls = null, relations, outputs = false, numbers = true } = options;
+    depth = 0, kept = null, wireBound = false, boundPaths = new Map<number, string>(), grants, walls = null, relations, outputs = false, numbers = true, forms = CATALOG_FORMS } = options;
   const started = performance.now();
   const under: SessionState = { searchPath, timeZone, dateStyle };
   const analysis = await analyze(catalog, text, paramOids, under);
@@ -698,7 +708,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   // its columns read by a `*` included, whichever module writes it (the rewrite, the late select list, the libc bounds)
   const own = ownPrefix([stmt, analysis.tree], walls?.written ?? []);
   const analysed = performance.now();
-  const rewritten = (l = lookup, sc = scales, bu = buckets, nb = numbered): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, typeNames, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts, boundPaths, scales: sc, buckets: bu, numbered: nb, own, rows: copiedRows(copies(), searchSchemas(searchPath)) });
+  const rewritten = (l = lookup, sc = scales, bu = buckets, nb = numbered): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, typeNames, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts, boundPaths, scales: sc, buckets: bu, numbered: nb, own, rows: copiedRows(copies(), searchSchemas(searchPath)), forms });
   try {
     ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams, wholeNumericArrays, numbers: numberedReads } = rewritten());
     // the oracle's (`eager`): every read stored before the plan is made, and the plan made again over them

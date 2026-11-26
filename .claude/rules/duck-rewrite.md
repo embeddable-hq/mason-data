@@ -632,6 +632,12 @@ paths:
 - **A literal or a parameter of a held type is Postgres's text of it** (`pgEvalSync`, `readParameters`), so `'0800.2b01.0203'`
   equals the column. A money's text is the source's lc_monetary's, which no other Postgres writes, so its literal
   is refused (`literal: false`).
+- **A literal or a parameter of a held type is written as the SOURCE writes it** (`SourceForms`, src/duck/held-types.ts,
+  from the version the start reads; issue 1198). Why: Postgres 19 writes a `pg_lsn` as `0/016B3748` where the catalog's
+  18 writes `0/16B3748`, so `=` found no row and `<>` every row. A statement of no table holding such a type is the
+  synced data's (`ordersText`'s "form"). Where only a boolean or a numeric reads it ("form-values", `textReaches`),
+  the catalog answers when the synced data's run fails, as for "case".
+  ("A source's text form of a type")
 - **An array parameter is read by Postgres's own array_in, never by the engine's cast of its text** (issue 983:
   node-pg binds `'{"1","3"}'`, which DuckDB's cast cannot read). `PARAM_ARRAYS` (src/duck/held-types.ts) is the one
   list: `readParameters` reads the value in the catalog into the JSON of its elements' texts, `param` binds it as a

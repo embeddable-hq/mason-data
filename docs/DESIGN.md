@@ -910,6 +910,29 @@ a function Postgres has, and the rewrite answered the length of its text. A lite
 lc_monetary's. And pgjdbc asks for `timetz`, `point` and `box` in binary once a statement has run five times, which a BI
 tool's repeated query does: those three have their binary form, and any other is refused by name.
 
+### A source's text form of a type (issue 1198, 2026-11-26)
+
+A trial against Postgres 19.0 found that 19 writes a `pg_lsn`'s low half as 8 hex digits (`0/016B3748`, `1/00000000`),
+where 18 writes `0/16B3748` and `1/0`. Its release notes don't say so. The copy holds the source's text of a held type,
+and a literal is the catalog Postgres's text of it. The catalog is PGlite 18, so on a 19 source one value had two
+spellings. `=` and `IN` found no rows, `<>` found every row, and a literal in a `VALUES` printed in 18's form. CI's
+oracle met it in all three legs when it ran against `postgres:19`.
+
+The class is a source whose text form for a type differs from the catalog Postgres's. The decision is to write a
+literal or a parameter as the source writes it (`SourceForms`, src/duck/held-types.ts), from the version the start
+reads. Each value then has one text in the copy and in the statement, so comparing the text compares the value. This
+keeps every answer main gave on an 18 source, where nothing changes. Comparing by a key in the engine instead would
+have needed the same rewrite at every reader (`=`, IN, a join, DISTINCT, GROUP BY, a set operation), and the output
+would still need the source's form.
+
+A statement of no table is the catalog's, which prints its own form. So one that holds a `pg_lsn` is the synced
+data's on such a source (`ordersText`'s "form"). One whose `pg_lsn` is read only by a boolean or a numeric
+(`pg_lsn '0/2' - pg_lsn '0/1'`) is the same under either form, and stays the catalog's where the synced data cannot
+answer it. A value of every other built-in held type was compared between 18 and 19, and only `pg_lsn` differs.
+
+What it does not cover: a table synced before its source moved from 18 to 19 keeps 18's text in every row no change
+has synced since, beside 19's in the rest. Mason does not detect that.
+
 ### The names Mason invents (issue 1024, 2026-11-16)
 
 The rewrite writes names of its own into the SQL it sends the engine. Each was a fixed `__mason_…` name, and a source
