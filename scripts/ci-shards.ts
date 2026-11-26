@@ -46,39 +46,45 @@ export type Kind = keyof typeof SHARDS;
 export const isKind = (k: string | undefined): k is Kind => k === "unit" || k === "rest" || k === "oracle";
 
 /**
- * Seconds of test time on CI's runner, to balance the REST shards: each file's top-level tests summed from the rest
- * shards' logs of runs 44709284849 and 44720915403 (the larger of the two, or the older table's where larger). Only the
- * files that matter are here: a stale number costs balance, never coverage, and a file not listed counts as
- * `REST_UNLISTED`, so a new one lands in the lightest shard. The unit shards are weighed by
+ * Seconds of CI's runner time, to balance the REST shards: each file's span in a rest shard's log, from the previous
+ * file's last test line to its own last test line. So a file's load and its hooks count, not only its top-level tests
+ * (cli-catalog-read's `before` takes a minute). The largest of 11 runs of 26 November 2026, from 45878942817 to
+ * 45908812271, main's 45892390399 and 45908604653 among them: a runner's draw moves a file's time by up to a half, and
+ * a shard must fit the slow draw. Only the files that matter are here: a stale number costs balance, never coverage, and
+ * a file not listed counts as `REST_UNLISTED`, so a new one lands in the lightest shard. The unit shards are weighed by
  * tests/fixtures/unit-weights.json.
  */
 const REST_WEIGHTS: Readonly<Record<string, number>> = {
-  "tests/integration/cli-columns-change.itest.ts": 395,
-  "tests/integration/cli-column-identity.itest.ts": 367,
-  "tests/integration/duck-generated.itest.ts": 335,
-  "tests/integration/duck-poll.itest.ts": 280,
-  "tests/integration/cli-catalog-read.itest.ts": 245,
-  "tests/integration/duck-stream.itest.ts": 223,
-  "tests/integration/duck-pool.itest.ts": 219,
-  "tests/integration/cli-upgrade.itest.ts": 194,
-  "tests/integration/cli-entry-hold.itest.ts": 570,
-  "tests/integration/duck-secret.itest.ts": 160,
-  "tests/integration/duck-libc-read.itest.ts": 155,
-  "tests/integration/cli-case-names.itest.ts": 84,
-  "tests/integration/cli-sources.itest.ts": 82,
-  "tests/integration/cli-catalog-pooler.itest.ts": 81,
-  "tests/integration/cli-database-notes.itest.ts": 79,
-  "tests/integration/duck-serve.itest.ts": 74,
-  "tests/integration/duck-key-lookup.itest.ts": 54,
-  "tests/integration/duck-reference-keys.itest.ts": 47,
+  "tests/integration/cli-entry-hold.itest.ts": 650,
+  "tests/integration/cli-columns-change.itest.ts": 633,
+  "tests/integration/cli-column-identity.itest.ts": 496,
+  "tests/integration/duck-generated.itest.ts": 331,
+  "tests/integration/duck-poll.itest.ts": 319,
+  "tests/integration/cli-catalog-read.itest.ts": 311,
+  "tests/integration/duck-stream.itest.ts": 253,
+  "tests/integration/duck-pool.itest.ts": 229,
+  "tests/integration/cli-table-rename.itest.ts": 225,
+  "tests/integration/cli-upgrade.itest.ts": 222,
+  "tests/integration/duck-secret.itest.ts": 204,
+  "tests/integration/duck-libc-read.itest.ts": 198,
+  "tests/integration/cli-catalog-pooler.itest.ts": 163,
+  "tests/integration/cli-database-notes.itest.ts": 139,
+  "tests/integration/cli-case-names.itest.ts": 97,
+  "tests/integration/cli-sources.itest.ts": 94,
+  "tests/integration/duck-serve.itest.ts": 81,
+  "tests/integration/duck-key-lookup.itest.ts": 78,
+  "tests/integration/duck-reference-keys.itest.ts": 55,
+  "tests/integration/duck-rewrite.itest.ts": 54,
+  "tests/integration/duck-reference-keys-stale.itest.ts": 53,
   "tests/integration/duck-hidden-names.itest.ts": 47,
-  "tests/integration/duck-reference-keys-stale.itest.ts": 39,
-  "tests/integration/duck-compact.itest.ts": 28,
-  "tests/integration/duck-rewrite.itest.ts": 24,
-  "tests/integration/duck-bom.itest.ts": 18,
-  "tests/integration/cli-source-role.itest.ts": 17,
+  "tests/integration/duck-compact.itest.ts": 31,
+  "tests/integration/cli-source-role.itest.ts": 26,
+  "tests/integration/duck-plain-numeric.itest.ts": 23,
+  "tests/integration/duck-time-bucket.itest.ts": 21,
+  "tests/integration/duck-bom.itest.ts": 19,
+  "tests/integration/duck-stop.itest.ts": 19,
   "tests/integration/duck-json-paths.itest.ts": 16,
-  "tests/integration/duck-plain-numeric.itest.ts": 15,
+  "tests/integration/duck-table-rename.itest.ts": 9,
 };
 const REST_UNLISTED = 3;
 /** The executor's stress tests fill every core they get: one to a shard, before anything else is placed. */
