@@ -23,6 +23,7 @@ import * as syncModule from "../../src/duck/sync.ts";
 import { connectSource, parseSource, readTables, type Source, type SourceTable } from "../../src/cli/preflight.ts";
 import { addedTables, parseSourceText } from "../../src/cli/sources.ts";
 import { heldCopy } from "./held-copy.ts";
+import { checkpoint } from "./checkpoint.ts";
 
 // read from the module, not imported by name: the file loads at a commit without them (scripts/fails-without.ts)
 const { PollRefused } = syncModule as unknown as { PollRefused: typeof import("../../src/duck/sync.ts").PollRefused };
@@ -1180,7 +1181,7 @@ test("a copy stores each text column by a sample of its values: the dictionary f
     void sync.setTables([ORDERS]);
     await sync.once();
     assert.deepEqual(sync.state().map((s) => [s.source, s.phase, s.error]), [["public.orders", "copied", null]], logged.join("\n"));
-    await store.writer.run("CHECKPOINT");
+    await checkpoint(sync, store);
     // the status and the note short, the label long but of 40 values: the dictionary; each JSON document long and its
     // own: zstd; a column with no value sampled: the instance's, named nowhere
     assert.deepEqual(await methods(store), BY_COLUMN, logged.join("\n"));
@@ -1190,7 +1191,7 @@ test("a copy stores each text column by a sample of its values: the dictionary f
     // ROWS THE POLL WRITES: new ones and changed ones, then a checkpoint
     psql(url, `INSERT INTO orders ${values(ROWS + 1, ROWS + 150_000)}; UPDATE orders SET status = 'paid', note = 'changed' WHERE id % 50 = 0`);
     await sync.once();
-    await store.writer.run("CHECKPOINT");
+    await checkpoint(sync, store);
     assert.deepEqual(await methods(store), BY_COLUMN, "every row group the poll wrote keeps each column's method");
     await same(store, "a poll");
   } finally { await sync.stop(); await store.close(); }
@@ -1202,7 +1203,7 @@ test("a copy stores each text column by a sample of its values: the dictionary f
     void sync.setTables([ORDERS]);
     psql(url, `INSERT INTO orders ${values(ROWS + 150_001, ROWS + 200_000)}`);
     await sync.once();
-    await store.writer.run("CHECKPOINT");
+    await checkpoint(sync, store);
     assert.match(await definition(store), DEFINED);
     assert.deepEqual(await methods(store), BY_COLUMN);
     await same(store, "a restart and a poll");
@@ -1240,7 +1241,7 @@ test("a copy keeps zstd for a jsonb of large documents Postgres stored compresse
     void sync.setTables([CFG]);
     await sync.once();
     assert.deepEqual(sync.state().map((s) => [s.source, s.phase, s.error]), [["public.cfg", "copied", null]], logged.join("\n"));
-    await store.writer.run("CHECKPOINT");
+    await checkpoint(sync, store);
     assert.deepEqual((await store.writer.runAndReadAll(`SELECT column_name, string_agg(DISTINCT compression, ',' ORDER BY compression) FROM pragma_storage_info('public.cfg') ` +
       `WHERE column_name IN ('doc', 'small', 'payload') AND segment_type <> 'VALIDITY' GROUP BY column_name ORDER BY column_name`)).getRowsJS(), [["doc", "ZSTD"], ["payload", "ZSTD"], ["small", "DICT_FSST"]], logged.join("\n"));
     assert.equal(String((await store.writer.runAndReadAll("SELECT count(DISTINCT doc) || '/' || count(*) FROM public.cfg")).getRowsJS()[0]![0]), `5/${ROWS}`);
@@ -2002,7 +2003,7 @@ test("five tables added together, one wide of two jsonb columns, sync under a lo
     assert.deepEqual(sync.state().map((s) => [s.source, s.phase, s.error]).sort(), tables.map((t) => [t.source, "copied", null]).sort(), said);
     const groups = Number((await store.writer.runAndReadAll("SELECT count(DISTINCT row_group_id) FROM pragma_storage_info('public.wide')")).getRowsJS()[0]![0]);
     assert.ok(groups > 3, `the wide table's chunks are row groups of their own: ${groups}`);
-    await store.writer.run("CHECKPOINT");
+    await checkpoint(sync, store);
     for (const t of tables) {
       assert.equal(String((await store.writer.runAndReadAll(`SELECT count(*) FROM public.${t.table}`)).getRowsJS()[0]![0]), await psqlAsync(url, `SELECT count(*) FROM ${t.table}`), `${t.source}\n${said}`);
     }
@@ -2042,7 +2043,7 @@ test("a table of ~100 KB values synced one heap page a chunk under 128MB, and a 
     await sync.once();
     const said = logged.join("\n");
     assert.deepEqual(sync.state().map((s) => [s.source, s.phase, s.error]), [["public.big100", "copied", null]], said);
-    await store.writer.run("CHECKPOINT");
+    await checkpoint(sync, store);
     assert.equal(String((await store.writer.runAndReadAll("SELECT count(*) FROM public.big100")).getRowsJS()[0]![0]), "4000", said);
     assert.deepEqual(crashed, [], said);
   } finally { await sync.stop(); await store.close(); }

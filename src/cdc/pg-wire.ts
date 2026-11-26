@@ -461,10 +461,11 @@ async function transport(o: PgConnectOptions, hold: (s: net.Socket | tls.TLSSock
     if (answer === "S") {
       const verify = mode === "verify-ca" || mode === "verify-full";
       sock = await new Promise<tls.TLSSocket>((resolve, reject) => {
-        const t = tls.connect({
-          socket: raw, rejectUnauthorized: verify,
-          ...(mode === "verify-full" ? { servername: o.host } : { checkServerIdentity: () => undefined }),
-        });
+        let t: tls.TLSSocket;
+        // tls.connect can throw on its options (Node 26 refuses an IP address as the servername, which this sent under
+        // verify-full before tlsName): the connect fails with that error, and the socket under it is not left open
+        try { t = tls.connect({ socket: raw, rejectUnauthorized: verify, ...tlsName(o.host, mode === "verify-full") }); }
+        catch (e) { raw.destroy(); reject(e as Error); return; }
         hold(t);
         t.once("secureConnect", () => resolve(t));
         t.once("error", reject);
@@ -475,6 +476,22 @@ async function transport(o: PgConnectOptions, hold: (s: net.Socket | tls.TLSSock
     }
   }
   return sock;
+}
+
+/**
+ * THE SERVER'S NAME IN THE TLS HANDSHAKE, as libpq sends it (`sslsni=1`, its default since Postgres 14). The name goes
+ * out as SNI under every sslmode that uses TLS, whenever the host is a DNS name. An IP literal sends none, as libpq
+ * skips it and SNI may not carry one. Neon's proxy, and other poolers and proxies, route a connection by this name, and
+ * refuse one that sends none (issue 1193).
+ *
+ * Sending the name never changes what is verified. Only `verify-full` checks the certificate names the host, and it
+ * checks `host` itself, with or without SNI. Every other mode checks no name.
+ */
+export function tlsName(host: string, verifyName: boolean): Pick<tls.ConnectionOptions, "servername" | "checkServerIdentity"> {
+  const sni = net.isIP(host) === 0 ? { servername: host } : {};
+  return verifyName
+    ? { ...sni, checkServerIdentity: (_name, cert) => tls.checkServerIdentity(host, cert) }
+    : { ...sni, checkServerIdentity: () => undefined };
 }
 
 /** `16/B374D848` -> its 64-bit position; throws on anything else. */
