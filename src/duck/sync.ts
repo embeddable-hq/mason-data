@@ -2436,7 +2436,12 @@ export class Sync {
     if (ask.length) {
       const look = this.onHeldLook(ask).then(() => undefined, (e: unknown) => {
         this.log(`${ask.join(", ")}: held by its entry, and could not be looked at again on the database (looked at again at its next look): ${this.errorText(e)}`);
-      }).finally(() => { for (const s of ask) this.heldLooking.delete(s); });
+      }).finally(() => {
+        for (const s of ask) this.heldLooking.delete(s);
+        // ITS NEXT LOOK TIMED (the fourth review of PR 1091): a pass that ended while it looked left it out of the next
+        // pass's time (`heldLooks`), and with no other polled table due no pass was timed, so it was never looked at again
+        this.rearm();
+      });
       for (const s of ask) this.heldLooking.set(s, look);
     }
     await Promise.all(sources.flatMap((s) => this.heldLooking.get(s) ?? []));
