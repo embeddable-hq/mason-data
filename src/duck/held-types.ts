@@ -71,6 +71,85 @@ export const PARAM_ARRAYS: ReadonlyMap<number, number> = new Map([
   [1182, 1082], [1115, 1114], [1185, 1184], [1009, 25], [1015, 1043],
 ]);
 
+/**
+ * THE SOURCE'S TEXT OF A HELD TYPE (issue 1198).
+ *
+ * THE CLASS: a source whose text form for a type differs from the catalog Postgres's. The copy holds the source's text
+ * of a value, and a literal or a parameter is read by the catalog Postgres (PGlite 18), which writes it in its own form.
+ * Postgres 19 writes a pg_lsn's low half as 8 hex digits (`0/016B3748`), where 18 writes `0/16B3748`, so on a 19 source
+ * one value had two spellings: `=` found no row, `<>` every row, and a literal printed in 18's form.
+ *
+ * THE DECISION: a literal or a parameter of a held type is written as the source writes it (`written`), from the
+ * source's version read at the start. So each value has one text, in the copy and in the statement, and the text
+ * compares as the value does. A statement of no table stays the catalog's, which writes such a value in its own form:
+ * one that would print a constant whose text differs (`constDiffers`) is refused by name, `source-text-form`
+ * (src/duck/plan.ts `ordersText`; the owner's decision on PR 1201, after the synced data answered such statements'
+ * other values wrongly).
+ *
+ * Postgres 19 writes every other built-in held type's text as 18 does: a value of each was compared, 18 against 19.
+ */
+export interface SourceForms {
+  /** the types (and their arrays) whose text the source writes otherwise than the catalog Postgres */
+  readonly differs: ReadonlySet<number>;
+  /** a value of type `oid` (or its array) as the source writes it, from the catalog Postgres's text of it */
+  written(oid: number, text: string): string;
+  /** whether a constant of type `oid`, by its datum's bytes as the catalog holds it, has a text the source writes
+   *  otherwise than the catalog (true where the bytes cannot be read) */
+  constDiffers(oid: number, bytes: readonly number[] | null): boolean;
+}
+
+/** a source that writes every type as the catalog Postgres does */
+export const CATALOG_FORMS: SourceForms = { differs: new Set(), written: (_oid, text) => text, constDiffers: () => false };
+
+const PG_LSN = 3220, PG_LSN_ARRAY = 3221;
+/** the types whose text a source may write otherwise than the catalog Postgres, by name (src/api/postgres/translate.ts
+ *  `namesFormType` reads a statement of no table for them) */
+export const FORM_TYPES: ReadonlySet<string> = new Set(["pg_lsn"]);
+/** whether a Postgres of this `server_version_num` writes a pg_lsn's low half as 8 hex digits (Postgres 19's `%X/%08X`) */
+const lsnPadded = (version: number): boolean => version >= 190000;
+/** the catalog Postgres is 18, which writes `%X/%X` (`tests/duck-held-types.test.ts` holds it to the catalog) */
+export const CATALOG_LSN_PADDED = false;
+/** each pg_lsn in a value's text (a pg_lsn's, or its array's, whose elements are never quoted), in the `padded` form */
+const lsnWritten = (text: string, padded: boolean): string =>
+  text.replace(/\b([0-9A-Fa-f]{1,8})\/([0-9A-Fa-f]{1,8})\b/g, (_, hi: string, lo: string) => `${hi}/${padded ? lo.padStart(8, "0") : lo.replace(/^0+(?=.)/, "")}`);
+
+/** the source's forms, by its `server_version_num` (null where none is known, as in a unit test: the catalog's own) */
+export function sourceForms(version: number | null): SourceForms {
+  if (version === null || lsnPadded(version) === CATALOG_LSN_PADDED) return CATALOG_FORMS;
+  const padded = lsnPadded(version);
+  return { differs: new Set([PG_LSN, PG_LSN_ARRAY]), written: (oid, text) => oid === PG_LSN || oid === PG_LSN_ARRAY ? lsnWritten(text, padded) : text,
+    constDiffers: (oid, bytes) => oid === PG_LSN ? lsnLowsOf(bytes, false)?.some(short) ?? true : oid === PG_LSN_ARRAY ? lsnLowsOf(bytes, true)?.some(short) ?? true : false };
+}
+
+/** a pg_lsn's text is the same in both forms where its low half has 8 hex digits */
+const short = (low: number): boolean => low < 0x10000000;
+const int32 = (b: readonly number[], at: number): number => ((b[at] ?? 0) | ((b[at + 1] ?? 0) << 8) | ((b[at + 2] ?? 0) << 16) | ((b[at + 3] ?? 0) << 24)) >>> 0;
+/**
+ * The low halves of a pg_lsn datum, or of a pg_lsn[]'s elements, as the catalog (little-endian) holds them: a pg_lsn
+ * is 8 bytes by value; an array is array.h's varlena (its header, ndim, dataoffset, elemtype, the dims and lower
+ * bounds, the null bitmap where dataoffset is set, then each element aligned to 8 bytes). Null where it cannot be read.
+ */
+function lsnLowsOf(b: readonly number[] | null, array: boolean): number[] | null {
+  if (b === null) return null;
+  if (!array) return b.length === 8 ? [int32(b, 0)] : null;
+  if (b.length < 16 || (b[0]! & 3) !== 0 || int32(b, 12) !== PG_LSN) return null;
+  const ndim = int32(b, 4), offset = int32(b, 8);
+  if (ndim === 0) return [];
+  if (ndim > 6 || b.length < 16 + 8 * ndim) return null;
+  let count = 1;
+  for (let d = 0; d < ndim; d++) count *= int32(b, 16 + 4 * d);
+  const bitmap = 16 + 8 * ndim;
+  let at = offset !== 0 ? offset : (bitmap + 7) & ~7;
+  const out: number[] = [];
+  for (let i = 0; i < count; i++) {
+    if (offset !== 0 && (((b[bitmap + (i >> 3)] ?? 0) >> (i & 7)) & 1) === 0) continue;
+    if (at + 8 > b.length) return null;
+    out.push(int32(b, at));
+    at += 8;
+  }
+  return out;
+}
+
 /** a time written in the session's zone, which the copy's text cannot be: written again where the statement executes */
 export const ZONED_HELD: ReadonlyMap<number, string> = new Map([[3910, "tstzrange"], [4534, "tstzmultirange"]]);
 

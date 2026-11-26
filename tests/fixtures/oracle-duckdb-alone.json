@@ -1,7 +1,7 @@
 {
-  "statements": 8323,
+  "statements": 8330,
   "mason": {
-    "exact": 7796,
+    "exact": 7803,
     "decided": 46,
     "refused": 481,
     "differs": 0
@@ -9,9 +9,9 @@
   "duckdb": {
     "exact": 1952,
     "name": 1559,
-    "refused": 1961,
-    "value": 1218,
-    "rows": 637,
+    "refused": 1968,
+    "value": 1217,
+    "rows": 638,
     "text": 86,
     "other": 910
   },
@@ -94,7 +94,7 @@
       }
     },
     "everyAsk": {
-      "asked": 114073,
+      "asked": 114165,
       "refused": {
         "array-lower-bound": { "planted": 0, "natural": 2 },
         "array-remove-type": { "planted": 3, "natural": 0 },
@@ -180,7 +180,7 @@
   "measured": {
     "what": "the copy phase of tests/integration/duck-oracle.itest.ts, each statement as written to a plain DuckDB connection over the same copy",
     "machine": "linux x64",
-    "postgres": "PostgreSQL 18.7 (Debian 18.7-1.pgdg13+2) on x86_64-pc-linux-gnu",
+    "postgres": "PostgreSQL 18.7 (Debian 18.7-1.pgdg13+5) on x86_64-pc-linux-gnu",
     "collation": "en_US.utf8 (c)",
     "shapes": true
   }

@@ -335,6 +335,75 @@ function constTextArray(v: TreeNode): ReadonlyArray<string | null> | null | unde
 }
 
 const BOOL = 16;
+/**
+ * WHETHER A STATEMENT PRINTS A CONSTANT WHOSE TEXT THE SOURCE WRITES OTHERWISE (issue 1198, the owner's decision on
+ * PR 1201): a constant of one of `types` that `differs` (on a Postgres 19 source, a pg_lsn whose low half has fewer
+ * than 8 hex digits), in a statement the catalog Postgres answers in its own form.
+ * - Printed: the constant is carried to where its text is read. It is carried through the nodes that pass a value on
+ *   (CASE, COALESCE, GREATEST, NULLIF, an array, a subscript). Its text is read by an output of the statement, or by
+ *   an expression whose value holds text (`TEXT_HOLDING`: `::text`, to_json, a row, a type a database made).
+ * - Not printed: an expression of any other type reads it (`=`, `<`, IN, BETWEEN, `pg_lsn - pg_lsn`, pg_typeof,
+ *   pg_column_size), or arithmetic makes a new value of it (`pg_lsn + 1`). Either answer is the same under both forms.
+ * - Through a VALUES list, a subquery's output or an aggregate's argument, the constant counts as printed where some
+ *   value of `types` reaches the statement's output, or is read as text.
+ */
+export function printsDiffering(tree: TreeValue, types: ReadonlySet<number>, differs: (c: TreeNode) => boolean): boolean {
+  const parent = new Map<TreeNode, TreeNode | null>();
+  const consts: TreeNode[] = [];
+  let top: TreeNode | null = null;
+  const walk = (v: TreeValue, up: TreeNode | null): void => {
+    if (Array.isArray(v)) { for (const x of v) walk(x, up); return; }
+    if (!isNode(v)) return;
+    if (top === null && v._node === "QUERY") top = v;
+    parent.set(v, up);
+    if (v._node === "CONST" && v.constisnull !== "true" && types.has(num(v.consttype) ?? -1) && differs(v)) consts.push(v);
+    for (const [k, x] of Object.entries(v)) if (k !== "_node") walk(x, v);
+  };
+  walk(tree, null);
+  if (consts.length === 0) return false;
+  const of = (v: TreeValue): boolean => isNode(v) && types.has(exprType(v)?.type ?? -1);
+  const outputs = new Set<TreeNode>(top === null ? [] : (Array.isArray((top as TreeNode).targetList) ? (top as TreeNode).targetList as TreeValue[] : []).filter((x): x is TreeNode => isNode(x) && x.resjunk !== "true"));
+  // where a value of `types` reaches the answer as text: an output of the statement, or an expression of another kind
+  const textRead = (): boolean => {
+    for (const te of outputs) if (of(te.expr ?? null)) return true;
+    for (const n of parent.keys()) {
+      const own = exprType(n)?.type;
+      if (own === undefined || !holdsText(own) || types.has(own)) continue;
+      if (Object.entries(n).some(([k, x]) => k !== "_node" && !(n._node === "CASEEXPR" && k === "arg") && (Array.isArray(x) ? x.some(of) : of(x)))) return true;
+    }
+    return false;
+  };
+  let through = false;
+  for (const c of consts) {
+    let child: TreeNode = c, p = parent.get(c) ?? null;
+    for (;;) {
+      if (p === null || p._node === "QUERY" || p._node === "RANGETBLENTRY") { through = true; break; }
+      // `CASE x WHEN …`: x is compared with each WHEN, never printed
+      if (p._node === "CASEEXPR" && p.arg === child) break;
+      if (p._node === "TARGETENTRY") {
+        if (outputs.has(p)) return true;
+        if (p.resjunk !== "true") through = true;
+        break;
+      }
+      const t = exprType(p)?.type;
+      if (t === undefined || types.has(t)) {
+        if (t !== undefined && (p._node === "OPEXPR" || p._node === "FUNCEXPR")) break;
+        child = p;
+        p = parent.get(p) ?? null;
+        continue;
+      }
+      if (!holdsText(t)) break;
+      return true;
+    }
+  }
+  return through && textRead();
+}
+/** the built-in types whose value holds a value's text (text, varchar, bpchar, name, json, jsonb, unknown, record,
+ *  cstring, xml and their arrays); a type a database made (from 16384) counts too, since a composite's text holds its
+ *  fields' */
+const TEXT_HOLDING = new Set([25, 1043, 1042, 19, 114, 3802, 705, 2249, 2275, 142, 1009, 1015, 1014, 1003, 199, 3807, 2287, 1263, 143]);
+const holdsText = (t: number): boolean => TEXT_HOLDING.has(t) || t >= 16384;
+
 /** The type an expression node yields: exprType (nodeFuncs.c), for the nodes a SELECT's expressions are made of. */
 export function exprType(n: TreeNode): { type: number; typmod: number } | null {
   const t = (f: string, m?: string): { type: number; typmod: number } | null => {

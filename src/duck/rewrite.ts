@@ -26,7 +26,7 @@
  * answered differently. The rewritten tree is printed with pgsql-deparser; the server parses the printed text again
  * and refuses the statement unless it reads back as exactly this tree (`sameTree`), so a printing gap can only refuse.
  */
-import { HELD, heldType, isHeldArray, PARAM_ARRAYS, ZONED_HELD } from "./held-types.ts";
+import { CATALOG_FORMS, HELD, heldType, isHeldArray, PARAM_ARRAYS, ZONED_HELD, type SourceForms } from "./held-types.ts";
 import { pgEvalSync } from "./pg-eval.ts";
 import type { GapId, PostgresRefuses } from "./gaps.ts";
 import type { PgAnalysis } from "./analyze.ts";
@@ -299,6 +299,9 @@ class Rewriter {
    * says which parameters would fold (`pathParams`), so the listener plans it again at the Execute with the values.
    */
   boundPaths: ReadonlyMap<number, string> = new Map();
+  /** how the source writes a held type's text where the catalog Postgres writes it otherwise (src/duck/held-types.ts
+   *  `SourceForms`, issue 1198): a literal of one is written as the source writes it */
+  forms: SourceForms = CATALOG_FORMS;
   /** the plain numerics whose copy holds each value's own scale (`scaleOf`) */
   scales: ScaleLookup | null = null;
   /** the timestamptz columns whose copy holds each value's 15-minute bucket (src/duck/bucket-column.ts); null for none */
@@ -6929,10 +6932,13 @@ class Rewriter {
       // a value of a type the copy holds as its text: the text Postgres writes it as, under the session's zone (a
       // timetz with no zone of its own is at the Parse's offset, as Postgres folds it)
       if (t !== null && (t.type === TIMETZ || heldType(t.type) !== undefined) && t.type !== 26) {
-        const type = t.type === TIMETZ ? "timetz" : HELD_TYPE_NAMES.get(t.type);
+        // (an array of a type whose text the source writes otherwise: its elements as the source writes them, issue 1198)
+        const element = this.forms.differs.has(t.type) && !HELD_TYPE_NAMES.has(t.type) ? Object.entries(HELD).find(([, h]) => h.array === t.type)?.[0] : undefined;
+        const type = t.type === TIMETZ ? "timetz" : HELD_TYPE_NAMES.get(t.type) ?? (element === undefined ? undefined : `${element}[]`);
         if (type !== undefined) {
           const written = pgEvalSync(`SELECT $1::${type}::text`, [String(b.sval.sval ?? "")], this.timeZone, this.dateStyle)[0]?.[0];
-          if (written != null) return t.type === TIMETZ ? cast(strConst(written), ["timetz"]) : strConst(written);
+          // (as the source writes it, where its form is not the catalog's: a pg_lsn on Postgres 19, issue 1198)
+          if (written != null) return t.type === TIMETZ ? cast(strConst(written), ["timetz"]) : strConst(this.forms.written(t.type, written));
         }
       }
       // an inet literal as Postgres canonicalises it (`'10.3.6.45'` is `10.3.6.45/32`, as the copy stores the column)
@@ -8816,6 +8822,8 @@ export interface RewriteOptions {
   keyCounts?: ReadonlySet<number>;
   /** the values an Execute bound to the parameters read as a json path, by number (`Rewriter.boundPaths`) */
   boundPaths?: ReadonlyMap<number, string>;
+  /** how the source writes a held type's text (`Rewriter.forms`) */
+  forms?: SourceForms;
   /** the plain numerics whose copy holds each value's own scale (src/duck/scale-column.ts, src/duck/plan.ts `scaleLookup`) */
   scales?: ScaleLookup | null;
   /** the references whose keys the synced data numbers (src/duck/reference-keys.ts, src/duck/plan.ts `numberedLookup`) */
@@ -8856,11 +8864,12 @@ export interface ScaleLookup {
 }
 
 export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(), citextHeld = new Set(), typeNames = new Map(), rowTypes = new Map(), timeZone = "UTC", dateStyle = "ISO, MDY", enums = { labels: new Map(), arrays: new Map() }, kept = null,
-  wireBound = false, keyCounts = new Set(), boundPaths = new Map(), scales = null, buckets = null, numbered = null, own: prefix = ownPrefix([stmt, analysis.tree]), rows = null }: RewriteOptions):
+  wireBound = false, keyCounts = new Set(), boundPaths = new Map(), scales = null, buckets = null, numbered = null, own: prefix = ownPrefix([stmt, analysis.tree]), rows = null, forms = CATALOG_FORMS }: RewriteOptions):
   { tree: AstNode; withTies: boolean; exact: ExactColumn[]; clock: { parse?: number; exec?: number }; jsonReads: JsonRead[]; unboundedLateral: boolean; pathParams: number[]; wholeNumericArrays: number[];
     numbers: NumberedRead[] } {
   const r = new Rewriter(analysis, base, collations, userTypes, rowTypes, timeZone, dateStyle, enums, kept, keyCounts, citextHeld, typeNames);
   r.boundPaths = boundPaths;
+  r.forms = forms;
   r.scales = scales;
   r.buckets = buckets;
   r.numbered = numbered;

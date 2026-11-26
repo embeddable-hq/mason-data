@@ -649,7 +649,7 @@ async function serveMason(sourceUrl: string, database: string, memoryLimit: stri
       try { return await readLibcOrder(async (sql) => (await c.pg.query(sql)).rows, coll.collate, coll.version ?? null); } finally { c.pg.close(); }
     })).order : undefined;
     const requests = await RequestLedger.open(store, say, { days: 7 });
-    const duck = await store.listener(facts.collation, undefined, libc, () => sync.state(), sync.kept.enabled ? sync.kept : undefined);
+    const duck = await store.listener(facts.collation, undefined, libc, () => sync.state(), sync.kept.enabled ? sync.kept : undefined, { sourceVersion: facts.version });
     const server = await startPostgresApi({
       port, host: "127.0.0.1", tls: null, database, masonVersion: version, product: "mason-data", statementTimeoutMs: timeoutMs,
       // the bench's own listener, on loopback, without a password: a login is not what is measured

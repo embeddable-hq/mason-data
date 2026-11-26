@@ -2,6 +2,22 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **On a Postgres 19 source, a query that compared a `pg_lsn` column with a value gave wrong answers.** Postgres 19
+  writes a `pg_lsn` with 8 hex digits after the slash (`0/016B3748`, where 18 wrote `0/16B3748`). So `=` and `IN`
+  found no rows, and `<>` returned every row. A `pg_lsn` value written in a query, such as one in a `VALUES` list,
+  came back in 18's form. Now, in a query that reads a synced table, a `pg_lsn` value or parameter is compared and
+  printed as your database writes it, whichever form you write it in. A Postgres 18 source answers as before. Some
+  gaps remain:
+  - A `pg_lsn[]` parameter is still read as you send it.
+  - A query that reads no table is answered as before, by Mason's own Postgres 18. On Postgres 19, one that would
+    print a `pg_lsn` value with fewer than 8 digits after the slash, such as `SELECT '0/1'::pg_lsn`, is refused with
+    an error that says how to write it instead. Comparisons, the difference of two values, and values with 8 digits
+    after the slash are answered.
+  - In a query that reads no table, a `pg_lsn` bound as a parameter, or computed (`'0/1'::pg_lsn + 16`), still prints
+    in 18's form when it has fewer than 8 digits after the slash.
+  - If you upgrade your database from 18 to 19 in place, restart Mason afterwards. Rows synced before the upgrade
+    keep 18's form until they change, and no `mason sync` reads an unchanged row again. To sync every table again
+    from the start, run `mason destroy` and then `mason start`.
 - **A table synced with `sync: replication` lost the changes made to it while it was renamed on the database.** A row
   inserted, updated or deleted while the table had another name never reached the synced data, even after the table
   was renamed back and Mason restarted. All the while, `mason status` said the stream was current and `mason sync` said

@@ -245,8 +245,10 @@ export interface DuckOptions {
   parameters(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, oids: readonly number[], values: readonly (string | null)[], under: SessionState): Promise<(string | null)[]>;
   /** whether a statement of no table orders text under a collation that is not byte order ("order"), or maps case
    *  ("case": src/duck/plan.ts `ordersText`): "order" is the synced data's, never the catalog's C database's; "case" is
-   *  the synced data's where its run answers it (`Session.routed`). Absent: every such one is the catalog's */
-  ordersText?(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, text: string, paramOids: readonly number[], under: SessionState, bindable: boolean): Promise<"order" | "case" | null>;
+   *  the synced data's where its run answers it (`Session.routed`). "form": the catalog would print a constant whose
+   *  text the source writes otherwise (a short pg_lsn on Postgres 19, issue 1198): refused by name. Absent: every such
+   *  one is the catalog's */
+  ordersText?(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, text: string, paramOids: readonly number[], under: SessionState, bindable: boolean): Promise<"order" | "case" | "form" | null>;
   /** moves when what a plan is made from moves outside the schema (a stored JSON path ready or gone, src/duck/kept.ts):
    *  the plans kept are made again */
   generation?(): number;
@@ -1698,6 +1700,11 @@ class Session {
     const ask = this.server.options.duck.ordersText;
     if (t.kind !== "catalog" || t.fromless === undefined || ask === undefined) return t;
     const why = await ask((b) => this.server.catalog.run(b), text, paramOids, this.sessionState(), bindable);
+    // (the catalog is Postgres 18: on a source that writes the value otherwise, its answer would not be the source's)
+    if (why === "form") {
+      throw gapRefusal("source-text-form", "a pg_lsn whose part after the slash has fewer than 8 hex digits, in a statement that reads no table, is not supported by Mason on this database: Postgres 19 writes it with 8 digits, and Mason would write it as Postgres 18 does",
+        "select it beside a synced table, as in SELECT '0/1'::pg_lsn FROM <table> LIMIT 1, which writes it as your database does", text);
+    }
     if (why === null || why === "case" && !await this.answersCase(text, paramOids)) return t;
     return { kind: "duckdb", sql: text, names: t.fromless.names };
   }

@@ -413,7 +413,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     try { return await readLibcOrder(async (sql) => (await c.pg.query(sql)).rows, sc.collate ?? "C", sc.version ?? null, `${pgIdent(sc.schema)}.${pgIdent(sc.name)}`); } finally { c.pg.close(); }
   };
   // the sync's state of each copy, as mason start passes it (a plan reads a copy's rows from it: src/duck/late.ts)
-  const duck = await theStore.listener(facts.collation, null, libc, () => theSync.state(), theSync.kept, { ...(facts.collations === undefined ? {} : { collations: facts.collations }), readLibc });
+  const duck = await theStore.listener(facts.collation, null, libc, () => theSync.state(), theSync.kept, { ...(facts.collations === undefined ? {} : { collations: facts.collations }), sourceVersion: facts.version, readLibc });
   /**
    * DUCKDB ALONE (why a user would not just use DuckDB by itself): the same statement, as written, to
    * a plain connection of the same copy — no analysis, no rewrite, no Mason function — scored by the oracle's own

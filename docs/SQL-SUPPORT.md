@@ -20,14 +20,14 @@ each). The synced data is read-only.
 | The types: "char", a type the source made, bigint, bit, bit varying, boolean, box, bytea, character, character varying, cid, cidr, circle, date, daterange, double precision, inet, int4multirange, int4range, int8range, integer, interval, json, jsonb, jsonpath, line, lseg, macaddr, macaddr8, money, name, numeric, numrange, oid, path, pg_lsn, point, polygon, real, regclass, regtype, smallint, text, tid, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsquery, tsrange, tstzmultirange, tstzrange, tsvector, uuid, xid, xid8, xml; arrays of bigint, bit, boolean, character, character varying, cidr, date, double precision, inet, int4range, integer, interval, json, jsonb, macaddr, money, numeric, oid, point, real, smallint, text, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsvector, uuid; the source's enums and citext; a table's row | answered (93 types verified) |
 | Functions, operators, aggregates, window functions and casts | answered exactly: 256 functions, 388 operators, 97 aggregates, 58 window functions and 126 casts verified; "What is verified" below names each |
 | Transactions, SET, SHOW, the catalog (`pg_catalog`, `information_schema`) and the protocol a tool uses | answered: what a BI tool asks at connection and before a query |
-| Anything else: 63 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
+| Anything else: 64 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
 
 ## Why not DuckDB by itself
 
-DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 8,323 statements,
+DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 8,330 statements,
 each sent as written to Mason and to a plain DuckDB connection over the same synced tables (tests/integration/duck-oracle.itest.ts):
 
-| Of 8,323 statements | Mason | DuckDB alone |
+| Of 8,330 statements | Mason | DuckDB alone |
 |---|---|---|
 | answered exactly as Postgres: the rows, their text, the column names | 94% | 23% |
 | answered differently by a decision the registry lists ("Answered differently" below) | 1% | — |
@@ -55,7 +55,7 @@ Postgres did, after the first sync and after two rounds of changes. A statement 
 What is known **beyond** that list is below. A refusal names its gap in the error's detail (`Mason gap <id>`) and
 says what to write instead in its hint.
 
-## Refused (63)
+## Refused (64)
 
 A statement using one of these is refused with SQLSTATE 0A000, where Postgres would answer it.
 
@@ -107,6 +107,7 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `bc-timestamptz-zone` | a timestamptz before year 1 written in a zone other than UTC | the zone's local mean time | refused when a row holds one | SET TimeZone = 'UTC', or filter those rows out |
 | `width-bucket-forms` | width_bucket with its bounds reversed, or of an array of thresholds | answers | refused | low bound first |
 | `inet-order` | ORDER BY, <, >, min or max over an inet | orders addresses by network, then host | refused (equality, IS NULL and the value itself are answered) | sort or compare another column |
+| `source-text-form` | on a Postgres 19 database, a SELECT of no table that prints a pg_lsn literal whose part after the slash has fewer than 8 hex digits: as a column (`SELECT '0/1'::pg_lsn`, a VALUES list, min or GREATEST of such literals), or as text (`'0/1'::pg_lsn::text`, to_json) | writes it with 8 digits after the slash (`0/00000001`), as Postgres 19 does | refused: a statement of no table is answered by Mason's catalog, which is Postgres 18 and writes `0/1`. A comparison of such literals, their difference, a pg_lsn of 8 digits after the slash, and any statement that reads a synced table are answered as the database answers them. A pg_lsn parameter, or one computed (`'0/1'::pg_lsn + 16`), in a statement of no table is answered by the catalog, a short one in 18's form | select it beside a synced table (`SELECT '0/1'::pg_lsn FROM t LIMIT 1`), which writes it as the database does |
 | `held-type-compare` | what needs the type's own value of a column Mason holds as its text (money, bit, macaddr, cidr, a geometric type, a range, a tsvector, xml, a composite, an extension's type): ORDER BY, <, >, min, max, sum; a function, an operator, a cast to another type, a subscript or a field; GROUP BY or DISTINCT of a numrange, a tsquery or a tstzrange; = of a money | orders and computes by the type's own rules | refused (the value, x::text, IS NULL, count, and = and GROUP BY where equal values have one text are answered: docs/SQL-SUPPORT.md) | x::text, which sorts, groups and compares as text; or another column |
 | `binary-held-type` | a column of a type Mason holds as its text, in binary format, but a point or a box | the type's binary form | refused | ask for the column in text format |
 | `citext-forms` | GROUP BY, DISTINCT, min, max, a set operation, = ANY (an array), ALL of a subquery (`ci < ALL (SELECT …)`), a row ordered by <, <=, > or >= (`(ci, id) < ('ab', 3)`), or a row compared by <, <=, >, >= or <> with ANY of a subquery, over a citext | groups and sorts without regard to case, answering one spelling | refused (=, <>, <, >, IN (…), LIKE and ORDER BY are answered, case-insensitively) | GROUP BY lower(x), or x::text where case matters |
