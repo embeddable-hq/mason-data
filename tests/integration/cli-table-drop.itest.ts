@@ -26,7 +26,7 @@
  * writes only inside a database it creates, `it_tdrop_<random>`, drops it at the end, and runs `mason destroy` on its
  * project, so no replication slot is left behind.
  */
-import { test, type TestContext } from "node:test";
+import { test, after } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as net from "node:net";
@@ -59,7 +59,7 @@ interface Line { error: string | null; state: string | undefined; stream: string
 /** how long a case may take to settle: the run's look (30 s), a re-read and a whole read, or a held table's look (60 s) */
 const SETTLE_MS = 150_000;
 
-async function project(t: TestContext, publication: "own" | "named") {
+async function project(publication: "own" | "named") {
   const tag = `it_tdrop_${publication}_${process.pid}_${Math.floor(Math.random() * 1e6)}`;
   const dbUrl = (() => { const u = new URL(adminUrl!); u.pathname = `/${tag}`; return u.toString(); })();
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "it-tdrop-")));
@@ -76,7 +76,8 @@ async function project(t: TestContext, publication: "own" | "named") {
     return { status: r.status, stdout: r.stdout, stderr: r.stderr, json };
   };
   const ok = (r: Ran, what: string): Ran => { assert.equal(r.status, 0, `${what}:\n${r.stdout}${r.stderr}`); return r; };
-  t.after(() => {
+  // at the end of the file, as the other end-to-end tests clean up: a test that fails or times out still drops its run
+  after(() => {
     // the run and its slot first: a slot left behind holds the database's WAL for ever
     if (fs.existsSync(path.join(root, ".mason"))) {
       const s = spawnSync(process.execPath, [MAIN, "destroy", "--json"], { cwd: root, env, encoding: "utf8", timeout: 120_000 });
@@ -138,7 +139,7 @@ async function project(t: TestContext, publication: "own" | "named") {
 }
 
 test("sync: replication, Mason's own publication — a table dropped, made again or renamed into is noticed with nothing else running a pass: never said current while it serves the old rows, and synced as the new table (issue 1208)", { skip, timeout: 1_800_000 }, async (t) => {
-  const p = await project(t, "own");
+  const p = await project("own");
 
   await t.test("d1: dropped, made again and written to in one transaction, noticed by the run's own schedule", async () => {
     psql(p.dbUrl, "BEGIN; DROP TABLE d1; CREATE TABLE d1 (id int PRIMARY KEY, v text); INSERT INTO d1 VALUES (100, 'new d1 100'), (101, 'new d1 101'); COMMIT");
@@ -193,7 +194,7 @@ test("sync: replication, Mason's own publication — a table dropped, made again
 });
 
 test("sync: replication, a named publication — a table made again under its name is said as the publication's gap, never current, and synced once the publication carries it; one dropped alone is held (issue 1208)", { skip, timeout: 1_800_000 }, async (t) => {
-  const p = await project(t, "named");
+  const p = await project("named");
   /** said as the publication's gap: not synced, with the line that adds it */
   const gap = (n: string) => p.until(n, `${n} said as the publication's gap`, (l) => l.error !== null && l.error.replace(/\s+/g, " ").includes(`ALTER PUBLICATION ${p.pub} ADD TABLE public.${n};`) && l.state !== "synced" && l.stream !== "streamed");
 
