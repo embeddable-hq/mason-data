@@ -295,14 +295,44 @@ export function nameGone(oid: number | undefined, shape: string | null | undefin
   return oid !== undefined && shape === null;
 }
 
+/**
+ * WHETHER A TABLE'S NAME IS STILL THE TABLE THE RUN TOOK (issue 1208), from `Sync.placesNow`'s answer: `gone` when the
+ * name is no table (`nameGone`: renamed, moved or dropped), `other` when it is a table of another oid (dropped and made
+ * again, or another renamed into its place), null when it is its own table, or when the run never read its oid (a
+ * test's) or the name was not looked at. What a look at a replicated table decides by (`Sync.placesMoved`).
+ */
+export function placeVerdict(oid: number | undefined, p: { shape: string | null } | undefined): "gone" | "other" | null {
+  if (oid === undefined || p === undefined) return null;
+  if (nameGone(oid, p.shape)) return "gone";
+  const now = p.shape === null ? null : shapeOid(p.shape);
+  return now !== null && now !== oid ? "other" : null;
+}
+
 /** where a table whose name is no table is now, in words (`placeSql`'s answer): what the log and its event say */
 export function goneWords(t: Pick<AddedTable, "schema">, at: Place | null): string {
   if (at === null) return "no table of that name is on the database now, and the table it was is gone (dropped)";
   return `it was ${at.schema === t.schema ? "renamed" : "moved to another schema"} on the database, and is ${at.schema}.${at.table} now`;
 }
 
-/** the catch-up mark of a streamed table the stream carried under another name (`refuseStreamed`'s `renamed`) */
+/** the catch-up mark of a streamed table the stream carried under another name (`refuseStreamed`'s `renamed`), or a
+ *  look found renamed away (`placesMoved`) */
 const RENAMED_WHY = "after it was renamed on the database";
+/** the catch-up marks of a replicated table a look found dropped, or another table at its name (`placesMoved`) */
+const DROPPED_WHY = "after it was dropped on the database";
+const REPLACED_WHY = "after another table took its name on the database";
+
+/**
+ * HOW OFTEN THE REPLICATED TABLES' NAMES ARE LOOKED AT ON THE DATABASE when nothing else has looked since (issue 1208;
+ * `Sync.lookAtPlaces`). A DROP, a CREATE or a RENAME sends the stream no change, and a pass runs only when something
+ * kicks it, so a table dropped and made again under its name was never looked at again: it served its old rows as
+ * current, and the new table's rows never arrived. 30 s: such a change is noticed well inside the 120 s a streamed table
+ * promises (`REPLICATION_BEHIND_SECONDS`), and since a streamed table is current only as of the last look that answered
+ * (`streamedSyncedAt`), three looks can fail in a row (a database restarting) before it reads as behind. A look is ONE
+ * catalog query for every replicated table (`placesNow`), on the connection `databasePosition` reads the position on:
+ * no row of a table read, no lock, never a connection a table. `mason status`, `mason wait` and `mason sync` look too,
+ * at most every 5 s (`databasePosition`'s own bound).
+ */
+export const PLACE_LOOK_MS = 30_000;
 
 /** the shape `columnsChanged` reads a table again for when its name is no table (`nameGone`) */
 const GONE_SHAPE = "(no table)";
@@ -1534,6 +1564,14 @@ export class Sync {
   /** the slot's WAL as last read (`databasePosition`, at most every SLOT_READ_MS), and when */
   private slotWal: { wal: SlotWal; at: number } | null = null;
   private dbPositionRead: Promise<void> | null = null;
+  /** THE LAST LOOK AT THE REPLICATED TABLES' NAMES THAT ANSWERED (issue 1208; `lookAtPlaces`, a pass's
+   *  `prepareReplication`): when its query was sent. A streamed table is current only as of it (`streamedSyncedAt`) */
+  private placesLookedAt: number | null = null;
+  /** when the last look began, answered or not, and the next one's timer (`armPlaceLook`), and a look's failure as last
+   *  said (said once until its words change) */
+  private placesTriedAt = 0;
+  private placeTimer: TimerAt | null = null;
+  private placeLookFailed: string | null = null;
   /** THE STORED JSON PATHS (src/duck/kept.ts): every write below computes them; the plans read them */
   readonly kept: KeptJsonPaths;
   /** THE GENERATED TABLES (src/duck/generated.ts): every commit that changes a copy marks them, the rebuild queue runs them */
@@ -2613,10 +2651,15 @@ export class Sync {
   }
 
   /** a replicated table's copy is current as of its last copy or poll, or — `streamed` — the last moment the stream had
-   *  everything the database wrote (`keptOf`'s syncedAt) */
+   *  everything the database wrote (`keptOf`'s syncedAt), and no later than the last look that found its name still its
+   *  table (issue 1208, `placesLookedAt`): a drop or a table made again under its name sends the stream nothing, so the
+   *  stream having everything says nothing of it, and a look that cannot answer leaves the table behind (fail closed) */
   private streamedSyncedAt(source: string, streamed: boolean): string | null {
     const polled = this.polledAt.get(source) ?? null;
-    const at = streamed && this.streamCurrentAt !== null ? new Date(this.streamCurrentAt).toISOString() : null;
+    const t = this.tables.get(source);
+    const looked = t !== undefined && this.looksAt(t) ? this.placesLookedAt : Infinity;
+    const ms = streamed && this.streamCurrentAt !== null && looked !== null ? Math.min(this.streamCurrentAt, looked) : null;
+    const at = ms === null ? null : new Date(ms).toISOString();
     return at !== null && (polled === null || at > polled) ? at : polled;
   }
 
@@ -2719,6 +2762,8 @@ export class Sync {
       const d = this.nextPassDelay();
       if (d !== null) this.timer = timerAt(Date.now() + d, () => this.kick());
       this.wakeForBackOffs();
+      // the replicated tables' names looked at on their own schedule from here (issue 1208): a pass kicked by nothing
+      this.armPlaceLook();
     });
   }
 
@@ -2872,6 +2917,9 @@ export class Sync {
       return tables.filter((t) => this.replicated(t)).map((t) => { const p = this.streamTable(t, now, this.stream); return { table: t.source, position, state: p.state, why: p.why }; });
     };
     const polled = tables.filter((t) => !this.replicated(t));
+    // ITS NAME LOOKED AT FIRST (issue 1208): a table dropped or made again under its name sends the stream nothing, so
+    // the answer is where the stream is only once a look has seen its name is still its table (at most 5 s old)
+    if (polled.length < tables.length && this.streams()) await this.databasePosition();
     if (polled.length === 0) return { at: new Date().toISOString(), tables: [], streamed: said() };
     while (this.running !== null) await this.running;
     if (this.stopped) throw new Stopping();
@@ -2949,6 +2997,7 @@ export class Sync {
     if (this.wake !== null) { this.wake.cancel(); this.wake = null; }
     if (this.reportTimer !== null) { clearInterval(this.reportTimer); this.reportTimer = null; }
     if (this.compactTimer !== null) { this.compactTimer.cancel(); this.compactTimer = null; }
+    if (this.placeTimer !== null) { this.placeTimer.cancel(); this.placeTimer = null; }
     if (this.numbersTimer !== null) { clearTimeout(this.numbersTimer); this.numbersTimer = null; }
     // a removed table's sync being cut short (`cutShort`) is now the stop's to interrupt, with everything else
     if (this.cutTimer !== null) { clearInterval(this.cutTimer); this.cutTimer = null; }
@@ -2971,7 +3020,11 @@ export class Sync {
     interrupt();
     try {
       // none of them rejects: each says its own failure
-      await Promise.all([this.stream?.stop(), this.running, this.rebuilding, this.kept.stop(), this.generated.stop(), this.checkingCompaction]);
+      // (and the database's position and the names' look, on a connection of their own, which their timer may have
+      // opened: waited for at most CANCEL_DEADLINE_MS, so a database that does not answer never holds the stop)
+      const positionRead = this.dbPositionRead === null ? null
+        : Promise.race([this.dbPositionRead, new Promise<void>((done) => { setTimeout(done, CANCEL_DEADLINE_MS).unref(); })]);
+      await Promise.all([this.stream?.stop(), this.running, this.rebuilding, this.kept.stop(), this.generated.stop(), this.checkingCompaction, positionRead]);
       await this.writerTurn;
     } finally { clearInterval(again); }
     // the round of cancels in flight, if any, ends before the stop does (bounded by `CANCEL_DEADLINE_MS`): no connection
@@ -3445,14 +3498,19 @@ export class Sync {
       // by its oid, so Mason's own names a renamed one as it is now, never dropped from it and added back (a transaction
       // open across that could reach neither the stream nor the catch-up's poll); a dropped one is in no publication;
       // a named one is not checked for it (a gap there would say a wrong ALTER PUBLICATION … ADD TABLE)
-      const looked = tables.filter((t) => t.shape !== undefined && t.oid !== undefined && this.onColumnsChanged !== undefined);
+      // A NAME THAT IS ANOTHER TABLE NOW (issue 1208: dropped and made again, or another renamed into its place) is read
+      // again whole as that table: marked behind meanwhile, and named here by its name, so Mason's own publication
+      // carries the new table and a named one that does not is said as its gap. Both are acted on as a look's are
+      // (`placesMoved`), and this is a look: a streamed table is current as of it (`placesLookedAt`)
+      const looked = tables.filter((t) => this.looksAt(t));
+      const lookedAt = Date.now();
       const places = await this.placesNow(null, looked, pg);
+      this.placesLookedAt = lookedAt;
+      this.placesMoved(looked.filter((t) => !this.unplaced.has(t.source)), places);
       const gone = new Map<string, Place | null>();
       for (const t of looked) {
         const p = places.get(t.source);
-        if (!nameGone(t.oid, p?.shape)) continue;
-        gone.set(t.source, p?.place ?? null);
-        if (!this.unplaced.has(t.source)) this.columnsChanged(t, null, p?.place ?? null);
+        if (nameGone(t.oid, p?.shape)) gone.set(t.source, p?.place ?? null);
       }
       const named = tables.flatMap((t): AddedTable[] => {
         if (!gone.has(t.source)) return [t];
@@ -4136,12 +4194,15 @@ export class Sync {
    * behind the stream is when that matters — while it decodes a backlog. A read that fails is answered as its error.
    * THE SLOT'S WAL (`SlotWal`) is read on the same connection, at most every SLOT_READ_MS (one row of
    * pg_replication_slots): what the slot holds on the database's disk, said by `mason status` and sampled by usage.
+   * THE REPLICATED TABLES' NAMES are looked at on it too, at every read (issue 1208, `lookAtPlaces`), and a read is
+   * timed every `PLACE_LOOK_MS` when nothing else asked for one (`armPlaceLook`).
    */
   private async databasePosition(): Promise<{ lsn: bigint; at: number } | { error: string; at: number }> {
     const fresh = this.dbPosition !== null && Date.now() - this.dbPosition.at < 5_000;
     if (!fresh && this.dbPositionRead === null) {
       const slotDue = this.slotWal === null || Date.now() - this.slotWal.at >= SLOT_READ_MS;
       const slot = this.replication!.slot;
+      this.placesTriedAt = Date.now();
       this.dbPositionRead = (async () => {
         try {
           const pg = await PgConnection.connect(this.pgOptions());
@@ -4152,17 +4213,111 @@ export class Sync {
               try { this.slotWal = { wal: slotWalOf(await readSlot(pg, slot), slot, Date.now()), at: Date.now() }; }
               catch (e) { this.slotWal = { wal: { error: `the slot could not be read: ${this.errorText(e)}` }, at: Date.now() }; }
             }
+            // THE REPLICATED TABLES' NAMES, on the same connection (issue 1208): its own failure is said once, and the
+            // tables are current only as of the last look that answered
+            try { await this.lookAtPlaces(pg); }
+            catch (e) { this.placeLookSaid(e); }
           } finally { pg.close(); }
         } catch (e) {
           // answered as the status's (and the log line's) own words: the position could not be read, and why
           const m = this.errorText(e);
           this.dbPosition = { error: m, at: Date.now() };
           if (slotDue) this.slotWal = { wal: { error: `the database could not be reached: ${m}` }, at: Date.now() };
-        } finally { this.dbPositionRead = null; }
+          this.placeLookSaid(e);
+        } finally { this.dbPositionRead = null; this.armPlaceLook(); }
       })();
     }
     if (!fresh && this.dbPositionRead !== null) await Promise.race([this.dbPositionRead, new Promise<void>((done) => { setTimeout(done, 3_000).unref(); })]);
     return this.dbPosition ?? { error: "the database did not answer within 3 s", at: Date.now() };
+  }
+
+  /** a replicated table whose name a look checks (`lookAtPlaces`): one the run read the oid and shape of (a test's table
+   *  has neither), in a run that reads a table's catalog again (`onColumnsChanged`) */
+  private looksAt(t: AddedTable): boolean {
+    return t.shape !== undefined && t.oid !== undefined && this.onColumnsChanged !== undefined;
+  }
+
+  /**
+   * THE REPLICATED TABLES' NAMES LOOKED AT ON THE DATABASE (issue 1208): a DROP, a CREATE or a RENAME sends the stream no
+   * change, and a pass runs only when kicked, so nothing else would see a table dropped, made again under its name, or
+   * renamed away with no write. ONE catalog query for every replicated table, on `pg` (`placesNow`: the shape at each
+   * name and where each oid is; no lock, no row read). What it finds is acted on at once (`placesMoved`). Run by
+   * `databasePosition` on its own connection: on a schedule (`armPlaceLook`, every `PLACE_LOOK_MS`), and when `mason
+   * status`, `mason wait` or `mason sync` asks where the stream is. A table held by its entry is the held look's
+   * (`lookAtHeld`), one whose catalog is read again now is skipped until it is read.
+   */
+  private async lookAtPlaces(pg: PgConnection): Promise<void> {
+    if (this.stopped || this.replication === null) return;
+    const looked = this.replicatedTables().filter((t) => this.looksAt(t) && !this.unplaced.has(t.source) && !this.reshaping.has(t.source));
+    const at = Date.now();
+    const places = await this.placesNow(null, looked, pg);
+    if (this.stopped) return;
+    this.placesLookedAt = at;
+    this.placeLookFailed = null;
+    this.placesMoved(looked, places);
+  }
+
+  /** a look at the replicated tables' names that failed: said once, until its words change (decided on its raw words) */
+  private placeLookSaid(e: unknown): void {
+    const m = messageOf(e);
+    if (this.placeLookFailed === m) return;
+    this.placeLookFailed = m;
+    this.log(`replication: the replicated tables' names could not be looked at on the database (looked at again in ${Math.round(PLACE_LOOK_MS / 1000)} s; ` +
+      `until a look answers, they are said behind once ${REPLICATION_BEHIND_SECONDS} s have passed since the last): ${this.errorText(e)}`);
+  }
+
+  /**
+   * WHAT A LOOK AT THE REPLICATED TABLES' NAMES FOUND, ACTED ON (issue 1208; a look, or a pass's `prepareReplication`):
+   * a table whose name is no table now (`gone`: renamed, moved or dropped) or another table (`other`: dropped and made
+   * again, or another renamed into its place). Each such table that serves a copy is marked behind AT ONCE, so nothing
+   * says it is current from here (`streamTable`: catching up), and the mark is written on the writer's turn, its
+   * changes held so far dropped and the stream told (`refreshStreamed`); then its catalog is read again
+   * (`columnsChanged`), as #1202 reads a renamed table again. A name that is no table holds its entry until it is a table
+   * again, and is caught up by one poll then; a table of another oid is read again whole as that table, Mason's own
+   * publication set to carry it at the pass the read kicks (a named publication that does not carry it is said as its
+   * gap). A table already marked keeps its mark.
+   */
+  private placesMoved(looked: readonly AddedTable[], places: ReadonlyMap<string, { shape: string | null; place: Place | null }>): void {
+    const marks: Array<[string, string]> = [];
+    for (const t of looked) {
+      const p = places.get(t.source);
+      const v = placeVerdict(t.oid, p);
+      if (v === null || p === undefined) continue;
+      // read again while the look was asked (its oid the new table's now): the look was of a table that is no longer it
+      if (this.tables.get(t.source)?.oid !== t.oid) continue;
+      if (this.states.get(t.source)?.phase === "copied" && !this.behind.has(t.source)) {
+        const why = v === "other" ? REPLACED_WHY : p.place === null ? DROPPED_WHY : RENAMED_WHY;
+        this.behind.set(t.source, { why });
+        marks.push([t.source, why]);
+      }
+      this.columnsChanged(t, v === "gone" ? null : p.shape, p.place);
+    }
+    if (marks.length === 0 || this.stopped) return;
+    void this.onWriter(async () => {
+      for (const [source, why] of marks) {
+        // let go or caught up since (a whole read's swap, a catch-up): its mark is over, never written back
+        if (this.behind.get(source)?.why !== why) continue;
+        await this.store.writer.run(`INSERT OR REPLACE INTO ${MASON_SCHEMA}.catch_up VALUES (${literal(source)}, ${literal(why)}, now())`);
+        this.held.delete(source);
+      }
+      this.refreshStreamed();
+    }).catch((e: unknown) => {
+      // the mark stands for this run; a restart reads the table's catalog again, and a name gone or another table's
+      // refuses the start or reads it again whole
+      this.log(`replication: ${marks.map(([s]) => s).join(", ")}: marked behind, but the mark could not be recorded (it stands for this run): ${this.errorText(e)}`);
+    });
+  }
+
+  /**
+   * THE NEXT LOOK AT THE REPLICATED TABLES' NAMES TIMED (issue 1208): `PLACE_LOOK_MS` after the last began, whoever asked
+   * for it, while a slot is known and a table is replicated. A pass's end and each look's end time it again; never two.
+   */
+  private armPlaceLook(): void {
+    if (this.stopped || !this.streams() || !this.slotKnown) { this.placeTimer?.cancel(); this.placeTimer = null; return; }
+    const at = Math.max(Date.now(), this.placesTriedAt + PLACE_LOOK_MS);
+    if (this.placeTimer !== null && this.placeTimer.at <= at) return;
+    this.placeTimer?.cancel();
+    this.placeTimer = timerAt(at, () => { this.placeTimer = null; void this.databasePosition().then(() => this.armPlaceLook()); });
   }
 
   /**
@@ -4881,11 +5036,12 @@ export class Sync {
     if (asked.length) {
       try {
         const now = await this.onWriter(() => this.placesNow(this.store.writer, asked));
+        // its name no table now (issue 1199: the stream carried it under another name), or another table (issue 1208):
+        // acted on as a look's finding is, read again
+        this.placesMoved(asked, now);
         for (const t of asked) {
           const p = now.get(t.source);
-          // its name no table now (issue 1199: the stream carried it under another name): read again, its entry held
-          if (nameGone(t.oid, p?.shape)) this.columnsChanged(t, null, p?.place ?? null);
-          else if (p !== undefined && p.shape !== null && p.shape !== t.shape) this.columnsChanged(t, p.shape);
+          if (placeVerdict(t.oid, p) === null && p !== undefined && p.shape !== null && p.shape !== t.shape) this.columnsChanged(t, p.shape);
         }
       } catch (e) {
         // asked again at a pass after the sync's interval (in replication mode nothing else runs one); the stream goes on
